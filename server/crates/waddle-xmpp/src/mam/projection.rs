@@ -17,6 +17,7 @@
 
 use chrono::Utc;
 use jid::Jid;
+use std::collections::BTreeMap;
 use tracing::warn;
 use xmpp_parsers::message::Message;
 
@@ -284,7 +285,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         .subjects
         .iter()
         .map(|(lang, text)| (lang.0.clone(), text.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
 
     if payload.is_none()
         && reply.is_none()

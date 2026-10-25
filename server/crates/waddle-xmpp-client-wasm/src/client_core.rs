@@ -1,6 +1,12 @@
 //! JavaScript client lifecycle, transport, and event-subscription methods.
 
-use super::*;
+use super::{
+    build_client_config, disconnect_client, driver_loop, event_dispatch_loop, future_to_promise,
+    js_error, mpsc, request_stream_management_ack_command, spawn_local, to_js_value,
+    try_request_stream_management_ack_for_pagehide, wasm_bindgen, Function, JsResumeState, JsValue,
+    PagehideSmAckEnqueueOutcome, Promise, Rc, RefCell, StoredConfig, WaddleClient,
+    WaddleClientInner, WaddleConfig, WaddleResumeState, WasmCommandLane, WasmWebSocket,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {

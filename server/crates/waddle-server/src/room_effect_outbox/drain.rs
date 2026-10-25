@@ -6,6 +6,7 @@
 //! The latter preserves the wipe-first/destroy-presence contract; a recreated
 //! room cannot commit while its predecessor's terminal effect exists.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
@@ -676,8 +677,7 @@ async fn deliver_recipients_concurrently(
     // structural property rather than an accident of executor polling.
     // Recipients still fan out concurrently against each other.
     let mut grouped: Vec<(FullJid, Vec<Stanza>)> = Vec::new();
-    let mut group_index: std::collections::HashMap<FullJid, usize> =
-        std::collections::HashMap::new();
+    let mut group_index: HashMap<FullJid, usize> = HashMap::new();
     for (recipient, stanza) in recipients {
         match group_index.get(&recipient) {
             Some(&at) => grouped[at].1.push(stanza),

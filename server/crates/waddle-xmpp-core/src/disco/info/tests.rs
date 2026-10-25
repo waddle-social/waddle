@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_disco_info_response, community_service_features, is_disco_info_query, muc_room_features,
+    muc_service_features, parse_disco_info_query, parse_disco_info_response, push_service_features,
+    server_features, spaces_service_features, Element, Feature, Identity, Iq, DISCO_INFO_NS,
+    NS_CHATSTATES, NS_DATA_FORMS, NS_MUC_SELF_PING_OPTIMIZATION,
+};
 
 fn form_type_field(values: &[&str]) -> Element {
     let mut field = Element::builder("field", NS_DATA_FORMS)

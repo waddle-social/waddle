@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    debug, instrument, mpsc, Arc, AtomicBool, ConnectionEntry, ConnectionRegistry, FullJid,
+    Ordering, OutboundStanza,
+};
+use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
     /// Register a connection with its outbound channel.
@@ -180,7 +184,7 @@ impl ConnectionRegistry {
     pub fn unregister_if_sm_stream_id(
         &self,
         jid: &FullJid,
-        stream_id: &crate::pending_delivery::SmSessionId,
+        stream_id: &SmSessionId,
     ) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
             if entry.sm_stream_id().as_ref() != Some(stream_id) {

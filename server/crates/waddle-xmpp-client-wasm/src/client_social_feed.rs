@@ -18,7 +18,7 @@ use waddle_xmpp_client::pubsub::{
 use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 

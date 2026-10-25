@@ -1,20 +1,23 @@
 //! XEP-0313 §5.1.3: recipient dispatch and MAM expose the same archive order.
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use jid::FullJid;
+use waddle_server::ingress::commit::commit_submission;
 use waddle_server::ingress::{
-    commit::commit_submission, Deps, IngressDecisionClass, IngressPrincipal, IngressStreamIdentity,
-    IngressSubmission, RecoveryEnvironment,
+    Deps, IngressDecisionClass, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
+    RecoveryEnvironment,
 };
-use waddle_xmpp::{
-    auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{DigestContext, DigestInput, NormalizedTarget},
-    registry::ConnectionRegistry,
-    stream_management::InMemorySmSessionRegistry,
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
+use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp_core::xep0359::{add_stanza_id, extract_stanza_ids, StanzaId};
 
-use crate::{detached_progress_support as delivery, ingress_support::IngressFixture};
+use crate::detached_progress_support as delivery;
+use crate::ingress_support::IngressFixture;
 
 async fn second_sender(fixture: &IngressFixture) -> AuthenticatedPrincipalRef {
     let principal = AuthenticatedPrincipalRef::new(
@@ -200,18 +203,12 @@ async fn partial_fanout_restart(fixture: IngressFixture) {
 
 async fn reversed_live_execution(fixture: IngressFixture) {
     use kameo::actor::Spawn;
-    use waddle_server::ingress::{
-        effects::{
-            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-            Effect,
-        },
-        execute::execute_effects,
-        ExternalEffect, ImmediateSink,
-    };
-    use waddle_xmpp::{
-        registry::{RegisterUserResource, UserRegistryActor},
-        Stanza,
-    };
+    use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+    use waddle_server::ingress::effects::Effect;
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{ExternalEffect, ImmediateSink};
+    use waddle_xmpp::registry::{RegisterUserResource, UserRegistryActor};
+    use waddle_xmpp::Stanza;
 
     let sender_b = second_sender(&fixture).await;
     let [target, _, _] = delivery::resources();
@@ -438,29 +435,21 @@ async fn reversed_live_dispatch_postgres() {
 /// ordered copy (or a live successor) may enter that same stream.
 async fn pending_stream_progress(fixture: IngressFixture) {
     use kameo::actor::Spawn;
-    use waddle_server::{
-        ingress::{
-            effects::{
-                delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-                Effect,
-            },
-            execute::execute_effects,
-            ExternalEffect, ImmediateSink,
-        },
-        pending_delivery::{
-            flush_for_resource_with_retry, DatabasePendingDeliveryStorage, FlushContext,
-            MamArchiveResolver,
-        },
+    use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+    use waddle_server::ingress::effects::Effect;
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{ExternalEffect, ImmediateSink};
+    use waddle_server::pending_delivery::{
+        flush_for_resource_with_retry, DatabasePendingDeliveryStorage, FlushContext,
+        MamArchiveResolver,
     };
-    use waddle_xmpp::{
-        ingress::IngressEffectIntent,
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-            SmSessionId,
-        },
-        registry::{RegisterUserResource, UserRegistryActor},
-        Stanza,
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{
+        PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
     };
+    use waddle_xmpp::registry::{RegisterUserResource, UserRegistryActor};
+    use waddle_xmpp::Stanza;
     let [target, _, _] = delivery::resources();
     let targets = std::slice::from_ref(&target);
     let store: Arc<dyn PendingDeliveryStorage> = Arc::new(
@@ -676,10 +665,10 @@ async fn pending_dispatch_without_ack_postgres() {
 }
 
 fn make_stored_headline(submission: &mut IngressSubmission) {
-    use waddle_server::ingress::{
-        effects::{delivery::ExternalDeliveryEffect, direct::DurableDirectEffect, Effect},
-        DurableEffect, ExternalEffect,
-    };
+    use waddle_server::ingress::effects::delivery::ExternalDeliveryEffect;
+    use waddle_server::ingress::effects::direct::DurableDirectEffect;
+    use waddle_server::ingress::effects::Effect;
+    use waddle_server::ingress::{DurableEffect, ExternalEffect};
     submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Headline;
     waddle_xmpp::xep::xep0334::add_hint(
         &mut submission.plan.sanitized_message,

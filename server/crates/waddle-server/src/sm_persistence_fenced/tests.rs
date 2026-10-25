@@ -2,7 +2,16 @@
 //! 3 Slice 4). Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is
 //! unset, mirroring `clustering::claims`'s own test style exactly.
 
-use super::*;
+use super::{
+    async_trait, sm_session_entity, ClaimError, KeyedSnapshotOutcome, PersistedDetachedAppend,
+};
+use super::{
+    remove_sm_claim_cell_if, remove_sm_claim_fence_if, Arc, ClaimStore, DashMap, Database,
+    DatabaseDriver, DateTime, Entity, EntityType, IngressCustodyDisposition, OnceCell,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PostgresFencedSmPersistence,
+    PromotionAppendOutcome, SharedNodeIdentity, SmAckWindow, SmClaimFence, SmPersistenceError,
+    SmPersistenceStorage, SmSessionId, Utc,
+};
 
 #[test]
 fn stale_sm_cache_failure_does_not_evict_new_generation() {

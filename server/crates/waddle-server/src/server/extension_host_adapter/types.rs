@@ -1,3 +1,5 @@
+use crate::ingress::nested::NestedRefusal;
+use crate::server::routes::interpret::effects::PlanFailure;
 use jid::{BareJid, FullJid, Jid};
 use thiserror::Error;
 use waddle_extensions::{ReplyTarget, ThreadId};
@@ -126,9 +128,9 @@ pub enum ExtensionHostAdapterError {
     #[error("protocol failed: {0}")]
     Protocol(String),
     #[error("nested ingress refused: {0:?}")]
-    Refused(crate::ingress::nested::NestedRefusal),
+    Refused(NestedRefusal),
     #[error("message planning failed: {0}")]
-    Plan(crate::server::routes::interpret::effects::PlanFailure),
+    Plan(PlanFailure),
     #[error("unsupported: {0}")]
     Unsupported(String),
     #[error("the send could not commit before its deadline")]

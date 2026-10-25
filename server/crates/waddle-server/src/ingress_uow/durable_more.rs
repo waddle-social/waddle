@@ -1,12 +1,12 @@
 //! Additional plan-mode projections composed into the ingress transaction.
 use super::{InboxRepository, IngressUowError, IngressUowTransaction, MamArchiveRepository};
+use crate::db::DatabaseDriver;
 use jid::BareJid;
-use waddle_xmpp::{
-    inbox::{ConversationKind, InboxEntry},
-    ingress::{InboxProjectionMutation, MessageKey},
-    mam::{ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone},
-};
-use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::{InboxProjectionMutation, MessageKey};
+use waddle_xmpp::mam::{ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone};
+use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 impl InboxRepository {
     /// Mark this message's projection read once; retries return the current row.
@@ -83,10 +83,10 @@ impl MamArchiveRepository {
         // tombstone. Lock before decoding so a concurrent moderator cannot
         // change the payload between this check and the update.
         let sql = match tx.transaction_mut().driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 "SELECT rich_payload FROM mam_messages WHERE room_jid = ? AND id = ? FOR UPDATE"
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 "SELECT rich_payload FROM mam_messages WHERE room_jid = ? AND id = ?"
             }
         };

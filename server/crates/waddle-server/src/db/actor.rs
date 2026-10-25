@@ -1,5 +1,6 @@
 //! Kameo actor wrapping a logical database handle.
 
+use crate::db::Value;
 use std::time::Instant;
 
 use kameo::message::Context;
@@ -51,7 +52,7 @@ impl kameo::message::Message<GetDatabase> for DbActor {
 
 pub struct DbExecute {
     pub sql: String,
-    pub params: Vec<crate::db::Value>,
+    pub params: Vec<Value>,
 }
 
 impl kameo::message::Message<DbExecute> for DbActor {
@@ -200,10 +201,10 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
 pub struct DbQuery {
     pub sql: String,
-    pub params: Vec<crate::db::Value>,
+    pub params: Vec<Value>,
 }
 
-pub type RowValues = Vec<crate::db::Value>;
+pub type RowValues = Vec<Value>;
 
 impl kameo::message::Message<DbQuery> for DbActor {
     type Reply = Result<Vec<RowValues>, DatabaseError>;
@@ -228,7 +229,7 @@ impl kameo::message::Message<DbQuery> for DbActor {
 
 pub struct DbQueryOne {
     pub sql: String,
-    pub params: Vec<crate::db::Value>,
+    pub params: Vec<Value>,
 }
 
 impl kameo::message::Message<DbQueryOne> for DbActor {

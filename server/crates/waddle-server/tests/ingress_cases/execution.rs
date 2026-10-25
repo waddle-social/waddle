@@ -1,9 +1,14 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, Effect, IngressDecisionClass, IngressEffectIntent,
+    IngressFixture, PlannedEffect,
+};
 
 async fn receipts_terminalization(fixture: IngressFixture) {
-    use waddle_server::ingress::{execute::terminalize_if_complete, ExternalEffect};
+    use waddle_server::ingress::execute::terminalize_if_complete;
+    use waddle_server::ingress::ExternalEffect;
     use waddle_server::ingress_uow::EffectReceiptRepository;
-    use waddle_xmpp::{ingress::FrozenStanzaError, Stanza};
+    use waddle_xmpp::ingress::FrozenStanzaError;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let unresolved_before = metrics
@@ -105,8 +110,11 @@ async fn ingress_receipts_terminalization_postgres() {
 }
 
 async fn external_reply_execution(fixture: IngressFixture) {
-    use waddle_server::ingress::{execute::execute_effects, Deps, ExternalOutcome, ImmediateSink};
-    use waddle_xmpp::{ingress::FrozenStanzaError, registry::ConnectionRegistry, Stanza};
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{Deps, ExternalOutcome, ImmediateSink};
+    use waddle_xmpp::ingress::FrozenStanzaError;
+    use waddle_xmpp::registry::ConnectionRegistry;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let mut submission = fixture.submission(None, "denied body");
     let error = StanzaError::new(

@@ -36,8 +36,10 @@
 //! Leaving is the absence of `<muji/>` from presence (XEP-0272
 //! §Leaving).
 
+use crate::xep::xep0167::NS_JINGLE_RTP;
 use jid::BareJid;
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use thiserror::Error;
 
 use crate::xep::xep0167::MediaKind;
@@ -112,9 +114,8 @@ impl MujiContent {
         // the actual encoding negotiation below the signaling
         // layer; the payload-types here are documentation of what
         // the participant offers.
-        let mut description_builder =
-            Element::builder(DESCRIPTION_NAME, crate::xep::xep0167::NS_JINGLE_RTP)
-                .attr(attr_media(), self.media.as_str());
+        let mut description_builder = Element::builder(DESCRIPTION_NAME, NS_JINGLE_RTP)
+            .attr(attr_media(), self.media.as_str());
         match self.media {
             MediaKind::Audio => {
                 description_builder = description_builder.append(opus_payload_type_element());
@@ -145,7 +146,7 @@ impl MujiContent {
             .ok_or(MujiParseError::MissingAttribute(ATTR_NAME))?;
         let description = elem
             .children()
-            .find(|c| c.name() == DESCRIPTION_NAME && c.ns() == crate::xep::xep0167::NS_JINGLE_RTP)
+            .find(|c| c.name() == DESCRIPTION_NAME && c.ns() == NS_JINGLE_RTP)
             .ok_or(MujiParseError::MissingDescription)?;
         let media_raw = description
             .attr(ATTR_MEDIA)
@@ -327,7 +328,7 @@ fn creator_as_attr(creator: Creator) -> &'static str {
 /// Matches WebRTC default (PT 111, 48 kHz, 2 channels) and
 /// `xep0167::opus_audio_description`.
 fn opus_payload_type_element() -> Element {
-    Element::builder("payload-type", crate::xep::xep0167::NS_JINGLE_RTP)
+    Element::builder("payload-type", NS_JINGLE_RTP)
         .attr(xml_ncname!("id").to_owned(), "111")
         .attr(xml_ncname!("name").to_owned(), "opus")
         .attr(xml_ncname!("clockrate").to_owned(), "48000")
@@ -339,7 +340,7 @@ fn opus_payload_type_element() -> Element {
 /// Matches the WebRTC default (PT 96, 90 kHz) and
 /// `xep0167::vp8_video_description`.
 fn vp8_payload_type_element() -> Element {
-    Element::builder("payload-type", crate::xep::xep0167::NS_JINGLE_RTP)
+    Element::builder("payload-type", NS_JINGLE_RTP)
         .attr(xml_ncname!("id").to_owned(), "96")
         .attr(xml_ncname!("name").to_owned(), "VP8")
         .attr(xml_ncname!("clockrate").to_owned(), "90000")

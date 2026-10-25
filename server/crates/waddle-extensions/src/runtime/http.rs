@@ -1,5 +1,6 @@
 //! Permission and resource enforcement for extension outbound HTTP requests.
 
+use crate::config::RuntimeLimits;
 use bytes::BytesMut;
 use futures::StreamExt;
 
@@ -36,7 +37,7 @@ pub(super) async fn execute_runtime_http_request(
     request: wit_types::OutgoingHttpRequest,
     allowed_origins: &[String],
     runtime: &HttpRuntime,
-    limits: &crate::config::RuntimeLimits,
+    limits: &RuntimeLimits,
 ) -> std::result::Result<wit_types::HttpResponse, HostToolError> {
     let url = request.url.value;
     let parsed = reqwest::Url::parse(&url).map_err(|_| {

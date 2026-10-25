@@ -35,6 +35,7 @@
 //! 3. Generate a mention notification for delivery/push
 
 use minidom::Element;
+use std::collections::HashMap;
 use xmpp_parsers::message::{Message, MessageType};
 
 /// Namespace for XEP-0452 MUC Mention Notifications.
@@ -213,7 +214,7 @@ pub fn strip_mention_notification(msg: &mut Message) {
 #[derive(Debug, Default)]
 pub struct MentionCounter {
     /// Room JID → unread mention count.
-    counts: std::collections::HashMap<String, u32>,
+    counts: HashMap<String, u32>,
 }
 
 impl MentionCounter {

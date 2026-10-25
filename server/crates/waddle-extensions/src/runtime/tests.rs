@@ -582,7 +582,10 @@ impl host_domain::ExtensionDeliveryCapability for ScopedDelivery {
 }
 
 fn delivery_source() -> crate::types::RoomMessageSource {
-    use crate::types::*;
+    use crate::types::{
+        DisplayText, ExtensionCapability, ExtensionEvent, MessageRevision, OriginId, PluginId,
+        RoomMessageObserve, RoomMessageSource, Sha256Digest, StanzaId, Timestamp, WaddleId,
+    };
     RoomMessageSource {
         room: "room@muc.example.com".parse().expect("room"),
         stanza_id: StanzaId::try_new("source").expect("id"),

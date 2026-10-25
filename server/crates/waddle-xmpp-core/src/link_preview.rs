@@ -1,6 +1,7 @@
 //! Shared link-preview protocol helpers.
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 /// Safe image MIME types Waddle accepts for cached link-preview media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

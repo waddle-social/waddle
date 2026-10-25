@@ -1,3 +1,6 @@
+use crate::auth::AuthenticatedPrincipalRef;
+use crate::stream_management::SmDrainedIngressAppend;
+use crate::stream_management::SmIngressAppendKey;
 use async_trait::async_trait;
 use tracing::debug;
 
@@ -105,8 +108,8 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn store_session_with_principal_inner(
         &self,
         session: DetachedSession,
-        principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
-        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
+        principal: Option<&AuthenticatedPrincipalRef>,
+        drained_appends: Vec<SmDrainedIngressAppend>,
     ) -> Result<StoredDetachedSession, SmRegistryError> {
         let stream_id = session.stream_id.clone();
         let jid = session.jid.clone();
@@ -343,7 +346,7 @@ pub struct StoredDetachedSession {
     /// Sessions evicted by this store, owed XEP-0198 §5 promotion.
     pub displaced: Vec<DetachedSession>,
     /// Drained obligations whose ledger proof was withheld; their entries stay queued.
-    pub unproven: Vec<crate::stream_management::SmIngressAppendKey>,
+    pub unproven: Vec<SmIngressAppendKey>,
 }
 
 #[async_trait]
@@ -646,10 +649,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 .await?;
             if let Some(storage) = &self.persistence {
                 if let Err(error) = storage
-                    .delete_tombstoned_unacked(
-                        &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
-                        &sequences,
-                    )
+                    .delete_tombstoned_unacked(&SmSessionId::new(stream_id.clone()), &sequences)
                     .await
                 {
                     durable_failures += 1;
@@ -793,10 +793,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                     continue;
                 }
                 match storage
-                    .delete_tombstoned_unacked(
-                        &crate::pending_delivery::SmSessionId::new(stream_id.clone()),
-                        &sequences,
-                    )
+                    .delete_tombstoned_unacked(&SmSessionId::new(stream_id.clone()), &sequences)
                     .await
                 {
                     Ok(deleted) => {

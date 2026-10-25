@@ -1,6 +1,12 @@
 //! Discovery and decoding of extension route descriptors at the JavaScript boundary.
 
-use super::*;
+use super::{
+    build_disco_info_iq, build_disco_items_iq, discovery, send_iq_command, Element, Rc, RefCell,
+    WaddleClientInner, WaddleExtensionRoute, WaddleExtensionRouteItem,
+    WaddleExtensionRouteItemAction, WaddleExtensionRouteItemField, WaddleExtensionRouteItemLaunch,
+    WaddleExtensionRouteItemOption, WaddleExtensionRouteLink, EXTENSION_ROUTE_FORM_TYPE,
+    NS_ADHOC_COMMANDS, NS_CLIENT, NS_WADDLE_EXTENSION_1,
+};
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 

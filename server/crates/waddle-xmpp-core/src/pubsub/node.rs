@@ -1,6 +1,11 @@
 //! Shared PubSub node configuration primitives.
 
-use std::{fmt, str::FromStr};
+use crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+use crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
+use crate::xep0472::NS_SOCIAL_FEED;
+use crate::xep0501::NS_STORIES;
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,8 +110,8 @@ impl PubSubNodeType {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            PubSubNodeType::PubsubSocialFeed => crate::xep0472::NS_SOCIAL_FEED,
-            PubSubNodeType::PubsubSocialFeedStories => crate::xep0501::NS_STORIES,
+            PubSubNodeType::PubsubSocialFeed => NS_SOCIAL_FEED,
+            PubSubNodeType::PubsubSocialFeedStories => NS_STORIES,
         }
     }
 }
@@ -122,8 +127,8 @@ impl FromStr for PubSubNodeType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            crate::xep0472::NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
-            crate::xep0501::NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
+            NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
+            NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
             _ => Err(()),
         }
     }
@@ -369,9 +374,9 @@ impl NodeConfig {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
             config = Self::waddle_dm_bookmarks_defaults();
-        } else if node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE {
+        } else if node == PEP_NODE_WADDLE_STATUS_PREFERENCE {
             config = Self::waddle_status_preference_defaults();
-        } else if node == crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS {
+        } else if node == PEP_NODE_WADDLE_STORY_READS {
             config = Self::waddle_story_reads_defaults();
         }
         config

@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    apply_groupchat_retraction_tombstone, interpret, lookup_groupchat_retraction_target,
+    seed_groupchat_archive_row, Arc, ArchivedRichPayload, ArchivedTombstone, BareJid,
+    ConnectionRegistry, Deps, InboxStorage, Jid, MamStorage, Message, OutboundEvent, RichMessageId,
+    RichText, Xep0359StanzaId,
+};
+use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 // XEP-0424 — groupchat retraction lookup (#281)
 // -----------------------------------------------------------------

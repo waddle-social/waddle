@@ -1,7 +1,8 @@
 //! Message Carbons (XEP-0280) helpers shared by server and client crates.
 
 use chrono::Utc;
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;

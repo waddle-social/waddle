@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    build_roster_push, build_roster_result, build_roster_result_empty, build_subscription_presence,
+    build_xmpp_error_response, chrono, global_database, iq_to_xml, local_account_jid_exists,
+    mark_span_error, parse_roster_get, parse_roster_set, warn, AskType, BareJid, BroadcastOutcome,
+    DatabaseRosterStorage, FullJid, RosterItem, RosterItemRow, RosterRowChange,
+    RosterRowMutationKind, RosterSetResult, RosterStorageError, RosterVersion, Stanza,
+    Subscription, SubscriptionStateMachine, SubscriptionType, WebSocketState, XmppError,
+};
+use crate::clustering::route_bridge::RemoteResourceStateUpdate;
 
 pub(super) async fn handle_roster_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -126,7 +134,7 @@ async fn mirror_remote_roster_interest(
             .update_remote_user_resource_if_owner(
                 jid,
                 owner,
-                crate::clustering::route_bridge::RemoteResourceStateUpdate::RosterInterested,
+                RemoteResourceStateUpdate::RosterInterested,
             )
             .await;
     }

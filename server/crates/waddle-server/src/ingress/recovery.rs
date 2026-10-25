@@ -1,22 +1,17 @@
 //! Reconcile notification obligations without exposing ingress transactions.
 use super::IngressAuthority;
-use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUowError, IngressUowTransaction,
-        PendingNotificationPreparation, PendingNotificationRecovery, RecoveryCompletion,
-        RecoveryReceiptRepository,
-    },
-    notification_outbox::{NotificationCandidate, NotificationCandidateInsertOutcome},
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::{
+    settle_recorded, CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
+    IngressUowError, IngressUowTransaction, PendingNotificationPreparation,
+    PendingNotificationRecovery, RecoveryCompletion, RecoveryReceiptRepository,
 };
-use waddle_xmpp::{
-    inbox::storage::GroupchatNotificationRecovery,
-    ingress::{
-        GroupchatNotificationRecoveryAction, IngressEffectIntent, NotificationActivityMutation,
-        NotificationCandidateOutcome,
-    },
+use crate::notification_outbox::{NotificationCandidate, NotificationCandidateInsertOutcome};
+use crate::server::routes::interpret::DeliveryExecutionContext;
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
+use waddle_xmpp::ingress::{
+    GroupchatNotificationRecoveryAction, IngressEffectIntent, NotificationActivityMutation,
+    NotificationCandidateOutcome,
 };
 
 /// Frozen work read under the canonical lock. Policy evaluation happens only after release.

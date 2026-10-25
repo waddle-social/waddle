@@ -1,14 +1,16 @@
 //! Phase B: one immutable plan, retried as complete fresh transactions.
-use super::{
-    decision::{AliasOutcomeClass, IngressDecision, IngressDecisionClass},
-    identity::IngressStreamIdentity,
-    submission::IngressSubmission,
-};
+use super::decision::{AliasOutcomeClass, IngressDecision, IngressDecisionClass};
+use super::identity::IngressStreamIdentity;
+use super::submission::IngressSubmission;
 use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::DeliveryProgressRepository;
+use crate::ingress_uow::EffectReceiptRepository;
 use crate::ingress_uow::{
     run_with_retry, CanonicalMessageRepository, DbRetryClass, EffectIntentRepository,
     IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
 };
+use crate::server::routes::interpret::effects::PlanFailure;
+use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::time::Instant;
 use waddle_xmpp::ingress::{AliasOutcome, AliasResolution, IngressEffectIntent, MessageKey};
@@ -85,9 +87,9 @@ pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
             IngressDecisionClass::PrincipalMissing
         }
         IngressUowError::RoomGenerationStale
-        | IngressUowError::Plan(
-            crate::server::routes::interpret::effects::PlanFailure::RoomClaimStale,
-        ) => IngressDecisionClass::RoomGenerationStale,
+        | IngressUowError::Plan(PlanFailure::RoomClaimStale) => {
+            IngressDecisionClass::RoomGenerationStale
+        }
         IngressUowError::IngressFrontierStale => IngressDecisionClass::FrontierStale,
         IngressUowError::AmbiguousCommit => IngressDecisionClass::AmbiguousCommit,
         IngressUowError::EffectIntentConflict
@@ -308,7 +310,7 @@ async fn commit_attempt(
     let mut unreceipted = Vec::new();
     for intent in &recorded {
         let receipt = super::durable::receipt_key(intent)?;
-        if !crate::ingress_uow::EffectReceiptRepository::contains(
+        if !EffectReceiptRepository::contains(
             &mut tx,
             key,
             receipt.kind,
@@ -465,9 +467,8 @@ async fn commit_attempt(
             .await?
             .ok_or(IngressUowError::EffectIntentMessageMissing)?;
         if recorded_envelope.room_observer_request().is_none() {
-            use crate::server::routes::interpret::effects::{
-                room::ExternalRoomEffect, Effect, ExternalEffect,
-            };
+            use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+            use crate::server::routes::interpret::effects::{Effect, ExternalEffect};
             let request = plan.plan.iter().find_map(|planned| match &planned.effect {
                 Effect::External(ExternalEffect::Room(
                     ExternalRoomEffect::ObserveRoomMessage { error_request, .. },
@@ -504,7 +505,8 @@ async fn commit_attempt(
     // Actor handles retained during planning are replay context, not authority.
     // Only a recorded grant permits the reconstructed membership mutation.
     plan.plan.retain(|planned| {
-        use crate::server::routes::interpret::effects::{early::RoomMembershipMutation, Effect, ExternalEffect};
+         use crate::server::routes::interpret::effects::{Effect, ExternalEffect};
+         use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
         match &planned.effect {
             Effect::External(ExternalEffect::RoomMembershipMutation(RoomMembershipMutation::GroupDm(mutation))) =>
                 plan.intents.iter().any(|intent| matches!(intent,
@@ -631,8 +633,7 @@ async fn commit_attempt(
     // detached append made by a later replay (or by recovery) is stamped with
     // the acceptance, not with the retransmission.
     let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
-    let all_progress =
-        crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
+    let all_progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
     if sealed_manifest.is_none() {
         super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
     }
@@ -646,7 +647,7 @@ async fn commit_attempt(
             continue;
         };
         super::reflection_dispatch::classify_progress(&mut progress, &intents);
-        if crate::ingress_uow::EffectReceiptRepository::contains(
+        if EffectReceiptRepository::contains(
             &mut tx,
             key,
             progress.receipt.kind,
@@ -694,7 +695,7 @@ async fn commit_attempt(
         let mut complete = Vec::new();
         for intent in manifest.recorded_intents() {
             let receipt = super::receipt_key(intent)?;
-            if crate::ingress_uow::EffectReceiptRepository::contains(
+            if EffectReceiptRepository::contains(
                 &mut tx,
                 key,
                 receipt.kind,
@@ -754,8 +755,7 @@ async fn commit_attempt(
             if proven_prerequisite {
                 // Retain a proof-only predecessor. The executor recognizes its
                 // durable receipt and releases dependents without rerunning it.
-                planned.suppression =
-                    crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always;
+                planned.suppression = PlanSuppressionPolicy::Always;
             }
             proven_prerequisite
         });
@@ -826,7 +826,7 @@ async fn commit_attempt(
     let mut pending = Vec::new();
     for intent in &intents {
         let receipt = super::durable::receipt_key(intent)?;
-        if !crate::ingress_uow::EffectReceiptRepository::contains(
+        if !EffectReceiptRepository::contains(
             &mut tx,
             key,
             receipt.kind,
@@ -931,11 +931,9 @@ fn retain_live_recipient_plan(
     recorded: &[IngressEffectIntent],
     plan: &mut super::IngressPlan,
 ) {
-    use super::effects::{
-        delivery::ExternalDeliveryEffect,
-        direct::{DurableDirectEffect, ExternalDirectEffect},
-        DurableEffect, Effect, ExternalEffect,
-    };
+    use super::effects::delivery::ExternalDeliveryEffect;
+    use super::effects::direct::{DurableDirectEffect, ExternalDirectEffect};
+    use super::effects::{DurableEffect, Effect, ExternalEffect};
     use waddle_xmpp::ingress::{EffectAuthorityKey, NormalizedTarget, PendingDeliveryMutation};
     let NormalizedTarget::Full(full) = &submission.target else {
         return;
@@ -1087,7 +1085,7 @@ mod alias_denial_replay_tests;
 /// Live invitation delivery and its offline fallback are mutually exclusive.
 /// Repair a partially persisted pair before rebuilding any delivery effects.
 pub(super) async fn reconcile_invitation_delivery_receipts(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     recorded: &[IngressEffectIntent],
     pending: &mut Vec<IngressEffectIntent>,
@@ -1121,7 +1119,7 @@ pub(super) async fn reconcile_invitation_delivery_receipts(
         for intent in [route, fallback] {
             if pending.contains(intent) {
                 let receipt = super::durable::receipt_key(intent)?;
-                crate::ingress_uow::EffectReceiptRepository::record_receipt(
+                EffectReceiptRepository::record_receipt(
                     tx,
                     key,
                     receipt.kind,

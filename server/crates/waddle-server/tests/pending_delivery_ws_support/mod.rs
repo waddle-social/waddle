@@ -5,10 +5,9 @@ use minidom::Element;
 use std::time::Duration;
 use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use waddle_xmpp::{
-    pending_delivery::{storage::PendingDeliveryStorage, PendingRow, QuotaPolicy, SmSessionId},
-    stream_management::{SmAck, SmRequest, SM_NS},
-};
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingRow, QuotaPolicy, SmSessionId};
+use waddle_xmpp::stream_management::{SmAck, SmRequest, SM_NS};
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 const ACCOUNTS: &[(&str, &str)] = &[

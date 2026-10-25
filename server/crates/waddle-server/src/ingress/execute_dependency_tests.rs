@@ -1,24 +1,21 @@
-use super::*;
-use crate::{
-    config::LineageConfig,
-    db::{DatabaseConfig, DatabaseDriver},
-    ingress::decision::{AliasOutcomeClass, IngressDecisionClass},
-    server::routes::interpret::effects::{
-        early::RoomMembershipMutation, invite::InviteDeliveryFailure, PlanEffectDependency,
-    },
-    server::routes::websocket::{
-        handlers::message::muc_invite::{InviteLedgerMutation, MucMembershipMutation},
-        muc_invites::OutstandingInvite,
-    },
+use super::{
+    execute_effects, proven_receipts, Database, Deps, Duration, EffectOutcome, ExternalEffect,
+    ExternalOutcome, ImmediateSink, IngressDecision, IngressUnitOfWork, Stanza,
 };
+use crate::config::LineageConfig;
+use crate::db::{DatabaseConfig, DatabaseDriver};
+use crate::ingress::decision::{AliasOutcomeClass, IngressDecisionClass};
+use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+use crate::server::routes::interpret::effects::invite::InviteDeliveryFailure;
+use crate::server::routes::interpret::effects::PlanEffectDependency;
+use crate::server::routes::websocket::handlers::message::muc_invite::{
+    InviteLedgerMutation, MucMembershipMutation,
+};
+use crate::server::routes::websocket::muc_invites::OutstandingInvite;
 use kameo::actor::Spawn;
-use waddle_xmpp::{
-    muc::{
-        room_actor::{GetSnapshot, RoomActor},
-        MucRoom, RoomConfig,
-    },
-    xep::xep0421::OccupantIdSecret,
-};
+use waddle_xmpp::muc::room_actor::{GetSnapshot, RoomActor};
+use waddle_xmpp::muc::{MucRoom, RoomConfig};
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
 async fn database() -> (Database, IngressUnitOfWork) {
     let db = Database::from_config(
@@ -220,10 +217,10 @@ async fn failed_dependency_withholds_and_meters_each_dependent() {
 #[test]
 fn invite_receipts_require_the_exact_captured_route_and_actual_delivery_proof() {
     use crate::server::routes::interpret::effects::invite::{MucUserDeliveryProof, MucUserRoute};
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation},
-        pending_delivery::{PendingPayload, PendingRow, PendingRowId},
+    use waddle_xmpp::ingress::{
+        EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation,
     };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
     let recipient: jid::BareJid = "recipient@example.com".parse().expect("recipient");
     let resource: jid::FullJid = "recipient@example.com/device".parse().expect("resource");
     let message = Box::new(xmpp_parsers::message::Message::new(Some(

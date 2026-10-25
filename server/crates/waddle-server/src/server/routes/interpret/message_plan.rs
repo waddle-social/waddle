@@ -1,15 +1,11 @@
 //! Phase-A entry point for early message handlers and interpreter feedback.
-use super::{
-    effects::{
-        Effect, EffectSink, ExternalEffect, IngressPlan, PlanRejection, PlanSink,
-        PolicyDeniedReason,
-    },
-    Deps, XmppStateMachine,
+use super::effects::{
+    Effect, EffectSink, ExternalEffect, IngressPlan, PlanRejection, PlanSink, PolicyDeniedReason,
 };
-use waddle_xmpp::{
-    protocol::{InboundEvent, InboundFrame},
-    Stanza,
-};
+use super::{Deps, XmppStateMachine};
+use crate::ingress::IngressEffectCapture;
+use waddle_xmpp::protocol::{InboundEvent, InboundFrame};
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};
 
 pub fn build_plan_deps<'a>(deps: &Deps<'a>, sink: &'a PlanSink) -> Deps<'a> {
@@ -41,7 +37,7 @@ pub async fn plan_message_dispatch(
         .as_ref()
         .and_then(|jid| jid.try_as_full().ok())
         .cloned();
-    let capture = crate::ingress::IngressEffectCapture::new();
+    let capture = IngressEffectCapture::new();
     sink.observe_message(&incoming);
     let planned = build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
     let early = if let Some(sender) = ingress_sender.as_ref() {
@@ -66,7 +62,7 @@ pub async fn plan_message_dispatch(
 
 pub(super) fn finish_plan(
     sink: &PlanSink,
-    capture: &crate::ingress::IngressEffectCapture,
+    capture: &IngressEffectCapture,
     incoming: Message,
     ingress_sender: Option<jid::FullJid>,
 ) -> IngressPlan {

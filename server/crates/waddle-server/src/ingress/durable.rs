@@ -1,21 +1,23 @@
 //! Transactional writes and their exact durable completion receipts.
 use super::decision::EffectReceiptKey;
-use crate::{
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::{
-        EffectReceiptRepository, InboxRepository, IngressUowError, IngressUowTransaction,
-        MamArchiveRepository,
-    },
-    server::routes::interpret::effects::{
-        direct::DurableDirectEffect, room::DurableRoomEffect, AppliedDurableEffects, DurableEffect,
-        DurableOutcome, Effect, ExternalEffect, IngressPlan, PlanEffectDependency, ProjectionRef,
-    },
+use crate::ingress_substrate::EffectReceiptKind;
+use crate::ingress_uow::CapturedRoomSource;
+use crate::ingress_uow::RoomObservationRepository;
+use crate::ingress_uow::RoomPublication;
+use crate::ingress_uow::{
+    EffectReceiptRepository, InboxRepository, IngressUowError, IngressUowTransaction,
+    MamArchiveRepository,
+};
+use crate::server::routes::interpret::effects::direct::DurableDirectEffect;
+use crate::server::routes::interpret::effects::room::DurableRoomEffect;
+use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
+use crate::server::routes::interpret::effects::{
+    AppliedDurableEffects, DurableEffect, DurableOutcome, Effect, ExternalEffect, IngressPlan,
+    PlanEffectDependency, ProjectionRef,
 };
 use sha2::{Digest, Sha256};
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    mam::MamTxStoreOutcome,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::mam::MamTxStoreOutcome;
 pub(super) struct AppliedDurable {
     pub archives: Vec<(PlanEffectDependency, MamTxStoreOutcome)>,
     pub outcomes: AppliedDurableEffects,
@@ -45,7 +47,7 @@ pub(super) async fn apply_durable(
     recorded: &[IngressEffectIntent],
     room_proof: &super::commit_room::RoomProof<'_>,
     sender: &jid::BareJid,
-    publication: Option<&crate::ingress_uow::RoomPublication>,
+    publication: Option<&RoomPublication>,
 ) -> Result<AppliedDurable, IngressUowError> {
     let mut applied = AppliedDurable {
         archives: Vec::new(),
@@ -73,9 +75,7 @@ pub(super) async fn apply_durable(
         .collect();
     MamArchiveRepository::lock_sequences(tx, &archives).await?;
     if let Some(publication) = publication {
-        if !crate::ingress_uow::RoomObservationRepository::assert_publication(tx, publication)
-            .await?
-        {
+        if !RoomObservationRepository::assert_publication(tx, publication).await? {
             return Err(IngressUowError::PrincipalAssertionFailed);
         }
     }
@@ -165,9 +165,9 @@ pub(super) async fn apply_durable(
                         }) => correction_target.as_ref(),
                         _ => None,
                     };
-                    crate::ingress_uow::RoomObservationRepository::capture(
+                    RoomObservationRepository::capture(
                         tx,
-                        crate::ingress_uow::CapturedRoomSource {
+                        CapturedRoomSource {
                             key,
                             room: archive,
                             message: &plan.sanitized_message,
@@ -254,13 +254,8 @@ pub(super) async fn apply_durable(
                 MamArchiveRepository::replace_with_tombstone(tx, archive, target, tombstone)
                     .await?;
                 if tx.room_observers_enabled() {
-                    crate::ingress_uow::RoomObservationRepository::retract(
-                        tx,
-                        archive,
-                        target,
-                        crate::time::now_ms(),
-                    )
-                    .await?;
+                    RoomObservationRepository::retract(tx, archive, target, crate::time::now_ms())
+                        .await?;
                 }
             }
             DurableEffect::Direct(DurableDirectEffect::DmCallThreadProjection {
@@ -286,12 +281,8 @@ pub(super) async fn apply_durable(
         }
     }
     if let Some(publication) = publication {
-        crate::ingress_uow::RoomObservationRepository::mark_published(
-            tx,
-            &publication.id,
-            crate::time::now_ms(),
-        )
-        .await?;
+        RoomObservationRepository::mark_published(tx, &publication.id, crate::time::now_ms())
+            .await?;
     }
     Ok(applied)
 }
@@ -449,7 +440,7 @@ fn corresponds(effect: &DurableEffect, intent: &IngressEffectIntent) -> bool {
 async fn recovery_completed(
     tx: &mut IngressUowTransaction<'_>,
     key: MessageKey,
-    recovery: &crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
+    recovery: &PlannedGroupchatNotificationRecovery,
     recorded: &[IngressEffectIntent],
 ) -> Result<bool, IngressUowError> {
     for intent in recorded {

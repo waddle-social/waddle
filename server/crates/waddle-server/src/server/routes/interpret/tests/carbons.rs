@@ -1,5 +1,11 @@
-use super::*;
+use super::{
+    chat_msg, detached_dm_session, drain_inbound, effects, interpret, jid, pipelined_dispatcher,
+    register_into_both_tiers, Arc, BareJid, BlockingStorage, CarbonKind, ConnectionRegistry,
+    DeliveryExecutionContext, Deps, FullJid, InMemorySmSessionRegistry, IngressEffectIntent, Jid,
+    OutboundEvent, Stanza,
+};
 use crate::ingress::IngressEffectCapture;
+use kameo::actor::Spawn;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 struct RecipientCarbonPlanGate {
@@ -20,9 +26,8 @@ impl BlockingStorage for RecipientCarbonPlanGate {
 }
 
 async fn headless_carbon_audience(existing_carbon: bool) {
-    use super::super::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, PlanSink,
-    };
+    use super::super::effects::delivery::ExternalDeliveryEffect;
+    use super::super::effects::{Effect, ExternalEffect, PlanSink};
     let registry = ConnectionRegistry::new();
     let users = waddle_xmpp::registry::UserRegistryActor::spawn(
         waddle_xmpp::registry::UserRegistryActor::new(),

@@ -37,10 +37,8 @@
 //! `http_request`, `clustering.shutdown_drain`, ...) pass through the
 //! same way: anything not on the lists delegates to the inner sampler.
 
-use opentelemetry::{
-    trace::{Link, SpanKind, TraceContextExt, TraceId},
-    Context, KeyValue,
-};
+use opentelemetry::trace::{Link, SpanKind, TraceContextExt, TraceId};
+use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::trace::{Sampler, SamplingDecision, SamplingResult, ShouldSample};
 
 /// Span names dropped only when they would start a new root trace.
@@ -144,7 +142,7 @@ mod tests {
     use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceState, TracerProvider as _};
     use opentelemetry_sdk::error::OTelSdkResult;
     use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
-    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
     use super::*;
 

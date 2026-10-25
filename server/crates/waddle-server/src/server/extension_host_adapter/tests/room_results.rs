@@ -1,39 +1,29 @@
 //! Saved observation output follows the ordinary room ingress authority.
 use super::groupchat_ingress::GroupchatFixture;
-use crate::{
-    ingress::{
-        nested::{NestedContinuation, NestedOutcome},
-        test_support::IngressFixture,
-    },
-    ingress_uow::{
-        initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
-        EffectIntentRepository, RoomObservationRepository,
-    },
-    server::routes::{
-        interpret::{
-            effects::{
-                room::ExternalRoomEffect, Effect, ExternalEffect, PlanSuppressionPolicy,
-                PlannedEffect,
-            },
-            plan_room_result,
-        },
-        websocket::interpret_loop::build_interpret_deps,
-    },
+use crate::ingress::nested::{NestedContinuation, NestedOutcome};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{
+    initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
+    EffectIntentRepository, RoomObservationRepository,
 };
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
+};
+use crate::server::routes::interpret::plan_room_result;
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
 use chrono::Utc;
 use waddle_extensions::{
     ConfiguredRoomObserver, ExtensionPayload, ObservationGeneration, PluginId,
     RoomObservationOutcome, RoomObservationResult, RoomObservationScope,
     RoomObservationSubscription, Sha256Digest, XmlAttribute, XmlElement, XmlNode,
 };
-use waddle_xmpp::{
-    ingress::{
-        DigestContext, DigestInput, IngressEffectIntent, MessageKey, NormalizedTarget,
-        SemanticDigest,
-    },
-    protocol::{handlers::register_default_message_handlers, StanzaDispatcher, XmppStateMachine},
-    Stanza,
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest,
 };
+use waddle_xmpp::protocol::handlers::register_default_message_handlers;
+use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::xep0359::{add_origin_id, add_stanza_id, StanzaId};
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 

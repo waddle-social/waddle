@@ -1,7 +1,12 @@
 //! Activity writers (XEP-0085 chat states, XEP-0490 read markers,
 //! XEP-0045 presence, outbound messages) and the reader implementation.
 
-use super::*;
+use super::{
+    async_trait, BareJid, NotificationActivity, NotificationActivityError,
+    NotificationActivityReader, NotificationActivityStore, NotificationChatState,
+    NotificationPresenceShow,
+};
+use crate::db::actor::DbExecute;
 
 impl NotificationActivityStore {
     /// Record a XEP-0085 chat-state change as activity for the user
@@ -27,8 +32,8 @@ impl NotificationActivityStore {
         conversation: &BareJid,
         chat_state: NotificationChatState,
         now_ms: i64,
-    ) -> crate::db::actor::DbExecute {
-        crate::db::actor::DbExecute {
+    ) -> DbExecute {
+        DbExecute {
             sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
@@ -92,12 +97,8 @@ impl NotificationActivityStore {
         Ok(())
     }
 
-    fn chat_state_gone_write(
-        owner: &BareJid,
-        conversation: &BareJid,
-        now_ms: i64,
-    ) -> crate::db::actor::DbExecute {
-        crate::db::actor::DbExecute {
+    fn chat_state_gone_write(owner: &BareJid, conversation: &BareJid, now_ms: i64) -> DbExecute {
+        DbExecute {
             sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
@@ -155,12 +156,8 @@ impl NotificationActivityStore {
         Ok(())
     }
 
-    fn read_marker_write(
-        owner: &BareJid,
-        conversation: &BareJid,
-        now_ms: i64,
-    ) -> crate::db::actor::DbExecute {
-        crate::db::actor::DbExecute {
+    fn read_marker_write(owner: &BareJid, conversation: &BareJid, now_ms: i64) -> DbExecute {
+        DbExecute {
             sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
@@ -220,12 +217,8 @@ impl NotificationActivityStore {
         Ok(())
     }
 
-    fn outbound_message_write(
-        owner: &BareJid,
-        conversation: &BareJid,
-        now_ms: i64,
-    ) -> crate::db::actor::DbExecute {
-        crate::db::actor::DbExecute {
+    fn outbound_message_write(owner: &BareJid, conversation: &BareJid, now_ms: i64) -> DbExecute {
+        DbExecute {
             sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
@@ -394,7 +387,7 @@ impl NotificationActivityStore {
     pub(crate) fn mutation_write(
         owner: &BareJid,
         mutation: &waddle_xmpp::ingress::NotificationActivityMutation,
-    ) -> Option<crate::db::actor::DbExecute> {
+    ) -> Option<DbExecute> {
         use waddle_xmpp::ingress::NotificationActivityMutation as Mutation;
         Some(match mutation {
             Mutation::ChatState {

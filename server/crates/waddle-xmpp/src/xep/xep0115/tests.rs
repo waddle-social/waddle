@@ -1,4 +1,11 @@
-use super::*;
+use super::BASE64;
+use super::{
+    build_verification_string_with_extensions, compute_caps_hash,
+    compute_caps_hash_with_extensions, extract_caps_from_presence, hash_verification_string,
+    is_caps_node_query, parse_caps_node, CachedDiscoInfo, Caps, CapsCache, CapsCacheKey, Element,
+    DATA_FORMS_NS, FORM_TYPE_FIELD, NS_CAPS, WADDLE_CAPS_NODE,
+};
+use base64::Engine;
 
 use crate::disco::info::{Feature, Identity, DISCO_INFO_NS};
 

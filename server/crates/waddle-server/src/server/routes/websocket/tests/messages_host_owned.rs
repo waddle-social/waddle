@@ -1,11 +1,21 @@
 //! Extension bots are host-owned: a joined bot observes room messages through hooks without
 //! a socket copy, and is never a peer for direct messages, private messages or subscriptions.
-use super::*;
+use super::{
+    create_test_server_owner_session, create_test_session,
+    create_test_websocket_state_with_db_pool_and_ingress,
+    create_test_websocket_state_with_fixture_bot, get_or_create_room_actor, get_room_actor,
+    handle_message_through_ingress, handle_muc_join_with_occupancy_session, handle_xmpp_frame,
+    mpsc, record_test_occupancy_session, register_test_connection, seed_local_account, tests,
+    Affiliation, Arc, BareJid, ConnectionPhase, DatabaseConfig, DatabasePool, Element, FromStr,
+    FullJid, OutboundStanza, PoolConfig, RoomConfig, Stanza, WebSocketState, WsConnState,
+    FIXTURE_BOT_PLUGIN,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 async fn user_groupchat_with_bot(f: IngressFixture, another_user: bool) {
     let pool = crate::db::DatabasePool::try_new(

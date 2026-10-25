@@ -1,9 +1,8 @@
 //! Execute delivery obligations through the existing immediate operations.
 use super::super::{route_to_connection, routing, Deps, FullJidDeliveryOutcome};
-use super::{
-    delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-    EffectOutcome, ImmediateSink,
-};
+use super::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use super::{EffectOutcome, ImmediateSink};
+use std::collections::HashSet;
 
 pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> EffectOutcome {
     execute_with_received_at(effect, deps, None).await
@@ -197,7 +196,7 @@ async fn queue_detached_without_direct_progress(
         let detached_outcomes = route_to_connection::queue_processed_for_detached_at(
             deps,
             vec![resource.clone()],
-            &std::collections::HashSet::new(),
+            &HashSet::new(),
             stanza,
             received_at,
         )

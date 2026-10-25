@@ -1,14 +1,12 @@
-use super::super::{
-    frame::handle_xmpp_frame,
-    registration::{
-        publish_stream_id_and_presence, register_bound_connection_after_frame,
-        register_bound_connection_after_frame_with_admission, RegistrationAfterFrame,
-    },
-    session_init::load_blocklist_for_bind,
-    state::WsConnState,
-    stream_management::SmRegistrationFinalization,
-    transport_xml::element_to_xml,
+use super::super::frame::handle_xmpp_frame;
+use super::super::registration::{
+    publish_stream_id_and_presence, register_bound_connection_after_frame,
+    register_bound_connection_after_frame_with_admission, RegistrationAfterFrame,
 };
+use super::super::session_init::load_blocklist_for_bind;
+use super::super::state::WsConnState;
+use super::super::stream_management::SmRegistrationFinalization;
+use super::super::transport_xml::element_to_xml;
 
 #[tokio::test]
 async fn revoked_authority_cannot_publish_a_bound_connection() {
@@ -53,12 +51,12 @@ use super::{create_test_session, create_test_websocket_state, store_resumable_de
 use jid::{BareJid, FullJid};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    protocol::{Blocklist, ConnectionPhase, InboundEvent, InboundFrame, StanzaDispatcher},
-    registry::OutboundStanza,
-    stream_management::SM_NS,
-    Stanza,
+use waddle_xmpp::protocol::{
+    Blocklist, ConnectionPhase, InboundEvent, InboundFrame, StanzaDispatcher,
 };
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::stream_management::SM_NS;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
@@ -385,13 +383,10 @@ async fn fresh_bind_interrupts_incumbent_write<S>(inner: S)
 where
     S: futures::Sink<axum::extract::ws::Message, Error = &'static str> + Unpin,
 {
-    use super::super::{
-        cleanup::{
-            cleanup_force_detach_connection_shutdown, finish_socket_cleanup,
-            ConnectionShutdownOutcome,
-        },
-        send::{send_ws_message, InterruptibleSink},
+    use super::super::cleanup::{
+        cleanup_force_detach_connection_shutdown, finish_socket_cleanup, ConnectionShutdownOutcome,
     };
+    use super::super::send::{send_ws_message, InterruptibleSink};
     use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState};
 
     let state = create_test_websocket_state().await;

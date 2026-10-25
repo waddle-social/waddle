@@ -4,7 +4,9 @@
 //! `WADDLE_TEST_POSTGRES_URL` is configured. Those tests get UUID-named schemas:
 //! a schema is a lineage boundary because its identity is part of the attestation.
 
-use std::{process::Command, sync::OnceLock, time::Duration};
+use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use waddle_ws_test_support::TestServer;
 

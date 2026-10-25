@@ -20,6 +20,8 @@ use super::errors::{forbidden_iq_error, internal_server_error_iq_error};
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
+use crate::auth::Session;
+use crate::server::routes::websocket::ResolvedPrincipal;
 #[cfg(test)]
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 
@@ -167,11 +169,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let session = synthetic_session(&sender);
     let deps = build_interpret_deps(
         state,
-        Some(
-            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
-                &session,
-            ),
-        ),
+        Some(ResolvedPrincipal::from_authenticated_session(&session)),
     );
     let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
     // Mirror the local adapter's post-terminate Muji-presence clear. It
@@ -196,13 +194,13 @@ pub(crate) async fn handle_relayed_muji_initiate(
 
 /// Minimal synthetic session for interpret-side owner checks, same
 /// shape the other reserved MUC-proxy deliveries use.
-fn synthetic_session(sender: &jid::FullJid) -> crate::auth::Session {
+fn synthetic_session(sender: &jid::FullJid) -> Session {
     let bare = sender.to_bare();
     let localpart = bare
         .node()
         .map(|node| node.to_string())
         .unwrap_or_else(|| bare.to_string());
-    crate::auth::Session::new(
+    Session::new(
         bare.to_string().as_str(),
         localpart.as_str(),
         localpart.as_str(),

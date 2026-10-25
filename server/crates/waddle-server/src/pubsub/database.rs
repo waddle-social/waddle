@@ -1,3 +1,4 @@
+use crate::db::Rows;
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
@@ -8,7 +9,7 @@ impl DatabasePubSubStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, XmppError> {
+    ) -> Result<Rows, XmppError> {
         let conn = self
             .db
             .guard()

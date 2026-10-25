@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    chat_msg, interpret, jid, offline_pass_deps, pipelined_dispatcher, Arc, BareJid,
+    BlockingStorage, ConnectionRegistry, DefinedCondition, Deps, Element, ErrorType, InboxStorage,
+    IngressEffectIntent, Jid, MamStorage, Message, OutboundEvent, Stanza, StanzaError,
+    XmppMessageType,
+};
 use crate::ingress::IngressEffectCapture;
 
 #[tokio::test]

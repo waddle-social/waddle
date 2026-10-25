@@ -5,8 +5,12 @@
 //! virtualised `ListView`, so only changed rows are touched. Message
 //! actions (react, reply, edit, delete) are in `ui/actions.rs`.
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{
+    ActionExt, ActionMapExt, ActionRowExt, AdjustmentExt, ApplicationExt, BoxExt, ButtonExt, Cast,
+    CastNone, EntryExt, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
+    NavigationPageExt, ObjectExt, TextureExt, ToVariant, WidgetExt,
+};
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gdk, gio, glib};
 use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
 

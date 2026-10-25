@@ -1,6 +1,11 @@
 //! Immutable, typed descriptions of effects selected during ingress.
 
-use std::{cmp::Ordering, collections::BTreeMap, ops::Deref};
+use crate::inbox::ConversationKind;
+use crate::muc::pin::PinPreview;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::ops::Deref;
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
@@ -11,20 +16,18 @@ use uuid::Uuid;
 use waddle_extensions::{ObservationGeneration, PluginId, Sha256Digest};
 use waddle_xmpp_core::mam::{ArchiveOrdinal, RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
-use xmpp_parsers::{
-    message::Lang,
-    stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType, StanzaError},
-};
+use xmpp_parsers::message::Lang;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType, StanzaError};
 
-use crate::{
-    error::StanzaErrorCondition,
-    inbox::InboxEntry,
-    ingress::{EntityGeneration, StoredMessagePayload},
-    muc::{pin::PinnedEntry, SubjectState},
-    pending_delivery::{PendingRowId, SmSessionId},
-    protocol::CarbonKind,
-    xep::{xep0085::ChatState, CallThreadDuration, CallThreadMedia},
-};
+use crate::error::StanzaErrorCondition;
+use crate::inbox::InboxEntry;
+use crate::ingress::{EntityGeneration, StoredMessagePayload};
+use crate::muc::pin::PinnedEntry;
+use crate::muc::SubjectState;
+use crate::pending_delivery::{PendingRowId, SmSessionId};
+use crate::protocol::CarbonKind;
+use crate::xep::xep0085::ChatState;
+use crate::xep::{CallThreadDuration, CallThreadMedia};
 
 /// Largest accepted version-one storage payload, matching the database check.
 pub const MAX_EFFECT_INTENT_PAYLOAD_BYTES: usize = 65_536;
@@ -1006,7 +1009,7 @@ pub struct PlannedDmCallState {
     pub key: DmCallThreadKey,
     pub pending: Option<PendingDmCallOffer>,
     pub active: Option<PlannedActiveDmCall>,
-    pub projected: std::collections::HashSet<BareJid>,
+    pub projected: HashSet<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1580,7 +1583,7 @@ impl IngressEffectIntent {
         let direct_entry = || {
             InboxEntry::new(
                 bare("juliet@example.test"),
-                crate::inbox::ConversationKind::Direct,
+                ConversationKind::Direct,
                 "stable-1",
                 1_752_768_000,
             )
@@ -1593,7 +1596,7 @@ impl IngressEffectIntent {
             pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc),
-            preview: crate::muc::pin::PinPreview::new(
+            preview: PinPreview::new(
                 bare("juliet@example.test"),
                 Some("Juliet".to_string()),
                 "important",

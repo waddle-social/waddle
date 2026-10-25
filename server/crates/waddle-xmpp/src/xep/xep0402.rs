@@ -49,6 +49,7 @@
 //! </message>
 //! ```
 
+use crate::pubsub::PubSubItem;
 use jid::BareJid;
 use minidom::Element;
 
@@ -246,9 +247,9 @@ pub fn build_bookmark_element(bookmark: &Bookmark) -> Element {
 /// Build a PubSub item for a bookmark.
 ///
 /// The item ID is the room's bare JID.
-pub fn build_bookmark_item(bookmark: &Bookmark) -> crate::pubsub::PubSubItem {
+pub fn build_bookmark_item(bookmark: &Bookmark) -> PubSubItem {
     let payload = build_bookmark_element(bookmark);
-    crate::pubsub::PubSubItem::new(Some(bookmark.jid.to_string()), Some(payload))
+    PubSubItem::new(Some(bookmark.jid.to_string()), Some(payload))
 }
 
 /// Check if a PubSub node name is the bookmarks node.

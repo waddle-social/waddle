@@ -1,10 +1,11 @@
-use super::*;
+use super::{debug, recipient_blocks_sender, FullJid, Jid, Stanza, WebSocketState};
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
 pub(in crate::server::routes::websocket::handlers::presence) async fn handle_directed_presence(
     state: &WebSocketState,
     sender_jid: &FullJid,
     mut presence: xmpp_parsers::presence::Presence,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     let Some(target) = presence.to.clone() else {
         return;

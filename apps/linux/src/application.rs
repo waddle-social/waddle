@@ -1,5 +1,10 @@
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{
+    ActionMapExtManual, AdwDialogExt, ApplicationExt, Cast, GtkApplicationExt, GtkWindowExt,
+};
+use adw::subclass::prelude::{
+    AdwApplicationImpl, ApplicationImpl, ApplicationImplExt, GtkApplicationImpl, ObjectImpl,
+    ObjectImplExt, ObjectSubclass, ObjectSubclassExt,
+};
 use gtk::{gio, glib};
 
 use crate::ui::WaddleWindow;

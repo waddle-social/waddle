@@ -1,20 +1,22 @@
 //! Host ingress owns its admission permit through commit, execution and settlement.
-use std::{sync::Arc, time::Duration};
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::SettledRefusal;
+use crate::server::routes::interpret::HostOwnedResources;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{oneshot, OwnedRwLockReadGuard};
 use tokio::task::JoinHandle;
-use waddle_xmpp::{ingress::TransportGeneration, Stanza};
+use waddle_xmpp::ingress::TransportGeneration;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::stanza_error::StanzaError;
 
 use super::{
     execute, Deps, ImmediateSink, IngressAuthority, IngressDecisionClass, IngressSubmission,
 };
-use crate::{
-    auth::Session,
-    server::routes::websocket::{
-        interpret_loop::build_interpret_deps, ResolvedPrincipal, WebSocketState,
-    },
-};
+use crate::auth::Session;
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::{ResolvedPrincipal, WebSocketState};
 
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(5);
 const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_millis(25);
@@ -111,9 +113,7 @@ impl NestedContinuation {
                 .as_ref()
                 .map(ResolvedPrincipal::from_authenticated_session),
         );
-        deps.host_sender = Some(
-            crate::server::routes::interpret::HostOwnedResources::Sender(self.host_sender.clone()),
-        );
+        deps.host_sender = Some(HostOwnedResources::Sender(self.host_sender.clone()));
         deps.host_copy_consumer = Some(Arc::new(HostFrameConsumer {
             sender: self.host_sender.clone(),
         }));
@@ -205,7 +205,7 @@ impl NestedIngressOperation {
                     .flat_map(|obligation| &obligation.frames)
                     .find_map(stanza_error)
                     .or_else(|| report.refusal.map(
-                        |crate::server::routes::interpret::effects::SettledRefusal::OfflineQuotaExceeded| {
+                        |SettledRefusal::OfflineQuotaExceeded| {
                             crate::server::routes::interpret::offline_delivery::offline_quota_error()
                         },
                     ));
@@ -236,9 +236,7 @@ impl NestedIngressOperation {
                             Ok(outcome) => outcome,
                             Err(_) => SettlementOutcome {
                                 rejection: None,
-                                terminal: Err(
-                                    crate::ingress_uow::IngressUowError::AuthorityStopped.into(),
-                                ),
+                                terminal: Err(IngressUowError::AuthorityStopped.into()),
                             },
                         }
                     }),
@@ -257,7 +255,7 @@ async fn consume_host_frames(
     continuation: &NestedContinuation,
     decision: &super::IngressDecision,
     report: &super::ExecutionReport,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), IngressUowError> {
     use crate::ingress_uow::{CanonicalMessageRepository, IngressUowError};
     use crate::server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext};
     if !report

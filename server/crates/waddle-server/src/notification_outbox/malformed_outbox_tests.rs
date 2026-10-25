@@ -1,10 +1,14 @@
-use super::*;
+use super::{
+    Element, NotificationOutboxJob, NotificationOutboxStore, STATUS_FAILED, STATUS_IN_PROGRESS,
+    STATUS_PUBLISHED,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope};
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
     EffectReceiptRepository,
 };
+use crate::notification_outbox::codec::encode_sender_jids;
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target_named};
 use sha2::{Digest, Sha256};
 use waddle_xmpp::ingress::{

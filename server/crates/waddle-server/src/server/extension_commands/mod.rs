@@ -1,3 +1,5 @@
+use crate::config::ServerConfig;
+use crate::server::extension_host_tools::DeferredExtensionHostTools;
 mod forms;
 pub(crate) mod pubsub;
 pub(crate) mod startup;
@@ -210,11 +212,9 @@ pub(crate) async fn register_extension_commands(
 }
 
 pub(crate) async fn build_extension_manager(
-    server_config: &crate::config::ServerConfig,
+    server_config: &ServerConfig,
     _xmpp_domain: &str,
-    deferred_extension_host_tools: Arc<
-        crate::server::extension_host_tools::DeferredExtensionHostTools,
-    >,
+    deferred_extension_host_tools: Arc<DeferredExtensionHostTools>,
 ) -> anyhow::Result<Arc<ExtensionManager>> {
     let manager = match ExtensionManager::from_config_with_host_tools(
         server_config.extensions.clone(),

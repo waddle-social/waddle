@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    Affiliation, BareJid, Context, FullJid, InviteMembershipGrant, MediatedInviteAuthorized,
+    MediatedInviteGrantError, MediatedInviteOperationCompletion, MediatedInviteOperationId,
+    MediatedInviteOperationRecord, MediatedInviteOperationState, RoomActor,
+};
+use crate::muc::durable::AffiliationEntry;
+use crate::muc::durable::RoomDurableMutation;
+use crate::muc::RoomMutationEffects;
 
 pub struct AuthorizeMediatedInvite {
     pub operation_id: MediatedInviteOperationId,
@@ -75,13 +82,11 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
             // Persist first; only a successful write permits the infallible
             // in-memory transition and creation of rollback authority.
             self.commit_durable(
-                crate::muc::durable::RoomDurableMutation::MediatedInviteGrant(
-                    crate::muc::durable::AffiliationEntry::new(
-                        msg.invitee.clone(),
-                        Some(Affiliation::Member),
-                    ),
-                ),
-                crate::muc::RoomMutationEffects::none(),
+                RoomDurableMutation::MediatedInviteGrant(AffiliationEntry::new(
+                    msg.invitee.clone(),
+                    Some(Affiliation::Member),
+                )),
+                RoomMutationEffects::none(),
             )
             .await
             .map_err(MediatedInviteGrantError::GrantPersistFailed)?;

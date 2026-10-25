@@ -2,9 +2,15 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate_for, drain_deps_with_noop_activity, noop_activity_reader, register_push_target,
+    seed_inbox_witness, settings_projection, store, target, StubRoomPolicy,
+};
 use jid::{BareJid, Jid};
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    DndReader, DndState, NoopDndReader, NotificationCandidate, NotificationClass,
+    NotificationMessageHints, NotificationOutboxError, NotificationThreadId, RichSummary,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::NS_DATA_FORMS;
 use waddle_xmpp_core::xep0359::StanzaId;

@@ -16,7 +16,10 @@ use super::frame::ResponseFrame;
 use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
 use super::state::WsConnState;
 use super::stream_management::{apply_sm_ack, is_countable_stanza};
-use super::*;
+use super::{
+    debug, error, info, warn, Message, Sink, SmStanza, StreamExt, WebSocketState, MAX_FRAME_SIZE,
+};
+use crate::clustering::NodeAdmissionPermit;
 use futures::FutureExt as _;
 use waddle_xmpp::stream_management::{SmAck, SmRequest};
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
@@ -121,20 +124,14 @@ enum SendWindowOutcome {
 }
 
 fn batch_authoritative(
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> bool {
     authority
         .is_none_or(|(permit, shutdown)| !shutdown.is_cancelled() && permit.revalidate().is_ok())
 }
 
 async fn batch_authority_revoked(
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) {
     let Some((permit, shutdown)) = authority else {
         std::future::pending::<()>().await;
@@ -151,10 +148,7 @@ async fn send_window_message<S, E>(
     sender: &mut S,
     message: Message,
     failure_message: &'static str,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -169,7 +163,7 @@ where
 
 #[derive(Clone, Copy)]
 pub(super) struct BatchAuthority<'a> {
-    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) permit: &'a NodeAdmissionPermit,
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
@@ -288,10 +282,7 @@ async fn write_response_batch_impl<S, SE, R, RE>(
     conn: &mut WsConnState,
     frames: Vec<ResponseFrame>,
     policy: BatchSmPolicy,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -557,10 +548,7 @@ async fn await_send_window_recovery<S, SE, R, RE>(
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> SendWindowOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
@@ -764,10 +752,7 @@ async fn service_paused_sm_requests_from_deferred<S, E>(
     sender: &mut S,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -957,10 +942,7 @@ async fn drain_ready_inbound<S, SE, R, RE>(
     reader: &mut R,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> DrainSignal
 where
     S: Sink<Message, Error = SE> + Unpin,

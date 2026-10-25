@@ -20,6 +20,7 @@
 //! acquire → fence → release lifecycle a Postgres-backed store would
 //! enforce.
 
+use crate::ownership::ExactReleaseOutcome;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -239,14 +240,14 @@ impl ClaimStore for InProcessClaimStore {
         entity: &Entity,
         me: &NodeIdentity,
         mine: ClaimEpoch,
-    ) -> Result<crate::ownership::ExactReleaseOutcome, ClaimError> {
+    ) -> Result<ExactReleaseOutcome, ClaimError> {
         let mut state = self.lock()?;
         if matches!(state.claims.get(entity), Some(record) if record.owner == *me && record.epoch == mine)
         {
             state.claims.remove(entity);
-            Ok(crate::ownership::ExactReleaseOutcome::Released)
+            Ok(ExactReleaseOutcome::Released)
         } else {
-            Ok(crate::ownership::ExactReleaseOutcome::NotOwned)
+            Ok(ExactReleaseOutcome::NotOwned)
         }
     }
 

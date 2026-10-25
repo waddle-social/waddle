@@ -1,5 +1,18 @@
-use super::namespaces::*;
-use super::*;
+use super::namespaces::{
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_FILE_METADATA, NS_HINTS, NS_MARKUP,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC_USER, NS_ORIGIN_ID,
+    NS_REACTIONS, NS_REFERENCES, NS_SFS, NS_URL_DATA, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW,
+    NS_WADDLE_MARKUP, NS_WADDLE_PIN_V0,
+};
+use super::{
+    build_chat_state_message, build_correction_message, build_displayed_message,
+    build_in_call_reaction_message, build_moderation_message, build_muc_join_presence,
+    build_outbound_message, build_pinned_message, build_reaction_message, build_retraction_message,
+    build_unpinned_message, is_muc_join_presence, parse, InCallReactionEmoji,
+    InCallReactionRecipient, InCallSessionId, InCallSignal, LinkPreviewToken, MarkupSpanData,
+    MarkupSpanType, MentionDirectory, MentionTarget, MessagingEvent, MucAffiliation, MucRole,
+    ReferenceData, SendMessageOptions, SharedFile, SharedFileDisposition,
+};
 use crate::error::ClientError;
 use crate::request::StanzaId;
 use minidom::Element;

@@ -1,25 +1,21 @@
 //! XEP-0333 planning must preserve both channel and thread read obligations.
-use super::super::{
-    build_plan_deps,
-    effects::{PlanFailure, PlanSink},
-    interpret,
-    message_plan::finish_plan,
-    Deps,
-};
+use super::super::effects::{PlanFailure, PlanSink};
+use super::super::message_plan::finish_plan;
+use super::super::{build_plan_deps, interpret, Deps};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
+    IngressDecisionClass, IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
 use crate::ingress_uow::SmIngressStreamRepository;
 use std::sync::Arc;
-use waddle_xmpp::{
-    inbox::{storage::InboxStorage, ConversationKind, InboxEntry},
-    ingress::WireHandledCount,
-    mam::{ArchivedMessage, MamStorage, SqlxMamStorage},
-    pending_delivery::SmSessionId,
-    protocol::OutboundEvent,
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::WireHandledCount;
+use waddle_xmpp::mam::{ArchivedMessage, MamStorage, SqlxMamStorage};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::protocol::OutboundEvent;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn plan_marker(submission: &mut IngressSubmission, deps: &Deps<'_>, room: &jid::BareJid) {
     let sink = PlanSink::new();

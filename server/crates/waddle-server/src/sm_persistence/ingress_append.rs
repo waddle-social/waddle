@@ -1,5 +1,6 @@
 //! SQL boundary for immutable ingress allocations and their durable payload custody.
 
+use crate::db::DatabaseDriver;
 use chrono::{DateTime, Utc};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
@@ -23,7 +24,7 @@ pub(crate) async fn authorize_new_delivery(
     tx: &mut Transaction<'_>,
     key: &SmIngressAppendKey,
 ) -> Result<NewDeliveryAuthorization, SmPersistenceError> {
-    let postgres = tx.driver() == crate::db::DatabaseDriver::Postgres;
+    let postgres = tx.driver() == DatabaseDriver::Postgres;
     let lock_sql = if postgres {
         "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"
     } else {

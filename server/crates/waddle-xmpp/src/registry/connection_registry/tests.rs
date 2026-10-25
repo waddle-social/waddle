@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    mpsc, Arc, AtomicBool, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry,
+    DeliveryKind, FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance,
+    PendingFlushReserveError, SendResult, SmSessionId, Stanza,
+};
 use jid::Jid;
 use std::time::Duration;
 use xmpp_parsers::message::{Message, MessageType};

@@ -16,7 +16,11 @@
 //! behind the lookup (production evidence on #1470: 1.3 s dispatch stalls vs
 //! a 13.6 ms dispatch p95).
 
-use super::*;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, chrono, debug, forbidden_iq_error,
+    get_room_actor, internal_server_error_iq_error, iq_to_xml, not_authorized_iq_error, warn, Arc,
+    BareJid, FullJid, GetOccupantByJid, Jid, Stanza, WebSocketState,
+};
 use chrono::{Duration, SecondsFormat, Utc};
 use kameo::actor::ActorRef;
 use minidom::rxml::xml_ncname;

@@ -1,5 +1,8 @@
 //! Recorded invitation authority survives a later silent block policy.
-use super::*;
+use super::{
+    commit_submission, invite_plan, invite_room, shared_state, submission, Arc, BareJid,
+    ExternalEffect, IngressDecisionClass, IngressFixture,
+};
 use crate::server::routes::interpret::DeliveryExecutionContext;
 
 async fn policy_replay(fixture: IngressFixture, blocked: bool) {

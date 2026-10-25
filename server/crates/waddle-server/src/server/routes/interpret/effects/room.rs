@@ -1,12 +1,16 @@
 //! Typed room mutations and delivery work retained by an ingress plan.
 #[cfg(feature = "clustering")]
 pub use super::super::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::notification_outbox::NotificationCandidate;
 use jid::BareJid;
-use waddle_xmpp::{
-    inbox::{storage::GroupchatNotificationRecoveryKey, InboxEntry},
-    mam::{ArchiveExpectation, ArchivedMessage},
-    muc::{pin::PinStateChange, RoomClaimFenceContext, SubjectState},
-};
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
+use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
+use waddle_xmpp::muc::pin::PinStateChange;
+use waddle_xmpp::muc::{RoomClaimFenceContext, SubjectState};
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
@@ -89,16 +93,16 @@ pub enum ExternalRoomEffect {
         room: BareJid,
         archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId,
         /// None completes recovery for a candidate suppressed by the planning-time gate.
-        candidate: Option<Box<crate::notification_outbox::NotificationCandidate>>,
+        candidate: Option<Box<NotificationCandidate>>,
         recovery: Option<PlannedGroupchatNotificationRecovery>,
     },
     #[cfg(feature = "clustering")]
     RelayMucProxy {
-        admission: Option<crate::ingress::identity::IngressRelayAdmission>,
+        admission: Option<IngressRelayAdmission>,
         room: BareJid,
         stanza: Box<waddle_xmpp::Stanza>,
-        kind: crate::clustering::ordered_relay::OrderedRelayMucProxyKind,
-        muc_origin: crate::clustering::ordered_relay::MucProxyOrigin,
+        kind: OrderedRelayMucProxyKind,
+        muc_origin: MucProxyOrigin,
         origin: super::super::OrderedRelayRouteOrigin,
         reflect_replies_to_sender: bool,
     },

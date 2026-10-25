@@ -1,13 +1,14 @@
 //! Carbon receipt authority includes the direction, original payload and resource.
-use super::*;
-use crate::{
-    ingress::{
-        commit::commit_submission, identity::IngressAppendObligationRef,
-        test_support::IngressFixture,
-    },
-    server::routes::interpret::SmIngressAppendContext,
+use super::{
+    check_canonical_obligation, check_resource_binding, check_stanza_binding, AppendAuthority,
+    AppendAuthorityRejection, Duration, Stanza,
 };
-use waddle_xmpp::{ingress::IngressEffectIntent, protocol::CarbonKind};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::SmIngressAppendContext;
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::CarbonKind;
 use xmpp_parsers::message::Message;
 
 fn wrapper(
@@ -179,10 +180,8 @@ async fn postgres_carbon_append_requires_exact_frozen_authority() {
 
 async fn archive_free_carbon_stamps(fixture: IngressFixture) {
     use crate::server::routes::interpret::FullJidDeliveryOutcome;
-    use waddle_xmpp::{
-        registry::BroadcastOutcome,
-        xep::xep0353::{build_propose, CallOffer},
-    };
+    use waddle_xmpp::registry::BroadcastOutcome;
+    use waddle_xmpp::xep::xep0353::{build_propose, CallOffer};
     use waddle_xmpp_core::xep0359::{add_stanza_id, build_stanza_id_element, StanzaId};
     let authority = fixture.authority().await;
     for kind in [CarbonKind::Sent, CarbonKind::Received] {

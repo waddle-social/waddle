@@ -6,7 +6,13 @@ use minidom::Element;
 use url::Url;
 use waddle_xmpp_core::waddle_status_preference::{ManualStatus, StatusPreference};
 
-use super::*;
+use super::{
+    AuthMechanism, AuthenticationRequest, ClientConfig, ClientError, ClientEvent, ClientRequest,
+    ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, PagehideAckRequest,
+    RequiredStreamFeature, SessionBinding, SessionPhase, SmAckRequestReason, SmNegotiationState,
+    SmState, StanzaId, StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState,
+    XmppRuntime, NS_SM,
+};
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::{

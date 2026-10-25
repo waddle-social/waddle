@@ -1,4 +1,4 @@
-use super::*;
+use super::{BareJid, DatabasePushServiceStore, PushQueueAcceptanceError, XmppError};
 use crate::ingress::test_support::IngressFixture;
 use crate::push_service::test_support::{notification_item, owner};
 use waddle_xmpp::StanzaErrorCondition;

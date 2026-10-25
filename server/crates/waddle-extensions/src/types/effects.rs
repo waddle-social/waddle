@@ -1,6 +1,10 @@
 //! Host effects returned by extension invocations.
 
-use super::*;
+use super::{
+    ArtifactReference, CommandNode, DataForm, Deserialize, DisplayText, ExtensionCapability,
+    ExtensionEnvelope, ExtensionManifest, ExtensionPayload, HashSet, InvocationUsage, Message,
+    PayloadSurface, PubSubItemId, PubSubNode, Serialize, FRAMEWORK_NAMESPACE,
+};
 
 /// Requested host effects and optional provider usage reported by one invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -16,7 +16,7 @@ mod threads;
 mod ui;
 
 use gtk::glib;
-use gtk::prelude::*;
+use gtk::prelude::ApplicationExtManual;
 
 pub const APP_ID: &str = "social.waddle.Waddle";
 

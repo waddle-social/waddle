@@ -8,7 +8,8 @@ use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::error::CoreError;
 

@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_thread_element, install_thread_element, is_thread_element_for_stanza, parse_thread_info,
+    set_thread_id, thread_id_from_message, thread_info_from_message,
+    thread_info_from_message_in_stanza_ns, Element, Message, ThreadId, ThreadInfo,
+    SERVER_STANZA_NS, THREAD_ELEMENT,
+};
 
 #[test]
 fn parses_root_thread() {

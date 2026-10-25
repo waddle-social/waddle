@@ -1,6 +1,18 @@
 //! Browser methods for messages, read markers, reactions, corrections, pins, and raw IQs.
 
-use super::*;
+use super::{
+    bare_jid, build_chat_state_message, build_correction_message, build_disco_info_iq,
+    build_displayed_message, build_in_call_reaction_message, build_mds_catchup_iq,
+    build_mds_publish_iq, build_mds_subscribe_iq, build_moderation_message, build_outbound_message,
+    build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
+    cancel_iq_command, element_to_xml_string, future_to_promise, jid_domain, js_error,
+    mds_entry_to_js, parse_disco_info_result, parse_mds_catchup_result, parse_raw_iq,
+    send_iq_command, send_message_stanza_command, send_options_from_js, send_stanza_command,
+    thread_ref_from_args, to_js_value, wasm_bindgen, BareJid, FullJid, InCallReactionEmoji,
+    InCallReactionRecipient, InCallSessionId, Jid, JsValue, Promise, StanzaId, WaddleClient,
+    WaddleMdsDisplayedEntry, WaddleSendMessageOutcome, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_HINTS,
+    NS_MODERATE, NS_PUBSUB_PUBLISH_OPTIONS_FEATURE, NS_REACTIONS, NS_REPLACE, NS_RETRACT,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {

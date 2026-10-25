@@ -3,11 +3,10 @@ use jid::FullJid;
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{IngressUowError, IngressUowTransaction};
-use crate::{
-    db::DatabaseDriver,
-    ingress::{decision::EffectReceiptKey, room_manifest::RoomManifestChildDisposition},
-    ingress_substrate::EffectReceiptKind,
-};
+use crate::db::DatabaseDriver;
+use crate::ingress::decision::EffectReceiptKey;
+use crate::ingress::room_manifest::RoomManifestChildDisposition;
+use crate::ingress_substrate::EffectReceiptKind;
 
 pub(crate) struct DeliveryProgressRepository;
 
@@ -222,20 +221,19 @@ impl DeliveryProgressRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::LineageConfig,
-        db::{Database, MigrationRunner},
-        ingress::{FrozenRoomManifest, RoomManifestSnapshot},
-        ingress_substrate::MessageEnvelope,
-        ingress_uow::{
-            CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
-            IngressUnitOfWork, SendAttemptRepository, SendObligation,
-        },
+    use crate::config::LineageConfig;
+    use crate::db::{Database, MigrationRunner};
+    use crate::ingress::{FrozenRoomManifest, RoomManifestSnapshot};
+    use crate::ingress_substrate::MessageEnvelope;
+    use crate::ingress_uow::{
+        CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
+        IngressUnitOfWork, SendAttemptRepository, SendObligation,
     };
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, EntityGeneration, IngressEffectIntent, SemanticDigest},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+    use waddle_xmpp::ingress::{
+        EffectMessageIdentity, EntityGeneration, IngressEffectIntent, SemanticDigest,
     };
+    use waddle_xmpp::muc::durable::AdminMutationId;
+    use waddle_xmpp::muc::room_actor::OccupancyWatermark;
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::Message;
 

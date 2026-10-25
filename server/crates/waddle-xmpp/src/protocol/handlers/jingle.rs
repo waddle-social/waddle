@@ -10,11 +10,10 @@
 //! directly rather than going through the two-phase AskSfu callback
 //! machinery.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
-};
+use crate::telemetry::call::PendingCallSetupRoute;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use jid::{BareJid, Jid};
 use minidom::Element;
@@ -102,9 +101,8 @@ impl CallSetupAttempt {
     /// it here (#1488): the route disposition — delivered vs. no usable
     /// resource — is only known after the sans-I/O boundary, so the
     /// interpreter closes the attempt via the returned ticket.
-    fn handed_to_router(self) -> Option<crate::telemetry::call::PendingCallSetupRoute> {
-        self.live
-            .then(crate::telemetry::call::PendingCallSetupRoute::open)
+    fn handed_to_router(self) -> Option<PendingCallSetupRoute> {
+        self.live.then(PendingCallSetupRoute::open)
     }
 
     fn failed(self, reason: CallSetupFailureReason) {

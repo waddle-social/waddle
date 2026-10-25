@@ -47,7 +47,10 @@ use waddle_xmpp_client::admin_commands::{
     AdminSpacesSetRoleArgs, AdminSpacesUpdateArgs,
 };
 
-use super::*;
+use super::{
+    future_to_promise, jid_domain, js_error, send_iq_command, to_js_value, wasm_bindgen, JsValue,
+    Promise, Rc, RefCell, WaddleClient, WaddleClientInner,
+};
 
 fn caller_domain(inner: &Rc<RefCell<WaddleClientInner>>) -> String {
     let stored = inner.borrow().config.clone();

@@ -1,20 +1,20 @@
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use jid::{BareJid, FullJid, Jid};
 use tracing::{debug, info, warn};
-use waddle_xmpp::{
-    muc::{
-        messages::build_subject_message,
-        room_actor::{JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid},
-        RoomConfig,
-    },
-    presence::subscription::{
-        build_available_presence, build_subscription_presence, build_unavailable_presence,
-        parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
-    },
-    registry::BroadcastOutcome,
-    roster::{build_roster_push, AskType, RosterItem, RosterVersion, Subscription},
-    xep::NS_DELAY,
-    Affiliation, Role, Stanza,
+use waddle_xmpp::muc::messages::build_subject_message;
+use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid};
+use waddle_xmpp::muc::RoomConfig;
+use waddle_xmpp::presence::subscription::{
+    build_available_presence, build_subscription_presence, build_unavailable_presence,
+    parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
 };
+use waddle_xmpp::registry::BroadcastOutcome;
+use waddle_xmpp::roster::{build_roster_push, AskType, RosterItem, RosterVersion, Subscription};
+use waddle_xmpp::xep::NS_DELAY;
+use waddle_xmpp::{Affiliation, Role, Stanza};
 use xmpp_parsers::minidom::Element;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -146,7 +146,7 @@ pub struct PresenceHandlerContext<'a> {
     pub authenticated_session: Option<&'a Session>,
     pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 
 #[cfg(feature = "clustering")]
@@ -154,7 +154,7 @@ pub(crate) async fn handle_ordered_relay_presence_request(
     state: &WebSocketState,
     target: &BareJid,
     presence: xmpp_parsers::presence::Presence,
-    ordered_relay_origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
+    ordered_relay_origin: OrderedRelayRouteOrigin,
 ) -> Result<(), ()> {
     let Some(from) = presence.from.as_ref().map(|from| from.to_bare()) else {
         warn!(
@@ -313,8 +313,8 @@ async fn handle_presence_impl(
                         .try_proxy_muc_remote(
                             &room_jid,
                             &stanza,
-                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                            OrderedRelayMucProxyKind::OccupantPresence,
+                            MucProxyOrigin::Connection(
                                 *context.occupancy_session,
                             ),
                             origin, None)
@@ -334,13 +334,13 @@ async fn handle_presence_impl(
                             crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames { .. },
                         )
                         | Some(
-                            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted,
+                            OrderedRelayMucProxyOutcome::MaybeCommitted,
                         )
                         | Some(
-                            crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
+                            OrderedRelayMucProxyOutcome::JoinMaybeCommitted,
                         ) => return Vec::new(),
-                        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-                        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+                        Some(OrderedRelayMucProxyOutcome::Unavailable)
+                        | Some(OrderedRelayMucProxyOutcome::Dropped)
                         | None => {}
                     }
                 }

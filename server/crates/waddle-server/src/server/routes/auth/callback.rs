@@ -1,7 +1,16 @@
-use super::*;
+use super::{
+    auth_error_response, auth_error_to_response, header, instrument, oauth2, oidc,
+    reconcile_user_membership, record_auth_failure, record_auth_success, warn, Arc, AuthError,
+    AuthFailure, AuthProviderKind, AuthStage, AuthState, BrowserSessionTransport, CallbackQuery,
+    DeviceAuthStatus, IntoResponse, PendingFlow, Query, Redirect, Session, State, StatusCode, Utc,
+    Uuid, XmppAuthCode,
+};
 use crate::auth::redirect::{
     PkceS256Challenge, RedirectError, TrustedWebOrigins, XmppClientRedirectUri,
 };
+use crate::profile::NameIntent;
+use crate::profile::PhotoIntent;
+use crate::profile::ProfileSource;
 
 #[instrument(skip(state, query))]
 pub(super) async fn callback_handler(
@@ -274,9 +283,9 @@ pub(super) async fn callback_handler(
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             let photo_intent = match raw_avatar {
-                None => crate::profile::PhotoIntent::RemoveIfOidcOwned,
+                None => PhotoIntent::RemoveIfOidcOwned,
                 Some(s) => match url::Url::parse(s) {
-                    Ok(url) => crate::profile::PhotoIntent::SetFromUrl(url),
+                    Ok(url) => PhotoIntent::SetFromUrl(url),
                     Err(parse_err) => {
                         tracing::warn!(
                             jid = %linked.user.xmpp_localpart,
@@ -284,15 +293,15 @@ pub(super) async fn callback_handler(
                             error = %parse_err,
                             "OIDC `picture` claim is not a parseable URL; skipping PHOTO sync (prior avatar preserved)"
                         );
-                        crate::profile::PhotoIntent::Skip
+                        PhotoIntent::Skip
                     }
                 },
             };
             let name_intent = match display_name {
-                Some(s) => crate::profile::NameIntent::Set(s),
-                None => crate::profile::NameIntent::Remove,
+                Some(s) => NameIntent::Set(s),
+                None => NameIntent::Remove,
             };
-            let source = crate::profile::ProfileSource::Oidc {
+            let source = ProfileSource::Oidc {
                 photo: photo_intent,
                 name: name_intent,
             };

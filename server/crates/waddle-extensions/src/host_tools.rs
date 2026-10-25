@@ -1,5 +1,8 @@
 //! Typed capabilities available to extensions for messaging, discovery, and account state.
 
+use crate::types::PluginId;
+use crate::types::RoomMessageSource;
+use crate::types::WaddleId;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,9 +19,9 @@ use crate::types::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvocationContext {
     /// Identifier of the Waddle community providing invocation context.
-    pub waddle_id: crate::types::WaddleId,
+    pub waddle_id: WaddleId,
     /// Identifier of the extension owning this value.
-    pub plugin_id: crate::types::PluginId,
+    pub plugin_id: PluginId,
     /// Authenticated bare account JID supplying user authority, when this invocation has a user.
     pub requester: Option<BareJid>,
     /// Authoritative source room used to scope host access; absent for events without a room.
@@ -43,7 +46,7 @@ pub trait ExtensionDeliveryCapability: Send + Sync + 'static {
     async fn validate(
         &self,
         context: &InvocationContext,
-        source: &crate::types::RoomMessageSource,
+        source: &RoomMessageSource,
     ) -> Result<(), HostToolError>;
 }
 

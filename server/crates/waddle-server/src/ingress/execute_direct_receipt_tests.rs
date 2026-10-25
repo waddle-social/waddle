@@ -1,17 +1,20 @@
 //! RFC 0018 §3: a capture identity receipts only its complete frozen fanout.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
+use super::{
+    classify_outcome, completed_receipts, execute_effects, proven_receipts,
+    terminalize_if_complete, AppendAuthority, CanonicalMessageRepository, Deps, Duration, Effect,
+    EffectOutcome, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect,
+    FullJidDeliveryOutcome, ImmediateSink, MessageKey, PlannedEffect, SmIngressAppendContext,
+    Stanza,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::effects::PlanSink;
+use crate::server::routes::interpret::interpret;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::server::routes::{
-    interpret::{effects::PlanSink, interpret},
-    websocket::tests as socket_tests,
-};
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    protocol::OutboundEvent,
-};
+use crate::server::routes::websocket::tests as socket_tests;
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::protocol::OutboundEvent;
 
 async fn direct_receipt(fixture: IngressFixture, partial: bool) {
     let state = socket_tests::create_test_websocket_state().await;
@@ -319,11 +322,9 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
     use crate::server::routes::interpret::{
         deliver_direct_to_full_with_registered_remote, SmIngressAppendContext,
     };
-    use waddle_xmpp::{
-        ingress::{MessageKey, SemanticDigest},
-        mam::ArchiveOrdinal,
-        stream_management::ArchiveDispatchPosition,
-    };
+    use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
+    use waddle_xmpp::mam::ArchiveOrdinal;
+    use waddle_xmpp::stream_management::ArchiveDispatchPosition;
     let state = socket_tests::create_test_websocket_state().await;
     let target: jid::FullJid = "juliet@example.com/phone"
         .parse()

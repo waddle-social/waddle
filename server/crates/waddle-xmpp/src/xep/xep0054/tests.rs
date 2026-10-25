@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_empty_vcard_response, build_vcard_element, build_vcard_response, build_vcard_success,
+    is_vcard_get, is_vcard_set, parse_vcard_element, Element, Iq, VCard, VCardError, VCardPhoto,
+    NS_VCARD,
+};
 
 #[test]
 fn test_is_vcard_get_classifies_only_get_with_correct_payload() {

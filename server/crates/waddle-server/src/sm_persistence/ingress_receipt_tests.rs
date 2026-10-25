@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    fixture_session, fixture_unacked, schema, DatabaseDriver, DatabaseSmPersistence,
+    SmPersistenceStorage,
+};
 use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::MessageKey;
 use waddle_xmpp::stream_management::{SmIngressFrameReceipt, SmIngressReceiptKind};

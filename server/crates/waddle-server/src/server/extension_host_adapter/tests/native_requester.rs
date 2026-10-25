@@ -1,9 +1,8 @@
 //! Native SCRAM accounts have the same extension admission authority as OIDC accounts.
-use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
-use crate::{
-    ingress::test_support::IngressFixture,
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-};
+use super::direct_ingress;
+use super::groupchat_ingress::GroupchatFixture;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
 use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
 
 fn context(source_room: Option<jid::BareJid>) -> host::InvocationContext {

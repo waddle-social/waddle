@@ -1,4 +1,5 @@
-use super::*;
+use super::{BareJid, ConnectionRegistry, FullJid, Ordering, SendResult, Stanza};
+use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
     /// Mark a connected resource as interested in roster pushes.
@@ -104,7 +105,7 @@ impl ConnectionRegistry {
     /// sessions, not active ones, so without this the janitor would
     /// wrongly treat actively-claimed-but-not-yet-acked rows as
     /// orphaned and release them. (Codex/Qodo review on PR #360.)
-    pub fn active_sm_stream_ids(&self) -> Vec<crate::pending_delivery::SmSessionId> {
+    pub fn active_sm_stream_ids(&self) -> Vec<SmSessionId> {
         self.connections
             .iter()
             .filter_map(|entry| entry.value().sm_stream_id())

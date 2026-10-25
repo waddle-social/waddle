@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_block_push, build_blocking_error, build_blocking_success, build_blocklist_response,
+    build_unblock_push, is_block_set, is_blocking_query, is_blocklist_get, is_unblock_set,
+    parse_blocking_request, BareJid, BlockingBadRequest, BlockingError, BlockingRequest,
+    BlockingStorage, Element, InMemoryBlockingStorage, Iq, Jid, NS_BLOCKING,
+};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 fn jid(value: &str) -> Jid {

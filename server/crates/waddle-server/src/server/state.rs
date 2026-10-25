@@ -1,9 +1,22 @@
 use crate::channel_space_links::ChannelSpaceLinkStore;
+use crate::channel_space_links::InMemoryChannelSpaceLinkStore;
+use crate::clustering::ClusteringHandles;
+use crate::clustering::NodeLifecycle;
+use crate::config::LineageConfig;
+use crate::db::lineage::DurableStore;
+use crate::db::lineage::LineageRegistry;
+use crate::db::lineage::LineageRegistryBuilder;
+use crate::db::lineage::LineageReport;
+use crate::db::lineage::LineageUuid;
+use crate::db::Database;
+use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
+use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
 use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
@@ -14,7 +27,7 @@ use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 /// Server application state
 pub struct AppState {
     /// Database pool for global and per-waddle databases
-    pub db_pool: Arc<crate::db::DatabasePool>,
+    pub db_pool: Arc<DatabasePool>,
     /// Blob storage backend for file uploads (XEP-0363).
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
     /// Shared Waddle inbox projection storage.
@@ -67,33 +80,33 @@ pub struct AppState {
     /// Sole typed authority for HTTP readiness and WebSocket admission.
     /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
     /// critical registry death latches `Failed` until this process exits.
-    pub node_lifecycle: crate::clustering::NodeLifecycle,
+    pub node_lifecycle: NodeLifecycle,
     /// Live `ClaimStore`/node-identity handles from the clustering
     /// subsystem (ADR-0017 Phase 3 Slice 4 follow-up plumbing note), used
     /// to select and construct the Postgres-fenced `SmPersistenceStorage`
     /// at WebSocket-state build time. Both fields are `None` whenever
     /// clustering is disabled or not compiled in — see
     /// [`crate::clustering::ClusteringHandles`].
-    pub clustering_claims: crate::clustering::ClusteringHandles,
+    pub clustering_claims: ClusteringHandles,
     /// Immutable database-lineage topology, published exactly once after all
     /// independently opened storage pools are available.
-    pub lineage_registry: OnceLock<crate::db::lineage::LineageRegistry>,
-    lineage_registry_builder: Mutex<Option<crate::db::lineage::LineageRegistryBuilder>>,
-    pub lineage_config: crate::config::LineageConfig,
+    pub lineage_registry: OnceLock<LineageRegistry>,
+    lineage_registry_builder: Mutex<Option<LineageRegistryBuilder>>,
+    pub lineage_config: LineageConfig,
     pub clustering_enabled: bool,
     /// Result of the one startup attestation pass, published exactly once by
     /// `create_websocket_state` after the registry seals. `create_router`
     /// consults it to gate Serving promotion and the janitor spawns.
-    pub lineage_startup: OnceLock<crate::db::lineage::LineageReport>,
+    pub lineage_startup: OnceLock<LineageReport>,
     /// The report that LATCHED this node (startup-definitive or live drift
     /// detected at readiness). Preferred over `lineage_startup` in
     /// not-Serving readiness responses so the operator sees the failure
     /// that actually took the node down, not a stale startup snapshot.
-    pub lineage_latched: OnceLock<crate::db::lineage::LineageReport>,
+    pub lineage_latched: OnceLock<LineageReport>,
     /// Which `adopt=<uuid>` list entries actually matched a durable
     /// boundary. An entry that matched nothing is an operator typo (or a
     /// boundary that no longer exists) and must fail the startup gate loudly.
-    lineage_adopt_matched: Mutex<std::collections::HashSet<crate::db::lineage::LineageUuid>>,
+    lineage_adopt_matched: Mutex<HashSet<LineageUuid>>,
 }
 
 impl AppState {
@@ -102,7 +115,7 @@ impl AppState {
     /// Production code should call [`Self::new_with_deps`] so each
     /// dependency is explicit.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn new(db_pool: Arc<crate::db::DatabasePool>) -> Self {
+    pub fn new(db_pool: Arc<DatabasePool>) -> Self {
         use kameo::actor::Spawn;
         use std::str::FromStr;
         use waddle_xmpp::pubsub::InMemoryPubSubStorage;
@@ -130,12 +143,8 @@ impl AppState {
             db_pool,
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
-            spaces_metadata_store: Arc::new(
-                crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
-            ),
-            channel_space_link_store: Arc::new(
-                crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),
-            ),
+            spaces_metadata_store: Arc::new(InMemorySpacesMetadataStore::new()),
+            channel_space_link_store: Arc::new(InMemoryChannelSpaceLinkStore::new()),
             pubsub_storage: Arc::new(InMemoryPubSubStorage::new()),
             room_registry,
             spaces_jid,
@@ -144,14 +153,12 @@ impl AppState {
             server_hats,
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
-            node_lifecycle: crate::clustering::NodeLifecycle::new(),
-            clustering_claims: crate::clustering::ClusteringHandles::default(),
-            lineage_config: crate::config::LineageConfig::default(),
+            node_lifecycle: NodeLifecycle::new(),
+            clustering_claims: ClusteringHandles::default(),
+            lineage_config: LineageConfig::default(),
             clustering_enabled: false,
         });
-        let _ = state
-            .lineage_registry
-            .set(crate::db::lineage::LineageRegistry::new(Vec::new()));
+        let _ = state.lineage_registry.set(LineageRegistry::new(Vec::new()));
         state
     }
 
@@ -195,24 +202,18 @@ impl AppState {
             node_lifecycle,
             clustering_claims,
             lineage_registry: OnceLock::new(),
-            lineage_registry_builder: Mutex::new(Some(
-                crate::db::lineage::LineageRegistryBuilder::default(),
-            )),
+            lineage_registry_builder: Mutex::new(Some(LineageRegistryBuilder::default())),
             lineage_config,
             clustering_enabled,
             lineage_startup: OnceLock::new(),
             lineage_latched: OnceLock::new(),
-            lineage_adopt_matched: Mutex::new(std::collections::HashSet::new()),
+            lineage_adopt_matched: Mutex::new(HashSet::new()),
         }
     }
 }
 
 impl AppState {
-    pub fn register_lineage_database(
-        &self,
-        store: crate::db::lineage::DurableStore,
-        database: crate::db::Database,
-    ) {
+    pub fn register_lineage_database(&self, store: DurableStore, database: Database) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {
                 builder.register_database(store, database);
@@ -222,7 +223,7 @@ impl AppState {
 
     pub fn register_lineage_probe(
         &self,
-        store: crate::db::lineage::DurableStore,
+        store: DurableStore,
         attestor: Arc<dyn crate::db::lineage::LineageAttestor>,
     ) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
@@ -232,11 +233,7 @@ impl AppState {
         }
     }
 
-    pub fn register_lineage_control_plane(
-        &self,
-        store: crate::db::lineage::DurableStore,
-        database: crate::db::Database,
-    ) {
+    pub fn register_lineage_control_plane(&self, store: DurableStore, database: Database) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {
                 builder.register_control_plane(store, database);
@@ -244,11 +241,7 @@ impl AppState {
         }
     }
 
-    pub fn register_lineage_alias(
-        &self,
-        store: crate::db::lineage::DurableStore,
-        of: crate::db::lineage::DurableStore,
-    ) {
+    pub fn register_lineage_alias(&self, store: DurableStore, of: DurableStore) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {
                 builder.register_alias(store, of);
@@ -256,7 +249,7 @@ impl AppState {
         }
     }
 
-    pub fn register_lineage_ephemeral(&self, store: crate::db::lineage::DurableStore) {
+    pub fn register_lineage_ephemeral(&self, store: DurableStore) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {
                 builder.register_ephemeral(store);
@@ -264,7 +257,7 @@ impl AppState {
         }
     }
 
-    pub fn note_lineage_adopt_match(&self, matched: crate::db::lineage::LineageUuid) {
+    pub fn note_lineage_adopt_match(&self, matched: LineageUuid) {
         if let Ok(mut set) = self.lineage_adopt_matched.lock() {
             set.insert(matched);
         }
@@ -276,7 +269,7 @@ impl AppState {
     /// the replayed action legitimately matches nothing; a genuine restore
     /// that still needs adoption keeps failing attestation on its own
     /// identity mismatch. The startup gate logs these loudly instead.
-    pub fn lineage_adopt_unmatched(&self) -> Vec<crate::db::lineage::LineageUuid> {
+    pub fn lineage_adopt_unmatched(&self) -> Vec<LineageUuid> {
         let Some(crate::db::lineage::LineageAction::Adopt(expected)) =
             self.lineage_config.action.as_ref()
         else {
@@ -299,11 +292,7 @@ impl AppState {
             .lineage_registry_builder
             .lock()
             .ok()
-            .and_then(|mut builder| {
-                builder
-                    .take()
-                    .map(crate::db::lineage::LineageRegistryBuilder::seal)
-            });
+            .and_then(|mut builder| builder.take().map(LineageRegistryBuilder::seal));
         if let Some(registry) = registry {
             let _ = self.lineage_registry.set(registry);
         }
@@ -314,7 +303,7 @@ impl AppState {
 /// single struct so adding a new dependency does not widen the
 /// `new_with_deps` argument list (clippy `too_many_arguments`).
 pub struct AppStateDeps {
-    pub db_pool: Arc<crate::db::DatabasePool>,
+    pub db_pool: Arc<DatabasePool>,
     pub blob_storage: Arc<dyn crate::storage::BlobStorage>,
     pub inbox_storage: Arc<dyn InboxStorage>,
     pub spaces_metadata_store: Arc<dyn SpacesMetadataStore>,
@@ -327,9 +316,9 @@ pub struct AppStateDeps {
     pub server_hats: waddle_xmpp::xep::xep0317::ServerHats,
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
-    pub node_lifecycle: crate::clustering::NodeLifecycle,
-    pub clustering_claims: crate::clustering::ClusteringHandles,
-    pub lineage_config: crate::config::LineageConfig,
+    pub node_lifecycle: NodeLifecycle,
+    pub clustering_claims: ClusteringHandles,
+    pub lineage_config: LineageConfig,
     pub clustering_enabled: bool,
 }
 

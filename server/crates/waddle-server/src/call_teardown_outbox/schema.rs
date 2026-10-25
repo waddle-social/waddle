@@ -1,5 +1,7 @@
 use super::CallTeardownOutboxError;
+use crate::db::ConnectionGuard;
 use crate::db::Database;
+use crate::db::DatabaseDriver;
 
 pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxError> {
     let timestamp_type = crate::db::i64_sql_type(db.driver());
@@ -80,12 +82,12 @@ pub(super) async fn initialize(db: &Database) -> Result<(), CallTeardownOutboxEr
 /// `column` MUST be a compile-time identifier constant: DDL cannot bind
 /// parameters, so it is interpolated into the statement.
 async fn add_non_blank_text_column_if_missing(
-    connection: &crate::db::ConnectionGuard,
-    driver: crate::db::DatabaseDriver,
+    connection: &ConnectionGuard,
+    driver: DatabaseDriver,
     column: &'static str,
 ) -> Result<(), CallTeardownOutboxError> {
     match driver {
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             connection
                 .execute(
                     &format!(
@@ -96,7 +98,7 @@ async fn add_non_blank_text_column_if_missing(
                 )
                 .await?;
         }
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             if sqlite_column_present(connection, column).await? {
                 return Ok(());
             }
@@ -118,7 +120,7 @@ async fn add_non_blank_text_column_if_missing(
 /// `call_teardown_outbox`. `PRAGMA table_info` reports the column name
 /// at index 1.
 async fn sqlite_column_present(
-    connection: &crate::db::ConnectionGuard,
+    connection: &ConnectionGuard,
     column: &str,
 ) -> Result<bool, CallTeardownOutboxError> {
     let mut rows = connection

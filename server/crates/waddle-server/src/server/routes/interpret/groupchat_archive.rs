@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    build_inbox_push, debug, extract_correction_from_message, extract_explicit_mentions,
+    extract_reactions_from_message, extract_references_from_message,
+    extract_retraction_from_message, groupchat_entry, groupchat_thread_entry, message_to_string,
+    parse_reply_from_message, warn, Arc, ArchiveIdRewrite, ArchivedMention, ArchivedReactionSet,
+    ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload,
+    ArchivedTombstone, BareJid, Deps, FullJid, GroupchatThreadProjection,
+    InMemorySmSessionRegistry, InboxEntry, IngressEffectIntent, Jid, MamArchivedMessage,
+    MamStorage, Message, RetractionKind, RichMessageId, RichText, Stanza, Xep0359StanzaId,
+    NS_REPLY, STANZA_ID_NS,
+};
+use std::collections::BTreeMap;
 use waddle_xmpp::mam::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::RoomClaimFenceContext;
@@ -742,7 +753,8 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
 fn replay_target(
     target: &waddle_xmpp::tombstone::TombstoneTarget,
 ) -> waddle_xmpp::ingress::TombstoneReplayTarget {
-    use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+    use waddle_xmpp::ingress::TombstoneReplayTarget;
+    use waddle_xmpp::tombstone::TombstoneTarget;
     match target {
         TombstoneTarget::Groupchat { stanza_id, room } => TombstoneReplayTarget::Groupchat {
             stanza_id: stanza_id.clone(),
@@ -1213,7 +1225,7 @@ pub(super) fn rich_archive_payload(
         .subjects
         .iter()
         .map(|(lang, text)| (lang.0.clone(), text.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     // XEP-0421: capture the server-stamped occupant-id into the typed
     // projection so the non-`stanza_xml` fallback reconstruction can
     // re-emit it (#1268). `MucCanonicalizeHandler` stamped it (and

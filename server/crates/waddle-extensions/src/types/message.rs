@@ -1,6 +1,10 @@
 //! Typed message content, revisions, links, and extension-enrichment envelopes.
 
-use super::*;
+use super::{
+    ActionId, BodyRange, CommandNode, Deserialize, DisplayText, Element, EnrichmentId,
+    ExtensionCapability, ExtensionPayload, LaunchId, LaunchToken, PayloadNamespace, PluginId,
+    RoomJid, Serialize, StanzaId, Timestamp, UiView, WaddleId, FRAMEWORK_NAMESPACE,
+};
 
 /// Versioned message envelope containing extension enrichments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

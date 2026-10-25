@@ -1,10 +1,14 @@
 //! A retry round cannot repeat the accepted half of a direct resource fanout.
-use super::*;
+use super::{
+    capture_delivery, commit_submission, execute_effects, Arc, Deps, DetachedSession, Duration,
+    EffectMessageIdentity, EffectReceiptRepository, ExternalDeliveryEffect, ExternalOutcome,
+    ImmediateSink, InMemorySmSessionRegistry, IngressFixture, PlannedEffect, SmSessionRegistry,
+    Stanza,
+};
 use crate::ingress::DispatchProbeBudget;
 use crate::ingress_uow::DeliveryProgressRepository;
-use crate::server::routes::interpret::effects::{
-    direct::DurableDirectEffect, DurableEffect, Effect,
-};
+use crate::server::routes::interpret::effects::direct::DurableDirectEffect;
+use crate::server::routes::interpret::effects::{DurableEffect, Effect};
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
 

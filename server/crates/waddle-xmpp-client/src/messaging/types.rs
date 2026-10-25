@@ -1,5 +1,14 @@
 //! Inbound message and presence models and outbound message options.
 
+use crate::error::StanzaError;
+use crate::messaging::namespaces::NS_WADDLE_EXTENSION;
+use crate::pin::PinEvent;
+use crate::pubsub_event::PubsubEvent;
+use crate::stickers::StickerHash;
+use crate::stickers::StickerMarker;
+use crate::xep::call_thread::CallThreadAnchor;
+use crate::xep::call_thread::CallThreadEnded;
+use crate::xep::safety_scores::SafetyScoresFastening;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid, Jid};
 use std::fmt;
@@ -110,7 +119,7 @@ pub struct SharedFile {
     /// XEP-0446 / XEP-0300 `urn:xmpp:hashes:2` content hashes inside
     /// `<file/>`. Distinct from the XEP-0448 ciphertext hashes carried
     /// on `encrypted`.
-    pub hashes: Vec<crate::stickers::StickerHash>,
+    pub hashes: Vec<StickerHash>,
     /// Whether a file should be displayed inline or offered as an attachment.
     pub disposition: SharedFileDisposition,
     /// XEP-0448 encryption envelope, when the bytes at `url` are ciphertext
@@ -386,21 +395,21 @@ pub struct InboundMessage {
     pub parent_thread_id: Option<String>,
     /// urn:waddle:call-thread:0 call anchor authored by the room.
     /// `None` when the message carries no `<call-thread/>` payload.
-    pub call_thread: Option<crate::xep::call_thread::CallThreadAnchor>,
+    pub call_thread: Option<CallThreadAnchor>,
     /// urn:waddle:call-thread:0 ended fastening targeting a call-thread anchor.
-    pub call_thread_ended: Option<crate::xep::call_thread::CallThreadEnded>,
+    pub call_thread_ended: Option<CallThreadEnded>,
     /// XEP-0422 fastening carrying `urn:waddle:safety-scores:1` scores for
     /// the message named by its `<apply-to id='…'/>`. Already filtered to
     /// the one trusted sender (the room itself, bare room JID,
     /// `type='groupchat'`) by [`crate::xep::safety_scores::parse_room_safety_scores_child`];
     /// `None` for anything else, including a direct message or an
     /// occupant's own claim.
-    pub safety_scores: Option<crate::xep::safety_scores::SafetyScoresFastening>,
+    pub safety_scores: Option<SafetyScoresFastening>,
     /// Whether the file is marked as a sticker.
     pub is_sticker: bool,
     /// urn:waddle:pin:0 pin/unpin system event surfaced by the room.
     /// `None` when the message carries no `<pin-event/>` payload.
-    pub pin_event: Option<crate::pin::PinEvent>,
+    pub pin_event: Option<PinEvent>,
     /// Waddle typed extension envelope attached to the message.
     pub extension_envelope: Option<ExtensionEnvelopeData>,
     /// XEP-0428 marks the readable body as fallback for the Waddle extension payload.
@@ -418,7 +427,7 @@ pub struct InboundMessage {
     pub mds_displayed: Option<Vec<MdsDisplayedEntry>>,
     /// Generic typed XEP-0060 PubSub event notifications carried by
     /// `<event xmlns='http://jabber.org/protocol/pubsub#event'/>`.
-    pub pubsub_events: Vec<crate::pubsub_event::PubsubEvent>,
+    pub pubsub_events: Vec<PubsubEvent>,
     /// XEP-0280: `Some(direction)` when this message was unwrapped from
     /// a `<sent/>`/`<received/>` carbon envelope whose wrapping stanza
     /// passed the §11 own-bare-JID check. `None` for directly received
@@ -739,9 +748,9 @@ impl ExtensionCommandNode {
     #[must_use]
     pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
-        let valid = value == crate::messaging::namespaces::NS_WADDLE_EXTENSION
+        let valid = value == NS_WADDLE_EXTENSION
             || value
-                .strip_prefix(crate::messaging::namespaces::NS_WADDLE_EXTENSION)
+                .strip_prefix(NS_WADDLE_EXTENSION)
                 .is_some_and(|suffix| suffix.starts_with(':'));
         valid.then_some(Self(value))
     }
@@ -1022,7 +1031,7 @@ pub struct InboundPresence {
     /// non-error presences. Parsed once at the wire boundary
     /// (typed-payloads rule) so consumers never re-parse the `<error/>`
     /// child.
-    pub error: Option<crate::error::StanzaError>,
+    pub error: Option<StanzaError>,
 }
 
 /// Parsed `<muji xmlns='urn:xmpp:jingle:muji:0'>` extension on a MUC
@@ -1100,7 +1109,7 @@ pub struct SendMessageOptions {
     /// XEP-0449 `<sticker/>` marker: this message sends a sticker. The
     /// attached `shared_files` entry carries the sticker image; the
     /// marker optionally references the source pack.
-    pub sticker: Option<crate::stickers::StickerMarker>,
+    pub sticker: Option<StickerMarker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

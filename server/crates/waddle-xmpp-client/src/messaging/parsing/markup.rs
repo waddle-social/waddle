@@ -2,7 +2,7 @@
 
 use minidom::Element;
 
-use super::super::types::*;
+use super::super::types::{MarkupSpan, MarkupSpanType};
 
 pub(super) fn parse_markup_spans(markups_el: &Element) -> Vec<MarkupSpan> {
     // XEP-0394: direct children of <markup> are:

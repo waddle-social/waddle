@@ -2,6 +2,7 @@
 
 use crate::types::{ObservationGeneration, RoomObservationScope};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Explicit operator opt-in to a generated, scoped, concurrency-bounded room observer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,7 +34,7 @@ impl RoomObservationConfig {
             return Err("observation max_concurrent must be 1..=64".into());
         }
         if let RoomObservationScope::Rooms(rooms) = &self.scope {
-            let distinct: std::collections::HashSet<_> = rooms.iter().collect();
+            let distinct: HashSet<_> = rooms.iter().collect();
             if distinct.len() != rooms.len() {
                 return Err("observation room scope contains duplicate rooms".into());
             }

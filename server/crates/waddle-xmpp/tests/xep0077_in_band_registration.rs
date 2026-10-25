@@ -5,10 +5,8 @@ use waddle_xmpp::xep::xep0077::{
     build_registration_error, build_registration_feature, build_registration_fields_response,
     build_registration_success, RegistrationError, NS_REGISTER, NS_REGISTER_FEATURE,
 };
-use xmpp_parsers::{
-    iq::Iq,
-    stanza_error::{DefinedCondition, ErrorType},
-};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 fn serialize_element(element: &Element) -> String {
     let mut buf = Vec::new();

@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    message_stanza_with_id, realistic_test_session, Duration, EnsureClaimTestAction,
+    FailingSnapshotPersistence, GatedSnapshotPersistence, HangingReleaseClaimStore,
+    InMemorySmSessionRegistry, Instant, PromotionCaptureCustody, SmSessionRegistry, Utc,
+};
 
 #[tokio::test]
 async fn fresh_detached_append_recovers_only_an_existing_claim_without_acquiring() {
@@ -7,7 +11,8 @@ async fn fresh_detached_append_recovers_only_an_existing_claim_without_acquiring
     };
     use crate::pending_delivery::SmSessionId;
     use crate::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage as _};
-    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     for existing_claim in [true, false] {
         let stream = "cancelled-before-detach-acquire";

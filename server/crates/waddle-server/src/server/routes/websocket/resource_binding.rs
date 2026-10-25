@@ -1,5 +1,8 @@
 use super::frame::ResponseFrame;
-use super::*;
+use super::{
+    build_iq_error_xml_typed, info, not_authorized_iq_error, warn, ConnectionPhase, Element,
+    FullJid,
+};
 
 fn build_bind_result_element(id: &str, full_jid: &FullJid) -> Element {
     Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)

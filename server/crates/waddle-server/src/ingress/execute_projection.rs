@@ -1,16 +1,16 @@
 //! Apply approved local projections and their completion under one canonical lock.
-use crate::{
-    ingress::decision::IngressDecision,
-    ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, DeliveryEffectRepository,
-        EffectDeliveryBinding, EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork,
-        IngressUowError, ProjectionRepository,
-    },
-    server::routes::interpret::effects::{
-        direct::ExternalDirectEffect, EffectOutcome, ExternalEffect, SettledCompletion,
-        SettledOutcome,
-    },
+use crate::ingress::decision::IngressDecision;
+use crate::ingress_uow::CarbonReceiptRepository;
+use crate::ingress_uow::{
+    settle_recorded, CanonicalMessageRepository, DeliveryEffectRepository, EffectDeliveryBinding,
+    EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
+    ProjectionRepository,
 };
+use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
+use crate::server::routes::interpret::effects::{
+    EffectOutcome, ExternalEffect, SettledCompletion, SettledOutcome,
+};
+use crate::server::routes::interpret::Deps;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 /// Sealed inbox refreshes retain their best-effort policy, but their account
@@ -20,7 +20,7 @@ pub(super) async fn execute_sealed_inbox_push(
     decision: &IngressDecision,
     index: usize,
     effect: &ExternalEffect,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
 ) -> Result<Option<EffectOutcome>, IngressUowError> {
     use crate::server::routes::interpret::effects::{Effect, ImmediateSink, PlannedEffect};
     use waddle_xmpp::ingress::{DeliveryKey, EffectMessageIdentity, InboxProjectionMutation};
@@ -35,8 +35,7 @@ pub(super) async fn execute_sealed_inbox_push(
     let key = decision
         .message_key
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-    let (envelope, recorded) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(uow.database(), key).await?;
+    let (envelope, recorded) = CarbonReceiptRepository::load_authority(uow.database(), key).await?;
     let Some(manifest) = envelope.room_manifest() else {
         return Ok(None);
     };

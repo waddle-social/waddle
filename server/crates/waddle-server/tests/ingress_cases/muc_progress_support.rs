@@ -1,28 +1,27 @@
 //! Public Phase B/C wire regressions; real planner coverage lives in muc_occupant_progress_tests.
-use crate::{detached_progress_support as detached, ingress_support::IngressFixture};
+use crate::detached_progress_support as detached;
+use crate::ingress_support::IngressFixture;
 use jid::{BareJid, FullJid};
 use kameo::actor::Spawn;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::delivery::ExternalDeliveryEffect;
+use waddle_server::ingress::effects::Effect;
 use waddle_server::ingress::{
-    commit::commit_submission,
-    effects::{delivery::ExternalDeliveryEffect, Effect},
     EffectReceiptKey, ExternalEffect, IngressDecision, IngressSubmission, PlanSuppressionPolicy,
     PlannedEffect, RecoveryEnvironment,
 };
-use waddle_xmpp::xep::xep0421::{self, OccupantId, OccupantIdSecret};
-use waddle_xmpp::{
-    ingress::{
-        DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
-        NormalizedTarget, StoredMessagePayload,
-    },
-    muc::{
-        room_actor::Join,
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
-    },
-    registry::ConnectionRegistry,
-    stream_management::InMemorySmSessionRegistry,
-    Affiliation, Role, Stanza,
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
+    NormalizedTarget, StoredMessagePayload,
 };
+use waddle_xmpp::muc::room_actor::Join;
+use waddle_xmpp::muc::room_registry_actor::{CreateRoom, RoomRegistryActor};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::xep::xep0421::{self, OccupantId, OccupantIdSecret};
+use waddle_xmpp::{Affiliation, Role, Stanza};
 use waddle_xmpp_core::xep0359::{add_stanza_id, extract_stanza_ids, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 
@@ -793,7 +792,8 @@ async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
 /// XEP-0045 §7.4 and XEP-0313: a confirmed archived reflection must not be
 /// appended again behind newer room traffic when the sender retransmits.
 pub async fn archived_reflection_replay(fixture: IngressFixture) {
-    use waddle_server::ingress::effects::{direct::DurableDirectEffect, DurableEffect};
+    use waddle_server::ingress::effects::direct::DurableDirectEffect;
+    use waddle_server::ingress::effects::DurableEffect;
     use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
     let mut submission = make_submission(&fixture, false);
     let source = submission

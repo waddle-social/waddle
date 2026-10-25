@@ -4,6 +4,8 @@
 //! acknowledged by the client yet. When a stream is resumed, these stanzas
 //! can be resent to ensure reliable delivery.
 
+use crate::stream_management::SmIngressFrameReceipt;
+use crate::stream_management::SmRelayedAppendObligation;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -15,7 +17,7 @@ use super::sequence::{sequence_gt, sequence_lte};
 #[derive(Debug, Clone)]
 pub struct UnackedStanza {
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
-    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
+    pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// The sequence number of this stanza (outbound count when sent)
     pub sequence: u32,
     /// Immutable wire XML captured by the production serializer. This queue
@@ -36,7 +38,7 @@ pub struct UnackedStanza {
     /// It lives exactly as long as the entry is recovery-owned: a detach proves it
     /// with the session snapshot, and an acknowledgement drops it with the entry.
     /// Boxed: almost no entry carries one.
-    pub ingress_append: Option<Box<crate::stream_management::SmRelayedAppendObligation>>,
+    pub ingress_append: Option<Box<SmRelayedAppendObligation>>,
 }
 
 /// Outcome of a `push` onto the unacked queue.

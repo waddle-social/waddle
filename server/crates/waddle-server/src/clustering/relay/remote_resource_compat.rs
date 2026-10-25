@@ -7,14 +7,23 @@
 //! pinned by the codec fixtures in `tests`; changing them requires a new DTO
 //! and endpoint while retaining these receivers through the upgrade window.
 
-use super::*;
+use super::{
+    relay_dispatch_span, spawn_in_dispatch_span, Arc, Context, Deserialize, Duration, Message,
+    Mutex, OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind, PendingReplyReceipts, RelayActor,
+    RelayDeliverRemoteResourceFrame, RelayDispatchKind, RelayRemoteResourceFrameReply,
+    RelayRemoteResourceFrameStatus, RelayReplyReceiptToken, RelayRouteRemoteResourceStanza,
+    RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteActorRef,
+    RemoteResourceOutboundFrame, RemoteResourceRegistrationId, RemoteResourceRouteOutcome,
+    RemoteResourceRouteTarget, RemoteResourceSocketGeneration, RemoteSendError, RemoteStanza,
+    Reply, Serialize,
+};
 use crate::clustering::ordered_relay::MucProxyOrigin;
 use crate::ingress::identity::IngressAppendObligationRef;
 use std::future::Future;
 use waddle_xmpp::registry::DeliveryKind;
 
 mod wire;
-use wire::*;
+use wire::{FrameReply, FrameV3, LiveFrame, LiveRoute, RouteReply, RouteV8};
 
 #[cfg(test)]
 mod tests;

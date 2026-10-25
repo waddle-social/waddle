@@ -7,7 +7,12 @@ mod promotion_receipt_gc;
 mod startup_poison;
 
 use super::core::PendingClaimAcquisitionDisposition;
-use super::*;
+use super::{
+    claims, persistence_codec, tombstones, DetachedSession, DetachedUnackedStanza,
+    InMemorySmSessionRegistry, PendingPromotionRetryRetention, PromotionCaptureCustody,
+    ReclaimedHydrationOutcome, ResumableSessionProbe, SmClaimCompletion, SmRegistryError,
+    SmSessionRegistry, TombstoneScrubbedSmEntry,
+};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;

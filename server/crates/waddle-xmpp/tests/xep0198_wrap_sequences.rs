@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use proptest::prelude::*;
+use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{

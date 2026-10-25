@@ -1,16 +1,12 @@
-use super::super::{
-    interpret_loop::build_interpret_deps,
-    replay::{drain_outbound_into_replay, drive_interpret_loop},
-    stanza_to_xml,
-    state::WsConnState,
-};
+use super::super::interpret_loop::build_interpret_deps;
+use super::super::replay::{drain_outbound_into_replay, drive_interpret_loop};
+use super::super::stanza_to_xml;
+use super::super::state::WsConnState;
 use super::create_test_websocket_state;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    protocol::{Blocklist, InboundEvent, OutboundEvent},
-    registry::OutboundStanza,
-    Stanza,
-};
+use waddle_xmpp::protocol::{Blocklist, InboundEvent, OutboundEvent};
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::Stanza;
 
 // ---------------------------------------------------------------
 // #229 PR11 - DeliveryKind dispatch in the per-connection main loop

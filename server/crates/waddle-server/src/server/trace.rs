@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use axum::{
-    body::Body,
-    extract::MatchedPath,
-    http::{Request, Response, Uri},
-    middleware::Next,
-    response::Response as AxumResponse,
-};
+use axum::body::Body;
+use axum::extract::MatchedPath;
+use axum::http::{Request, Response, Uri};
+use axum::middleware::Next;
+use axum::response::Response as AxumResponse;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::HeaderExtractor;
 use tower_http::trace::{DefaultOnResponse, OnResponse};
@@ -187,21 +185,21 @@ fn redacted_request_uri(uri: &Uri) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap,
-        fmt,
-        sync::{Arc, Mutex},
-    };
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
 
-    use axum::{routing::get, Router};
+    use axum::routing::get;
+    use axum::Router;
     use tower::ServiceExt;
     use tower_http::trace::TraceLayer;
-    use tracing::{
-        field::{Field, Visit},
-        span::{Attributes, Id, Record},
-        Subscriber,
-    };
-    use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::Layer;
 
     use super::*;
 

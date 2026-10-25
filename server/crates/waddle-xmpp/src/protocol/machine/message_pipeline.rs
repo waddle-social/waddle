@@ -1,3 +1,4 @@
+use crate::protocol::id_gen::FixedIdGenerator;
 use jid::BareJid;
 use tracing::Level;
 
@@ -140,7 +141,7 @@ fn infer_resume_kind(
             OutboundEvent::LookupArchivedMessage { .. } => {
                 let blocklist = Blocklist::empty();
                 let muc_occupancy = MucOccupancy::empty();
-                let id_gen = crate::protocol::id_gen::FixedIdGenerator(String::new());
+                let id_gen = FixedIdGenerator(String::new());
                 let detected = rich_target_validation::detect(
                     message,
                     &MessageContext {

@@ -1,6 +1,8 @@
 //! XEP-0115 entity-capabilities hashing and client capability advertisements.
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use crate::bootstrap::NS_CLIENT;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use minidom::Element;
 use sha1::{Digest, Sha1};
 
@@ -124,7 +126,7 @@ pub fn build_client_caps_disco_info_response(
         }
     }
 
-    let mut iq = Element::builder("iq", crate::bootstrap::NS_CLIENT)
+    let mut iq = Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result");
     if let Some(id) = request.attr("id") {
         iq = iq.attr(minidom::rxml::xml_ncname!("id").to_owned(), id);

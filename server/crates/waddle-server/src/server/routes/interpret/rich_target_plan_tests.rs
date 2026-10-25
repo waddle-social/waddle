@@ -1,15 +1,14 @@
 //! Infrastructure failures in the first rich-target read must never claim ingress.
-use super::super::{effects::PlanFailure, Deps};
+use super::super::effects::PlanFailure;
+use super::super::Deps;
 use super::plan_message_dispatch;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::IngressDecisionClass;
 use std::sync::Arc;
-use waddle_xmpp::{
-    mam::{MamStorage, SqlxMamStorage},
-    protocol::{StanzaDispatcher, XmppStateMachine},
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn rich_target_read(fixture: IngressFixture, retract: bool, fail_read: bool) {
     let mam: Arc<dyn MamStorage> = Arc::new(
@@ -117,15 +116,11 @@ async fn rich_target_missing_target_commits_semantic_denial_postgres() {
 }
 
 async fn groupchat_rich_target_failure(fixture: IngressFixture, stop_actor: bool) {
-    use super::super::{
-        effects::{EffectSink, PlanSink},
-        groupchat_validation::validate_groupchat_rich_targets,
-    };
+    use super::super::effects::{EffectSink, PlanSink};
+    use super::super::groupchat_validation::validate_groupchat_rich_targets;
     use kameo::actor::Spawn;
-    use waddle_xmpp::muc::{
-        room_actor::Join,
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
-    };
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, RoomRegistryActor};
     let room: jid::BareJid = "rich@muc.example.com".parse().expect("room");
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
     let nick: jid::Jid = room.with_resource_str("romeo").expect("nickname").into();

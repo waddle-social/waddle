@@ -19,7 +19,10 @@ use waddle_xmpp_client::admin_commands::{
     build_admin_users_list_iq, parse_admin_users_list_result, AdminUsersListArgs,
 };
 
-use super::*;
+use super::{
+    future_to_promise, jid_domain, js_error, send_iq_command, to_js_value, wasm_bindgen, JsValue,
+    Promise, WaddleClient,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {

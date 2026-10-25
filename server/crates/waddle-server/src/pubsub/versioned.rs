@@ -1,5 +1,6 @@
 //! Host-only ordering of XEP-0357 backing items. This projection metadata is
 //! deliberately independent of canonical delivery receipts and of item lifetime.
+use crate::db::DatabaseError;
 use jid::BareJid;
 use waddle_xmpp::pubsub::{
     PubSubItem, PublicationError, PublicationFingerprint, PublicationNode, PublicationVersion,
@@ -9,7 +10,7 @@ use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
 
-fn storage(error: crate::db::DatabaseError) -> PublicationError {
+fn storage(error: DatabaseError) -> PublicationError {
     PublicationError::Storage(XmppError::internal(error.to_string()))
 }
 

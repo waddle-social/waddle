@@ -1,21 +1,19 @@
 //! Adapter-produced frozen notification work remains recoverable after Phase C fails.
 use super::super::ExtensionHostAdapter;
 use super::direct_ingress::{adapter, invocation, request};
-use crate::{
-    db::DatabaseDriver,
-    ingress::{test_support::IngressFixture, RecoveryEnvironment},
-    ingress_uow::EffectIntentRepository,
-    notification_settings_projection::{
-        ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
-    },
+use crate::db::DatabaseDriver;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::RecoveryEnvironment;
+use crate::ingress_uow::EffectIntentRepository;
+use crate::notification_settings_projection::{
+    ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
 };
-use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, MessageKey, NotificationActivityMutation, NotificationCandidateOutcome,
-    },
-    xep::NotificationLevel,
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, MessageKey, NotificationActivityMutation, NotificationCandidateOutcome,
 };
+use waddle_xmpp::xep::NotificationLevel;
 
 async fn candidate_failure(f: &IngressFixture) {
     match f.db.driver() {

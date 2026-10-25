@@ -1,5 +1,16 @@
 //! Actor-facing extension invocation and observation request contracts.
 
+use crate::host_tools::DeliveryInvocation;
+#[cfg(any(test, feature = "test-support"))]
+use crate::observer_test_support::ObserverTestPlugin;
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::ArtifactReference;
+use crate::types::ConfiguredRoomObserver;
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::ExtensionProfile;
+use crate::types::ExtensionResponse;
+use crate::types::ObservationFailure;
+use crate::types::RoomMessageObserve;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -18,21 +29,21 @@ use xmpp_parsers::jid::FullJid;
 /// Host admission is distinct from any error after entering the runtime.
 pub(crate) enum ObservationInvocationError {
     NotInvoked,
-    Invoked(crate::types::ObservationFailure),
+    Invoked(ObservationFailure),
 }
 
 /// An extension loaded into wasmtime and ready to handle typed framework events.
 pub struct WasmExtensionActor {
     manifest: ExtensionManifest,
     #[cfg(any(test, feature = "test-support"))]
-    observer_test: Option<Arc<crate::observer_test_support::ObserverTestPlugin>>,
+    observer_test: Option<Arc<ObserverTestPlugin>>,
     extension: Arc<LoadedExtension>,
     config: String,
     host_tools: Arc<dyn ExtensionHostTools>,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
-    room_observer: Option<crate::types::ConfiguredRoomObserver>,
+    room_observer: Option<ConfiguredRoomObserver>,
     observation_permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -73,21 +84,18 @@ impl WasmExtensionActor {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_observer_test(
-        mut self,
-        plugin: Arc<crate::observer_test_support::ObserverTestPlugin>,
-    ) -> Self {
+    pub(crate) fn with_observer_test(mut self, plugin: Arc<ObserverTestPlugin>) -> Self {
         self.manifest.id = plugin.id.clone();
         self.observer_test = Some(plugin);
         self
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_profile_avatar(&mut self, avatar: crate::types::ArtifactReference) {
+    pub(crate) fn set_profile_avatar(&mut self, avatar: ArtifactReference) {
         let display_name = self.manifest.name.clone();
         self.manifest
             .profile
-            .get_or_insert(crate::types::ExtensionProfile {
+            .get_or_insert(ExtensionProfile {
                 display_name,
                 description: None,
                 accent: None,
@@ -131,10 +139,7 @@ impl WasmExtensionActor {
         &self.provider_room_grants
     }
 
-    pub(crate) fn with_room_observer(
-        mut self,
-        observer: Option<crate::types::ConfiguredRoomObserver>,
-    ) -> Self {
+    pub(crate) fn with_room_observer(mut self, observer: Option<ConfiguredRoomObserver>) -> Self {
         if let Some(observer) = &observer {
             self.observation_permits = Arc::new(tokio::sync::Semaphore::new(
                 observer.max_concurrent as usize,
@@ -144,15 +149,15 @@ impl WasmExtensionActor {
         self
     }
 
-    pub(crate) fn room_observer(&self) -> Option<&crate::types::ConfiguredRoomObserver> {
+    pub(crate) fn room_observer(&self) -> Option<&ConfiguredRoomObserver> {
         self.room_observer.as_ref()
     }
 
     pub(crate) async fn observe_room_message(
         &self,
-        event: crate::types::RoomMessageObserve,
+        event: RoomMessageObserve,
         delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
-    ) -> Result<crate::types::ExtensionResponse, ObservationInvocationError> {
+    ) -> Result<ExtensionResponse, ObservationInvocationError> {
         let _permit = self
             .observation_permits
             .clone()
@@ -172,7 +177,7 @@ impl WasmExtensionActor {
                 .call_handle_event_typed_with_delivery(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
-                    crate::host_tools::DeliveryInvocation {
+                    DeliveryInvocation {
                         context,
                         capability,
                     },

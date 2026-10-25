@@ -1,7 +1,8 @@
 //! The observer-retention phase rides passes on its own interval (#1901).
 
 use super::{run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor};
-use crate::{ingress::gc::RetentionGcBudget, ingress::test_support::IngressFixture};
+use crate::ingress::gc::RetentionGcBudget;
+use crate::ingress::test_support::IngressFixture;
 use std::time::Duration;
 use uuid::Uuid;
 

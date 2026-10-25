@@ -1,15 +1,15 @@
 use jid::{BareJid, Jid};
 use uuid::Uuid;
-use waddle_server::{
-    config::LineageConfig,
-    db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner},
-    ingress::{IngressStreamIdentity, IngressSubmission},
-    ingress_uow::IngressUnitOfWork,
+use waddle_server::config::LineageConfig;
+use waddle_server::db::{
+    lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner,
 };
-use waddle_xmpp::{
-    auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{ConnectionGeneration, DigestContext, DigestInput, NormalizedTarget},
+use waddle_server::ingress::{IngressStreamIdentity, IngressSubmission};
+use waddle_server::ingress_uow::IngressUnitOfWork;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
+use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, DigestInput, NormalizedTarget};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 
 pub struct IngressFixture {

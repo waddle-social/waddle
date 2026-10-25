@@ -1,6 +1,17 @@
 use super::effects::{EffectSink, IngressPlan, PlanFailure, PlanSink, RoomExecutionPath};
 use super::groupchat_archive::room_scoped_reply_to_attr;
-use super::*;
+use super::{
+    build_plan_deps, default_room_pipeline_dispatcher, interpret_with_depth, set_reply_payload,
+    set_thread_id, validate_groupchat_rich_targets, warn, ActorRef, BareJid, Deps, DisplayText,
+    Element, ExtensionEnvelope, FullJid, GetAffiliation, GetRoom, GetRoomSnapshot,
+    HostOwnedResources, Jid, JoinAffiliationGrant, JoinWithAffiliation, Message, MessageMarkupKind,
+    MessageMarkupSpan, OccupantSnapshot, OrderedRelayRouteOrigin, OutboundEvent, ReplyReference,
+    ReplyTarget, RoomActor, RoomContext, RoomJid, Stanza, StanzaId, ThreadId, UuidV4Generator,
+    XmppMessageType,
+};
+use crate::ingress::IngressEffectCapture;
+use crate::ingress::RoomManifestSnapshot;
+use crate::server::routes::websocket::WebSocketState;
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, DigestInputError, EntityGeneration, IngressEffectIntent,
     NormalizedTarget,
@@ -42,7 +53,7 @@ pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) sender_nickname_generation: u64,
     pub(super) claim_fence: Option<&'a waddle_xmpp::muc::RoomClaimFenceContext>,
     pub(super) snapshot_generation: u64,
-    pub(super) manifest_snapshot: Option<crate::ingress::RoomManifestSnapshot>,
+    pub(super) manifest_snapshot: Option<RoomManifestSnapshot>,
     pub(super) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
 }
 
@@ -137,7 +148,7 @@ pub(super) async fn plan_bot_groupchat_message(
     digest_input: DigestInput,
 ) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
     let sink = PlanSink::new();
-    let capture = crate::ingress::IngressEffectCapture::new();
+    let capture = IngressEffectCapture::new();
     capture.reserve_room_capacity(
         0,
         bot_ctx.occupants.len(),
@@ -351,7 +362,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
     room_jid: BareJid,
     bot_full: FullJid,
     response: ExtensionRoomMessage,
-    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    host_state: &std::sync::Arc<WebSocketState>,
     commit_deadline: Option<tokio::time::Instant>,
     occupancy: &mut BotOccupancy,
 ) -> Result<PlannedExtensionBotGroupchat, ExtensionBotDispatchError> {
@@ -626,7 +637,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
             claim_fence: snapshot.claim_fence.as_ref(),
             snapshot_generation: snapshot.admission_revision,
-            manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
+            manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),
             occupant_id_secret: &state.deps.occupant_id_secret,
         },
         working,
@@ -639,7 +650,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
 /// sealed actor is purged too: the registry may still hand it out when the
 /// sweep's destroy timed out, and a retry would meet it again.
 async fn room_gone<M>(
-    state: &crate::server::routes::websocket::WebSocketState,
+    state: &WebSocketState,
     room: &BareJid,
     error: &kameo::error::SendError<M, waddle_xmpp::muc::room_actor::RoomActorError>,
 ) -> bool {
@@ -661,7 +672,7 @@ async fn room_gone<M>(
 /// the way a member join does, from its channel and durable state. A room
 /// another node claimed meanwhile is that node's to post in.
 async fn load_managed_room(
-    state: &crate::server::routes::websocket::WebSocketState,
+    state: &WebSocketState,
     room_jid: &BareJid,
 ) -> Result<ActorRef<RoomActor>, ExtensionBotDispatchError> {
     use crate::server::routes::websocket::handlers::presence::get_managed_channel_for_room;
@@ -720,8 +731,8 @@ tokio::task_local! {
 /// and finishes on its own, so a slow peer may see the message first. Each
 /// route joins `routes` as it is spawned, and those still running stay.
 async fn route_join_presences(
-    state: &crate::server::routes::websocket::WebSocketState,
-    host_state: &std::sync::Arc<crate::server::routes::websocket::WebSocketState>,
+    state: &WebSocketState,
+    host_state: &std::sync::Arc<WebSocketState>,
     room: &BareJid,
     presences: Vec<(FullJid, Stanza)>,
     commit_deadline: Option<tokio::time::Instant>,
@@ -770,7 +781,7 @@ async fn route_join_presences(
 /// The remote node owning `room`'s actor claim, or `None` when this node runs it.
 #[cfg(feature = "clustering")]
 pub(crate) async fn extension_room_owner(
-    state: &crate::server::routes::websocket::WebSocketState,
+    state: &WebSocketState,
     room: &BareJid,
 ) -> Result<Option<waddle_xmpp::ownership::NodeIdentity>, PlanFailure> {
     let clustering = &state.deps.app_state.clustering_claims;

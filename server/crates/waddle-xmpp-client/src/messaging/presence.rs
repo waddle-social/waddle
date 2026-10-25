@@ -4,8 +4,13 @@ use chrono::{DateTime, Utc};
 use minidom::Element;
 use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 
-use super::namespaces::*;
-use super::types::*;
+use super::namespaces::{
+    build_idle_element, NS_CLIENT, NS_HATS, NS_IDLE, NS_JINGLE_RTP, NS_MUC_USER, NS_MUJI,
+    NS_VCARD_UPDATE, NS_WADDLE_IN_CALL,
+};
+use super::types::{
+    InboundPresence, MucAffiliation, MucRole, MucStatus, MujiPresence, PresenceHat,
+};
 
 pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     let from = el.attr("from").map(String::from);

@@ -1,5 +1,7 @@
 //! Per-invocation Wasmtime state and host capability access.
 
+use crate::config::RuntimeLimits;
+use crate::types::RoomMessageSource;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ use crate::types::{DisplayText, ExtensionCapability, PluginId, WaddleId};
 /// table entry has no public constructor, representation, or receipt operation.
 pub struct DeliveryKey {
     capability: Arc<dyn ExtensionDeliveryCapability>,
-    source: crate::types::RoomMessageSource,
+    source: RoomMessageSource,
 }
 
 /// Host state made available to every WASM instance for satisfying WASI imports.
@@ -38,7 +40,7 @@ pub struct HostState {
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     pub(super) limits: wasmtime::StoreLimits,
-    runtime_limits: crate::config::RuntimeLimits,
+    runtime_limits: RuntimeLimits,
     http: super::http::HttpRuntime,
     http_requests: u32,
 }
@@ -50,7 +52,7 @@ impl HostState {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-        runtime_limits: crate::config::RuntimeLimits,
+        runtime_limits: RuntimeLimits,
         http: super::http::HttpRuntime,
     ) -> Self {
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -85,7 +87,7 @@ impl HostState {
     pub(super) async fn bind_delivery(
         &mut self,
         capability: Arc<dyn ExtensionDeliveryCapability>,
-        source: crate::types::RoomMessageSource,
+        source: RoomMessageSource,
     ) -> Result<(), HostToolError> {
         capability.validate(&self.context, &source).await?;
         let resource = self
@@ -120,15 +122,12 @@ impl HostState {
 
     pub(super) fn for_init() -> Self {
         Self::for_init_with(
-            crate::config::RuntimeLimits::default(),
+            RuntimeLimits::default(),
             super::http::HttpRuntime::try_new().expect("static HTTP client configuration"),
         )
     }
 
-    pub(super) fn for_init_with(
-        limits: crate::config::RuntimeLimits,
-        http: super::http::HttpRuntime,
-    ) -> Self {
+    pub(super) fn for_init_with(limits: RuntimeLimits, http: super::http::HttpRuntime) -> Self {
         Self::new(
             Arc::new(DenyingExtensionHostTools),
             InvocationContext {

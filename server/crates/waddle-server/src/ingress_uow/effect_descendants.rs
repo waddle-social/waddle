@@ -1,5 +1,8 @@
 //! Foundation references for scheduled descendants, never completion receipts.
 
+use crate::db::DatabaseError;
+use crate::ingress_substrate::IngressSubstrateError;
+use crate::ingress_substrate::MessageWriteOutcome;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -106,7 +109,7 @@ impl EffectDescendantRepository {
         }
         let key = DeliveryKey::effect(message_key, effect);
         let outcome = crate::ingress_substrate::record_delivery(tx, key, message_key).await?;
-        if outcome == crate::ingress_substrate::MessageWriteOutcome::MessageVanished {
+        if outcome == MessageWriteOutcome::MessageVanished {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
         Ok(EffectDeliveryBinding::Bound(key))
@@ -315,9 +318,11 @@ async fn ancestor_keys(
     let mut keys = Vec::new();
     while let Some(row) = rows.next().await? {
         let value: String = row.get(0)?;
-        keys.push(MessageKey::from_storage(value.parse().map_err(|_| {
-            crate::ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey
-        })?));
+        keys.push(MessageKey::from_storage(
+            value
+                .parse()
+                .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?,
+        ));
     }
     Ok(keys)
 }
@@ -329,7 +334,7 @@ fn sql<'a>(tx: &Transaction<'_>, postgres: &'a str, sqlite: &'a str) -> &'a str 
     }
 }
 
-pub(crate) fn canonical_nowait_error(error: crate::db::DatabaseError) -> IngressUowError {
+pub(crate) fn canonical_nowait_error(error: DatabaseError) -> IngressUowError {
     if let crate::db::DatabaseError::Internal(sqlx::Error::Database(database)) = &error {
         if database.code().as_deref() == Some("55P03") {
             return IngressUowError::Database {

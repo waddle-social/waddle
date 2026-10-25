@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    cached_wasm_digest_path, select_wasm_layer, validate_cached_wasm_file, validate_wasm_layer,
+    write_cached_wasm_digest, ExtensionModuleConfig, ImageLayer, OciExtensionPuller,
+};
 
 use bytes::Bytes;
 use oci_client::manifest::OciDescriptor;

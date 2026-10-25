@@ -7,7 +7,10 @@ use waddle_xmpp_core::pubsub::{
 use crate::pubsub::node::NodeConfig;
 use crate::pubsub::stanzas::PubSubItem;
 
-use super::*;
+use super::{
+    InMemoryPubSubStorage, PubSubNode, PubSubStorage, PublicationError, PublicationFingerprint,
+    PublicationNode, PublicationVersion, StoredItem, VersionedPublishResult,
+};
 
 #[test]
 fn test_pubsub_node_new_pep() {

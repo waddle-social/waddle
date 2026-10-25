@@ -1,4 +1,9 @@
-use super::*;
+use super::ReferenceCarrier;
+use super::{
+    add_reference, build_reference_element, extract_mentioned_jids,
+    extract_references_from_message, has_references, is_reference_element, parse_reference_element,
+    strip_references, Element, Reference, ReferenceError, ReferenceType, NS_REFERENCE,
+};
 
 use xmpp_parsers::message::Message;
 

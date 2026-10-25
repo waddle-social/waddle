@@ -2,7 +2,7 @@
 //! A database outage cannot persist new evidence, so retain it in the shared
 //! storage instance until deletion succeeds. Never clear row sequence ownership
 //! while any acknowledged interval for its session remains unsettled.
-use super::*;
+use super::{DatabasePendingDeliveryStorage, PendingStorageError, SmSessionId};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 

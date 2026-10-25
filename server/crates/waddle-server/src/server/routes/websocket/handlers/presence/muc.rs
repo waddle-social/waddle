@@ -1,5 +1,27 @@
-use super::*;
+use super::{
+    build_subject_message, debug, element_to_xml, get_or_create_room_actor, get_room_actor,
+    get_xmpp_channel, info, stanza_to_xml, warn, Affiliation, BareJid, CheckPermission,
+    DefinedCondition, Element, ErrorType, FullJid, JoinAffiliationGrant, JoinWithAffiliation,
+    LeaveByRealJid, Object, ObjectType, Permission, Role, RoomConfig, Session, Stanza, StanzaError,
+    Subject, WebSocketState, XmppChannelRecord, DEPLOYMENT_SERVER_ID,
+};
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome;
+use crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery;
+use crate::notification_activity::NotificationPresenceShow;
+use crate::server::routes::interpret::FullJidDeliveryOutcome;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
+use crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition;
+use crate::server::routes::websocket::state::ResolverAffiliationSyncWorker;
+use crate::server::routes::websocket::InFlightLease;
+use crate::server::routes::websocket::LeaveAskFailure;
+use crate::server::routes::websocket::LocalDepartureItem;
+use crate::server::routes::websocket::ResolvedPrincipal;
+use crate::server::routes::websocket::ResolverAffiliationSyncSchedule;
+use crate::server::routes::websocket::ResolverAffiliationSyncScheduler;
+use crate::server::routes::websocket::ResolverAffiliationSyncWork;
 use std::collections::HashSet;
 
 mod access;
@@ -78,11 +100,11 @@ pub struct MucJoinRequest<'a> {
     pub room_jid: &'a BareJid,
     pub sender_jid: &'a FullJid,
     pub nick: &'a str,
-    pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    pub presence_show: Option<NotificationPresenceShow>,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: Option<&'a Session>,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 
 struct MucJoinWork<'a> {
@@ -90,11 +112,11 @@ struct MucJoinWork<'a> {
     room_jid: &'a BareJid,
     sender_jid: &'a FullJid,
     nick: String,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<NotificationPresenceShow>,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     authenticated_session: Option<&'a Session>,
-    ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 
 pub async fn handle_muc_join_with_ordered_relay(
@@ -164,7 +186,7 @@ fn sync_resolver_affiliation_on_rejection(
 
 fn sync_resolver_affiliation_on_rejection_with_registry(
     existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
-    scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
+    scheduler: &std::sync::Arc<ResolverAffiliationSyncScheduler>,
     room_registry: Option<RoomRegistry>,
     room_jid: &BareJid,
     jid: BareJid,
@@ -174,7 +196,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
     let Some(actor) = existing_room_actor else {
         return;
     };
-    let work = crate::server::routes::websocket::ResolverAffiliationSyncWork {
+    let work = ResolverAffiliationSyncWork {
         affiliation,
         expected_admission_revision,
     };
@@ -182,7 +204,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
         crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Started(worker) => {
             worker
         }
-        crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Updated => {
+        ResolverAffiliationSyncSchedule::Updated => {
             debug!(
                 room = %room_jid,
                 %jid,
@@ -190,7 +212,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
             );
             return;
         }
-        crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Coalesced => {
+        ResolverAffiliationSyncSchedule::Coalesced => {
             debug!(
                 room = %room_jid,
                 %jid,
@@ -198,7 +220,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
             );
             return;
         }
-        crate::server::routes::websocket::ResolverAffiliationSyncSchedule::Stale => {
+        ResolverAffiliationSyncSchedule::Stale => {
             debug!(
                 room = %room_jid,
                 %jid,
@@ -206,7 +228,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
             );
             return;
         }
-        crate::server::routes::websocket::ResolverAffiliationSyncSchedule::AtCapacity => {
+        ResolverAffiliationSyncSchedule::AtCapacity => {
             debug!(
                 room = %room_jid,
                 %jid,
@@ -236,7 +258,7 @@ async fn run_resolver_affiliation_sync_worker(
     room_registry: Option<RoomRegistry>,
     room_jid: BareJid,
     jid: BareJid,
-    mut worker: crate::server::routes::websocket::state::ResolverAffiliationSyncWorker,
+    mut worker: ResolverAffiliationSyncWorker,
 ) {
     let mut work = worker.current();
     let mut effective_admission_revision = worker.effective_admission_revision();
@@ -309,9 +331,9 @@ async fn run_resolver_affiliation_sync_worker(
                 let disposition = if outcome
                     == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable
                 {
-                    crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion
+                    ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion
                 } else {
-                    crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome
+                    ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome
                 };
                 let Some(next) = worker.finish_terminal_or_take_update(disposition) else {
                     return;
@@ -343,7 +365,7 @@ async fn run_resolver_affiliation_sync_worker(
                     "Resolver affiliation sync retries exhausted"
                 );
                 let Some(next) = worker.finish_terminal_or_take_update(
-                    crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion,
+                    ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion,
                 ) else {
                     return;
                 };
@@ -360,7 +382,7 @@ async fn run_resolver_affiliation_sync_worker(
                     "Resolver affiliation sync retries exhausted"
                 );
                 let Some(next) = worker.finish_terminal_or_take_update(
-                    crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome,
+                    ResolverAffiliationSyncTerminalDisposition::InvalidatingOutcome,
                 ) else {
                     return;
                 };
@@ -397,9 +419,7 @@ pub(crate) async fn route_room_presence_to_occupant(
     if !delivered {
         let deps =
             crate::server::routes::websocket::interpret_loop::build_interpret_deps(state, None)
-                .with_ordered_relay_origin(Some(
-                    crate::server::routes::interpret::OrderedRelayRouteOrigin::room(room_jid),
-                ));
+                .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin::room(room_jid)));
         let replies = crate::server::routes::interpret::route_to_connection(
             &deps,
             jid::Jid::from(recipient.clone()),
@@ -506,17 +526,11 @@ pub(crate) async fn registered_remote_resource_delivery(
             )
             .await
         {
-            Some(crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered) => {
-                RegisteredRemoteDelivery::Delivered
+            Some(FullJidDeliveryOutcome::Delivered) => RegisteredRemoteDelivery::Delivered,
+            Some(FullJidDeliveryOutcome::Dropped | FullJidDeliveryOutcome::MaybeCommitted) => {
+                RegisteredRemoteDelivery::Retryable
             }
-            Some(
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted,
-            ) => RegisteredRemoteDelivery::Retryable,
-            Some(
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached,
-            )
+            Some(FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::QueuedDetached)
             | None => RegisteredRemoteDelivery::Absent,
         }
     }
@@ -547,14 +561,10 @@ pub(crate) async fn registered_remote_resource_write_accepted_delivery(
             .try_deliver_registered_remote_resource_write_accepted(target, stanza)
             .await
         {
-            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Delivered => {
-                RegisteredRemoteDelivery::Delivered
-            }
-            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Absent => {
-                RegisteredRemoteDelivery::Absent
-            }
-            crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::Retryable
-            | crate::clustering::route_bridge::RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
+            RegisteredRemoteWriteAcceptedDelivery::Delivered => RegisteredRemoteDelivery::Delivered,
+            RegisteredRemoteWriteAcceptedDelivery::Absent => RegisteredRemoteDelivery::Absent,
+            RegisteredRemoteWriteAcceptedDelivery::Retryable
+            | RegisteredRemoteWriteAcceptedDelivery::RefreshNeeded => {
                 RegisteredRemoteDelivery::Retryable
             }
         }
@@ -593,7 +603,7 @@ enum RemoteMucLeaveDecision {
 
 #[cfg(feature = "clustering")]
 fn remote_muc_join_decision(
-    outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
+    outcome: Option<OrderedRelayMucProxyOutcome>,
 ) -> Option<RemoteMucJoinDecision> {
     match outcome {
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
@@ -602,19 +612,19 @@ fn remote_muc_join_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
             ..
         })
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+        | Some(OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | Some(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             Some(RemoteMucJoinDecision::MaybeCommitted)
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped)
+        Some(OrderedRelayMucProxyOutcome::Unavailable)
+        | Some(OrderedRelayMucProxyOutcome::Dropped)
         | None => None,
     }
 }
 
 #[cfg(feature = "clustering")]
 fn remote_muc_leave_decision(
-    outcome: Option<crate::clustering::route_bridge::OrderedRelayMucProxyOutcome>,
+    outcome: Option<OrderedRelayMucProxyOutcome>,
 ) -> RemoteMucLeaveDecision {
     match outcome {
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered(replies)) => {
@@ -623,14 +633,12 @@ fn remote_muc_leave_decision(
         Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::PendingFrames {
             ..
         })
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::MaybeCommitted)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
+        | Some(OrderedRelayMucProxyOutcome::MaybeCommitted)
+        | Some(OrderedRelayMucProxyOutcome::JoinMaybeCommitted) => {
             RemoteMucLeaveDecision::MaybeCommitted
         }
-        Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Unavailable)
-        | Some(crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Dropped) => {
-            RemoteMucLeaveDecision::RetryableNoEffect
-        }
+        Some(OrderedRelayMucProxyOutcome::Unavailable)
+        | Some(OrderedRelayMucProxyOutcome::Dropped) => RemoteMucLeaveDecision::RetryableNoEffect,
         None => RemoteMucLeaveDecision::LocalFallback,
     }
 }
@@ -1215,9 +1223,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     && !room_preparation_pending
                     && !server_permission_allowed(
                         state,
-                        authenticated_session.map(
-                            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
-                        ),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                         Permission::CreateMuc,
                     )
                     .await
@@ -1325,8 +1331,8 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                                         .try_proxy_muc_remote(
                                             room_jid,
                                             &stanza,
-                                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::JoinPresence,
-                                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
+                                            OrderedRelayMucProxyKind::JoinPresence,
+                                            MucProxyOrigin::Connection(
                                                 occupancy_session,
                                             ),
                                             origin, None)
@@ -1781,7 +1787,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
         // that own call state. Active call membership is nick-level, but
         // XEP-0272 preparing is resource-owned coordination state, so the
         // joiner needs the exact full JID that advertised it.
-        let mut replayed_nicks = std::collections::HashSet::new();
+        let mut replayed_nicks = HashSet::new();
         let replay_occupants: Vec<_> = join_outcome
             .existing_occupants
             .iter()
@@ -1944,7 +1950,7 @@ pub async fn handle_muc_leave(
     sender_jid: &FullJid,
     nick: &str,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
     let _request_timer = waddle_xmpp::metrics::MucOccupancyHandlerTimer::start("leave_request");
     info!(room = %room_jid, nick = %nick, sender = %sender_jid, "MUC leave request");
@@ -2001,11 +2007,11 @@ pub async fn handle_muc_leave(
                         .try_proxy_muc_remote(
                             room_jid,
                             &stanza,
-                            crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
-                                occupancy_session,
-                            ),
-                            origin, None)
+                            OrderedRelayMucProxyKind::OccupantPresence,
+                            MucProxyOrigin::Connection(occupancy_session),
+                            origin,
+                            None,
+                        )
                         .await,
                 ) {
                     RemoteMucLeaveDecision::Delivered(replies) => {
@@ -2026,9 +2032,7 @@ pub async fn handle_muc_leave(
                         return Vec::new();
                     }
                     RemoteMucLeaveDecision::RetryableNoEffect => {
-                        return bounce_muc_leave_ownership_unreachable(
-                            room_jid, sender_jid, nick,
-                        );
+                        return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
                     }
                     RemoteMucLeaveDecision::LocalFallback => {}
                 }
@@ -2066,7 +2070,7 @@ pub async fn handle_muc_leave(
     // Write-ahead: if this task is cancelled after the actor dropped the
     // occupancy but before the fan-out below, the janitor replays the retained
     // outcome under this attempt. Completed once the effects ran.
-    let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
+    let in_flight = LocalDepartureItem::InFlight {
         room: room_jid.clone(),
         jid: sender_jid.clone(),
         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
@@ -2080,7 +2084,7 @@ pub async fn handle_muc_leave(
         .protocol
         .pending_local_muc_departures
         .record_in_flight(in_flight.clone());
-    let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
+    let _in_flight_lease = InFlightLease::hold(
         std::sync::Arc::clone(&state.deps.protocol.pending_local_muc_departures),
         in_flight.clone(),
     );
@@ -2186,7 +2190,7 @@ pub async fn handle_muc_leave(
                 affiliation,
             )];
         }
-        Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
+        Err(LeaveAskFailure::Timeout) => {
             // The actor may still complete the departure after this bound:
             // retain it so the janitor replays the outcome (self-echo, fan-out,
             // SFU teardown) under the same attempt id, and bounce wait-class now.
@@ -2197,7 +2201,7 @@ pub async fn handle_muc_leave(
                 .pending_local_muc_departures
                 .complete_in_flight(&in_flight);
             state.deps.protocol.pending_local_muc_departures.record(
-                crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
+                LocalDepartureItem::RoomDeparture {
                     room: room_jid.clone(),
                     jid: sender_jid.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
@@ -2213,7 +2217,7 @@ pub async fn handle_muc_leave(
         }
         Err(
             error @ (crate::server::routes::websocket::LeaveAskFailure::Handler(_)
-            | crate::server::routes::websocket::LeaveAskFailure::Transport),
+            | LeaveAskFailure::Transport),
         ) => {
             // A sealed answer can follow an ENQUEUED leave whose durable
             // projection was ambiguous (the actor self-seals with its
@@ -2228,7 +2232,7 @@ pub async fn handle_muc_leave(
                 .pending_local_muc_departures
                 .complete_in_flight(&in_flight);
             state.deps.protocol.pending_local_muc_departures.record(
-                crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
+                LocalDepartureItem::ConfirmRetired {
                     room: room_jid.clone(),
                     jid: sender_jid.clone(),
                     actor: room_actor.id(),

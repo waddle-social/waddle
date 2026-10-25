@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    build_interpret_deps, deliver_reserved_bare_jid, deliver_reserved_full_jid_peer_live_only,
+    deliver_reserved_muc_proxy, muc_proxy_result_to_outcome, no_client_reply_outcome,
+    relay_payload_target, route_local_bare_jid_with_timeout, validate_claims,
+    FullJidDeliveryOutcome, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    OrderedRelayNackReason, OrderedRelayPayload, RelayFrameCompletion, RelayPayloadTarget,
+    RemoteDeliveryOutcome, RemoteStanza, RemoteStanzaEnvelope, Stanza,
+};
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 impl OrderedRelayDeliveryBridge {
     /// Receiver-side effect for one already-reserved envelope. The caller
@@ -93,7 +103,7 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
     target: &jid::Jid,
     stanza: &Stanza,
     payload: &OrderedRelayPayload,
-    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> RemoteDeliveryOutcome {
     match payload {
         OrderedRelayPayload::MucProxy {
@@ -113,7 +123,7 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
                     *kind,
                     *origin,
                     &stanza.0,
-                    crate::ingress::identity::IngressRelayAdmission::from_parts(
+                    IngressRelayAdmission::from_parts(
                         canonical.clone(),
                         principal.clone(),
                         stanza_lang.clone(),
@@ -123,8 +133,7 @@ pub(in super::super) async fn deliver_local_after_target_refresh_outcome(
                 ))
                 .await,
             );
-            outcome.frame_completion =
-                completion.map(crate::ingress::execute::RelayFrameReceiptCompletion::new);
+            outcome.frame_completion = completion.map(RelayFrameReceiptCompletion::new);
             outcome
         }
         OrderedRelayPayload::ProcessedDirectMessage { .. } => {
@@ -164,7 +173,7 @@ pub(in super::super) async fn deliver_local_after_target_refresh_at(
     services: &OrderedRelayDeliveryServices,
     target: &jid::Jid,
     stanza: &Stanza,
-    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    ingress_append_context: Option<&SmIngressAppendContext>,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     match target.clone().try_into_full() {
@@ -198,7 +207,7 @@ pub(in super::super) async fn deliver_local_full_jid_after_target_refresh_at(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
     stanza: &Stanza,
-    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    ingress_append_context: Option<&SmIngressAppendContext>,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if matches!(stanza, Stanza::Iq(_)) {

@@ -1,6 +1,9 @@
 //! Notification candidate construction and sender-provenance validation.
 
-use super::*;
+use super::{
+    BareJid, Jid, NotificationClass, NotificationOutboxError, NotificationReason,
+    NotificationThreadId, StanzaId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationCandidate {

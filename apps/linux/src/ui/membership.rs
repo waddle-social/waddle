@@ -2,8 +2,8 @@
 //! The same presence stream tells who else is in each room, for mentions.
 use std::collections::{HashMap, VecDeque};
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{EntryExt, ObjectExt, WidgetExt};
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::glib;
 use jid::{BareJid, Jid};
 use waddle_xmpp_client_ffi::WaddlePresence;

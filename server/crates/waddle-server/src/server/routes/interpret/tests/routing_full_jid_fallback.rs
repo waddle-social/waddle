@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    chat_msg, detached_dm_session, drain_inbound, extract_stanza_id_by, interpret, jid,
+    offline_pass_deps, offline_pass_deps_with_user_registry, pipelined_dispatcher,
+    register_into_both_tiers, Arc, BareJid, BlockingStorage, ConnectionRegistry, Deps, Element,
+    FullJid, InMemorySmSessionRegistry, InboxStorage, Jid, MamStorage, Message, OutboundEvent,
+    Stanza,
+};
+use kameo::actor::Spawn;
 
 // ---------------------------------------------------------------------
 // #1244 — RFC 6121 §8.5.3.2.1: full-JID DM with no matching resource

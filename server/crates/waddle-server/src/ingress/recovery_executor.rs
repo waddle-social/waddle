@@ -1,5 +1,9 @@
 //! Freeze recorded authority, release the lock, then replay existing effect arms.
 
+use crate::ingress_uow::PolicyDiscardReason;
+use crate::server::routes::interpret::effects::ExternalEffect;
+use crate::server::routes::interpret::SmIngressAppendContext;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -8,13 +12,11 @@ use tokio::time::Instant;
 use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKind, MessageKey};
 use waddle_xmpp::protocol::Blocklist;
 
-use crate::{
-    db::Database,
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
-        CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
-    },
+use crate::db::Database;
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::{
+    CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
+    EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
 };
 
 use super::{recovery_rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
@@ -219,7 +221,7 @@ async fn discharge_departed_copies(
             .iter_mut()
             .filter(|route| route.room().is_some())
         {
-            let context = crate::server::routes::interpret::SmIngressAppendContext {
+            let context = SmIngressAppendContext {
                 message_key: key,
                 receipt: route.receipt.clone(),
                 received_at: Some(frozen.created_at),
@@ -334,7 +336,7 @@ async fn blocked_recipients(
     // groupchat row records one inbox-push route per occupant, none of which
     // any path rebuilds, and one blocklist read per occupant would spend the
     // row deadline before its observer or notification recovery ran.
-    let recipients: std::collections::BTreeSet<_> = frozen
+    let recipients: BTreeSet<_> = frozen
         .unreceipted
         .iter()
         .filter_map(|intent| match intent {
@@ -398,7 +400,7 @@ async fn record_discarded_receipts(
                 && super::receipt_key(intent).ok().as_ref() == Some(receipt)
         }) {
             EffectReceiptRepository::record_policy_discard(&mut tx, key, receipt,
-                crate::ingress_uow::PolicyDiscardReason::RecipientBlocked).await?;
+                PolicyDiscardReason::RecipientBlocked).await?;
             continue;
         }
         EffectReceiptRepository::record_receipt(
@@ -419,10 +421,9 @@ async fn record_discarded_receipts(
 }
 
 /// Effects whose only completion path is a frame to the original sender.
-fn frame_only_kind(
-    effect: &crate::server::routes::interpret::effects::ExternalEffect,
-) -> Option<IngressEffectKind> {
-    use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, ExternalEffect};
+fn frame_only_kind(effect: &ExternalEffect) -> Option<IngressEffectKind> {
+    use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+    use crate::server::routes::interpret::effects::ExternalEffect;
     match effect {
         ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { .. }) => {
             Some(IngressEffectKind::RoomObserver)

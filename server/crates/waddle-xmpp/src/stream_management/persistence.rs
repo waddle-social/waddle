@@ -27,6 +27,11 @@
 //!    session, runs each unacked stanza through `classify_dm_intake`
 //!    and `pending_delivery` insertion (Q6 promotion).
 
+use crate::stream_management::SmIngressAppendKey;
+use crate::stream_management::SmIngressFrameReceipt;
+use crate::tombstone::TombstoneTarget;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -205,7 +210,7 @@ pub struct PersistedSession {
 #[derive(Debug, Clone)]
 pub struct PersistedUnackedStanza {
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
-    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
+    pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// XEP-0198 stream-id of the owning session.
     pub stream_id: SmSessionId,
     /// Server-side outbound sequence number; ordered ascending.
@@ -288,7 +293,7 @@ pub struct SmAckWindow {
 /// quarantine cannot destroy custody because neither owns this row's lifetime.
 #[derive(Debug, Clone)]
 pub struct PersistedIngressAppend {
-    pub key: crate::stream_management::SmIngressAppendKey,
+    pub key: SmIngressAppendKey,
     pub accepting_stream: SmSessionId,
     pub sequence: u32,
     pub appended_at: chrono::DateTime<chrono::Utc>,
@@ -768,7 +773,7 @@ pub trait SmPersistenceStorage: Send + Sync {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
         appends: Vec<PersistedIngressAppend>,
-    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmPersistenceError>;
+    ) -> Result<Vec<SmIngressAppendKey>, SmPersistenceError>;
 
     /// Look up durable proof for one ingress obligation, across every stream.
     ///
@@ -777,7 +782,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// is now bound to a different stream or has no detached session at all.
     async fn get_ingress_append(
         &self,
-        key: &crate::stream_management::SmIngressAppendKey,
+        key: &SmIngressAppendKey,
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError>;
 
     /// Read all immutable allocations at a replay slot, including terminal rows.
@@ -800,7 +805,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Keyset pagination lets bounded recovery advance beyond protected rows.
     async fn list_pending_ingress_appends_after(
         &self,
-        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        after: Option<&SmIngressAppendKey>,
         limit: usize,
     ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError>;
 
@@ -808,7 +813,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// the caller observed. The payload remains alongside the proof until GC.
     async fn complete_ingress_append(
         &self,
-        key: &crate::stream_management::SmIngressAppendKey,
+        key: &SmIngressAppendKey,
         accepting_stream: &SmSessionId,
         sequence: u32,
         disposition: IngressCustodyDisposition,
@@ -826,7 +831,7 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// cache has been retired. The cutoff excludes later reused wire ids.
     async fn scrub_ingress_custody(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
         through: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), SmPersistenceError>;
 
@@ -892,16 +897,16 @@ pub struct InMemorySmPersistence {
 
 #[derive(Debug, Default)]
 struct InMemoryState {
-    sessions: std::collections::HashMap<SmSessionId, PersistedSession>,
+    sessions: HashMap<SmSessionId, PersistedSession>,
     // Per-session unacked queue keyed by stream_id.
-    unacked: std::collections::HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
+    unacked: HashMap<SmSessionId, Vec<PersistedUnackedStanza>>,
     // Non-secret authorization reference paired with the detached snapshot.
-    principals: std::collections::HashMap<SmSessionId, AuthenticatedPrincipalRef>,
+    principals: HashMap<SmSessionId, AuthenticatedPrincipalRef>,
     // Ingress append ledger, keyed by obligation and NOT by stream, so it survives the
     // snapshot deletion a resume performs and is shared across rebinds. A flat list keeps
     // the obligation key free of a `Hash` bound; only tests use this backend.
     ingress_appends: Vec<PersistedIngressAppend>,
-    acknowledgement_windows: std::collections::HashMap<SmSessionId, Vec<SmAckWindow>>,
+    acknowledgement_windows: HashMap<SmSessionId, Vec<SmAckWindow>>,
 }
 
 impl InMemoryState {
@@ -1063,7 +1068,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .keys()
             .chain(guard.acknowledgement_windows.keys())
             .cloned()
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect())
     }
@@ -1368,7 +1373,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
         appends: Vec<PersistedIngressAppend>,
-    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmPersistenceError> {
+    ) -> Result<Vec<SmIngressAppendKey>, SmPersistenceError> {
         if appends
             .iter()
             .any(|append| append.disposition != IngressCustodyDisposition::Pending)
@@ -1446,7 +1451,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn get_ingress_append(
         &self,
-        key: &crate::stream_management::SmIngressAppendKey,
+        key: &SmIngressAppendKey,
     ) -> Result<Option<PersistedIngressAppend>, SmPersistenceError> {
         let guard = self
             .inner
@@ -1484,12 +1489,10 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn list_pending_ingress_appends_after(
         &self,
-        after: Option<&crate::stream_management::SmIngressAppendKey>,
+        after: Option<&SmIngressAppendKey>,
         limit: usize,
     ) -> Result<Vec<PersistedIngressAppend>, SmPersistenceError> {
-        fn order(
-            key: &crate::stream_management::SmIngressAppendKey,
-        ) -> (String, i32, [u8; 32], String) {
+        fn order(key: &SmIngressAppendKey) -> (String, i32, [u8; 32], String) {
             (
                 key.message_key.to_storage().to_string(),
                 key.kind.to_storage(),
@@ -1517,7 +1520,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn complete_ingress_append(
         &self,
-        key: &crate::stream_management::SmIngressAppendKey,
+        key: &SmIngressAppendKey,
         accepting_stream: &SmSessionId,
         sequence: u32,
         disposition: IngressCustodyDisposition,
@@ -1574,7 +1577,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
 
     async fn scrub_ingress_custody(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
         through: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), SmPersistenceError> {
         let mut guard = self

@@ -31,6 +31,7 @@
 //! the server's annotation. The server's `xep0198_replay_bytes` and
 //! `xep0198_cross_node_resume` suites cover the durable boundaries.
 
+use crate::ingress::MessageKey;
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use std::str::FromStr;
@@ -140,7 +141,7 @@ pub fn stamp_replay_delay(
 /// Earlier frames are either written before it or cumulatively acknowledged by SM.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SmIngressFrameReceipt {
-    pub message_key: crate::ingress::MessageKey,
+    pub message_key: MessageKey,
     pub kind: SmIngressReceiptKind,
     pub semantic_identity_hash: [u8; 32],
 }

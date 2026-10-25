@@ -1,3 +1,5 @@
+use crate::stream_management::PromotionCaptureCustody;
+use crate::Stanza;
 use std::time::Instant;
 
 use tracing::warn;
@@ -328,7 +330,7 @@ impl StreamManagementState {
     pub fn ingress_replay_payload(
         &self,
         sequence: u32,
-    ) -> Option<(crate::Stanza, chrono::DateTime<chrono::Utc>)> {
+    ) -> Option<(Stanza, chrono::DateTime<chrono::Utc>)> {
         let entry = self
             .unacked_queue
             .all_unacked()
@@ -336,7 +338,7 @@ impl StreamManagementState {
             .find(|entry| entry.sequence == sequence)?;
         let element = entry.stanza_xml.parse::<minidom::Element>().ok()?;
         let message = xmpp_parsers::message::Message::try_from(element).ok()?;
-        Some((crate::Stanza::Message(message), entry.original_receipt_at))
+        Some((Stanza::Message(message), entry.original_receipt_at))
     }
 
     /// Attach receipt obligations to the most recently recorded replay entry.
@@ -592,7 +594,7 @@ impl StreamManagementState {
         self.clear_ack_request_tracking();
 
         Some(DetachedSession {
-            promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
+            promotion_custody: PromotionCaptureCustody::unproven(),
             stream_id: self.stream_id.clone()?,
             user_id: snapshot.user_id,
             jid: snapshot.jid,

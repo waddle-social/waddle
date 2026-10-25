@@ -5,6 +5,8 @@
 //! handle to send IQ queries, collect result stanzas, and return a structured
 //! [`MamPage`] when the server signals completion via `<fin/>`.
 
+use crate::messaging::InboundCallEvent;
+use crate::messaging::InboundMessage;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use minidom::Element;
@@ -96,9 +98,9 @@ pub struct ArchivedMessage {
 /// Message and call payloads parsed once from the inner MAM message.
 pub struct ArchivedPayload {
     /// Parsed message content, when the archive entry contains a supported message.
-    pub message: Option<Box<crate::messaging::InboundMessage>>,
+    pub message: Option<Box<InboundMessage>>,
     /// Parsed call-control payload carried by the message.
-    pub call: Option<Box<crate::messaging::InboundCallEvent>>,
+    pub call: Option<Box<InboundCallEvent>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

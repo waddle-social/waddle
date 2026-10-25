@@ -2,6 +2,8 @@
 //! credentials, per-node quotas, disable + credential clearing, and
 //! registration-time endpoint validation (SSRF gate).
 
+use crate::db::Row;
+use crate::db::Transaction;
 use jid::BareJid;
 use waddle_xmpp::XmppError;
 
@@ -153,7 +155,7 @@ pub(super) fn validate_len(field: &str, value: &str, max: usize) -> Result<(), X
 }
 
 async fn active_device_exists_on_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     device_id: &str,
 ) -> Result<bool, XmppError> {
@@ -172,7 +174,7 @@ async fn active_device_exists_on_node_tx(
 }
 
 pub(super) async fn count_active_devices_for_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
 ) -> Result<i64, XmppError> {
     let mut rows = tx
@@ -192,7 +194,7 @@ pub(super) async fn count_active_devices_for_node_tx(
 }
 
 async fn prune_disabled_devices_for_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     retain: i64,
 ) -> Result<(), XmppError> {
@@ -235,7 +237,7 @@ async fn prune_disabled_devices_for_node_tx(
 }
 
 pub(super) async fn active_devices_with_subscription_for_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
 ) -> Result<Vec<dispatch::SealedActiveDevice>, XmppError> {
     let mut rows = tx
@@ -303,7 +305,7 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
 /// does: a disabled row is never sent to again, and re-registering
 /// writes fresh ones.
 pub(super) async fn mark_device_disabled_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     device_id: &str,
     reason: &str,
@@ -337,7 +339,7 @@ pub(super) async fn mark_device_disabled_tx(
 }
 
 async fn get_device_for_owner_on_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
     device_id: &str,
@@ -367,10 +369,7 @@ async fn get_device_for_owner_on_node_tx(
     Ok(Some(decode_device(&row, secrets)?))
 }
 
-fn decode_device(
-    row: &crate::db::Row,
-    secrets: &PushSecretCipher,
-) -> Result<PushServiceDevice, XmppError> {
+fn decode_device(row: &Row, secrets: &PushSecretCipher) -> Result<PushServiceDevice, XmppError> {
     let provider_endpoint = secrets.open_optional(
         row.get(4)
             .map_err(|error| XmppError::internal(error.to_string()))?,
@@ -427,7 +426,7 @@ pub(super) enum WakeQueuedJobs {
 }
 
 pub(super) async fn upsert_device_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     registration: PushDeviceRegistration,
     secrets: &PushSecretCipher,

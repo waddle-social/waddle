@@ -4,16 +4,12 @@ use jid::FullJid;
 use minidom::Element;
 use std::time::Duration;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use waddle_xmpp::{
-    parser::ns::{STREAM, STREAMS},
-    pending_delivery::SmSessionId,
-    stream_management::SM_NS,
-};
-use xmpp_parsers::{
-    iq::Iq,
-    message::{Id, Lang, Message, MessageType},
-    ping::Ping,
-};
+use waddle_xmpp::parser::ns::{STREAM, STREAMS};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::SM_NS;
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+use xmpp_parsers::ping::Ping;
 
 const ACCOUNTS: &[(&str, &str)] = &[
     ("alice", "attached-resume-alice"),

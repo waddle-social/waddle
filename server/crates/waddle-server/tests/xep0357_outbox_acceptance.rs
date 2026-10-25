@@ -6,22 +6,18 @@ use jid::BareJid;
 use minidom::Element;
 use std::sync::Arc;
 use uuid::Uuid;
-use waddle_server::{
-    notification_outbox::{
-        NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
-        WADDLE_PUSH_CONTEXT_NS,
-    },
-    push_service::{DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration},
+use waddle_server::notification_outbox::{
+    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
+    WADDLE_PUSH_CONTEXT_NS,
 };
-use waddle_xmpp::{
-    inbox::{
-        storage::{InMemoryInboxStorage, InboxStorage},
-        ConversationKind, InboxEntry,
-    },
-    pubsub::{Affiliation, InMemoryPubSubStorage, PubSubStorage},
-    push::{InMemoryPushStore, PushSubscription, PushSubscriptionStore},
-    xep::xep0191::InMemoryBlockingStorage,
+use waddle_server::push_service::{
+    DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
+use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::pubsub::{Affiliation, InMemoryPubSubStorage, PubSubStorage};
+use waddle_xmpp::push::{InMemoryPushStore, PushSubscription, PushSubscriptionStore};
+use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
 fn publish_options(access_model: &str) -> Element {
     use waddle_xmpp::xep::{NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS};

@@ -1,7 +1,12 @@
 //! Durable schema DDL, CHECK-constraint matching, and migrations for
 //! `notification_activity`.
 
-use super::*;
+use super::{
+    NotificationActivityError, NotificationActivityStore, NotificationChatState,
+    NotificationPresenceShow,
+};
+use crate::db::DatabaseDriver;
+use std::collections::BTreeSet;
 
 /// CHECK constraint name on `notification_activity.last_chat_state`.
 pub(crate) const NOTIFICATION_ACTIVITY_LAST_CHAT_STATE_CHECK_NAME: &str =
@@ -93,8 +98,8 @@ pub(crate) fn notification_activity_last_chat_state_constraint_matches_expected(
 /// matcher tier keeps that decode path tight by construction — the
 /// migration will rewrite the constraint to the canonical closed
 /// set before any stale row can be observed.
-fn extract_single_quoted_literals(definition: &str) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+fn extract_single_quoted_literals(definition: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
     let bytes = definition.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -136,7 +141,7 @@ pub(crate) fn notification_activity_presence_show_constraint_matches_expected(
         return false;
     }
     let extracted = extract_single_quoted_literals(&normalized);
-    let expected: std::collections::BTreeSet<String> = NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES
+    let expected: BTreeSet<String> = NOTIFICATION_ACTIVITY_PRESENCE_SHOW_VALUES
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -221,10 +226,8 @@ impl NotificationActivityStore {
         i64_type: &str,
     ) -> Result<(), NotificationActivityError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => self.migrate_postgres_last_chat_state().await,
-            crate::db::DatabaseDriver::Sqlite => {
-                self.migrate_sqlite_last_chat_state(i64_type).await
-            }
+            DatabaseDriver::Postgres => self.migrate_postgres_last_chat_state().await,
+            DatabaseDriver::Sqlite => self.migrate_sqlite_last_chat_state(i64_type).await,
         }
     }
 
@@ -381,8 +384,8 @@ impl NotificationActivityStore {
         i64_type: &str,
     ) -> Result<(), NotificationActivityError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => self.migrate_postgres_presence_show().await,
-            crate::db::DatabaseDriver::Sqlite => self.migrate_sqlite_presence_show(i64_type).await,
+            DatabaseDriver::Postgres => self.migrate_postgres_presence_show().await,
+            DatabaseDriver::Sqlite => self.migrate_sqlite_presence_show(i64_type).await,
         }
     }
 

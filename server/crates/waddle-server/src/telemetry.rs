@@ -9,13 +9,13 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{
-    logs::SdkLoggerProvider,
-    metrics::{PeriodicReader, SdkMeterProvider},
-    trace::SdkTracerProvider,
-    Resource,
-};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 mod span_hygiene;
 mod span_noise;
@@ -557,25 +557,21 @@ mod tests {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::Key;
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-    use opentelemetry_sdk::{
-        logs::{BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider},
-        metrics::{
-            data::ResourceMetrics, exporter::PushMetricExporter, PeriodicReader, SdkMeterProvider,
-            Temporality,
-        },
-        trace::{
-            BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
-            SpanExporter,
-        },
+    use opentelemetry_sdk::logs::{
+        BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
     };
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::{Duration, Instant},
+    use opentelemetry_sdk::metrics::data::ResourceMetrics;
+    use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+    use opentelemetry_sdk::trace::{
+        BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
+        SpanExporter,
     };
-    use tracing_subscriber::{layer::SubscriberExt, Layer as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer as _;
 
     #[derive(Debug)]
     struct FailingSpanExporter {

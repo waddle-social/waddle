@@ -1,8 +1,6 @@
 //! Origin-scoped test gates before and after durable admission.
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::Semaphore;
 use waddle_xmpp_core::xep0359::OriginId;
 

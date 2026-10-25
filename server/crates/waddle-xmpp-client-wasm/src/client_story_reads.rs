@@ -18,7 +18,7 @@ use waddle_xmpp_core::waddle_story_reads::{
     StoryId, StoryReads, NS_WADDLE_STORY_READS, PEP_ITEM_WADDLE_STORY_READS,
     PEP_NODE_WADDLE_STORY_READS,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, to_js_value, WaddleClient};
 

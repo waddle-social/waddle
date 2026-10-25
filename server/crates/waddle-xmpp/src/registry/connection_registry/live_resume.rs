@@ -241,7 +241,8 @@ mod tests {
     use crate::registry::ConnectionEntry;
     use crate::stream_management::StreamManagementState;
     use crate::telemetry::attributes::SmEvictionPath;
-    use futures::{poll, task::noop_waker};
+    use futures::poll;
+    use futures::task::noop_waker;
 
     fn fixture() -> (
         StreamManagementState,

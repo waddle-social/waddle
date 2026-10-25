@@ -10,9 +10,8 @@
 use chrono::{TimeZone, Utc};
 use minidom::Element;
 use waddle_xmpp_client::messaging::{build_muc_join_presence, is_muc_join_presence};
-use waddle_xmpp_client::{
-    stream_management::SmState, SmResumeState, StreamId, UnhandledOutboundEntry,
-};
+use waddle_xmpp_client::stream_management::SmState;
+use waddle_xmpp_client::{SmResumeState, StreamId, UnhandledOutboundEntry};
 
 #[test]
 fn xep0045_join_presences_are_told_apart_from_other_stanzas() {

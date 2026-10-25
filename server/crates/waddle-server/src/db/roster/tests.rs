@@ -2,7 +2,10 @@ use dashmap::DashMap;
 use jid::BareJid;
 use std::sync::Arc;
 
-use super::*;
+use super::{
+    mutation, DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterRowMutationKind,
+    RosterStorageError,
+};
 use crate::db::Database;
 
 async fn setup_test_db() -> Database {

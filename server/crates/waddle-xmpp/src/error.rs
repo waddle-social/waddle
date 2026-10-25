@@ -1,5 +1,6 @@
 //! Error types for the XMPP server.
 
+use crate::xep::xep0050::AdHocCommandCondition;
 use thiserror::Error;
 use waddle_xmpp_core::CoreError;
 
@@ -113,7 +114,7 @@ pub enum XmppError {
     #[error("ad-hoc command error: {condition:?}")]
     AdHocCommand {
         /// The XEP-0050 §4.4 specific condition.
-        condition: crate::xep::xep0050::AdHocCommandCondition,
+        condition: AdHocCommandCondition,
         /// Optional human-readable diagnostic text.
         text: Option<String>,
     },
@@ -278,10 +279,7 @@ impl XmppError {
 
     /// Create a XEP-0050 §4.4 command-specific error
     /// ([`Self::AdHocCommand`]).
-    pub fn ad_hoc_command(
-        condition: crate::xep::xep0050::AdHocCommandCondition,
-        text: Option<String>,
-    ) -> Self {
+    pub fn ad_hoc_command(condition: AdHocCommandCondition, text: Option<String>) -> Self {
         Self::AdHocCommand { condition, text }
     }
 }

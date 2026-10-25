@@ -1,6 +1,17 @@
 //! Extension manager construction and configured runtime initialization.
 
-use super::*;
+use super::{
+    bail, effective_module_config_json, push_feature_namespace, remove_invalid_cached_extension,
+    runtime_grants_for_module, validate_manifest_against_module, Arc, BareJid, CommandNode,
+    DenyingExtensionHostTools, Digest, ExtensionCapability, ExtensionConfig, ExtensionHostTools,
+    ExtensionManager, ExtensionManifest, ExtensionModuleConfig, HashMap, HashSet, LoadedExtension,
+    OciExtensionPuller, Path, PayloadNamespace, PluginId, Result, Sha256, WasmExtensionActor,
+    WasmRuntime,
+};
+use crate::types::CommandDescriptor;
+use crate::types::ConfiguredRoomObserver;
+use crate::types::ExtensionRouteDescriptor;
+use crate::types::Sha256Digest;
 
 impl ExtensionManager {
     /// Build an `ExtensionManager` from the given configuration.
@@ -220,9 +231,7 @@ impl ExtensionManager {
     /// Return plugin identities and command descriptors for command-granted plugins,
     /// excluding the generic invoke node.
     #[must_use]
-    pub fn command_descriptors(
-        &self,
-    ) -> Vec<(crate::types::PluginId, crate::types::CommandDescriptor)> {
+    pub fn command_descriptors(&self) -> Vec<(crate::types::PluginId, CommandDescriptor)> {
         self.actors
             .iter()
             .filter(|actor| actor.has_grant(ExtensionCapability::Commands))
@@ -241,7 +250,7 @@ impl ExtensionManager {
 
     /// Borrow the extension routes retained for discovery and UI rendering.
     #[must_use]
-    pub fn route_descriptors(&self) -> &[crate::types::ExtensionRouteDescriptor] {
+    pub fn route_descriptors(&self) -> &[ExtensionRouteDescriptor] {
         &self.route_descriptors
     }
 
@@ -318,7 +327,7 @@ fn configured_room_observer(
     manifest: &ExtensionManifest,
     wasm_path: &Path,
     effective_config: &str,
-) -> Result<Option<crate::types::ConfiguredRoomObserver>> {
+) -> Result<Option<ConfiguredRoomObserver>> {
     let Some(observation) = &module.room_observation else {
         return Ok(None);
     };
@@ -341,10 +350,10 @@ fn configured_room_observer(
         observation,
         &module.runtime_limits,
     ))?;
-    Ok(Some(crate::types::ConfiguredRoomObserver {
+    Ok(Some(ConfiguredRoomObserver {
         plugin: manifest.id.clone(),
         generation: observation.generation,
-        identity: crate::types::Sha256Digest::try_new(hex::encode(Sha256::digest(identity_input)))?,
+        identity: Sha256Digest::try_new(hex::encode(Sha256::digest(identity_input)))?,
         scope: observation.scope.clone(),
         max_concurrent: observation.max_concurrent,
     }))

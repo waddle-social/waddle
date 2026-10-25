@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    build_available_presence, build_roster_push, build_subscription_presence, debug, warn, AskType,
+    BareJid, BroadcastOutcome, DatabaseBlockingStorage, DatabaseRosterStorage, Element, FullJid,
+    GetDatabase, Jid, RosterItem, RosterItemRow, RosterRowChange, RosterStorageError,
+    RosterVersion, Stanza, Subscription, SubscriptionStateMachine, SubscriptionType,
+    WebSocketState,
+};
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 
 mod delivery;
 mod directed;
@@ -28,15 +36,13 @@ use roster_state::send_current_roster_push_to_local_resources;
 use roster_state::update_subscription_roster_state;
 
 #[cfg(feature = "clustering")]
-fn user_actor_route_origin(
-    user: &BareJid,
-) -> crate::server::routes::interpret::OrderedRelayRouteOrigin {
+fn user_actor_route_origin(user: &BareJid) -> OrderedRelayRouteOrigin {
     let entity = waddle_xmpp::ownership::Entity::new(
         waddle_xmpp::ownership::EntityType::UserActor,
         user.to_string(),
     );
-    crate::server::routes::interpret::OrderedRelayRouteOrigin {
-        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(entity.clone()),
+    OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
         sender_entity: entity,
         inbound_sequence: 0,
         handoff: None,
@@ -47,7 +53,7 @@ fn user_actor_route_origin(
 pub(super) async fn try_handle_remote_subscription_presence(
     _state: &WebSocketState,
     _request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
-    _ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    _ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) -> bool {
     false
 }
@@ -56,7 +62,7 @@ pub(super) async fn try_handle_remote_subscription_presence(
 pub(super) async fn try_handle_remote_subscription_presence(
     state: &WebSocketState,
     request: &waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) -> bool {
     let fallback_origin;
     let origin = match ordered_relay_origin {
@@ -171,7 +177,7 @@ pub(super) async fn try_handle_remote_subscription_presence(
 pub(super) async fn handle_subscription_presence(
     state: &WebSocketState,
     request: waddle_xmpp::presence::subscription::PresenceSubscriptionRequest,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     #[cfg(feature = "clustering")]
     let fallback_origin;

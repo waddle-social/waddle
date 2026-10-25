@@ -1,3 +1,4 @@
+use crate::mam::MamArchiveKind;
 use async_trait::async_trait;
 use jid::BareJid;
 use sqlx::postgres::PgRow;
@@ -66,7 +67,7 @@ impl MamStorage for SqlxMamStorage {
     async fn query_messages(
         &self,
         archive_jid: &BareJid,
-        archive_kind: crate::mam::MamArchiveKind,
+        archive_kind: MamArchiveKind,
         query: &MamQuery,
     ) -> Result<MamResult, MamStorageError> {
         let limit = i64::from(query.max.unwrap_or(100).min(500)) + 1;
@@ -326,7 +327,7 @@ impl MamStorage for SqlxMamStorage {
     async fn get_message_by_sender_and_origin_id(
         &self,
         archive_jid: &BareJid,
-        archive_kind: crate::mam::MamArchiveKind,
+        archive_kind: MamArchiveKind,
         sender: &jid::Jid,
         origin_id: &OriginId,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
@@ -347,7 +348,7 @@ impl MamStorage for SqlxMamStorage {
                     .push_bind(origin_id.as_str())
                     .push(") AND ");
                 match archive_kind {
-                    crate::mam::MamArchiveKind::Personal => {
+                    MamArchiveKind::Personal => {
                         builder
                             .push("(from_jid = ")
                             .push_bind(sender_bare.as_str())
@@ -355,7 +356,7 @@ impl MamStorage for SqlxMamStorage {
                             .push_bind(sender_resource_prefix.as_str())
                             .push(" ESCAPE '\\')");
                     }
-                    crate::mam::MamArchiveKind::Room => {
+                    MamArchiveKind::Room => {
                         builder.push("from_jid = ").push_bind(sender_full.as_str());
                     }
                 }
@@ -378,7 +379,7 @@ impl MamStorage for SqlxMamStorage {
                     .push_bind(origin_id.as_str())
                     .push(") AND ");
                 match archive_kind {
-                    crate::mam::MamArchiveKind::Personal => {
+                    MamArchiveKind::Personal => {
                         builder
                             .push("(from_jid = ")
                             .push_bind(sender_bare.as_str())
@@ -386,7 +387,7 @@ impl MamStorage for SqlxMamStorage {
                             .push_bind(sender_resource_prefix.as_str())
                             .push(" ESCAPE '\\')");
                     }
-                    crate::mam::MamArchiveKind::Room => {
+                    MamArchiveKind::Room => {
                         builder.push("from_jid = ").push_bind(sender_full.as_str());
                     }
                 }

@@ -3259,7 +3259,8 @@ async fn send_partial_fanout_with_origin(
     id: &str,
     origin: uuid::Uuid,
 ) {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     let mut message = fanout_message(room, id, None);
     message.append_child(
         Element::builder("origin-id", waddle_xmpp::xep::NS_SID)
@@ -3364,7 +3365,8 @@ async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: 
 }
 
 fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom::Element {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     let payload = match body {
         Some(body) => Element::builder("body", waddle_xmpp::ns::JABBER_CLIENT)
             .append(body)

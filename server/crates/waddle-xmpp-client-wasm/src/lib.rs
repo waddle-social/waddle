@@ -52,24 +52,26 @@ use waddle_xmpp_client::stream_management::SmState;
 use waddle_xmpp_client::transport::{
     StreamClose, TransportEvent, TransportMessage, TransportState,
 };
-use waddle_xmpp_client::xep::{
-    reply::{FallbackRange, ReplyMarker},
-    thread::ThreadRef,
-    threads::{
-        build_fetch_threads_iq, parse_threads_response, FetchThreadsQuery, ThreadSort,
-        ThreadStatusFilter,
-    },
-    xep0292::{build_fetch_vcard4_iq, build_publish_vcard4_iq, parse_pep_vcard4, VCard4},
-    xep0402::{build_fetch_bookmarks_iq, parse_bookmarks_response, BookmarkItem},
-    xep0492::{build_fetch_dm_bookmarks_iq, read_dm_bookmark_notify},
+use waddle_xmpp_client::xep::reply::{FallbackRange, ReplyMarker};
+use waddle_xmpp_client::xep::thread::ThreadRef;
+use waddle_xmpp_client::xep::threads::{
+    build_fetch_threads_iq, parse_threads_response, FetchThreadsQuery, ThreadSort,
+    ThreadStatusFilter,
 };
+use waddle_xmpp_client::xep::xep0292::{
+    build_fetch_vcard4_iq, build_publish_vcard4_iq, parse_pep_vcard4, VCard4,
+};
+use waddle_xmpp_client::xep::xep0402::{
+    build_fetch_bookmarks_iq, parse_bookmarks_response, BookmarkItem,
+};
+use waddle_xmpp_client::xep::xep0492::{build_fetch_dm_bookmarks_iq, read_dm_bookmark_notify};
 use waddle_xmpp_client::{
     AccessToken, ArchivedMessage, ClientConfig, ClientError, ClientEvent, ClientRequest,
     ClientResource, ConnectionConfig, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent,
     OAuthBearerConfig, StanzaId, StreamErrorCondition, StreamErrorDetail, StreamManagementEvent,
     WasmTransportEvent, WasmWebSocket, WebSocketConfig, XmppRuntime,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, Closure, JsCast, JsValue, UnwrapThrowExt, Upcast};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 mod client_account;
@@ -98,15 +100,78 @@ mod rejection;
 mod state;
 mod types;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use commands::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use conversions::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use driver::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use encrypted::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use events::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use extension_routes::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use helpers::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use options::*;
 pub(crate) use rejection::JsMessageRejection;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "crate facade reexport; source guard checks allowed import context"
+    )
+)]
 pub(crate) use state::*;
 
 pub use state::{WaddleClient, WaddleConfig};

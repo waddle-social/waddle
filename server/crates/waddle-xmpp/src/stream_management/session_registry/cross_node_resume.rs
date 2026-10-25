@@ -113,6 +113,7 @@
 //!   fall through to a bare `NotFound` just because there is no foreign
 //!   claim left to *steal*.
 
+use crate::pending_delivery::SmSessionId;
 use std::time::Duration;
 
 use jid::BareJid;
@@ -352,8 +353,7 @@ impl InMemorySmSessionRegistry {
                 .map_err(|e| match e {
                     // Poisoned = persistently broken store: storage health,
                     // same classification as the ownership decorator.
-                    crate::ownership::ClaimError::Backend(_)
-                    | crate::ownership::ClaimError::Poisoned => {
+                    crate::ownership::ClaimError::Backend(_) | ClaimError::Poisoned => {
                         SmRegistryError::StorageUnavailable(
                             super::traits::StorageOutageCause::Backend,
                         )
@@ -998,8 +998,7 @@ impl InMemorySmSessionRegistry {
             .map_err(|e| match e {
                 // Poisoned = persistently broken store: storage health,
                 // same classification as the ownership decorator.
-                crate::ownership::ClaimError::Backend(_)
-                | crate::ownership::ClaimError::Poisoned => {
+                crate::ownership::ClaimError::Backend(_) | ClaimError::Poisoned => {
                     SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend)
                 }
                 other => SmRegistryError::Internal(other.to_string()),
@@ -1017,7 +1016,7 @@ impl InMemorySmSessionRegistry {
         let Some(storage) = &self.persistence else {
             return Ok(None);
         };
-        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+        let session_id = SmSessionId::new(stream_id.to_string());
         // Durable-session reads are storage-backed by definition; a failed
         // read during a cross-node resume is a database incident, not a
         // registry logic error.

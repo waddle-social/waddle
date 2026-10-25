@@ -1,4 +1,4 @@
-use super::*;
+use super::{debug, direct_message_entry, warn, BareJid, Deps, IngressEffectIntent, Message};
 use waddle_xmpp_core::xep0359::StanzaId as ArchiveStanzaId;
 
 pub(super) async fn project_direct_inbox(

@@ -1,4 +1,20 @@
-use super::*;
+#[cfg(test)]
+use super::iq_to_xml;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
+    internal_server_error_iq_error, is_time_query, is_version_query, not_authorized_iq_error,
+    service_unavailable_iq_error, stanza_to_xml, warn, ConnectionPhase, DatabaseBlockingStorage,
+    FullJid, IqConnState, IqHandlerContext, Jid, ProtocolStanzaContext, Session, Stanza,
+    WebSocketState, CARBONS_NS,
+};
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxError;
+use crate::call_teardown_outbox::TeardownTarget;
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::route_bridge::RemoteResourceStateUpdate;
+use crate::server::routes::interpret::effects::ImmediateSink;
+use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
@@ -311,12 +327,11 @@ async fn handle_sans_io_iq_with_relay_override(
             }
         }
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
-        let deps = crate::server::routes::interpret::Deps {
+        let deps = Deps {
             dispatch_probe_budget: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
-            delivery_execution_context:
-                crate::server::routes::interpret::DeliveryExecutionContext::Live,
+            delivery_execution_context: DeliveryExecutionContext::Live,
             connection_registry: &state.deps.protocol.connection_registry,
             user_registry: Some(&state.deps.protocol.user_registry),
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
@@ -338,7 +353,7 @@ async fn handle_sans_io_iq_with_relay_override(
             host_sender: None,
             host_copy_consumer: None,
             ingress_append_context: None,
-            effects: &crate::server::routes::interpret::effects::ImmediateSink,
+            effects: &ImmediateSink,
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
@@ -791,9 +806,7 @@ async fn relay_muji_to_room_owner(
             room_jid,
             &stanza,
             OrderedRelayMucProxyKind::MujiJingleIq,
-            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
-                *conn_state.occupancy_session,
-            ),
+            MucProxyOrigin::Connection(*conn_state.occupancy_session),
             origin,
             None,
         )
@@ -909,7 +922,7 @@ async fn enqueue_muji_relay_teardown_fallback(
     departed: &jid::FullJid,
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
-) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+) -> Result<(), CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -927,9 +940,9 @@ async fn enqueue_muji_relay_teardown_fallback(
     // which the created-after-the-registration timestamp fence alone
     // cannot see.
     let intents = [
-        crate::call_teardown_outbox::CallTeardownIntent {
+        CallTeardownIntent {
             call_id: call_id.clone(),
-            target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+            target: TeardownTarget::MujiPresenceClear {
                 room_jid: room_jid.clone(),
                 departed: departed.clone(),
                 participant_sid: None,
@@ -940,9 +953,9 @@ async fn enqueue_muji_relay_teardown_fallback(
             room_sid: None,
             session: session.cloned(),
         },
-        crate::call_teardown_outbox::CallTeardownIntent {
+        CallTeardownIntent {
             call_id,
-            target: crate::call_teardown_outbox::TeardownTarget::Participant {
+            target: TeardownTarget::Participant {
                 identity: departed.clone(),
                 participant_sid: None,
             },
@@ -1097,7 +1110,7 @@ async fn mirror_remote_carbons_update(
             .update_remote_user_resource_if_owner(
                 jid,
                 owner,
-                crate::clustering::route_bridge::RemoteResourceStateUpdate::Carbons { enabled },
+                RemoteResourceStateUpdate::Carbons { enabled },
             )
             .await;
     }

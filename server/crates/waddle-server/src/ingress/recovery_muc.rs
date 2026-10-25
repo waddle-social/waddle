@@ -1,17 +1,14 @@
 //! Rebuild only frozen room copies whose mutation and archive proofs are complete.
 use super::RecoveryInput;
-use crate::{
-    ingress::room_canonical::{self, CanonicalSourceError},
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::IngressUowError,
-    server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan, PlannedEffect,
-    },
+use crate::ingress::room_canonical::{self, CanonicalSourceError};
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    Stanza,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]

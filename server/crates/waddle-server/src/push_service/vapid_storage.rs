@@ -18,6 +18,8 @@
 //! `docs/planning/startup-safety-2020-2024.md` for the trust boundary and the
 //! requirement that future child launchers exclude bootstrap secrets explicitly.
 
+use crate::db::DatabaseDriver;
+use crate::db::Rows;
 use std::env;
 use std::sync::Arc;
 
@@ -168,8 +170,8 @@ impl VapidStorage {
         // `BLOB` is the SQLite byte type; Postgres requires `BYTEA`. Use the
         // configured driver to emit the dialect-correct column type.
         let blob_type = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => "BLOB",
-            crate::db::DatabaseDriver::Postgres => "BYTEA",
+            DatabaseDriver::Sqlite => "BLOB",
+            DatabaseDriver::Postgres => "BYTEA",
         };
         // `kid` is a UUIDv4 and already `NOT NULL UNIQUE`; using it as the
         // primary key avoids the SQLite-vs-Postgres autoincrement-integer
@@ -207,11 +209,7 @@ impl VapidStorage {
             .map_err(|e| XmppError::internal(e.to_string()))
     }
 
-    async fn run_query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, XmppError> {
+    async fn run_query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, XmppError> {
         let conn = self
             .db
             .guard()

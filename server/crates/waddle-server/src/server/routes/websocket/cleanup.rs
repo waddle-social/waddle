@@ -1,15 +1,31 @@
-use super::state::MembershipGenerationFilter;
-use super::*;
-use super::{
-    frame::ResponseBatch,
-    replay::{
-        drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
-        ReplayDrainSink, TerminalDrainContext,
-    },
-    state::WsConnState,
-    stream_management::sm_show_from_name,
-    LocalDepartureItem,
+use super::frame::ResponseBatch;
+use super::replay::{
+    drain_outbound_into_replay, drain_outbound_into_terminal_recovery, PendingRowDrainPolicy,
+    ReplayDrainSink, TerminalDrainContext,
 };
+use super::state::MembershipGenerationFilter;
+use super::state::WsConnState;
+use super::stream_management::sm_show_from_name;
+use super::LocalDepartureItem;
+use super::{
+    debug, handlers, info, mpsc, warn, ActorRef, Arc, BareJid, ConnectionPhase, FullJid,
+    InFlightLease, LeaveByRealJid, OutboundStanza, PendingLocalMucDepartures, RoomActor,
+    RoomConfig, Stanza, WebSocketState,
+};
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+use crate::clustering::route_bridge::MucProxyRouteDecision;
+use crate::clustering::route_bridge::RemoteResourceUnregisterOutcome;
+use crate::clustering::ClusteringHandles;
+use crate::pending_delivery::FlushOutcome;
+use crate::pending_delivery::MamArchiveResolver;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
+use crate::server::routes::websocket::state::RemoteMucMembershipSnapshot;
+use crate::sm_promotion::DisplacedPromotionDeps;
+use crate::sm_promotion::PromotionSessionGuard;
+use crate::sm_promotion::RowBackedReleaseOutcome;
+use crate::sm_promotion::TerminalOverflowPromotionDeps;
 use std::collections::HashSet;
 use waddle_xmpp::muc::durable::OccupancyLeaveCause;
 use waddle_xmpp::muc::room_actor::{
@@ -72,7 +88,7 @@ async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> crate::clustering::route_bridge::RemoteResourceUnregisterOutcome {
+) -> RemoteResourceUnregisterOutcome {
     if let Some(bridge) = state
         .deps
         .app_state
@@ -84,7 +100,7 @@ async fn unregister_remote_user_resource_if_owner(
             .unregister_remote_user_resource_if_owner(jid, owner)
             .await;
     }
-    crate::clustering::route_bridge::RemoteResourceUnregisterOutcome::NotRegistered
+    RemoteResourceUnregisterOutcome::NotRegistered
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -519,7 +535,7 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
     session: LeaveSessionSelector,
-    origin: crate::server::routes::interpret::OrderedRelayRouteOrigin,
+    origin: OrderedRelayRouteOrigin,
 ) -> MucCleanupOutcome {
     if cleanup_muc_presence_with_origin(
         state,
@@ -1083,7 +1099,7 @@ async fn cleanup_connection_shutdown_inner(
                     if !displaced.is_empty() {
                         crate::sm_promotion::promote_displaced_sessions(
                             displaced.clone(),
-                            crate::sm_promotion::DisplacedPromotionDeps {
+                            DisplacedPromotionDeps {
                                 sm_registry: &state.deps.protocol.sm_session_registry,
                                 connection_registry: &state.deps.protocol.connection_registry,
                                 user_registry: &state.deps.protocol.user_registry,
@@ -1128,7 +1144,7 @@ async fn cleanup_connection_shutdown_inner(
                             Ok(Some(displaced)) => {
                                 let outcome = crate::sm_promotion::promote_displaced_sessions(
                                     vec![displaced],
-                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                    DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
                                         connection_registry: &state
                                             .deps
@@ -1347,7 +1363,7 @@ async fn cleanup_connection_shutdown_inner(
                             let promotion_outcome =
                                 crate::sm_promotion::promote_displaced_sessions(
                                     stranded.clone(),
-                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                    DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
                                         connection_registry: &state
                                             .deps
@@ -1638,7 +1654,7 @@ enum TerminalRouteRemoval {
 }
 
 struct TerminalRecoverySessionResult<'a> {
-    custody: crate::sm_promotion::PromotionSessionGuard<'a>,
+    custody: PromotionSessionGuard<'a>,
     released_pending_rows: bool,
     queued_pending_rows: bool,
     release_failed_pending_rows: bool,
@@ -1780,10 +1796,8 @@ async fn promote_terminal_recovery_inner(
     detached.promotion_custody = promotion_capture_custody(conn);
     // Capture every already-recorded terminal frame before any backend await.
     capture_terminal_recovery_backlog(conn, &mut detached, detached_snapshot);
-    let mut custody = crate::sm_promotion::PromotionSessionGuard::new(
-        &state.deps.protocol.sm_session_registry,
-        detached,
-    );
+    let mut custody =
+        PromotionSessionGuard::new(&state.deps.protocol.sm_session_registry, detached);
     let inventory_ready = match custody.register_inventory().await {
         Ok(()) => true,
         Err(error) => {
@@ -1803,7 +1817,7 @@ async fn promote_terminal_recovery_inner(
         )
         .await
     } else {
-        crate::sm_promotion::RowBackedReleaseOutcome {
+        RowBackedReleaseOutcome {
             ownership_unknown: true,
             ..Default::default()
         }
@@ -2035,7 +2049,7 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
         let Some(retry_lease) = entry.try_acquire_terminal_ordering_retry() else {
             return TerminalRedriveOutcome::OrderingDeferred;
         };
-        let resolver = crate::pending_delivery::MamArchiveResolver {
+        let resolver = MamArchiveResolver {
             mam_storage: std::sync::Arc::clone(&state.deps.protocol.mam_storage),
         };
         let outcome = tokio::select! {
@@ -2129,7 +2143,7 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
 fn spawn_terminal_pending_ordering_retry(
     state: &WebSocketState,
     mut target: LivePendingFlushTarget,
-    mut outcome: crate::pending_delivery::FlushOutcome,
+    mut outcome: FlushOutcome,
     retry_lease: waddle_xmpp::registry::TerminalOrderingRetryLease,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -2142,7 +2156,7 @@ fn spawn_terminal_pending_ordering_retry(
     let recipient = target.resource.to_bare();
     tokio::spawn(async move {
         let mut retry_lease = retry_lease;
-        let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+        let resolver = MamArchiveResolver { mam_storage };
         // Release settlement is independent of resource ownership. Afterwards,
         // allow one fresh target selection: its initial presence may already
         // have run while the old claim was still waiting for storage recovery.
@@ -2196,7 +2210,7 @@ fn spawn_terminal_pending_ordering_retry(
             };
             retry_lease = replacement_lease;
             target = replacement;
-            outcome = crate::pending_delivery::FlushOutcome::default();
+            outcome = FlushOutcome::default();
         }
     });
 }
@@ -2279,7 +2293,7 @@ async fn terminal_recovery_session<'a>(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     conn: &mut WsConnState,
-    mut custody: crate::sm_promotion::PromotionSessionGuard<'a>,
+    mut custody: PromotionSessionGuard<'a>,
     can_promote_incrementally: bool,
 ) -> TerminalRecoverySessionResult<'a> {
     outbound_rx.close();
@@ -2488,7 +2502,7 @@ async fn promote_terminal_recovery_prefix(
         let summary = crate::sm_promotion::promote_terminal_overflow_entry(
             detached,
             entry.clone(),
-            crate::sm_promotion::TerminalOverflowPromotionDeps {
+            TerminalOverflowPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
                 registry: &state.deps.protocol.connection_registry,
                 user_registry: &state.deps.protocol.user_registry,
@@ -2578,7 +2592,7 @@ async fn refuse_detach_without_principal(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     jid: &FullJid,
     conn: &mut WsConnState,
-    mut detached_sessions: Vec<crate::sm_promotion::PromotionSessionGuard<'_>>,
+    mut detached_sessions: Vec<PromotionSessionGuard<'_>>,
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
@@ -2664,7 +2678,7 @@ async fn refuse_detach_without_principal(
     } else {
         let outcome = crate::sm_promotion::promote_guarded_sessions(
             detached_sessions,
-            crate::sm_promotion::DisplacedPromotionDeps {
+            DisplacedPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
                 connection_registry: &state.deps.protocol.connection_registry,
                 user_registry: &state.deps.protocol.user_registry,
@@ -2915,7 +2929,7 @@ async fn cleanup_muc_presence_with_origin(
     state: &WebSocketState,
     jid: &FullJid,
     session: LeaveSessionSelector,
-    origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    origin: Option<&OrderedRelayRouteOrigin>,
     sweep: LocalSweep,
 ) -> bool {
     let LocalSweep {
@@ -3284,10 +3298,8 @@ async fn cleanup_muc_presence_with_origin(
 }
 
 #[cfg(feature = "clustering")]
-fn remote_membership_leave_origin(
-    membership: &crate::server::routes::websocket::state::RemoteMucMembershipSnapshot,
-) -> crate::clustering::ordered_relay::MucProxyOrigin {
-    crate::clustering::ordered_relay::MucProxyOrigin::Connection(membership.occupant_session())
+fn remote_membership_leave_origin(membership: &RemoteMucMembershipSnapshot) -> MucProxyOrigin {
+    MucProxyOrigin::Connection(membership.occupant_session())
 }
 
 /// Taking a membership hides it from ordinary reconciliation. Retain custody
@@ -3333,7 +3345,7 @@ impl Drop for RemoteMucCleanupGuard<'_> {
 async fn cleanup_remote_muc_presence(
     state: &WebSocketState,
     jid: &FullJid,
-    cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    cleanup_origin: Option<&OrderedRelayRouteOrigin>,
     remote_ceiling: u64,
     connection_generation: MembershipGenerationFilter,
     retry_policy: RemoteCleanupRetryPolicy,
@@ -3441,17 +3453,19 @@ async fn cleanup_remote_muc_presence(
         presence.to = Some(occupant.clone().into());
         let stanza = Stanza::Presence(presence);
         let mut decision = match origin.as_ref() {
-            Some(origin) => bridge
-                .try_proxy_muc_remote_decision(
-                    &room_jid,
-                    &stanza,
-                    crate::clustering::ordered_relay::OrderedRelayMucProxyKind::OccupantPresence,
-                    remote_membership_leave_origin(membership),
-                    origin,
-                    None,
-                )
-                .await,
-            None => crate::clustering::route_bridge::MucProxyRouteDecision::OriginUnavailable,
+            Some(origin) => {
+                bridge
+                    .try_proxy_muc_remote_decision(
+                        &room_jid,
+                        &stanza,
+                        OrderedRelayMucProxyKind::OccupantPresence,
+                        remote_membership_leave_origin(membership),
+                        origin,
+                        None,
+                    )
+                    .await
+            }
+            None => MucProxyRouteDecision::OriginUnavailable,
         };
         // A janitor has no live registration. A live sibling can keep the
         // UserActor claim foreign indefinitely, so forward the exact recorded
@@ -3584,9 +3598,7 @@ enum RemoteMucCleanupDisposition {
 }
 
 #[cfg(feature = "clustering")]
-fn remote_muc_cleanup_disposition(
-    decision: &crate::clustering::route_bridge::MucProxyRouteDecision,
-) -> RemoteMucCleanupDisposition {
+fn remote_muc_cleanup_disposition(decision: &MucProxyRouteDecision) -> RemoteMucCleanupDisposition {
     use crate::clustering::route_bridge::{MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
     match decision {
         MucProxyRouteDecision::Attempted(attempt) => match &attempt.outcome {
@@ -3610,15 +3622,13 @@ fn remote_muc_cleanup_disposition(
 }
 
 #[cfg(feature = "clustering")]
-fn clustered_user_actor_cleanup_origin(
-    jid: &FullJid,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+fn clustered_user_actor_cleanup_origin(jid: &FullJid) -> Option<OrderedRelayRouteOrigin> {
     let entity = waddle_xmpp::ownership::Entity::new(
         waddle_xmpp::ownership::EntityType::UserActor,
         jid.to_bare().to_string(),
     );
-    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(entity.clone()),
+    Some(OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
         sender_entity: entity,
         inbound_sequence: 0,
         handoff: None,
@@ -3639,7 +3649,7 @@ async fn clustered_cleanup_origin(
     state: &WebSocketState,
     jid: &FullJid,
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+) -> Option<OrderedRelayRouteOrigin> {
     if let Some(bridge) = state
         .deps
         .app_state
@@ -3648,10 +3658,8 @@ async fn clustered_cleanup_origin(
         .as_ref()
     {
         if let Some(remote) = bridge.remote_resource_origin_if_owner(jid, owner).await {
-            return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::RemoteResource(
-                    remote,
-                ),
+            return Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::RemoteResource(remote),
                 sender_entity: waddle_xmpp::ownership::Entity::new(
                     waddle_xmpp::ownership::EntityType::UserActor,
                     jid.to_bare().to_string(),
@@ -3669,7 +3677,7 @@ async fn clustered_cleanup_origin(
     _state: &WebSocketState,
     _jid: &FullJid,
     _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+) -> Option<OrderedRelayRouteOrigin> {
     None
 }
 
@@ -3677,7 +3685,7 @@ async fn clustered_cleanup_origin(
 async fn acquire_remote_muc_cleanup_origin(
     state: &WebSocketState,
     jid: &FullJid,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+) -> Option<OrderedRelayRouteOrigin> {
     let bare_jid = jid.to_bare();
     let entity = waddle_xmpp::ownership::Entity::new(
         waddle_xmpp::ownership::EntityType::UserActor,
@@ -3711,10 +3719,8 @@ async fn acquire_remote_muc_cleanup_origin(
         .reply_timeout(std::time::Duration::from_secs(2))
         .await
     {
-        Ok(_) => Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-                entity.clone(),
-            ),
+        Ok(_) => Some(OrderedRelayRouteOrigin {
+            kind: OrderedRelayRouteOriginKind::Entity(entity.clone()),
             sender_entity: entity,
             inbound_sequence: 0,
             handoff: None,
@@ -3753,7 +3759,7 @@ enum RemoteMucCleanupClaimObservationError {
 
 #[cfg(feature = "clustering")]
 async fn remote_muc_cleanup_claim_available(
-    claims: &crate::clustering::ClusteringHandles,
+    claims: &ClusteringHandles,
     entity: &waddle_xmpp::ownership::Entity,
 ) -> Result<bool, RemoteMucCleanupClaimObservationError> {
     let (Some(store), Some(identity)) = (&claims.claim_store, &claims.node_identity) else {
@@ -3801,7 +3807,7 @@ async fn reap_remote_muc_cleanup_origin_if_empty(state: &WebSocketState, jid: &F
 async fn cleanup_remote_muc_presence(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _cleanup_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    _cleanup_origin: Option<&OrderedRelayRouteOrigin>,
     _remote_ceiling: u64,
     _connection_generation: MembershipGenerationFilter,
     _retry_policy: RemoteCleanupRetryPolicy,
@@ -4297,11 +4303,9 @@ pub(crate) async fn destroy_room_actor(
 mod destroy_completion_tests {
     use super::super::tests::create_test_websocket_state;
     use super::*;
-    use waddle_xmpp::muc::{
-        room_actor::GetSnapshot,
-        room_registry_actor::{CreateInstantRoom, DestroyCompletion},
-        DestroyRequest,
-    };
+    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room_registry_actor::{CreateInstantRoom, DestroyCompletion};
+    use waddle_xmpp::muc::DestroyRequest;
 
     fn room_jid(local: &str) -> BareJid {
         format!("{local}@muc.example.com")
@@ -4382,11 +4386,9 @@ mod destroy_completion_tests {
 mod eviction_tests {
     use super::super::tests::create_test_websocket_state;
     use super::*;
-    use waddle_xmpp::muc::{
-        room_actor::{Join, LeaveByRealJid},
-        room_registry_actor::{CreateInstantRoom, CreateRoom, RoomCount},
-        RoomConfig,
-    };
+    use waddle_xmpp::muc::room_actor::{Join, LeaveByRealJid};
+    use waddle_xmpp::muc::room_registry_actor::{CreateInstantRoom, CreateRoom, RoomCount};
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp_core::{Affiliation, Role};
 
     fn full_jid(s: &str) -> FullJid {
@@ -4434,9 +4436,8 @@ mod eviction_tests {
     #[cfg(feature = "clustering")]
     #[test]
     fn remote_muc_cleanup_success_leaves_fresh_join_untouched() {
-        use crate::clustering::route_bridge::{
-            MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome::Delivered,
-        };
+        use crate::clustering::route_bridge::OrderedRelayMucProxyOutcome::Delivered;
+        use crate::clustering::route_bridge::{MucProxyRouteAttempt, MucProxyRouteDecision};
         use waddle_xmpp::ingress::RelayTargetIdentity;
 
         let memberships = crate::server::routes::websocket::state::RemoteMucMemberships::default();
@@ -4823,10 +4824,8 @@ mod local_departure_cleanup_tests {
     use jid::{BareJid, FullJid};
     use kameo::actor::ActorRef;
     use std::collections::HashMap;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use waddle_sfu::SfuService;

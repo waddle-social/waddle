@@ -6,9 +6,8 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use minidom::Element;
-use waddle_xmpp_client::{
-    stream_management::SmState, SmResumeState, StreamId, UnhandledOutboundEntry,
-};
+use waddle_xmpp_client::stream_management::SmState;
+use waddle_xmpp_client::{SmResumeState, StreamId, UnhandledOutboundEntry};
 use waddle_xmpp_core::xep0359::{
     add_origin_id, add_stanza_id, extract_origin_id, extract_stanza_ids, OriginId,
     StanzaId as StableStanzaId,

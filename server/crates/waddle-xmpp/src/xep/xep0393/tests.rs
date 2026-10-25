@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    add_unstyled, blocks_to_html, blocks_to_plain, build_unstyled_element, has_unstyled,
+    parse_blocks, parse_message_body, parse_spans, spans_to_plain, strip_unstyled, Block, Element,
+    Span, StyledBody, StylingCarrier, NS_STYLING,
+};
 use xmpp_parsers::message::{Lang, Message};
 
 // ── Inline span tests ────────────────────────────────────

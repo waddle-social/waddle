@@ -1,8 +1,10 @@
-use super::*;
-use waddle_xmpp::{
-    ingress::EntityGeneration,
-    muc::{RoomSubjectTexts, SubjectState},
+use super::{
+    authorized_source, CanonicalSourceError, EffectMessageIdentity, ExternalDeliveryEffect,
+    ExternalEffect, IngressEffectIntent, Message, MessageEnvelope, MucRecoveryError, RecoveryInput,
+    Stanza,
 };
+use waddle_xmpp::ingress::EntityGeneration;
+use waddle_xmpp::muc::{RoomSubjectTexts, SubjectState};
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::MessageType;
 
@@ -124,10 +126,8 @@ fn muc_recovery_body_with_subject_does_not_require_subject_mutation() {
 
 #[test]
 fn original_reflection_recovers_after_occupant_receipt_without_new_audience() {
-    use crate::ingress::{
-        recorded::RouteProgress,
-        recovery_rebuild::{self, RecoveryInput},
-    };
+    use crate::ingress::recorded::RouteProgress;
+    use crate::ingress::recovery_rebuild::{self, RecoveryInput};
     use waddle_xmpp::ingress::MessageKey;
     let (envelope, room) = groupchat();
     let reflection =

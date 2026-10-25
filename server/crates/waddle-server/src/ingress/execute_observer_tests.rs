@@ -1,11 +1,16 @@
-use super::*;
-use crate::ingress::{
-    commit::commit_submission,
-    test_support::{capture_room_message, IngressFixture},
+use super::{
+    classify_outcome, execute_effects, terminalize_if_complete, CanonicalMessageRepository, Deps,
+    Duration, Effect, EffectOutcome, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
+    Stanza,
 };
-use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSuppressionPolicy};
+use super::{ExecutionReport, IngressDecision};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::{capture_room_message, IngressFixture};
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::registry::ConnectionRegistry;
 use xmpp_parsers::message::Message;
 
 fn observer_plugin() -> waddle_extensions::PluginId {

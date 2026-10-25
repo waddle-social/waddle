@@ -1,5 +1,5 @@
 use super::permissions::{delete_channel_parent_tuple, write_channel_parent_tuple};
-use super::*;
+use super::{warn, BareJid, PubSubItem, WebSocketState};
 
 pub(super) async fn cleanup_stale_space_bookmarks(
     state: &WebSocketState,

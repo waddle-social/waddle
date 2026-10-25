@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    debug, interpret_with_depth, rewrite_stanza_archive_ids, warn, Arc, Blocklist, Deps, FullJid,
+    InMemorySmSessionRegistry, InboundEvent, InterpretOutcome, Jid, OutboundEvent,
+    SmIngressAppendContext, Stanza, XmppStateMachine,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
 
 pub(super) async fn run_headless_recipient_pass(
     deps: &Deps<'_>,
@@ -696,11 +701,8 @@ async fn deliver_one_via_actor_at(
     // reflection.
     // Preserve the same recorded obligation on live queues and detached fallback.
     // Owner mirrors forward this claim unchanged; detach retains canonical authorization.
-    let ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
-        ingress_append_context,
-        stanza,
-    )
-    .map(|obligation| obligation.into_relayed_for(target.clone()));
+    let ingress_append = IngressAppendObligationRef::for_message(ingress_append_context, stanza)
+        .map(|obligation| obligation.into_relayed_for(target.clone()));
     let mut retry_delays = DROPPED_FULL_RETRY_DELAYS.iter();
     let outcome: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> = loop {
         let attempt: Result<waddle_xmpp::registry::BroadcastOutcome, (ActorSendFailure, String)> =

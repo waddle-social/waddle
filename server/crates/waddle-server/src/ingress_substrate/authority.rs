@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    acquire_epoch_lock_first, decode_stored_alias, dialect_sql, discard_database_error,
+    lock_message_for_child, supported_protocol_epoch, Database, DatabaseDriver, IngressOrdinal,
+    IngressSubstrateError, MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid,
+    WireHandledCount,
+};
 use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
 use xmpp_parsers::message::Message;
 
@@ -311,10 +316,9 @@ pub async fn record_room_canonical_envelope(
 mod room_manifest_tests {
     use super::*;
     use crate::ingress::RoomManifestSnapshot;
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, IngressEffectIntent},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
-    };
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    use waddle_xmpp::muc::durable::AdminMutationId;
+    use waddle_xmpp::muc::room_actor::OccupancyWatermark;
 
     fn envelope() -> MessageEnvelope {
         let room = "room@conference.example.com"

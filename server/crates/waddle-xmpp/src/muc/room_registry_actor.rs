@@ -4,6 +4,9 @@
 //! legacy registry (deleted in #1136) with a single-writer actor that owns
 //! the room map and spawns per-room `RoomActor` instances on demand.
 
+use crate::xep::xep0317::ServerHats;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -168,7 +171,7 @@ struct LiveRoomRestore {
     live_roster_restore_attempt: super::durable::AdminMutationId,
     occupancy_incarnation: super::durable::AdminMutationId,
     departures: super::room_actor::DepartureLedger,
-    pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    pending_affiliation_departures: BTreeSet<BareJid>,
     pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,
     admin_mutation_resolutions: Vec<super::room_actor::AdminMutationResolution>,
 }
@@ -386,7 +389,7 @@ pub struct RoomRegistryActor {
     occupant_id_secret: OccupantIdSecret,
     /// Deployment-wide XEP-0317 hats, forwarded to every `RoomActor` at
     /// spawn alongside the occupant-id secret.
-    server_hats: crate::xep::xep0317::ServerHats,
+    server_hats: ServerHats,
     /// Durable membership source used to hydrate each freshly spawned
     /// `RoomActor`'s durable-recipient set (#1135). `None` in
     /// deployments/tests without a durable membership store; such
@@ -544,23 +547,22 @@ pub enum RoomRegistryError {
 
 impl RoomRegistryActor {
     fn destroy_effects(completion: &DestroyCompletion) -> RoomMutationEffects {
-        let mut by_nick: std::collections::BTreeMap<MucOccupantNick, Vec<jid::FullJid>> =
-            completion
-                .room
-                .occupants
-                .values()
-                .map(|occupant| {
-                    (
-                        MucOccupantNick::try_new(occupant.nick.clone())
-                            .expect("nick was previously accepted"),
-                        completion
-                            .room
-                            .occupant_sessions(&occupant.nick)
-                            .into_iter()
-                            .collect(),
-                    )
-                })
-                .collect();
+        let mut by_nick: BTreeMap<MucOccupantNick, Vec<jid::FullJid>> = completion
+            .room
+            .occupants
+            .values()
+            .map(|occupant| {
+                (
+                    MucOccupantNick::try_new(occupant.nick.clone())
+                        .expect("nick was previously accepted"),
+                    completion
+                        .room
+                        .occupant_sessions(&occupant.nick)
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect();
         // #1647: unacknowledged departure receipts belong to sessions that
         // already left the roster but never saw their leave reply. The
         // terminal destroy effect is the last chance to settle the owed
@@ -1331,7 +1333,7 @@ impl RoomRegistryActor {
         self
     }
 
-    pub fn with_server_hats(mut self, server_hats: crate::xep::xep0317::ServerHats) -> Self {
+    pub fn with_server_hats(mut self, server_hats: ServerHats) -> Self {
         self.server_hats = server_hats;
         self
     }
@@ -5276,7 +5278,7 @@ pub struct GetOrCreateRoomWithLiveRoster {
     /// [`super::room_actor::RestoreLiveRoster`]).
     pub departures: super::room_actor::DepartureLedger,
     /// Affiliation revocations whose callers still own the departure effects.
-    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    pub pending_affiliation_departures: BTreeSet<BareJid>,
     /// Preserve unresolved admin effects and exact attempt verdicts across
     /// every live-roster handoff, including mediated-invite recovery.
     pub pending_admin_projection: Option<super::room_actor::PendingAdminProjection>,

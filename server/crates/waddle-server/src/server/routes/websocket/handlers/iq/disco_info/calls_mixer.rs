@@ -8,7 +8,7 @@
 //! Muji + Jingle + RTP + LiveKit-transport features the server
 //! understands.
 
-use super::*;
+use super::{build_disco_info_response, DiscoInfoRequest, DiscoInfoResponse, Feature, Identity};
 
 /// Handle a disco#info query targeted at `calls.<server-domain>`.
 /// Returns `None` for queries to any other JID so the dispatcher

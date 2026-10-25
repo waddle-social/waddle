@@ -1,9 +1,10 @@
 //! Late-bound execution dependencies, weakly held to avoid an authority/state cycle.
 
+use crate::server::routes::interpret::Deps;
 use std::sync::{Arc, Mutex, Weak};
 
 pub trait RecoveryEnvironment: Send + Sync {
-    fn recovery_deps(&self) -> crate::server::routes::interpret::Deps<'_>;
+    fn recovery_deps(&self) -> Deps<'_>;
 }
 
 #[derive(Clone, Default)]

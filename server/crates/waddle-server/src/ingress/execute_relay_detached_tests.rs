@@ -1,14 +1,17 @@
 //! A frozen remote route retains its receipt identity when execution falls back locally.
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    execute_effects, terminalize_if_complete, CanonicalMessageRepository, Deps, DispatchReadiness,
+    Duration, Effect, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome,
+    FullJidDeliveryOutcome, ImmediateSink, PlannedEffect, Stanza,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    stream_management::{
-        DetachedSession, InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind,
-        SmSessionRegistry,
-    },
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmIngressAppendKey, SmIngressReceiptKind,
+    SmSessionRegistry,
 };
 
 async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: bool) {
@@ -242,7 +245,12 @@ async fn postgres_remote_planned_relay_detached_receipt_failure_does_not_reappen
 }
 
 #[cfg(feature = "clustering")]
-use crate::clustering::{ordered_relay::*, route_bridge::OrderedRelayDeliveryBridge};
+use crate::clustering::ordered_relay::{
+    OrderedRelayPayload, OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation,
+    RemoteStanzaEnvelope,
+};
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
 
 /// Replaces only the transport hop; reservations, claim/signature validation,
 /// append authorization and the receiving node's durable SM append are real.
@@ -587,9 +595,8 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
 #[tokio::test]
 async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending() {
     use crate::ingress::xep0045_room_manifest_tests::room_submission;
-    use crate::server::routes::interpret::{
-        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
-    };
+    use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
     let fixture = IngressFixture::sqlite().await;
     let mut submission = room_submission(&fixture);
     let IngressEffectIntent::RouteMucGroupchat {
@@ -681,9 +688,8 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
     use crate::ingress_uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
     };
-    use crate::server::routes::interpret::{
-        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
-    };
+    use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
     use waddle_xmpp::ingress::{DigestContext, DigestInput};
     let fixture = IngressFixture::sqlite().await;
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
@@ -905,18 +911,15 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_wire_attempt() {
-    use crate::ingress::{xep0045_room_manifest_tests::room_submission, RoomManifestSnapshot};
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::ingress::RoomManifestSnapshot;
     use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
-    use crate::server::routes::interpret::{
-        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+    use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
+    use waddle_xmpp::muc::room_actor::{
+        GetRoomSnapshot, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
     };
-    use waddle_xmpp::muc::{
-        room_actor::{
-            GetRoomSnapshot, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin,
-            LeaveSessionSelector,
-        },
-        room_registry_actor::CreateRoom,
-    };
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     for (reflection, detached) in [(false, false), (true, false), (false, true), (true, true)] {
         let fixture = IngressFixture::sqlite().await;
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;

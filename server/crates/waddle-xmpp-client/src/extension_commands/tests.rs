@@ -9,7 +9,15 @@ use minidom::Element;
 use crate::discovery::{DiscoDataField, DiscoDataForm, DiscoInfoResult, DiscoItem};
 use crate::xep::xep0050::{AdHocAction, AdHocStatus, NS_COMMANDS, NS_DATA_FORMS};
 
-use super::*;
+use super::{
+    build_extension_invoke_iq, build_extension_submit_iq, extension_command_descriptor,
+    extension_command_refs, extension_service_candidates, fallback_extension_service_jid,
+    is_extension_service, parse_extension_command_metadata, parse_extension_command_result,
+    ExtensionCommandItemRef, ExtensionCommandMetadata, ExtensionCommandNote, ExtensionCommandScope,
+    ExtensionFieldType, ExtensionFormOption, ExtensionNoteType, ExtensionResponseError,
+    ExtensionSubmitField, EXTENSION_COMMAND_FORM_TYPE, INVOKE_COMMAND_NODE, NS_WADDLE_EXTENSION_1,
+    ROOM_JID_FIELD,
+};
 
 const CLIENT_NS: &str = "jabber:client";
 

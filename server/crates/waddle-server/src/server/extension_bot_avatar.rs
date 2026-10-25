@@ -12,7 +12,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use minidom::Element;

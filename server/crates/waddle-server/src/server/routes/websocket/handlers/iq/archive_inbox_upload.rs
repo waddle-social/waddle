@@ -1,4 +1,17 @@
-use super::*;
+use super::{
+    bad_request_iq_error, build_fin_iq, build_inbox_entry_message, build_inbox_fin_iq,
+    build_iq_error_xml_typed, build_mark_read_result, build_query_form_iq, build_result_messages,
+    build_upload_error, build_upload_slot_response, chrono, debug, effective_content_type,
+    feature_not_implemented_iq_error, forbidden_iq_error, get_managed_channel_for_room,
+    internal_server_error_iq_error, iq_to_xml, is_inbox_iq, is_mam_query,
+    is_mam_query_form_request, is_mark_read_iq, is_muc_room_jid, is_upload_request,
+    item_not_found_iq_error, jid_malformed_iq_error, not_authorized_iq_error, parse_inbox_query,
+    parse_mam_query, parse_mark_read, parse_upload_request, resolve_muc_room_archive_access,
+    sanitize_filename, stanza_to_xml, warn, BareJid, CheckPermission, ConnectionPhase, DbExecute,
+    InboxFinCounts, InboxLastMessage, Object, ObjectType, Permission, RoomArchiveAccess, Stanza,
+    Subject, UploadError, UploadSlot, WebSocketState, XmppChannelRecord,
+};
+use crate::db::actor::DbQueryOne;
 
 pub(super) async fn handle_archive_inbox_upload_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -470,7 +483,7 @@ async fn group_dm_archive_visibility(
 
     let actor = state.deps.app_state.db_pool.global_actor().clone();
     let row = match actor
-        .ask(crate::db::actor::DbQueryOne {
+        .ask(DbQueryOne {
             sql: "SELECT visible_after FROM group_dm_archive_boundaries WHERE room_jid = ? AND member_jid = ?".to_string(),
             params: vec![room_jid.to_string().into(), sender_bare.to_string().into()],
         })

@@ -1,8 +1,13 @@
+use super::Repo;
 use sha2::{Digest, Sha256};
 use waddle_xmpp::xep::xep0428::{build_fallback_element, FallbackIndication};
 use waddle_xmpp::xep::xep0461::{build_reply_element, ReplyReference, NS_REPLY};
 
-use super::*;
+use super::{
+    capture, configured_observer, correction_intent, initialize_room_observations, intent, message,
+    payload, record_message, room, sender, subscription, EffectReceiptRepository, IngressFixture,
+    Message, MessageKey, RoomObservationOutcome, RoomObservationResult, Sha256Digest, Utc,
+};
 
 fn with_reply(mut message: Message, quote_len: usize) -> Message {
     message.payloads.push(build_reply_element(

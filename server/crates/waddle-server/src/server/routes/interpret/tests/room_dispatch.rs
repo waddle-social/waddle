@@ -1,8 +1,20 @@
 #[cfg(feature = "clustering")]
 use super::super::room_dispatch::capture_delivered_remote_room_route;
 use super::super::room_dispatch::push_sender_error_reply;
-use super::*;
+use super::{
+    available_bot_nick, available_bot_nick_with_base, chat_msg, drain_inbound, effects,
+    extract_forum_action, interpret, message_thread_id, normalize_thread_create_source,
+    parse_reply_from_message, plan_bot_groupchat_message, prepare_extension_room_message,
+    register_into_both_tiers, room_scoped_reply_to_attr, set_thread_create, set_thread_id,
+    waddle_id_for_room_jid, Arc, BareJid, BotGroupchatDispatch, CaptureWriter, ConnectionRegistry,
+    DefinedCondition, DeliveryExecutionContext, Deps, DisplayText, Element, ErrorType,
+    ExtensionManager, ExtensionRoomMessage, ForumAction, FullJid, IngressEffectIntent,
+    InterpretOutcome, Jid, Message, MessageMarkupKind, MessageMarkupSpan, OccupantSnapshot,
+    OutboundEvent, ReplyTarget, RoomJid, Stanza, StanzaError, StanzaId, ThreadCreate, ThreadId,
+    XmppMessageType,
+};
 use crate::ingress::IngressEffectCapture;
+use kameo::actor::Spawn;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -727,10 +739,13 @@ async fn assert_room_observer_message_planning(
     archive_available: bool,
     expected: bool,
 ) {
+    use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
     use crate::server::routes::interpret::effects::{
-        room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
+        Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
     };
-    use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom, RoomConfig};
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::{Affiliation, Role};
 
     let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;

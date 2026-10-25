@@ -1,16 +1,16 @@
-use super::super::{
-    cleanup::{
-        cleanup_connection_shutdown, cleanup_force_detach_connection_shutdown,
-        cleanup_muc_presence_for_jid,
-    },
-    frame::{handle_xmpp_frame, settle_inbound_dispatch},
-    frame_backstop::InboundDisposition,
-    handlers,
-    interpret_loop::build_interpret_deps,
-    replay::drive_interpret_loop,
-    state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
-    stream_management::is_countable_stanza,
-    transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
+use super::super::cleanup::{
+    cleanup_connection_shutdown, cleanup_force_detach_connection_shutdown,
+    cleanup_muc_presence_for_jid,
+};
+use super::super::frame::{handle_xmpp_frame, settle_inbound_dispatch};
+use super::super::frame_backstop::InboundDisposition;
+use super::super::handlers;
+use super::super::interpret_loop::build_interpret_deps;
+use super::super::replay::drive_interpret_loop;
+use super::super::state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
+use super::super::stream_management::is_countable_stanza;
+use super::super::transport_xml::{
+    build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml,
 };
 use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
@@ -22,22 +22,21 @@ use super::{
     store_resumable_detached_session,
 };
 use crate::auth::Session;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use jid::{BareJid, FullJid};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
-use waddle_xmpp::{
-    ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity},
-    protocol::{Blocklist, ConnectionPhase, InboundEvent},
-    registry::{
-        ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-        GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
-    },
-    stream_management::{InMemorySmSessionRegistry, SmSessionRegistry, SM_NS},
-    telemetry::attributes::SmEvictionPath,
-    Stanza,
+use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::protocol::{Blocklist, ConnectionPhase, InboundEvent};
+use waddle_xmpp::registry::{
+    ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
 };
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry, SM_NS};
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::minidom::Element;
 
 struct HangingEnsureClaimStore {
@@ -8284,14 +8283,13 @@ async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect()
     use super::super::stream_management::{
         finalize_sm_after_registry_registration, SmRegistrationFinalization,
     };
-    use waddle_xmpp::{
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, SmSessionId,
-        },
-        stream_management::{
-            persistence::{InMemorySmPersistence, SmPersistenceStorage},
-            DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
-        },
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
     };
 
     let source = Arc::new(InMemorySmPersistence::new());
@@ -8488,14 +8486,11 @@ async fn sm_resume_ack_survives_failed_completion_then_expiry_and_reconnect() {
     use super::super::stream_management::{
         finalize_sm_after_registry_registration, SmRegistrationFinalization,
     };
-    use waddle_xmpp::{
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, SmSessionId,
-        },
-        stream_management::{
-            persistence::SmPersistenceStorage, DetachedSessionSnapshot, PromotionCaptureCustody,
-            StreamManagementState,
-        },
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    use waddle_xmpp::stream_management::{
+        DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
     };
 
     let source = Arc::new(FailDeleteSmPersistence::new());
@@ -12258,8 +12253,10 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
 mod terminal_ordering_release_tests {
     use super::*;
     use crate::pending_delivery::DatabasePendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::storage::{
+        PendingClaimToken, PendingDeliveryStorage, PendingStorageError,
+    };
     use waddle_xmpp::pending_delivery::{
-        storage::{PendingClaimToken, PendingDeliveryStorage, PendingStorageError},
         InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
     };
     use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;

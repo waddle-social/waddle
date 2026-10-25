@@ -1,6 +1,9 @@
 //! Validated identifiers, JIDs, namespaces, artifact references, and body ranges.
 
-use super::*;
+use super::{
+    fmt, is_official_namespace, BareJid, Deserialize, FrameworkTypeError, FullJid, Serialize,
+    FRAMEWORK_NAMESPACE, INVOKE_COMMAND_NODE,
+};
 
 typed_non_empty_string!(
     ActionId,

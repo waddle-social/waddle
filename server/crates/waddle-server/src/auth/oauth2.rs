@@ -1,5 +1,6 @@
 use crate::auth::{AuthError, AuthProviderConfig, IdentityClaims};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::elliptic_curve::rand_core::OsRng;

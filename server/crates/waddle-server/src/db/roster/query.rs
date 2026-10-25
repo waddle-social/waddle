@@ -1,4 +1,5 @@
 use crate::db::IntoParams;
+use crate::db::Rows;
 use jid::BareJid;
 use tokio::time::sleep;
 use tracing::{debug, instrument};
@@ -322,7 +323,7 @@ impl DatabaseRosterStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, RosterStorageError> {
+    ) -> Result<Rows, RosterStorageError> {
         let conn = self
             .db
             .guard()

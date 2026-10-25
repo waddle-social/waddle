@@ -1,5 +1,6 @@
 //! Conversion between component host-tool requests and typed framework contracts.
 
+use crate::types::FrameworkTypeError;
 use chrono::{DateTime, Utc};
 use xmpp_parsers::jid::BareJid;
 
@@ -500,7 +501,7 @@ fn parse_timestamp(value: String) -> std::result::Result<DateTime<Utc>, HostTool
         })
 }
 
-fn host_type_error(error: crate::types::FrameworkTypeError) -> HostToolError {
+fn host_type_error(error: FrameworkTypeError) -> HostToolError {
     HostToolError::invalid_request(
         DisplayText::try_new(error.to_string()).expect("type error message is non-empty"),
     )

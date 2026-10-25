@@ -1,14 +1,13 @@
-use super::{
-    delivery::ExternalDeliveryEffect,
-    direct::{DurableDirectEffect, ExternalDirectEffect},
-    room::{DurableRoomEffect, ExternalRoomEffect, RoomFenceRequirement},
-    PlanEffectDependency, PlanSuppressionPolicy,
-};
+use super::delivery::ExternalDeliveryEffect;
+use super::direct::{DurableDirectEffect, ExternalDirectEffect};
+use super::room::{DurableRoomEffect, ExternalRoomEffect, RoomFenceRequirement};
+use super::{PlanEffectDependency, PlanSuppressionPolicy};
+use crate::ingress::room_manifest::RoomManifestSnapshot;
+use crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation;
+use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
 use jid::BareJid;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, RelayTargetIdentity},
-    Stanza,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, RelayTargetIdentity};
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 #[derive(Clone, Debug)]
@@ -22,10 +21,8 @@ pub enum ExternalEffect {
     RouteToPeer(super::invite::MucUserRoute),
     QueueOfflineDelivery(super::invite::MucUserRoute),
     RoomMembershipMutation(super::early::RoomMembershipMutation),
-    InviteLedger(
-        crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation,
-    ),
-    DmPinMutation(crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation),
+    InviteLedger(InviteLedgerMutation),
+    DmPinMutation(DmPinMutation),
     Frame(Box<Stanza>),
     Direct(ExternalDirectEffect),
     Room(ExternalRoomEffect),
@@ -102,7 +99,7 @@ pub enum RoomExecutionPath {
         fence: RoomFenceRequirement,
         snapshot_generation: u64,
         /// Frozen room authority and recipient occupancy guards captured in Phase A.
-        manifest_snapshot: Option<crate::ingress::room_manifest::RoomManifestSnapshot>,
+        manifest_snapshot: Option<RoomManifestSnapshot>,
     },
     Remote {
         room: BareJid,

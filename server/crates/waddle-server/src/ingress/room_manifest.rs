@@ -2,21 +2,17 @@
 use std::collections::HashSet;
 
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{
-    ingress::{DeliveryKey, EffectAuthorityKey, IngressEffectIntent, MessageKey},
-    muc::{
-        durable::{
-            AdminMutationId, RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId,
-            RoomRevision,
-        },
-        room_actor::OccupancyWatermark,
-    },
-    ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity},
+use waddle_xmpp::ingress::{DeliveryKey, EffectAuthorityKey, IngressEffectIntent, MessageKey};
+use waddle_xmpp::muc::durable::{
+    AdminMutationId, RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId, RoomRevision,
 };
+use waddle_xmpp::muc::room_actor::OccupancyWatermark;
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::decision::EffectReceiptKey;
-use crate::{ingress_substrate::IngressSubstrateError, ingress_uow::IngressUowError};
+use crate::ingress_substrate::IngressSubstrateError;
+use crate::ingress_uow::IngressUowError;
 
 /// One actor snapshot, captured before the handled frontier advances.
 #[derive(Debug, Clone, PartialEq, Eq)]

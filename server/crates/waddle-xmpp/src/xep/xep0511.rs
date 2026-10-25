@@ -4,10 +4,8 @@
 //! an `rdf:Description` element with a namespaced `rdf:about` attribute and
 //! optional OpenGraph text properties.
 
-use minidom::{
-    rxml::{xml_ncname, Namespace},
-    Element,
-};
+use minidom::rxml::{xml_ncname, Namespace};
+use minidom::Element;
 use thiserror::Error;
 use url::Url;
 use waddle_xmpp_core::{DirectVideoMediaType, PreviewImageMediaType};

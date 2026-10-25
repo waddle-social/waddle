@@ -2,29 +2,22 @@ use super::{
     requeue_failed_accounting, run_maintenance_pass, run_maintenance_pass_with_cursor,
     MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome, RECOVERY_ACCOUNTING_QUEUE_BOUND,
 };
-use crate::{
-    db::DatabaseDriver,
-    ingress::{
-        commit::commit_submission,
-        effects::{
-            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-            Effect,
-        },
-        execute::{execute_effects, test_hooks},
-        gc::{run_retention_gc_coordinator, RetentionGcCoordinator},
-        test_support::IngressFixture,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
-    },
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-};
-use std::{sync::Arc, time::Duration};
+use crate::db::DatabaseDriver;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use crate::ingress::effects::Effect;
+use crate::ingress::execute::{execute_effects, test_hooks};
+use crate::ingress::gc::{run_retention_gc_coordinator, RetentionGcCoordinator};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect};
+use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey},
-    registry::ConnectionRegistry,
-    Stanza,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::Stanza;
 
 #[path = "maintenance_waits_tests.rs"]
 mod lease_waits;

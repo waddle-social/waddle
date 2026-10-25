@@ -1,8 +1,15 @@
-use super::*;
+use super::frame::{ResponseFrame, StreamErrorFrame};
+use super::transport_xml::websocket_stream_close_element;
 use super::{
-    frame::{ResponseFrame, StreamErrorFrame},
-    transport_xml::websocket_stream_close_element,
+    debug, info, warn, BareJid, ConnectionPhase, Element, FromStr, Session, SmEnable, SmResume,
+    SmStanza, StreamManagementState, WebSocketState,
 };
+use crate::auth::session::PrincipalResolution;
+use crate::db::actor::DbExecute;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::SmInboundCompletionTracker;
+#[cfg(test)]
+use std::sync::Arc;
 mod observe;
 #[cfg(test)]
 mod timeout_tests;
@@ -385,8 +392,7 @@ pub(super) struct SmCtx<'a> {
     pub(super) sm_state: &'a mut StreamManagementState,
     pub(super) sm_ingress_fence:
         &'a mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
-    pub(super) sm_inbound_completion:
-        &'a mut crate::server::routes::interpret::SmInboundCompletionTracker,
+    pub(super) sm_inbound_completion: &'a mut SmInboundCompletionTracker,
     pub(super) authenticated_session: &'a mut Option<Session>,
     pub(super) occupancy_session: &'a mut waddle_xmpp_core::OccupancySessionGeneration,
     pub(super) carbons_enabled: &'a mut bool,
@@ -1182,7 +1188,7 @@ async fn handle_sm_resume_terminal(
         .await;
     match early_resolution {
         crate::auth::session::PrincipalResolution::Resolved(_) => {}
-        crate::auth::session::PrincipalResolution::Missing => {
+        PrincipalResolution::Missing => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
@@ -1192,7 +1198,7 @@ async fn handle_sm_resume_terminal(
         // A durable row exists but its auth context diverged (context
         // version, auth epoch, or JID): an identity mismatch, not an
         // unavailable principal. Same `not-authorized` wire condition.
-        crate::auth::session::PrincipalResolution::Mismatched => {
+        PrincipalResolution::Mismatched => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
@@ -1263,7 +1269,7 @@ async fn handle_sm_resume_terminal(
         .await
     {
         crate::auth::session::PrincipalResolution::Resolved(session) => session,
-        crate::auth::session::PrincipalResolution::Missing => {
+        PrincipalResolution::Missing => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
@@ -1272,7 +1278,7 @@ async fn handle_sm_resume_terminal(
         }
         // Mirror of the early resolution: diverged durable principal =
         // identity mismatch (same wire condition).
-        crate::auth::session::PrincipalResolution::Mismatched => {
+        PrincipalResolution::Mismatched => {
             claim_guard.release().await;
             return SmResumeTerminal::failed(
                 waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
@@ -1370,7 +1376,7 @@ async fn handle_sm_resume_terminal(
             let actor = state.deps.auth_state.session_manager.actor_ref();
             tokio::spawn(async move {
                 if actor
-                    .ask(crate::db::actor::DbExecute {
+                    .ask(DbExecute {
                         sql: format!(
                             "DELETE FROM sessions WHERE id = ? AND token_hash LIKE '{}:%'",
                             crate::auth::session::NATIVE_RESUME_TOKEN_SENTINEL
@@ -1425,15 +1431,15 @@ async fn handle_sm_resume_terminal(
 pub(super) async fn flush_ingress_checkpoint(
     state: &WebSocketState,
     sm_state: &StreamManagementState,
-    tracker: &mut crate::server::routes::interpret::SmInboundCompletionTracker,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+    tracker: &mut SmInboundCompletionTracker,
+) -> Result<(), IngressUowError> {
     if !tracker.checkpoint_dirty() || !sm_state.is_resumable() {
         return Ok(());
     }
     let stream_id = sm_state
         .stream_id
         .as_ref()
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(IngressUowError::SmIngressStreamMissing)?;
     let stream = state
         .deps
         .protocol
@@ -1442,7 +1448,7 @@ pub(super) async fn flush_ingress_checkpoint(
             stream_id.clone(),
         ))
         .await?
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(IngressUowError::SmIngressStreamMissing)?;
     state
         .deps
         .protocol
@@ -1459,7 +1465,7 @@ pub(super) async fn flush_ingress_checkpoint(
 async fn restore_ingress_checkpoint(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), IngressUowError> {
     let checkpoint = state
         .deps
         .protocol
@@ -1468,7 +1474,7 @@ async fn restore_ingress_checkpoint(
             detached.stream_id.clone(),
         ))
         .await?
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(IngressUowError::SmIngressStreamMissing)?;
     detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
         detached.inbound_count,
         checkpoint.to_storage(),
@@ -1479,9 +1485,8 @@ async fn restore_ingress_checkpoint(
 #[cfg(test)]
 mod ingress_checkpoint_tests {
     use super::*;
-    use crate::server::routes::websocket::{
-        state::WsConnState, tests::create_test_websocket_state,
-    };
+    use crate::server::routes::websocket::state::WsConnState;
+    use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::ingress::WireHandledCount;
     use waddle_xmpp::pending_delivery::SmSessionId;
 

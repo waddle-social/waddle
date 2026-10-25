@@ -1,5 +1,8 @@
 //! Compilation, instantiation, and execution of extension Wasm components.
 
+use crate::config::RuntimeLimits;
+use crate::host_tools::HostToolError;
+use crate::types::ObservationFailure;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,7 +58,7 @@ pub struct LoadedExtension {
     component: Component,
     linker: Linker<HostState>,
     http: super::http::HttpRuntime,
-    limits: crate::config::RuntimeLimits,
+    limits: RuntimeLimits,
 }
 
 impl std::fmt::Debug for LoadedExtension {
@@ -102,7 +105,7 @@ impl LoadedExtension {
             component,
             linker,
             http: runtime.http.clone(),
-            limits: crate::config::RuntimeLimits::default(),
+            limits: RuntimeLimits::default(),
         })
     }
 
@@ -111,7 +114,7 @@ impl LoadedExtension {
     /// # Errors
     ///
     /// Returns an explanatory error if the limits are outside host-supported bounds.
-    pub fn with_limits(mut self, limits: crate::config::RuntimeLimits) -> Result<Self> {
+    pub fn with_limits(mut self, limits: RuntimeLimits) -> Result<Self> {
         limits.validate().map_err(anyhow::Error::msg)?;
         self.limits = limits;
         Ok(self)
@@ -218,7 +221,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
@@ -248,7 +251,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
@@ -274,8 +277,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
-    {
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
             self.invoke(
@@ -288,7 +290,7 @@ impl LoadedExtension {
             ),
         )
         .await
-        .map_err(|_| (crate::types::ObservationFailure::DeadlineExceeded, None))?
+        .map_err(|_| (ObservationFailure::DeadlineExceeded, None))?
     }
 
     async fn invoke(
@@ -299,8 +301,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
-    {
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
         use crate::types::ObservationFailure;
         let mut store = Store::new(
             &self.engine,
@@ -371,9 +372,7 @@ struct InvocationBinding {
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
 }
 
-fn classify_delivery_error(
-    error: crate::host_tools::HostToolError,
-) -> crate::types::ObservationFailure {
+fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
     use crate::host_tools::HostToolErrorCode;
     use crate::types::ObservationFailure;
     match error.code {
@@ -385,14 +384,14 @@ fn classify_delivery_error(
     }
 }
 
-fn classify_runtime_error(error: wasmtime::Error) -> crate::types::ObservationFailure {
+fn classify_runtime_error(error: wasmtime::Error) -> ObservationFailure {
     if matches!(
         error.downcast_ref::<wasmtime::Trap>(),
         Some(wasmtime::Trap::OutOfFuel)
     ) {
-        crate::types::ObservationFailure::ResourceLimit
+        ObservationFailure::ResourceLimit
     } else {
-        crate::types::ObservationFailure::RuntimeFailure
+        ObservationFailure::RuntimeFailure
     }
 }
 

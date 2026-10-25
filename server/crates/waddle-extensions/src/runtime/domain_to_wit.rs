@@ -1,6 +1,7 @@
 //! Conversion of framework events and domain values into component-interface values.
 
 use super::waddle::extension::types as wit_types;
+use crate::types::RoomMessageObserve;
 use crate::types::{
     ActionId, CommandAction, CommandInvocation, CommandNode, CommandSessionId, DataForm,
     DataFormField, DataFormType, DataFormValue, DisplayText, EnrichmentId, ExtensionEvent,
@@ -343,8 +344,8 @@ impl_domain_newtype_to_wit!(UiViewId, UiViewId);
 impl_domain_newtype_to_wit!(Url, Url);
 impl_domain_newtype_to_wit!(WaddleId, WaddleId);
 
-impl From<crate::types::RoomMessageObserve> for wit_types::RoomMessageObserve {
-    fn from(value: crate::types::RoomMessageObserve) -> Self {
+impl From<RoomMessageObserve> for wit_types::RoomMessageObserve {
+    fn from(value: RoomMessageObserve) -> Self {
         let source = value.source;
         Self {
             source: wit_types::RoomMessageSource {

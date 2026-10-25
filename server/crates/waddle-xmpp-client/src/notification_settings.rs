@@ -3,6 +3,9 @@
 //! Binding crates deserialize their own boundary options and call these
 //! helpers; the XMPP fetch/merge/publish/retract semantics live here.
 
+use crate::error::ClientError;
+use crate::pep::NS_BOOKMARKS;
+use crate::pep::NS_PUBSUB;
 use jid::BareJid;
 use minidom::Element;
 use uuid::Uuid;
@@ -195,15 +198,15 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
 #[must_use]
 pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
     let Some(items) = iq
-        .get_child("pubsub", crate::pep::NS_PUBSUB)
-        .and_then(|pubsub| pubsub.get_child("items", crate::pep::NS_PUBSUB))
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
         .filter(|items| items.attr("node") == Some(NS_WADDLE_DM_BOOKMARKS))
     else {
         return Vec::new();
     };
     items
         .children()
-        .filter(|child| child.name() == "item" && child.ns() == crate::pep::NS_PUBSUB)
+        .filter(|child| child.name() == "item" && child.ns() == NS_PUBSUB)
         .filter_map(|item| {
             let jid: BareJid = item.attr("id")?.parse().ok()?;
             jid.node()?;
@@ -214,18 +217,18 @@ pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
 }
 
 fn build_extensions_wrapper(children: &[Element]) -> Element {
-    let mut builder = Element::builder("extensions", crate::pep::NS_BOOKMARKS);
+    let mut builder = Element::builder("extensions", NS_BOOKMARKS);
     for child in children {
         builder = builder.append(child.clone());
     }
     builder.build()
 }
 
-fn is_stanza_condition(err: &crate::error::ClientError, condition: &str) -> bool {
+fn is_stanza_condition(err: &ClientError, condition: &str) -> bool {
     matches!(err, crate::error::ClientError::StanzaError(stanza_err) if stanza_err.condition == condition)
 }
 
-fn warn_stanza_error(err: &crate::error::ClientError, operation: &'static str) -> bool {
+fn warn_stanza_error(err: &ClientError, operation: &'static str) -> bool {
     let crate::error::ClientError::StanzaError(stanza_err) = err else {
         return false;
     };

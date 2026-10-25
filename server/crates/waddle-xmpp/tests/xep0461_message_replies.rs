@@ -196,7 +196,8 @@ fn xep0461_set_reply_replaces_existing_reply() {
 /// parsing with original id bytes preserved (the archive paths retain and
 /// replay the raw attribute) and whitespace-only ids rejected.
 mod ingress_digest_boundary {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     use waddle_xmpp::ingress::{DigestContext, DigestInput, DigestInputError, NormalizedTarget};
     use waddle_xmpp::xep::xep0461::NS_REPLY;
     use xmpp_parsers::message::Message;

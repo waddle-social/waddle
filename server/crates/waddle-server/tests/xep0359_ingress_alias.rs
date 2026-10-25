@@ -3,26 +3,22 @@
 mod alias_support;
 mod ingress_support;
 
-use alias_support::*;
+use alias_support::{
+    add_reflections, archive_plan, assert_canonical, assert_error, refresh_digest, wire_messages,
+};
 use ingress_support::IngressFixture;
 use jid::BareJid;
-use waddle_server::{
-    ingress::{
-        commit::commit_submission, ExternalEffect, IngressDecision, IngressDecisionClass,
-        IngressSubmission,
-    },
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::CanonicalMessageRepository,
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::{
+    ExternalEffect, IngressDecision, IngressDecisionClass, IngressSubmission,
 };
-use waddle_xmpp::{
-    ingress::{DigestContext, IngressEffectIntent, NormalizedTarget},
-    Stanza,
-};
+use waddle_server::ingress_substrate::MessageEnvelope;
+use waddle_server::ingress_uow::CanonicalMessageRepository;
+use waddle_xmpp::ingress::{DigestContext, IngressEffectIntent, NormalizedTarget};
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::xep0359::StanzaId;
-use xmpp_parsers::{
-    message::{Lang, Message, MessageType},
-    stanza_error::{DefinedCondition, StanzaError},
-};
+use xmpp_parsers::message::{Lang, Message, MessageType};
+use xmpp_parsers::stanza_error::{DefinedCondition, StanzaError};
 
 macro_rules! backend_tests {
     ($sqlite:ident, $postgres:ident, $case:ident) => {
@@ -369,16 +365,15 @@ async fn alias_connection(
 
 #[cfg(feature = "test-support")]
 async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
-    use std::{sync::Arc, time::Duration};
-    use waddle_server::{
-        db::{DatabaseConfig, DatabasePool, PoolConfig},
-        ingress::RecoveryEnvironment,
-        test_support::websocket_state_with_ingress,
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
+    use waddle_server::ingress::RecoveryEnvironment;
+    use waddle_server::test_support::websocket_state_with_ingress;
+    use waddle_xmpp::muc::room_actor::{
+        Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
     };
-    use waddle_xmpp::muc::{
-        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::CreateRoom,
-    };
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     let pool = Arc::new(
         DatabasePool::try_new(
@@ -687,13 +682,9 @@ backend_tests!(
 );
 
 async fn remote_owner(mut fixture: IngressFixture) {
-    use waddle_server::ingress::{
-        effects::{
-            room::{DurableRoomEffect, RoomFenceRequirement},
-            DurableEffect, Effect,
-        },
-        IngressCanonicalRef, IngressStreamIdentity,
-    };
+    use waddle_server::ingress::effects::room::{DurableRoomEffect, RoomFenceRequirement};
+    use waddle_server::ingress::effects::{DurableEffect, Effect};
+    use waddle_server::ingress::{IngressCanonicalRef, IngressStreamIdentity};
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     #[cfg(feature = "clustering")]
     let fence = fixture.room_fence(&room).await;
@@ -846,11 +837,11 @@ async fn recover_stanza_id_pass(
 }
 
 async fn recovery_preserves_recipient_stanza_id(fixture: IngressFixture) {
-    use std::{sync::Arc, time::Duration};
-    use waddle_server::ingress::{
-        effects::{direct::DurableDirectEffect, Effect},
-        DurableEffect, PlannedEffect, RecoveryEnvironment,
-    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_server::ingress::effects::direct::DurableDirectEffect;
+    use waddle_server::ingress::effects::Effect;
+    use waddle_server::ingress::{DurableEffect, PlannedEffect, RecoveryEnvironment};
     use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
     let sm = detached_progress_support::registry(&fixture).await;
     let [resource, witness_resource, _] = detached_progress_support::resources();
@@ -970,15 +961,14 @@ backend_tests!(
 );
 
 async fn recovery_does_not_rebuild_groupchat_inbox_push(fixture: IngressFixture) {
-    use std::{sync::Arc, time::Duration};
-    use waddle_server::ingress::{
-        effects::{direct::ExternalDirectEffect, room::DurableRoomEffect, Effect, ProjectionRef},
-        DurableEffect, PlannedEffect, RecoveryEnvironment,
-    };
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::{EffectMessageIdentity, InboxProjectionMutation},
-    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+    use waddle_server::ingress::effects::room::DurableRoomEffect;
+    use waddle_server::ingress::effects::{Effect, ProjectionRef};
+    use waddle_server::ingress::{DurableEffect, PlannedEffect, RecoveryEnvironment};
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation};
     let sm = detached_progress_support::registry(&fixture).await;
     let [resource, witness_resource, _] = detached_progress_support::resources();
     detached_progress_support::attach(&sm, &resource).await;

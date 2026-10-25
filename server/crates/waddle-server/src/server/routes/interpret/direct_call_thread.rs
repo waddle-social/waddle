@@ -1,11 +1,10 @@
 use super::Deps;
 use jid::BareJid;
 use tracing::{debug, warn};
-use waddle_xmpp::{
-    ingress::{InboxProjectionMutation, IngressEffectIntent},
-    xep::{CallThreadDuration, CallThreadMedia},
-};
-use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
+use waddle_xmpp::ingress::{InboxProjectionMutation, IngressEffectIntent};
+use waddle_xmpp::xep::{CallThreadDuration, CallThreadMedia};
+use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) async fn project_direct_call_thread_anchor(
     deps: &Deps<'_>,
@@ -106,12 +105,11 @@ mod tests {
 
     use super::*;
     use crate::ingress::IngressEffectCapture;
-    use waddle_xmpp::{
-        inbox::storage::{InMemoryInboxStorage, InboxStorage},
-        mam::{storage::InMemoryMamStorage, MamStorage},
-        registry::ConnectionRegistry,
-        xep::CallThreadDuration,
-    };
+    use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::mam::MamStorage;
+    use waddle_xmpp::registry::ConnectionRegistry;
+    use waddle_xmpp::xep::CallThreadDuration;
 
     #[tokio::test]
     async fn plans_call_thread_projection_without_writing_inbox() {

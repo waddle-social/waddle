@@ -1,10 +1,12 @@
 //! XEP-0085: Chat State Notifications dedicated client suite.
 
 use minidom::Element;
-use waddle_xmpp_client::{
-    caps::{build_client_caps_disco_info_response, client_caps_features, client_caps_node_ver},
-    discovery::DISCO_INFO_NS,
-    messaging::{build_chat_state_message, parse_chat_state_payload, NS_CHAT_STATES, NS_CLIENT},
+use waddle_xmpp_client::caps::{
+    build_client_caps_disco_info_response, client_caps_features, client_caps_node_ver,
+};
+use waddle_xmpp_client::discovery::DISCO_INFO_NS;
+use waddle_xmpp_client::messaging::{
+    build_chat_state_message, parse_chat_state_payload, NS_CHAT_STATES, NS_CLIENT,
 };
 
 #[test]

@@ -6,7 +6,13 @@
 use jid::BareJid;
 use minidom::Element;
 
-use super::*;
+use super::{
+    build_pubsub_items_iq, build_pubsub_publish_iq, build_pubsub_retract_iq,
+    build_pubsub_subscribe_iq, build_pubsub_unsubscribe_iq, community_service_jid,
+    parse_pubsub_items_result, parse_pubsub_publish_result_item_id, parse_pubsub_subscribe_result,
+    PubsubAccessModel, PubsubPublishOptions, PubsubSendLastPublishedItem, PubsubSubscriptionState,
+    NS_PUBSUB, NS_PUBSUB_PUBLISH_OPTIONS,
+};
 
 const SERVICE: &str = "community.waddle.test";
 const NODE: &str = "urn:xmpp:pubsub-social-feed:1";

@@ -1,28 +1,27 @@
 //! XEP-0045 sender echoes retain XEP-0334's one live attempt.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-    xep0045_room_manifest_tests::room_submission, IngressSubmission, RoomManifestSnapshot,
-};
+use super::{ActorRef, Duration, GetRoomSnapshot, RoomActor, Stanza};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::xep0045_room_manifest_tests::room_submission;
+use crate::ingress::{IngressSubmission, RoomManifestSnapshot};
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
-use crate::server::routes::interpret::{
-    effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        Effect, ExternalEffect, ImmediateSink, PlannedEffect, RoomExecutionPath,
-    },
-    DeliveryExecutionContext, Deps,
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PeerDeliveryKind,
 };
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, ImmediateSink, PlannedEffect, RoomExecutionPath,
+};
+use crate::server::routes::interpret::{DeliveryExecutionContext, Deps};
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{DigestContext, DigestInput, IngressEffectIntent},
-    muc::{
-        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::CreateRoom,
-    },
-    xep::xep0334::{add_hint, Hint},
+use waddle_xmpp::ingress::{DigestContext, DigestInput, IngressEffectIntent};
+use waddle_xmpp::muc::room_actor::{
+    Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
 };
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::xep::xep0334::{add_hint, Hint};
 
 struct Case {
     fixture: IngressFixture,

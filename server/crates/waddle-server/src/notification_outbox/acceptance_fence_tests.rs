@@ -1,4 +1,4 @@
-use super::*;
+use super::{NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore};
 use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target};
 

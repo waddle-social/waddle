@@ -3,7 +3,9 @@
 //! fastening ahead of its target. Each case reproduces a defect found in
 //! review of the first version of this store.
 
-use waddle_client_session::*;
+use waddle_client_session::{
+    Delivery, IncomingMessage, LocalEcho, ReactionUpdate, Timeline, TimelineDiff,
+};
 
 /// A DM archive row as session.rs::archived_from builds it.
 fn dm(mam: &str, origin: &str, own: bool, body: &str, at: i64) -> IncomingMessage {

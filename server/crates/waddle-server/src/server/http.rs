@@ -1,13 +1,61 @@
+use crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL;
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxStore;
+use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
+use crate::call_teardown_outbox::TeardownTarget;
+use crate::clustering::allowlist::PostgresAllowlistStore;
+use crate::clustering::resume_asker::SwarmRemoteResumeAsker;
+use crate::clustering::route_bridge::OrderedRelayDeliveryServices;
+use crate::clustering::ClusteringHandles;
+use crate::config::DatabaseRuntimeConfig;
 use crate::config::ServerConfig;
+use crate::db::actor::GetDatabase;
+use crate::db::blocking::DatabaseBlockingStorage;
+use crate::db::lineage::DurableStore;
+use crate::db::lineage::LineageReport;
+use crate::db::lineage::PgIdentity;
+use crate::db::Database;
+use crate::db::DatabaseDriver;
+use crate::dnd_projection::DndProjectionStore;
+use crate::dnd_reader::PepDndReader;
+use crate::inbox::DatabaseInboxStorage;
+use crate::ingress::IngressAuthority;
+use crate::ingress::IngressStartupError;
+use crate::ingress_uow::IngressUnitOfWork;
+use crate::notification_activity::NotificationActivityStore;
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use crate::pep_feed_bridge::PepFeedBridge;
+use crate::profile::AvatarLockMap;
+use crate::profile::FetchPolicy;
+use crate::profile::ProfilePublishDeps;
+use crate::pubsub::DatabasePubSubStorage;
+use crate::push_registrations::DatabasePushRegistrationStore;
+use crate::push_service::vapid_storage::VapidStorage;
+use crate::push_service::DatabasePushServiceStore;
+use crate::room_effect_outbox::RoomEffectArmSupervisor;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
+use crate::room_observation::RoomObservationActors;
+use crate::server::bootstrap_membership::BootstrapMembershipConfig;
+use crate::server::caps_resolution::CapsResolver;
+use crate::server::extension_bot_avatar::BotAvatars;
 use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
 use crate::server::extension_host_adapter;
 use crate::server::extension_host_tools::DeferredExtensionHostTools;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
+use crate::server::profile_publish_route::TestSeamAuth;
 use crate::server::routes;
 use crate::server::routes::auth::AuthState;
+use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
+use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
 use crate::server::routes::uploads::UploadState;
+use crate::server::routes::websocket::DmPinStore;
+use crate::server::routes::websocket::PendingLocalMucDepartures;
+use crate::server::routes::websocket::RemoteMucMemberships;
+use crate::server::routes::websocket::ResolverAffiliationSyncScheduler;
 use crate::server::routes::websocket::{
     ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains,
 };
@@ -22,12 +70,16 @@ use crate::server::session_janitors::{
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
 use crate::server::{AppState, XmppConfig};
+use crate::threads::storage::InboxBackedThreadsStorage;
+use crate::vcard::VCardStore;
 use anyhow::{Context, Result};
-use axum::{middleware, routing::get, Router};
+use axum::routing::get;
+use axum::{middleware, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::future::IntoFuture as _;
 use std::sync::Arc;
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::compression::CompressionLayer;
+use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
 use waddle_xmpp::registry::ConnectionRegistry;
@@ -42,7 +94,7 @@ pub(crate) struct HttpServerDeps {
     /// settings projection can attach to the same SQL database without
     /// re-opening it. The trait-object view lives on
     /// [`AppState::pubsub_storage`] for the rest of the WebSocket graph.
-    pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
+    pub(crate) pubsub_database_storage: Arc<DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) listener: tokio::net::TcpListener,
     /// Ecdysis shutdown view: carries the stop token that gates the
@@ -205,10 +257,10 @@ enum IngressColocationError {
 }
 
 async fn ensure_postgres_ingress_colocation(
-    store_identity: &crate::db::lineage::PgIdentity,
-    global: &crate::db::Database,
+    store_identity: &PgIdentity,
+    global: &Database,
 ) -> Result<()> {
-    if global.driver() != crate::db::DatabaseDriver::Postgres {
+    if global.driver() != DatabaseDriver::Postgres {
         return Err(IngressColocationError::Backend.into());
     }
     let global_identity = crate::db::lineage::live_postgres_identity(global).await?;
@@ -228,16 +280,16 @@ async fn ensure_postgres_ingress_colocation(
 /// This startup invariant applies with or without clustering.
 pub(crate) async fn create_ingress_inbox_storage(
     database_url: Option<&str>,
-    global: &crate::db::Database,
-) -> Result<Arc<crate::inbox::DatabaseInboxStorage>> {
+    global: &Database,
+) -> Result<Arc<DatabaseInboxStorage>> {
     let storage = match global.driver() {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             if database_url.is_some_and(|url| url != global.database_url()) {
                 return Err(IngressColocationError::SqliteDatabase.into());
             }
-            crate::inbox::DatabaseInboxStorage::from_database(global.clone()).await?
+            DatabaseInboxStorage::from_database(global.clone()).await?
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             let database_url = database_url.unwrap_or_else(|| global.database_url());
             // Opening inbox storage mutates its schema. Check the live identity
             // through a plain pool before initializing the configured database.
@@ -248,9 +300,9 @@ pub(crate) async fn create_ingress_inbox_storage(
             let identity = crate::db::lineage::live_postgres_identity_via_pg_pool(&probe).await;
             probe.close().await;
             ensure_postgres_ingress_colocation(&identity?, global).await?;
-            let storage = crate::inbox::DatabaseInboxStorage::open(Some(database_url)).await?;
+            let storage = DatabaseInboxStorage::open(Some(database_url)).await?;
             let database = storage.database();
-            if database.driver() != crate::db::DatabaseDriver::Postgres {
+            if database.driver() != DatabaseDriver::Postgres {
                 return Err(IngressColocationError::Backend.into());
             }
             let identity = crate::db::lineage::live_postgres_identity(&database).await?;
@@ -261,19 +313,16 @@ pub(crate) async fn create_ingress_inbox_storage(
     Ok(Arc::new(storage))
 }
 
-async fn ensure_mam_ingress_colocation(
-    storage: &SqlxMamStorage,
-    global: &crate::db::Database,
-) -> Result<()> {
+async fn ensure_mam_ingress_colocation(storage: &SqlxMamStorage, global: &Database) -> Result<()> {
     if let Some(pool) = storage.postgres_pool() {
-        if global.driver() != crate::db::DatabaseDriver::Postgres {
+        if global.driver() != DatabaseDriver::Postgres {
             return Err(IngressColocationError::Backend.into());
         }
         let mam_identity = crate::db::lineage::live_postgres_identity_via_pg_pool(pool).await?;
         ensure_postgres_ingress_colocation(&mam_identity, global).await?;
         return Ok(());
     }
-    if global.driver() != crate::db::DatabaseDriver::Sqlite {
+    if global.driver() != DatabaseDriver::Sqlite {
         return Err(IngressColocationError::Backend.into());
     }
     let pool = storage
@@ -309,10 +358,10 @@ pub(crate) async fn create_websocket_mam_storage(
     database_url: Option<String>,
     clustering_enabled: bool,
     clustering_claim_pair_live: bool,
-    global_db: &crate::db::Database,
+    global_db: &Database,
 ) -> Result<Arc<SqlxMamStorage>> {
     let storage = match global_db.driver() {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             if database_url
                 .as_deref()
                 .is_some_and(|url| url != global_db.database_url())
@@ -324,7 +373,7 @@ pub(crate) async fn create_websocket_mam_storage(
                 .ok_or(IngressColocationError::Backend)?;
             SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             let database_url = database_url
                 .as_deref()
                 .unwrap_or_else(|| global_db.database_url());
@@ -358,7 +407,7 @@ pub(crate) struct RouterDeps {
     pub(crate) server_config: ServerConfig,
     pub(crate) xmpp_config: XmppConfig,
     pub(crate) mam_storage: Arc<dyn MamStorage>,
-    pub(crate) pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
+    pub(crate) pubsub_database_storage: Arc<DatabasePubSubStorage>,
     pub(crate) acme_http01_challenge_service: Option<TowerHttp01ChallengeService>,
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
@@ -424,7 +473,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .app_state
         .lineage_startup
         .get()
-        .map(crate::db::lineage::LineageReport::is_attested)
+        .map(LineageReport::is_attested)
         .unwrap_or(false);
     if lineage_attested {
         let db_actor = websocket_state
@@ -440,7 +489,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         let backfill_tracker = backfill_state.deps.protocol.profile_publish_tracker.clone();
         let _backfill_handle = backfill_tracker.spawn(async move {
             use tracing::Instrument;
-            let db = match db_actor.ask(crate::db::actor::GetDatabase).await {
+            let db = match db_actor.ask(GetDatabase).await {
                 Ok(db) => db,
                 Err(error) => {
                     warn!(
@@ -450,10 +499,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
                     return;
                 }
             };
-            let deps = crate::profile::ProfilePublishDeps {
+            let deps = ProfilePublishDeps {
                 state: backfill_state,
-                vcard_store: crate::vcard::VCardStore::new(db.into()),
-                fetch_policy: crate::profile::FetchPolicy::default(),
+                vcard_store: VCardStore::new(db.into()),
+                fetch_policy: FetchPolicy::default(),
             };
             let _report = async move {
                 crate::profile::run_startup_backfill(&deps, &xmpp_domain, backfill_cancel).await;
@@ -600,7 +649,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 async fn open_ingress_authority(
     config: &ServerConfig,
     state: &AppState,
-) -> Result<Arc<crate::ingress::IngressAuthority>> {
+) -> Result<Arc<IngressAuthority>> {
     #[cfg(feature = "clustering")]
     let node_identity = if config.clustering.enabled {
         Some(
@@ -608,13 +657,13 @@ async fn open_ingress_authority(
                 .clustering_claims
                 .node_identity
                 .clone()
-                .ok_or(crate::ingress::IngressStartupError::NodeIdentityMissing)?,
+                .ok_or(IngressStartupError::NodeIdentityMissing)?,
         )
     } else {
         None
     };
     Ok(Arc::new(
-        crate::ingress::IngressAuthority::try_new(
+        IngressAuthority::try_new(
             config.ingress.clone(),
             state.db_pool.global().clone(),
             state.lineage_config.clone(),
@@ -631,7 +680,7 @@ async fn create_websocket_state(
     xmpp_config: &XmppConfig,
     auth_state: Arc<AuthState>,
     mam_storage: Arc<dyn MamStorage>,
-    pubsub_database_storage: Arc<crate::pubsub::DatabasePubSubStorage>,
+    pubsub_database_storage: Arc<DatabasePubSubStorage>,
     shutdown_handle: waddle_ecdysis::ShutdownHandle,
 ) -> Result<Arc<WebSocketState>> {
     // Create connection registry for WebSocket message routing
@@ -718,7 +767,7 @@ async fn create_websocket_state(
         service_domains.clone(),
         Arc::clone(&extension_manager),
     );
-    let bot_avatars = Arc::new(crate::server::extension_bot_avatar::BotAvatars::default());
+    let bot_avatars = Arc::new(BotAvatars::default());
     bot_avatars.prefetch(&extension_manager);
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
@@ -733,24 +782,23 @@ async fn create_websocket_state(
             )
         });
     let call_teardown_outbox = Arc::new(
-        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
+        CallTeardownOutboxStore::new_with_node_identity(
             state.db_pool.global().clone(),
             call_teardown_node_identity,
         )
         .await
         .map_err(|error| anyhow::anyhow!("failed to initialize call teardown outbox: {error}"))?,
     );
-    let call_teardown_persistence =
-        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(
-            Arc::clone(&call_teardown_outbox),
-            tokio::runtime::Handle::current(),
-        );
+    let call_teardown_persistence = CallTeardownPersistenceSupervisor::new(
+        Arc::clone(&call_teardown_outbox),
+        tokio::runtime::Handle::current(),
+    );
     let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::try_new(state.db_pool.global().clone())
+        RoomEffectOutboxStore::try_new(state.db_pool.global().clone())
             .await
             .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?,
     );
-    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+    let room_effect_arm_supervisor = RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
     );
@@ -790,15 +838,13 @@ async fn create_websocket_state(
                             waddle_sfu::TeardownTargetLite::Participant {
                                 identity,
                                 participant_sid,
-                            } => crate::call_teardown_outbox::TeardownTarget::Participant {
+                            } => TeardownTarget::Participant {
                                 identity: identity.as_jid().clone(),
                                 participant_sid,
                             },
-                            waddle_sfu::TeardownTargetLite::Room => {
-                                crate::call_teardown_outbox::TeardownTarget::Room
-                            }
+                            waddle_sfu::TeardownTargetLite::Room => TeardownTarget::Room,
                         };
-                        let intent = crate::call_teardown_outbox::CallTeardownIntent {
+                        let intent = CallTeardownIntent {
                             call_id: lite.call_id,
                             target,
                             generation: lite.generation,
@@ -941,10 +987,8 @@ async fn create_websocket_state(
         // Grant reconciliation mutates application data and opens a lineage-
         // guarded transaction. Run it only after the readiness attestation;
         // an unenrolled node must remain alive to expose its diagnostics.
-        let extension_grant_uow = crate::ingress_uow::IngressUnitOfWork::open(
-            state.db_pool.global().clone(),
-            state.lineage_config.clone(),
-        )?;
+        let extension_grant_uow =
+            IngressUnitOfWork::open(state.db_pool.global().clone(), state.lineage_config.clone())?;
         crate::server::extension_commands::startup::sync_extension_grants(
             &extension_manager,
             &extension_grant_uow,
@@ -988,7 +1032,7 @@ async fn create_websocket_state(
         crate::server::bootstrap_membership::reconcile_existing_accounts_or_warn(
             state.db_pool.global_actor(),
             &state.permission_actor,
-            &crate::server::bootstrap_membership::BootstrapMembershipConfig::from_env(),
+            &BootstrapMembershipConfig::from_env(),
         )
         .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(
@@ -1008,11 +1052,9 @@ async fn create_websocket_state(
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
-        crate::push_registrations::DatabasePushRegistrationStore::try_new(
-            state.db_pool.global().clone(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
+        DatabasePushRegistrationStore::try_new(state.db_pool.global().clone())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to initialize XEP-0357 storage: {error}"))?,
     );
     // Provision (or load) the VAPID signing key once at boot. The
     // signer is `Arc<dyn VapidSigner>` so the publish-job worker can
@@ -1022,7 +1064,7 @@ async fn create_websocket_state(
     // case the entire push service degrades, so the caller intentionally
     // fails boot rather than silently dispatching without VAPID.
     let vapid_signer = if lineage_attested {
-        crate::push_service::vapid_storage::VapidStorage::load_or_provision(
+        VapidStorage::load_or_provision(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
         )
@@ -1032,7 +1074,7 @@ async fn create_websocket_state(
         // Never provision (write) a key into an unattested database. The
         // node is permanently unready in this state, so an ephemeral,
         // unpersisted signer only has to keep the object graph valid.
-        crate::push_service::vapid_storage::VapidStorage::load_or_ephemeral(
+        VapidStorage::load_or_ephemeral(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
         )
@@ -1055,17 +1097,16 @@ async fn create_websocket_state(
     // contact when our deliveries misbehave.
     let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
         .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
-    let push_service =
-        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
-            state.db_pool.global().clone(),
-            server_config.session_key.as_bytes(),
-            service_domains.push.parse()?,
-            Arc::clone(&pubsub_storage),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
-        .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub)
-        .with_inbox_storage(Arc::clone(&state.inbox_storage));
+    let push_service = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        state.db_pool.global().clone(),
+        server_config.session_key.as_bytes(),
+        service_domains.push.parse()?,
+        Arc::clone(&pubsub_storage),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to initialize XMPP Push Service: {error}"))?
+    .with_web_push_provider(vapid_signer, web_push_sender, vapid_sub)
+    .with_inbox_storage(Arc::clone(&state.inbox_storage));
     // APNs (#529): the `.p8` provider key is read once here. A
     // configured-but-unusable key fails boot rather than leaving Apple
     // devices silently undeliverable; no `WADDLE_APNS_*` at all leaves
@@ -1137,13 +1178,11 @@ async fn create_websocket_state(
     )
     .await;
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::try_new(
-            state.db_pool.global().clone(),
-        )
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
-        })?,
+        NotificationOutboxStore::try_new(state.db_pool.global().clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
+            })?,
     );
     // Push initialization precedes outbox schema/adoption. Rebind only exact
     // accepted target tuples once canonical ancestry is available.
@@ -1151,38 +1190,28 @@ async fn create_websocket_state(
         .adopt_notification_ancestry()
         .await
         .context("failed to adopt canonical notification ancestry")?;
-    let notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
-            pubsub_database_storage.database(),
-        ),
-    );
-    let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
+    let notification_settings_projection = Arc::new(NotificationSettingsProjectionStore::new(
         pubsub_database_storage.database(),
     ));
-    let dnd_reader = Arc::new(crate::dnd_reader::PepDndReader::with_system_clock(
-        Arc::clone(&dnd_projection),
-    ));
+    let dnd_projection = Arc::new(DndProjectionStore::new(pubsub_database_storage.database()));
+    let dnd_reader = Arc::new(PepDndReader::with_system_clock(Arc::clone(&dnd_projection)));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::try_new(
-            state.db_pool.global().clone(),
-        )
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to initialize notification activity projection: {error}")
-        })?,
+        NotificationActivityStore::try_new(state.db_pool.global().clone())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to initialize notification activity projection: {error}")
+            })?,
     );
 
-    let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> = Arc::new(
-        crate::db::blocking::DatabaseBlockingStorage::new(state.db_pool.global().clone()),
-    );
-    let caps_resolver = Arc::new(crate::server::caps_resolution::CapsResolver::default());
+    let blocking_storage: Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage> =
+        Arc::new(DatabaseBlockingStorage::new(state.db_pool.global().clone()));
+    let caps_resolver = Arc::new(CapsResolver::default());
 
     let provider_ingress = Arc::new(
-        crate::server::routes::extension_webhooks::ProviderIngressRegistry::from_env()
+        ProviderIngressRegistry::from_env()
             .map_err(|error| anyhow::anyhow!("failed to load provider webhook config: {error}"))?,
     );
-    let provider_dispatch_tasks =
-        crate::server::routes::extension_webhooks::ProviderDispatchTracker::new();
+    let provider_dispatch_tasks = ProviderDispatchTracker::new();
     let ingress = open_ingress_authority(server_config, &state).await?;
     let websocket_state = Arc::new(WebSocketState {
         deps: WebSocketDeps {
@@ -1195,7 +1224,7 @@ async fn create_websocket_state(
                 room_registry,
                 mam_storage,
                 inbox_storage: Arc::clone(&state.inbox_storage),
-                threads_storage: Arc::new(crate::threads::storage::InboxBackedThreadsStorage::new(
+                threads_storage: Arc::new(InboxBackedThreadsStorage::new(
                     Arc::clone(&state.inbox_storage),
                 )),
                 blocking_storage,
@@ -1228,23 +1257,23 @@ async fn create_websocket_state(
                 link_preview_resolves:
                     crate::server::routes::websocket::default_link_preview_resolve_permits(),
                 caps_resolver,
-                avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
+                avatar_source_locks: Arc::new(AvatarLockMap::new()),
                 profile_publish_tracker: tokio_util::task::TaskTracker::new(),
-                pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
+                pep_feed_bridge: Arc::new(PepFeedBridge::new()),
                 call_threads: Arc::new(dashmap::DashMap::new()),
                 call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
                 extension_bot_rooms: Default::default(),
                 remote_muc_memberships: Arc::new(
-                    crate::server::routes::websocket::RemoteMucMemberships::default(),
+                    RemoteMucMemberships::default(),
                 ),
                 pending_local_muc_departures: Arc::new(
-                    crate::server::routes::websocket::PendingLocalMucDepartures::default(),
+                    PendingLocalMucDepartures::default(),
                 ),
                 resolver_affiliation_syncs: Arc::new(
-                    crate::server::routes::websocket::ResolverAffiliationSyncScheduler::default(),
+                    ResolverAffiliationSyncScheduler::default(),
                 ),
                 dm_call_threads: Arc::new(dashmap::DashMap::new()),
-                dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
+                dm_pin_store: Arc::new(DmPinStore::default()),
                 dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
                 pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
                 sfu: sfu_service,
@@ -1283,31 +1312,23 @@ async fn create_websocket_state(
             &state.clustering_claims.node_lease,
             state.clustering_claims.lease_ttl,
         ) {
-            bridge.wire(Arc::new(
-                crate::clustering::route_bridge::OrderedRelayDeliveryServices {
-                    occupancy_database: state.db_pool.global().clone(),
-                    claim_store,
-                    allowlist_store: Arc::new(
-                        crate::clustering::allowlist::PostgresAllowlistStore::new(
-                            state.db_pool.global().clone(),
-                        ),
-                    ),
-                    node_lease: Arc::clone(node_lease),
-                    node_lease_ttl,
-                    resource_presence: state.clustering_claims.resource_presence.clone(),
-                    cluster_membership: state.clustering_claims.cluster_membership.clone(),
-                    node_identity,
-                    connection_registry: Arc::clone(
-                        &websocket_state.deps.protocol.connection_registry,
-                    ),
-                    user_registry: websocket_state.deps.protocol.user_registry.clone(),
-                    sm_session_registry: Arc::clone(
-                        &websocket_state.deps.protocol.sm_session_registry,
-                    ),
-                    blocking_storage: Arc::clone(&websocket_state.deps.protocol.blocking_storage),
-                    web_socket_state: Arc::downgrade(&websocket_state),
-                },
-            ));
+            bridge.wire(Arc::new(OrderedRelayDeliveryServices {
+                occupancy_database: state.db_pool.global().clone(),
+                claim_store,
+                allowlist_store: Arc::new(PostgresAllowlistStore::new(
+                    state.db_pool.global().clone(),
+                )),
+                node_lease: Arc::clone(node_lease),
+                node_lease_ttl,
+                resource_presence: state.clustering_claims.resource_presence.clone(),
+                cluster_membership: state.clustering_claims.cluster_membership.clone(),
+                node_identity,
+                connection_registry: Arc::clone(&websocket_state.deps.protocol.connection_registry),
+                user_registry: websocket_state.deps.protocol.user_registry.clone(),
+                sm_session_registry: Arc::clone(&websocket_state.deps.protocol.sm_session_registry),
+                blocking_storage: Arc::clone(&websocket_state.deps.protocol.blocking_storage),
+                web_socket_state: Arc::downgrade(&websocket_state),
+            }));
         } else {
             warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }
@@ -1331,7 +1352,7 @@ async fn create_websocket_state(
         }
     }
     if lineage_attested {
-        crate::room_observation::RoomObservationActors::start(&websocket_state).await?;
+        RoomObservationActors::start(&websocket_state).await?;
     } else {
         // Observer configuration and recovery write through lineage-guarded
         // transactions. Keep an unattested node alive for diagnostics without
@@ -1408,7 +1429,7 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_auth_state_janitor(websocket_state);
     crate::auth::directory::spawn_account_key_backfill(
         websocket_state.deps.app_state.db_pool.global_actor(),
-        crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL,
+        ACCOUNT_KEY_BACKFILL_INTERVAL,
     );
     spawn_destroy_completion_janitor(websocket_state);
     spawn_room_dormancy_janitor(websocket_state);
@@ -1423,7 +1444,7 @@ fn promote_to_serving_and_spawn_janitors(
 
 /// One startup attestation pass with a short bounded retry for transient
 /// errors and an overall deadline. Definitive lineage failures do not retry.
-async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::LineageReport {
+async fn attest_startup_lineage(state: &AppState) -> LineageReport {
     const ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
     const OVERALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1432,14 +1453,13 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
     let Some(registry) = state.lineage_registry.get() else {
-        return crate::db::lineage::LineageReport::initializing();
+        return LineageReport::initializing();
     };
     // Each completed pass lands in this slot so the overall deadline cannot
     // discard an already-returned DEFINITIVE report (one boundary answering
     // a mismatch while another stalls must latch, not fabricate a
     // transient-only timeout that exit-and-retries forever).
-    let completed: std::sync::Mutex<Option<crate::db::lineage::LineageReport>> =
-        std::sync::Mutex::new(None);
+    let completed: std::sync::Mutex<Option<LineageReport>> = std::sync::Mutex::new(None);
     let pass = async {
         let mut last = registry
             .attest(
@@ -1475,7 +1495,7 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
-            .unwrap_or_else(crate::db::lineage::LineageReport::timeout),
+            .unwrap_or_else(LineageReport::timeout),
     };
     let unmatched = state.lineage_adopt_unmatched();
     if !unmatched.is_empty() {
@@ -1502,9 +1522,7 @@ async fn attest_startup_lineage(state: &AppState) -> crate::db::lineage::Lineage
 /// from `WADDLE_TEST_FIXED_ACCOUNT_USERNAME` (default `admin`) plus
 /// any `WADDLE_TEST_EXTRA_FIXED_ACCOUNTS` entries, all in the
 /// configured XMPP domain.
-fn build_test_profile_publish_auth(
-    xmpp_domain: &str,
-) -> Option<crate::server::profile_publish_route::TestSeamAuth> {
+fn build_test_profile_publish_auth(xmpp_domain: &str) -> Option<TestSeamAuth> {
     use crate::server::profile_publish_route::TestSeamAuth;
 
     if !crate::server::fixed_account::fixed_test_account_enabled() {
@@ -1596,7 +1614,7 @@ fn install_profile_publish_hook(
             // user even after the closure capture is gone.
             let span = tracing::info_span!("oidc_profile_publish", jid = %jid);
             let fut = async move {
-                let db = match db_actor.ask(crate::db::actor::GetDatabase).await {
+                let db = match db_actor.ask(GetDatabase).await {
                     Ok(db) => db,
                     Err(error) => {
                         warn!(
@@ -1608,7 +1626,7 @@ fn install_profile_publish_hook(
                 };
                 let deps = ProfilePublishDeps {
                     state: websocket_state,
-                    vcard_store: crate::vcard::VCardStore::new(db.into()),
+                    vcard_store: VCardStore::new(db.into()),
                     fetch_policy: FetchPolicy::default(),
                 };
                 if let Err(error) = ensure_pep_profile_published(&deps, &jid, source).await {
@@ -1649,8 +1667,8 @@ fn sm_max_sessions_from_env() -> usize {
 async fn create_sm_session_registry(
     xmpp_config: &XmppConfig,
     server_config: &ServerConfig,
-    clustering: &crate::clustering::ClusteringHandles,
-    global_db: &crate::db::Database,
+    clustering: &ClusteringHandles,
+    global_db: &Database,
     state: &Arc<AppState>,
     pending: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
 ) -> Result<Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>> {
@@ -1670,10 +1688,7 @@ async fn create_sm_session_registry(
         global_db,
     )
     .await?;
-    state.register_lineage_alias(
-        crate::db::lineage::DurableStore::Sm,
-        crate::db::lineage::DurableStore::Global,
-    );
+    state.register_lineage_alias(DurableStore::Sm, DurableStore::Global);
     let mut sm_session_registry =
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
@@ -1702,7 +1717,7 @@ async fn create_sm_session_registry(
     // and single-node behavior stays byte-identical.
     #[cfg(feature = "clustering")]
     if let Some(stop_token) = &clustering.stop_token {
-        let asker = crate::clustering::resume_asker::SwarmRemoteResumeAsker::new(
+        let asker = SwarmRemoteResumeAsker::new(
             stop_token.clone(),
             server_config.clustering.messaging.mailbox_timeout,
             server_config.clustering.messaging.reply_timeout,
@@ -1735,15 +1750,15 @@ async fn create_sm_session_registry(
 /// Reject split stores before initializing schemas or hydrating retained sessions.
 async fn ensure_ingress_storage_colocation(
     database_url: Option<&str>,
-    global: &crate::db::Database,
+    global: &Database,
 ) -> Result<()> {
     match global.driver() {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             if database_url.is_some_and(|url| url != global.database_url()) {
                 return Err(IngressColocationError::SqliteDatabase.into());
             }
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             if let Some(database_url) = database_url {
                 if !database_url.starts_with("postgres://")
                     && !database_url.starts_with("postgresql://")
@@ -1770,7 +1785,7 @@ async fn create_ingress_sm_storage(
         Arc<dyn waddle_xmpp::ownership::ClaimStore>,
         waddle_xmpp::ownership::SharedNodeIdentity,
     )>,
-    global: &crate::db::Database,
+    global: &Database,
 ) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
     ensure_ingress_storage_colocation(database_url, global).await?;
     Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
@@ -1785,24 +1800,22 @@ async fn create_ingress_sm_storage(
 /// Validate configured locations before initializing any store-owned schema.
 async fn create_ingress_pending_storage(
     database_url: Option<&str>,
-    global: &crate::db::Database,
-) -> Result<crate::pending_delivery::DatabasePendingDeliveryStorage> {
+    global: &Database,
+) -> Result<DatabasePendingDeliveryStorage> {
     ensure_ingress_storage_colocation(database_url, global).await?;
     // Sharing the pool also preserves private in-memory SQLite identity.
-    Ok(
-        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
-            global.clone(),
-            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
-        )
-        .await?,
+    Ok(DatabasePendingDeliveryStorage::from_database(
+        global.clone(),
+        waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
     )
+    .await?)
 }
 
 async fn create_pending_delivery_storage(
     xmpp_config: &XmppConfig,
     server_config: &ServerConfig,
-    clustering: &crate::clustering::ClusteringHandles,
-    global_db: &crate::db::Database,
+    clustering: &ClusteringHandles,
+    global_db: &Database,
     state: &Arc<AppState>,
 ) -> Result<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>> {
     let pending_delivery_url = xmpp_config.pending_delivery_database_url.clone();
@@ -1818,34 +1831,32 @@ async fn create_pending_delivery_storage(
     let storage =
         create_ingress_pending_storage(pending_delivery_url.as_deref(), global_db).await?;
     #[cfg(feature = "clustering")]
-    let storage = if server_config.clustering.enabled
-        && global_db.driver() == crate::db::DatabaseDriver::Postgres
-    {
-        if let Some((claim_store, node_identity)) = clustering.claim_pair() {
-            storage.with_cluster_fencing(claim_store, node_identity)
-        } else {
-            warn!(
+    let storage =
+        if server_config.clustering.enabled && global_db.driver() == DatabaseDriver::Postgres {
+            if let Some((claim_store, node_identity)) = clustering.claim_pair() {
+                storage.with_cluster_fencing(claim_store, node_identity)
+            } else {
+                warn!(
                 "clustered pending delivery has no claim handles; using unfenced promotion inserts"
             );
+                storage
+            }
+        } else {
             storage
-        }
-    } else {
-        storage
-    };
+        };
     #[cfg(not(feature = "clustering"))]
     let _ = (server_config, clustering);
     let database = storage.database();
     if database.is_in_memory_sqlite() {
-        state.register_lineage_ephemeral(crate::db::lineage::DurableStore::PendingDelivery);
+        state.register_lineage_ephemeral(DurableStore::PendingDelivery);
     } else {
         crate::server::bootstrap_store_lineage(
             state,
-            crate::db::lineage::DurableStore::PendingDelivery,
+            DurableStore::PendingDelivery,
             database.clone(),
         )
         .await?;
-        state
-            .register_lineage_database(crate::db::lineage::DurableStore::PendingDelivery, database);
+        state.register_lineage_database(DurableStore::PendingDelivery, database);
     }
     Ok(Arc::new(storage))
 }
@@ -1854,7 +1865,7 @@ fn ensure_push_service_global_database_is_durable() -> Result<()> {
     if cfg!(test) {
         return Ok(());
     }
-    let db_runtime = crate::config::DatabaseRuntimeConfig::from_env()
+    let db_runtime = DatabaseRuntimeConfig::from_env()
         .map_err(|error| anyhow::anyhow!("failed to load database runtime config: {error}"))?;
     if push_service_database_is_restart_durable(&db_runtime) {
         return Ok(());
@@ -1874,14 +1885,10 @@ fn ensure_push_service_global_database_is_durable() -> Result<()> {
     );
 }
 
-pub(crate) fn push_service_database_is_restart_durable(
-    db_runtime: &crate::config::DatabaseRuntimeConfig,
-) -> bool {
+pub(crate) fn push_service_database_is_restart_durable(db_runtime: &DatabaseRuntimeConfig) -> bool {
     match db_runtime.driver {
-        crate::db::DatabaseDriver::Postgres => true,
-        crate::db::DatabaseDriver::Sqlite => {
-            !crate::db::sqlite_url_is_in_memory(&db_runtime.database_url)
-        }
+        DatabaseDriver::Postgres => true,
+        DatabaseDriver::Sqlite => !crate::db::sqlite_url_is_in_memory(&db_runtime.database_url),
     }
 }
 

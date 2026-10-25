@@ -1,10 +1,12 @@
-use crate::ingress::{
-    commit::commit_submission, execute::terminalize_if_complete, test_support::IngressFixture,
-    IngressDecisionClass,
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute::terminalize_if_complete;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::IngressDecisionClass;
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PeerDeliveryKind,
 };
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
 use crate::server::routes::interpret::effects::{
-    delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-    room::ExternalRoomEffect,
     Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
 };
 use crate::server::routes::interpret::DeliveryExecutionContext;

@@ -1,6 +1,6 @@
 use minidom::Element;
 
-use super::*;
+use super::{DataForm, DataFormError, Field, FieldOption, FieldType, FormType, NS_DATA_FORMS};
 
 /// Trait for types that can be parsed from a minidom `Element`.
 pub trait FromElement: Sized {

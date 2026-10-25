@@ -1,4 +1,7 @@
 //! Durable authority asserted for each ingress producer.
+use crate::ingress_uow::IngressUowError;
+use crate::ingress_uow::IngressUowTransaction;
+use crate::ingress_uow::RoomPublication;
 use jid::BareJid;
 use waddle_xmpp::auth::{AuthenticatedPrincipalRef, ExtensionGrantRef};
 
@@ -12,7 +15,7 @@ pub struct ExtensionPrincipal {
 
 #[derive(Clone, Debug)]
 pub enum IngressPrincipal {
-    RoomResult(Box<crate::ingress_uow::RoomPublication>),
+    RoomResult(Box<RoomPublication>),
     Authenticated(AuthenticatedPrincipalRef),
     Extension(ExtensionPrincipal),
 }
@@ -28,17 +31,15 @@ impl IngressPrincipal {
 }
 
 pub(super) async fn assert_admission(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut IngressUowTransaction<'_>,
     submission: &super::submission::IngressSubmission,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), IngressUowError> {
     use super::identity::IngressStreamIdentity;
     use crate::ingress_uow::{
         ExtensionGrantRepository, IngressUowError, PrincipalAssertion, PrincipalRepository,
     };
-    use waddle_xmpp::{
-        auth::ExtensionGrantScope,
-        ingress::{NormalizedTarget, TransportGeneration},
-    };
+    use waddle_xmpp::auth::ExtensionGrantScope;
+    use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
     match (
         &submission.principal,
         &submission.identity,

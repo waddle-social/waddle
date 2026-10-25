@@ -3,6 +3,11 @@
 //! The helpers are test-only by construction and use `expect` internally when
 //! creating fixed local fixtures; they are never enabled in release images.
 
+use crate::db::DatabasePool;
+use crate::ingress::IngressAuthority;
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use std::sync::Arc;
 
 pub use crate::server::routes::websocket::muc_invites::{
@@ -22,24 +27,21 @@ pub use crate::server::routes::websocket::WebSocketState;
 /// The ingress authority must come from [`crate::ingress::IngressAuthority::try_new`] when a test
 /// drives recovery through `trigger_maintenance`, because it owns the maintenance task.
 pub async fn websocket_state_with_ingress(
-    db_pool: Arc<crate::db::DatabasePool>,
-    ingress: Arc<crate::ingress::IngressAuthority>,
+    db_pool: Arc<DatabasePool>,
+    ingress: Arc<IngressAuthority>,
 ) -> Arc<WebSocketState> {
     let database = db_pool.global().clone();
     let pending_delivery_storage = Arc::new(
-        crate::pending_delivery::DatabasePendingDeliveryStorage::from_database(
+        DatabasePendingDeliveryStorage::from_database(
             database.clone(),
             waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
         )
         .await
         .expect("database-backed pending delivery test storage"),
     );
-    let notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
-            database.clone(),
-        ),
-    );
-    crate::notification_outbox::NotificationOutboxStore::try_new(database)
+    let notification_settings_projection =
+        Arc::new(NotificationSettingsProjectionStore::new(database.clone()));
+    NotificationOutboxStore::try_new(database)
         .await
         .expect("notification outbox test schema");
     create_test_websocket_state_with_extension_manager(

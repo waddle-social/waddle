@@ -1,6 +1,8 @@
 //! Room-message observer selection, invocation, and outcome classification.
 
-use super::*;
+use super::{Arc, BareJid, Digest, DisplayText, ExtensionEffect, ExtensionManager, Sha256};
+use crate::actor::ObservationInvocationError;
+use crate::types::ExtensionResponse;
 use crate::types::{
     ConfiguredRoomObserver, ObservationFailure, ObservationSkip, RoomMessageObserve,
     RoomMessageSource, RoomObservationOutcome, RoomObservationResult, RoomObservationSubscription,
@@ -102,7 +104,7 @@ impl ExtensionManager {
     }
 }
 
-fn invocation_failure(error: crate::actor::ObservationInvocationError) -> RoomObservationOutcome {
+fn invocation_failure(error: ObservationInvocationError) -> RoomObservationOutcome {
     use crate::actor::ObservationInvocationError;
     match error {
         ObservationInvocationError::NotInvoked => RoomObservationOutcome::NotInvoked,
@@ -119,7 +121,7 @@ fn invocation_failure(error: crate::actor::ObservationInvocationError) -> RoomOb
 }
 
 fn validated_observation_result(
-    response: crate::types::ExtensionResponse,
+    response: ExtensionResponse,
     validate: impl Fn(&ExtensionEffect) -> bool,
 ) -> RoomObservationOutcome {
     let mut payloads = Vec::new();

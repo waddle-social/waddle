@@ -1,3 +1,5 @@
+use crate::muc::AdminMutationId;
+use crate::muc::RoomCommittedCoordinates;
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::message::Message;
@@ -38,9 +40,9 @@ pub struct RoomChainSnapshot {
     /// frozen snapshot.
     pub claim_fence: Option<RoomClaimFenceContext>,
     /// Durable room lifecycle and revision observed by the same actor read.
-    pub durable_coordinates: Option<crate::muc::RoomCommittedCoordinates>,
+    pub durable_coordinates: Option<RoomCommittedCoordinates>,
     /// Scope for monotonic occupancy watermarks, preserved across live handoff.
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub occupancy_incarnation: AdminMutationId,
     /// One entry per active occupant session — same `nick` may appear
     /// multiple times when an occupant has joined under multiple
     /// resources.
@@ -265,7 +267,7 @@ impl kameo::message::Message<GetNicknameGeneration> for RoomActor {
 /// live-roster handoff cannot race between the guard check and enqueue.
 pub struct RunOccupancyReplayGuarded<R> {
     pub jid: FullJid,
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub occupancy_incarnation: AdminMutationId,
     pub watermark: OccupancyWatermark,
     pub action: Box<dyn FnOnce() -> R + Send>,
 }
@@ -301,7 +303,7 @@ impl<R: Send + 'static> kameo::message::Message<RunOccupancyReplayGuarded<R>> fo
 /// of the asking task does not revoke an allocation already owned by its ledger.
 pub struct RunOccupancyReplayGuardedAsync<R> {
     pub jid: FullJid,
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub occupancy_incarnation: AdminMutationId,
     pub watermark: OccupancyWatermark,
     pub action: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, R> + Send>,
 }
@@ -330,7 +332,7 @@ impl<R: Send + 'static> kameo::message::Message<RunOccupancyReplayGuardedAsync<R
 /// remain unproven. The actor serializes settlement with subsequent joins.
 pub struct RunSupersededOccupancyGuardedAsync<R> {
     pub jid: FullJid,
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub occupancy_incarnation: AdminMutationId,
     pub watermark: OccupancyWatermark,
     pub action: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, R> + Send>,
 }
@@ -371,7 +373,7 @@ pub enum RoomChildRetirementReason {
 /// reachability checks can observe a rejoined or reconstructed room occupant.
 pub struct GetReplayOccupantSessionGeneration {
     pub jid: FullJid,
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub occupancy_incarnation: AdminMutationId,
     pub watermark: OccupancyWatermark,
 }
 
@@ -399,8 +401,8 @@ impl kameo::message::Message<GetReplayOccupantSessionGeneration> for RoomActor {
 /// clustered caller still needs a strictly newer inherited occupancy.
 pub struct RunRoomChildRetirementGuardedAsync<R> {
     pub jid: FullJid,
-    pub occupancy_incarnation: crate::muc::AdminMutationId,
-    pub coordinates: Option<crate::muc::RoomCommittedCoordinates>,
+    pub occupancy_incarnation: AdminMutationId,
+    pub coordinates: Option<RoomCommittedCoordinates>,
     pub watermark: OccupancyWatermark,
     pub allow_lost_occupancy: bool,
     pub action:

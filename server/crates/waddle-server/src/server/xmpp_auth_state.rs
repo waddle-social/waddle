@@ -1,3 +1,4 @@
+use crate::auth::Session;
 use tracing::{debug, warn};
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
@@ -76,7 +77,7 @@ pub(crate) fn oauth_discovery_url(domain: &str) -> String {
 async fn validate_http_session(
     session_manager: &SessionManager,
     token: &str,
-) -> Result<crate::auth::Session, XmppError> {
+) -> Result<Session, XmppError> {
     session_manager.validate_session(token).await.map_err(|e| {
         warn!(token_prefix = %&token[..token.len().min(8)], error = %e, "Session validation failed");
         match e {

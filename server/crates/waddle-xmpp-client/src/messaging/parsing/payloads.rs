@@ -4,8 +4,19 @@ use minidom::Element;
 
 use crate::error::{ClientError, ClientResult};
 
-use super::super::namespaces::*;
-use super::super::types::*;
+use super::super::namespaces::{
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT,
+    NS_REACTIONS, NS_WADDLE_EXTENSION, NS_WADDLE_IN_CALL,
+};
+use super::super::types::{
+    ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
+    ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,
+    ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
+    ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
+    ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
+    InCallReactionEmoji, InCallReactionPayload, InCallSessionId, MarkableMarkerPayload,
+    ModerationPayload, ReactionPayload, RetractionPayload, RetractionTombstonePayload,
+};
 
 pub(crate) fn validate_chat_state(state: &str) -> ClientResult<&str> {
     match state {

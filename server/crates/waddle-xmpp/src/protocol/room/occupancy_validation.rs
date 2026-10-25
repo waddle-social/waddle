@@ -30,6 +30,7 @@ use super::errors::{
     managed_room_forbidden_reply, xep_0045_not_acceptable_reply, xep_0045_visitor_forbidden_reply,
 };
 use super::traits::{RoomHandler, RoomHandlerOutcome};
+use crate::types::Moderation;
 use xmpp_parsers::message::Message;
 
 /// Sender-occupancy gate for the room handler chain.
@@ -67,9 +68,7 @@ impl RoomHandler for OccupancyValidationHandler {
         // can never disagree about who may speak.
         if !sender
             .role
-            .voice(crate::types::Moderation::from_moderated_flag(
-                ctx.room_moderated,
-            ))
+            .voice(Moderation::from_moderated_flag(ctx.room_moderated))
             .is_voiced()
         {
             let reply = xep_0045_visitor_forbidden_reply(message, ctx.room, ctx.sender_full);

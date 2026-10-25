@@ -1,12 +1,10 @@
 use super::groupchat_ingress::GroupchatFixture;
-use crate::{
-    ingress::test_support::IngressFixture,
-    ingress_uow::{CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository},
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{
+    CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    Stanza,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::Stanza;
 
 pub(super) async fn key(f: &IngressFixture) -> MessageKey {
     MessageKey::from_storage(

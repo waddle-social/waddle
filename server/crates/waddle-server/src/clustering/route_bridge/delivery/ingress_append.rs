@@ -1,6 +1,7 @@
 //! Optional receiver-side authority for a peer's keyed detached append.
 
-use super::*;
+use super::{Entity, OrderedRelayDeliveryServices, Stanza};
+use crate::db::Database;
 use crate::ingress::append_authority::{
     check_stanza_binding, record_authorization_failure, AppendAuthorityRejection,
 };
@@ -40,7 +41,7 @@ fn check_authority(
     validated_sender: &Entity,
     stanza: &Stanza,
     obligation: &IngressAppendObligationRef,
-) -> Result<crate::db::Database, AppendAuthorityRejection> {
+) -> Result<Database, AppendAuthorityRejection> {
     if obligation.sender_bare.as_str() != validated_sender.id {
         return Err(AppendAuthorityRejection::SenderClaimMismatch);
     }

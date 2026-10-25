@@ -1,4 +1,20 @@
-use super::*;
+use super::{
+    bad_request_error, build_message_error_reply, debug, default_room_pipeline_dispatcher,
+    extract_correction_from_message, extract_forum_action, extract_retraction_from_message,
+    info_span, interpret_with_depth, item_not_found_error, message_has_framework_envelope,
+    parse_managed_room_jid, remove_framework_envelopes, remove_stanza_ids_by,
+    resource_constraint_error, set_thread_id, validate_groupchat_rich_targets,
+    waddle_id_for_room_jid, warn, BareJid, CheckPermission, DemoteRoomIfExactActor, Deps,
+    ForumAction, FullJid, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid,
+    MamArchivedMessage, Message, Object, ObjectType, OccupantSnapshot, OrderedRelayRouteOrigin,
+    OutboundEvent, Permission, RetractionKind, RoomContext, Stanza, Subject, ToElementString,
+    UuidV4Generator, WebSocketState, Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
+};
+use crate::clustering::ordered_relay::MucProxyOrigin;
+use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+use crate::ingress::IngressEffectCapture;
+use crate::ingress::RoomManifestSnapshot;
+use crate::server::routes::websocket::ResolvedPrincipal;
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::RelayTargetIdentity;
 use waddle_xmpp::ingress::{EntityGeneration, IngressEffectIntent};
@@ -125,8 +141,8 @@ pub(super) async fn dispatch_to_room(
                 .try_proxy_muc_remote_decision(
                     &room_jid,
                     &stanza,
-                    crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
-                    crate::clustering::ordered_relay::MucProxyOrigin::Server,
+                    OrderedRelayMucProxyKind::GroupchatMessage,
+                    MucProxyOrigin::Server,
                     origin,
                     None,
                 )
@@ -317,7 +333,7 @@ pub(super) async fn dispatch_to_room(
                     .map(super::effects::room::RoomFenceRequirement::Guarded)
                     .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
                 snapshot_generation: snapshot.admission_revision,
-                manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
+                manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),
             });
     }
 
@@ -823,7 +839,7 @@ fn room_lookup_internal_error() -> xmpp_parsers::stanza_error::StanzaError {
 
 #[cfg(feature = "clustering")]
 pub(super) fn capture_delivered_remote_room_route(
-    capture: &crate::ingress::IngressEffectCapture,
+    capture: &IngressEffectCapture,
     room: &jid::BareJid,
     relay_target: RelayTargetIdentity,
 ) {
@@ -900,7 +916,7 @@ pub(super) fn normalize_thread_create_source(message: &mut Message) -> Option<St
 /// and the async permission-actor call lands in the interpreter.
 async fn session_is_server_owner(
     state: &WebSocketState,
-    principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'_>>,
+    principal: Option<ResolvedPrincipal<'_>>,
 ) -> bool {
     let Some(principal) = principal else {
         return false;
@@ -1103,8 +1119,8 @@ async fn plan_remote_room(
             admission: None,
             room: room.clone(),
             stanza: Box::new(Stanza::Message(message.clone())),
-            kind: crate::clustering::ordered_relay::OrderedRelayMucProxyKind::GroupchatMessage,
-            muc_origin: crate::clustering::ordered_relay::MucProxyOrigin::Server,
+            kind: OrderedRelayMucProxyKind::GroupchatMessage,
+            muc_origin: MucProxyOrigin::Server,
             origin: origin.clone(),
             reflect_replies_to_sender: true,
         },

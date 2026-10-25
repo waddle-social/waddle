@@ -1,6 +1,12 @@
 //! Browser methods for room presence, avatars, and HTTP upload service discovery.
 
-use super::*;
+use super::{
+    build_disco_info_iq, build_disco_items_iq, build_pin_list_iq, build_upload_slot_iq, discovery,
+    future_to_promise, jid_domain, js_error, parse_pin_list_response,
+    request_avatar_with_iq_skipping, send_avatar_iq_command, send_iq_command, send_stanza_command,
+    to_js_value, upload_slot_to_js, wasm_bindgen, BareJid, Element, JsValue, Promise, WaddleAvatar,
+    WaddleAvatarFetch, WaddleClient, WaddlePinEntry, NS_CLIENT,
+};
 
 /// In-call presence sub-state flags (`urn:waddle:in-call:0`) the chat
 /// passes to [`WaddleClient::update_muji_presence`] as a plain JS object

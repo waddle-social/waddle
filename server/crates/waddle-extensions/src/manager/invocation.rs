@@ -1,6 +1,12 @@
 //! Dispatch of typed extension events with runtime limits and result handling.
 
-use super::*;
+use super::{
+    timeout, warn, CommandInvocation, CommandInvocationRequest, CommandNode, DisplayText,
+    ExtensionCapability, ExtensionEffect, ExtensionEvent, ExtensionManager, LaunchInvocation,
+    LaunchInvocationRequest, LaunchTokenVerification, LaunchValidationRequest, PluginId,
+    ProviderWebhook, EXTENSION_COMMAND_TIMEOUT, EXTENSION_PROVIDER_WEBHOOK_TIMEOUT,
+};
+use crate::types::ActionId;
 
 impl ExtensionManager {
     /// Dispatch to the first command-granted plugin declaring the node and sign its
@@ -78,7 +84,7 @@ impl ExtensionManager {
         let Ok(plugin_id) = PluginId::try_new(plugin_name.to_string()) else {
             return Vec::new();
         };
-        let Ok(action_id) = crate::types::ActionId::try_new(action_id.to_string()) else {
+        let Ok(action_id) = ActionId::try_new(action_id.to_string()) else {
             return Vec::new();
         };
         if !self.verify_launch_token(LaunchTokenVerification {
@@ -162,7 +168,7 @@ impl ExtensionManager {
         let Ok(plugin_id) = PluginId::try_new(request.plugin_name.to_string()) else {
             return false;
         };
-        let Ok(action_id) = crate::types::ActionId::try_new(request.action_id.to_string()) else {
+        let Ok(action_id) = ActionId::try_new(request.action_id.to_string()) else {
             return false;
         };
         self.verify_launch_token(LaunchTokenVerification {

@@ -1,9 +1,7 @@
 //! XEP-0198: Stream Management detached session registry suite.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -2458,9 +2456,8 @@ async fn xep0198_drain_all_for_shutdown_does_not_delete_durable_row_until_confir
 async fn xep0198_unacked_original_receipt_at_round_trips_through_persistence() {
     use chrono::TimeZone;
     use std::sync::Arc;
-    use waddle_xmpp::stream_management::{
-        persistence::InMemorySmPersistence, DetachedUnackedStanza,
-    };
+    use waddle_xmpp::stream_management::persistence::InMemorySmPersistence;
+    use waddle_xmpp::stream_management::DetachedUnackedStanza;
 
     let persistence: Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage> =
         Arc::new(InMemorySmPersistence::new());

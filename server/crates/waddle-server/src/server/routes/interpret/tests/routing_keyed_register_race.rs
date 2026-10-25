@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    chat_msg, deliver_direct_to_full, jid, register_into_both_tiers, routing, test_registry,
+    FullJid, FullJidDeliveryOutcome, SmIngressAppendContext, Stanza,
+};
+use kameo::actor::Spawn;
 
 #[tokio::test]
 async fn keyed_fallback_never_enters_an_actor_registered_after_socket_lookup() {

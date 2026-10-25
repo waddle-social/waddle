@@ -1,4 +1,4 @@
-use super::*;
+use super::{info, DatabaseDriver, DatabaseInboxStorage, InboxStorageError};
 
 pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), InboxStorageError> {
     let i64_type = crate::db::i64_sql_type(storage.db.driver());

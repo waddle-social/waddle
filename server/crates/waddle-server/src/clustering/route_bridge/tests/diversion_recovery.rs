@@ -3,7 +3,16 @@
 //! divert it only for the cooldown, and a `Gap` NACK resynchronizes the
 //! sender onto the receiver's expected sequence.
 
-use super::*;
+use super::{
+    caller_delivery_outcome, envelope_for_services, origin_identity, other_identity,
+    receiver_identity, services_with_claims, target_entity, target_full, test_peer_id, Arc,
+    CancellationToken, ClaimEpoch, ClaimStore, ClusteringMessagingConfig, FullJidDeliveryOutcome,
+    Future, Keypair, Mutex, NodeIdentity, OrderedRelayClaimRole, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, OrderedRelayEnvelopeClaims, OrderedRelayNack,
+    OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayReply,
+    OrderedRelaySequence, OriginInboundSequence, PublicKey, RelayAskError, RemoteDeliverySeed,
+    RemoteStanza, RemoteStanzaEnvelope, Stanza,
+};
 use crate::clustering::ordered_relay::{
     OrderedRelayReceiverState, OrderedRelayReservation, OrderedRelayReservedEnvelope,
     ORDERED_RELAY_DIVERSION_COOLDOWN,
@@ -189,7 +198,8 @@ async fn send_with_inbound(
 
 #[tokio::test]
 async fn xep0045_legacy_same_resource_bridge_serializes_concurrent_enqueues_until_ack() {
-    use std::{future::Future, task::Poll};
+    use std::future::Future;
+    use std::task::Poll;
     let (bridge, services) = sender_bridge().await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());

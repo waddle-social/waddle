@@ -1,6 +1,9 @@
+use crate::db::Rows;
+use crate::ingress_uow::DbRetryClass;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use uuid::Uuid;
 use waddle_extensions::{
     ConfiguredRoomObserver, MessageRevision, ObservationGeneration, OriginId, PluginId,
@@ -84,7 +87,7 @@ async fn assert_source_locks(
 ) -> Result<(), ObservationError> {
     if !locked.contains(&root) {
         return Err(ObservationError::RetryableDatabase(
-            crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+            DbRetryClass::CanonicalLockContention,
         ));
     }
     let mut rows = tx
@@ -100,7 +103,7 @@ async fn assert_source_locks(
             MessageKey::from_storage(Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?);
         if !locked.contains(&key) {
             return Err(ObservationError::RetryableDatabase(
-                crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+                DbRetryClass::CanonicalLockContention,
             ));
         }
     }
@@ -128,7 +131,7 @@ async fn roots_for_target(
 
 async fn settle_publications(
     tx: &mut IngressUowTransaction<'_>,
-    mut rows: crate::db::Rows,
+    mut rows: Rows,
     now_ms: i64,
 ) -> Result<(), ObservationError> {
     let mut ids = Vec::new();
@@ -177,7 +180,7 @@ pub(super) async fn sync_configured(
         roots.extend(live_generation_roots(tx, &observer.plugin, generation).await?);
     }
     let canonical_locks = prelock_sources(tx, &roots, &[]).await?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for observer in configured {
         if !seen.insert(observer.plugin.clone()) {
             return Err(ObservationError::ConfigurationConflict);

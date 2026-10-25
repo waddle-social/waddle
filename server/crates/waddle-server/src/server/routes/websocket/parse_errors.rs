@@ -1,5 +1,8 @@
 use super::transport_xml::sasl_failure_xml;
-use super::*;
+use super::{
+    build_iq_error_xml_typed, feature_not_implemented_iq_error, inject_client_ns_if_missing,
+    Element, FromStr, ParseError,
+};
 
 pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
     match (parse_error_root_name(frame), err) {

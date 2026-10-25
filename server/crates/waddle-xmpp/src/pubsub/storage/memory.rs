@@ -1,3 +1,4 @@
+use crate::xep::xep0402::PEP_NODE;
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::pubsub::{Affiliation, SubId, Subscription, SubscriptionState};
@@ -406,7 +407,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
             XmppError::item_not_found(Some(format!("Node '{}' does not exist", node_name)))
         })?;
 
-        node.config = if node_name == crate::xep::xep0402::PEP_NODE {
+        node.config = if node_name == PEP_NODE {
             config.clone().normalize_xep0402_bookmarks()
         } else {
             config.clone()

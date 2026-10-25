@@ -6,6 +6,7 @@
 //! [`std::fmt::Debug`] impl redacts the payload so the values never
 //! leak into structured logs.
 
+use crate::turn::TurnHost;
 use std::fmt;
 
 use chrono::Duration;
@@ -160,7 +161,7 @@ pub struct SfuConfig {
     /// API secret does not also forge inbound webhook deliveries.
     pub webhook_secret: ApiSecret,
     pub ws_url: WebsocketUrl,
-    pub turn_host: crate::turn::TurnHost,
+    pub turn_host: TurnHost,
     pub turn_tls_port: u16,
     pub turn_udp_port: u16,
     pub turn_shared_secret: TurnSharedSecret,
@@ -241,7 +242,7 @@ impl SfuConfig {
             api_secret: api_secret_value,
             webhook_secret,
             ws_url,
-            turn_host: crate::turn::TurnHost::new(turn_host),
+            turn_host: TurnHost::new(turn_host),
             turn_tls_port,
             turn_udp_port,
             turn_shared_secret: TurnSharedSecret::from_text(&turn_shared_secret),

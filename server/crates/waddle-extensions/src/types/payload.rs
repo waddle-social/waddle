@@ -1,6 +1,11 @@
 //! Bounded extension XML trees and custom payload serialization.
 
-use super::*;
+use super::{
+    validate_xml_local_name, Deserialize, Element, FrameworkTypeError, PayloadNamespace, Serialize,
+    EXTENSION_ITEM_LOCAL_NAME, MAX_XML_ATTRIBUTES, MAX_XML_CHILDREN, MAX_XML_DEPTH,
+    MAX_XML_SERIALIZED_BYTES, MAX_XML_TEXT_BYTES,
+};
+use std::collections::HashSet;
 
 /// Unprefixed XML attribute name and text; namespaced attributes are unsupported by the serializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,7 +161,7 @@ impl XmlElement {
                 limit: "children per element",
             });
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for attr in &self.attributes {
             validate_xml_local_name(attr.local_name.clone())?;
             if attr.namespace.is_some() {

@@ -4,11 +4,22 @@
 //! sequentially, removing the need for external `RwLock` synchronisation.
 //! This is part of the Phase 3 actor-model migration.
 
+use crate::muc::durable::DestroyAttemptId;
+use crate::muc::MucOccupantNick;
+use crate::types::Moderation;
+use crate::xep::xep0272::Muji;
+use crate::xep::xep0317::ServerHats;
+use crate::xep::xep0421::OccupantIdSecret;
+use crate::xep::InCallPresenceState;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
-use std::{collections::HashMap, convert::Infallible};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use thiserror::Error;
 
 use super::affiliation::AffiliationEntry;
@@ -104,7 +115,7 @@ pub struct DepartureReceipt {
 
 impl DepartureReceipt {
     /// The nickname the departure vacated (typed at the source).
-    pub fn nick(&self) -> &crate::muc::MucOccupantNick {
+    pub fn nick(&self) -> &MucOccupantNick {
         match &self.outcome {
             DepartureReceiptOutcome::Left(outcome) => &outcome.nick,
             DepartureReceiptOutcome::Suppressed { nick, .. } => nick,
@@ -139,8 +150,8 @@ pub enum DepartureReceiptOutcome {
     /// Store-less room with a destroy/dormancy in flight: only the leaver's
     /// XEP-0045 §7.14 self-presence is owed.
     Suppressed {
-        nick: crate::muc::MucOccupantNick,
-        affiliation: crate::types::Affiliation,
+        nick: MucOccupantNick,
+        affiliation: Affiliation,
     },
 }
 
@@ -269,7 +280,7 @@ pub struct RoomSnapshot {
     /// verdict and a handoff carries every retained verdict along.
     pub admin_mutation_resolutions: Vec<AdminMutationResolution>,
     /// Local affiliation removals whose ambiguous commit still owes a leave.
-    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    pub pending_affiliation_departures: BTreeSet<BareJid>,
 }
 
 impl RoomSnapshot {
@@ -412,7 +423,7 @@ pub struct RestoreLiveRoster {
     /// lookup lands on the successor still finds its exact attempt.
     pub admin_mutation_resolutions: Vec<AdminMutationResolution>,
     /// Local affiliation removals whose ambiguous commit still owes a leave.
-    pub pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    pub pending_affiliation_departures: BTreeSet<BareJid>,
 }
 
 #[derive(Debug, Clone, Copy, Error)]
@@ -610,13 +621,13 @@ pub struct JoinExistingOccupant {
     /// the new joiner asked to enter. Preparing is resource-owned
     /// coordination state, so join replay must not stamp an aggregate
     /// same-nick Muji payload onto an arbitrary full JID.
-    pub muji: Option<crate::xep::xep0272::Muji>,
+    pub muji: Option<Muji>,
     /// This exact session's in-call presence state
     /// (`urn:waddle:in-call:0`, #1029 raised hand / #1030 mute) at join
     /// time. The join handler appends an `<in-call>` payload carrying
     /// these sub-states to the replayed presence so a late joiner sees
     /// who already has a hand up or is muted.
-    pub in_call: crate::xep::InCallPresenceState,
+    pub in_call: InCallPresenceState,
 }
 
 #[derive(Debug, Clone)]
@@ -655,15 +666,15 @@ pub struct LeaveOutcome {
     /// acknowledge THIS id once the effects ran; replay never consumes the
     /// receipt by itself.
     pub acknowledge: occupancy_handlers::LeaveAttemptId,
-    pub nick: crate::muc::MucOccupantNick,
+    pub nick: MucOccupantNick,
     pub affiliation: Affiliation,
     pub role: Role,
     pub leaving_room_jid: FullJid,
     pub remaining_occupants: Vec<FullJid>,
     pub removed_last_session: bool,
     pub cleared_muji_state: bool,
-    pub remaining_muji: Option<crate::xep::xep0272::Muji>,
-    pub remaining_muji_sessions: Vec<(FullJid, crate::xep::xep0272::Muji)>,
+    pub remaining_muji: Option<Muji>,
+    pub remaining_muji_sessions: Vec<(FullJid, Muji)>,
     pub remaining_nick_real_jid: Option<FullJid>,
     pub occupant_count: usize,
     /// Mirrors `MucRoom.config.persistent`. Surfaced so the leave
@@ -903,34 +914,31 @@ pub struct RoomActor {
     projected_revision: Option<super::durable::RoomRevision>,
     pending_admin_projection: Option<PendingAdminProjection>,
     /// Retained per attempt (bounded) until the minting caller reads it.
-    admin_mutation_resolutions: std::collections::VecDeque<AdminMutationResolution>,
-    pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
+    admin_mutation_resolutions: VecDeque<AdminMutationResolution>,
+    pending_affiliation_departures: BTreeSet<BareJid>,
     admin_receipt_after_publication: Option<super::durable::AdminMutationId>,
     live_roster_restore_attempt: super::durable::AdminMutationId,
     occupancy_incarnation: super::durable::AdminMutationId,
     restore_receipts_after_publication: Vec<super::durable::AdminMutationId>,
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
-    departure_receipts: std::collections::VecDeque<DepartureReceipt>,
+    departure_receipts: VecDeque<DepartureReceipt>,
     /// Latest known generation per full JID (advanced by every join and every
     /// departure) while a receipt of that JID is retained; pruned with the
     /// last receipt.
-    latest_generations: std::collections::HashMap<FullJid, occupancy_handlers::OccupancyOrder>,
+    latest_generations: HashMap<FullJid, occupancy_handlers::OccupancyOrder>,
     /// Attempts displaced by a newer retained departure of the same full
     /// JID. While that newer receipt exists, a late retry of one of these
     /// attempts must never consume the newer receipt through JID fallback.
-    superseded_departure_attempts: std::collections::HashMap<
-        FullJid,
-        std::collections::HashSet<occupancy_handlers::LeaveAttemptId>,
-    >,
+    superseded_departure_attempts: HashMap<FullJid, HashSet<occupancy_handlers::LeaveAttemptId>>,
     /// Why this actor refuses further admissions. Keeping the reason typed
     /// lets the registry distinguish an ordinary inactivity seal, whose
     /// removal must retain exact-release backlog fencing, from a definitive
     /// ownership-loss seal, whose non-serving local actor must be evicted even
     /// when that backlog is full.
     seal_state: RoomSealState,
-    occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
-    server_hats: crate::xep::xep0317::ServerHats,
+    occupant_id_secret: OccupantIdSecret,
+    server_hats: ServerHats,
     /// Durable membership hydrated from the deployment's membership
     /// source at spawn (#1135). Kept separate from
     /// `MucRoom.affiliation_list` on purpose: it never grants join /
@@ -1016,9 +1024,7 @@ pub enum RoomSealState {
     Inactive,
     /// The registry is committing a terminal destroy under this typed
     /// attempt. New mutations must retry through the registry.
-    Destroying {
-        attempt: crate::muc::durable::DestroyAttemptId,
-    },
+    Destroying { attempt: DestroyAttemptId },
     /// The durable ownership gate proved this incarnation is non-serving.
     OwnershipLost,
 }
@@ -1123,10 +1129,7 @@ impl Drop for RoomActor {
 
 impl RoomActor {
     /// Create a new `RoomActor` wrapping the given room.
-    pub fn new(
-        mut room: MucRoom,
-        occupant_id_secret: crate::xep::xep0421::OccupantIdSecret,
-    ) -> Self {
+    pub fn new(mut room: MucRoom, occupant_id_secret: OccupantIdSecret) -> Self {
         room.config = room.config.normalized();
         Self {
             extension_subscribers: HashMap::new(),
@@ -1142,15 +1145,15 @@ impl RoomActor {
             occupancy_revision: 0,
             projected_revision: None,
             pending_admin_projection: None,
-            admin_mutation_resolutions: std::collections::VecDeque::new(),
+            admin_mutation_resolutions: VecDeque::new(),
             pending_affiliation_departures: Default::default(),
             admin_receipt_after_publication: None,
             live_roster_restore_attempt: super::durable::AdminMutationId::generate(),
             occupancy_incarnation: super::durable::AdminMutationId::generate(),
             restore_receipts_after_publication: Vec::new(),
-            departure_receipts: std::collections::VecDeque::new(),
-            latest_generations: std::collections::HashMap::new(),
-            superseded_departure_attempts: std::collections::HashMap::new(),
+            departure_receipts: VecDeque::new(),
+            latest_generations: HashMap::new(),
+            superseded_departure_attempts: HashMap::new(),
             seal_state: RoomSealState::Open,
             occupant_id_secret,
             server_hats: Default::default(),
@@ -1165,7 +1168,7 @@ impl RoomActor {
     }
 
     /// Install the deployment's server-assigned XEP-0317 hats.
-    pub fn with_server_hats(mut self, server_hats: crate::xep::xep0317::ServerHats) -> Self {
+    pub fn with_server_hats(mut self, server_hats: ServerHats) -> Self {
         self.server_hats = server_hats;
         self
     }
@@ -1980,7 +1983,7 @@ impl RoomActor {
         }
 
         let current_moderation = self.room.moderation();
-        let next_moderation = crate::types::Moderation::from_moderated_flag(next.moderated);
+        let next_moderation = Moderation::from_moderated_flag(next.moderated);
         self.room
             .occupants
             .values()
@@ -3212,7 +3215,7 @@ pub struct SealIfInactive {
 /// Repeating the same attempt is deliberately idempotent so the registry can
 /// reconcile a lost ask reply without reopening the actor.
 pub struct SealForDestroy {
-    pub attempt: crate::muc::durable::DestroyAttemptId,
+    pub attempt: DestroyAttemptId,
 }
 
 impl kameo::message::Message<SealForDestroy> for RoomActor {
@@ -3248,7 +3251,7 @@ impl kameo::message::Message<SealForDestroy> for RoomActor {
 /// Undo a failed destroy only when this is still the matching attempt. A
 /// delayed recovery must never reopen a later destroy attempt.
 pub struct UnsealDestroy {
-    pub attempt: crate::muc::durable::DestroyAttemptId,
+    pub attempt: DestroyAttemptId,
 }
 
 /// Reopen an inactivity seal when the registry could not durably record the

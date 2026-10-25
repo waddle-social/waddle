@@ -1,15 +1,11 @@
-use crate::{
-    db::{
-        lineage::{LineageReport, LineageStatus},
-        PoolHealth,
-    },
-    server::AppState,
-};
-use axum::{
-    extract::State,
-    http::{header, HeaderName, Method, StatusCode},
-    response::{IntoResponse, Json},
-};
+use crate::clustering::NodeAdmissionError;
+use crate::clustering::NodeLifecycle;
+use crate::db::lineage::{LineageReport, LineageStatus};
+use crate::db::PoolHealth;
+use crate::server::AppState;
+use axum::extract::State;
+use axum::http::{header, HeaderName, Method, StatusCode};
+use axum::response::{IntoResponse, Json};
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -155,9 +151,9 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
 }
 
 async fn health_for_serving_generation<T>(
-    lifecycle: &crate::clustering::NodeLifecycle,
+    lifecycle: &NodeLifecycle,
     health_check: impl std::future::Future<Output = T>,
-) -> Result<T, crate::clustering::NodeAdmissionError> {
+) -> Result<T, NodeAdmissionError> {
     let permit = lifecycle.admit()?;
     let health = health_check.await;
     permit.revalidate()?;
@@ -169,8 +165,8 @@ async fn health_for_serving_generation<T>(
 /// lifecycle admission state alone reads as a generic "Starting", so the
 /// live per-store lineage statuses are attached whenever they are not clean.
 fn lifecycle_not_ready_response(
-    lifecycle: &crate::clustering::NodeLifecycle,
-    error: &crate::clustering::NodeAdmissionError,
+    lifecycle: &NodeLifecycle,
+    error: &NodeAdmissionError,
     lineage: Result<LineageReport, LineageStatus>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let admission = lifecycle.admission();
@@ -470,24 +466,23 @@ pub(crate) async fn detailed_health_handler(
 mod readiness_generation_tests {
     use super::*;
     use async_trait::async_trait;
-    use axum::{body::Body, response::Response};
+    use axum::body::Body;
+    use axum::response::Response;
     use http_body_util::BodyExt;
     use kameo::actor::Spawn;
-    use std::{str::FromStr, sync::Arc};
+    use std::str::FromStr;
+    use std::sync::Arc;
 
-    use crate::{
-        config::LineageConfig,
-        db::{
-            lineage::{
-                enroll, ensure_table, AttestedLineage, DatabaseLineageAttestor, DeploymentUuid,
-                DurableStore, LineageAttestor, LineageRegistryBuilder,
-            },
-            Database, DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig,
-        },
-        permissions::PermissionActor,
-        server::{AppState, AppStateDeps},
+    use crate::config::LineageConfig;
+    use crate::db::lineage::{
+        enroll, ensure_table, AttestedLineage, DatabaseLineageAttestor, DeploymentUuid,
+        DurableStore, LineageAttestor, LineageRegistryBuilder,
     };
-    use waddle_xmpp::{pubsub::InMemoryPubSubStorage, xep::xep0421::OccupantIdSecret};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig};
+    use crate::permissions::PermissionActor;
+    use crate::server::{AppState, AppStateDeps};
+    use waddle_xmpp::pubsub::InMemoryPubSubStorage;
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     fn configured_lineage() -> LineageConfig {
         LineageConfig {

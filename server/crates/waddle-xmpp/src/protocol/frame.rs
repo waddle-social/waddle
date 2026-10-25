@@ -9,10 +9,12 @@
 //! [`ParseError`] if the frame is malformed. Internal callers that already
 //! have one complete top-level element can also reuse the same classifier.
 
+use crate::ns::SASL;
 use crate::Stanza;
 use std::str::FromStr;
 use thiserror::Error;
-use xmpp_parsers::{message::Lang, minidom::Element};
+use xmpp_parsers::message::Lang;
+use xmpp_parsers::minidom::Element;
 
 pub const CLIENT_STANZA_NS: &str = "jabber:client";
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -154,7 +156,7 @@ fn peek_root_name(xml: &str) -> Option<&str> {
 fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
-    require_namespace(&element, "auth", crate::ns::SASL)?;
+    require_namespace(&element, "auth", SASL)?;
     require_text_only_element(&element, "auth")?;
     let mechanism = element
         .attr("mechanism")
@@ -172,7 +174,7 @@ fn parse_auth(frame: &str) -> Result<ParsedFrame, ParseError> {
 fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
     let element =
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
-    require_namespace(&element, "response", crate::ns::SASL)?;
+    require_namespace(&element, "response", SASL)?;
     require_text_only_element(&element, "response")?;
     Ok(ParsedFrame {
         frame: InboundFrame::SaslResponse(element.text().trim().to_string()),

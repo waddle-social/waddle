@@ -1,4 +1,4 @@
-use super::*;
+use super::{sync_extension_grants, ExtensionManager, GrantSync};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_extensions::{ExtensionCapability, ExtensionConfig, ExtensionModuleConfig, PluginId};

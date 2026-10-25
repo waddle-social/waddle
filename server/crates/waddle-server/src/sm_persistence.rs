@@ -8,6 +8,8 @@
 //! locks make multi-statement quota / append paths atomic across both
 //! drivers.
 
+use crate::db::Rows;
+use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -161,11 +163,7 @@ impl DatabaseSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))
     }
 
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, SmPersistenceError> {
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, SmPersistenceError> {
         let conn = self
             .db
             .guard()
@@ -894,12 +892,9 @@ pub async fn open_for_cluster_mode_with_lineage(
             }
             let (claim_store, node_identity) =
                 claim_pair.ok_or(SmPersistenceError::ClusterClaimHandlesUnavailable)?;
-            let fenced = crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
-                global_db.clone(),
-                claim_store,
-                node_identity,
-            )
-            .await?;
+            let fenced =
+                PostgresFencedSmPersistence::open(global_db.clone(), claim_store, node_identity)
+                    .await?;
             return Ok(Arc::new(fenced));
         }
     }

@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    command_descriptor, display, payload_namespace, payload_rule, plugin_id, polls_node_template,
+    results_node_template, types, votes_node_template, COMMAND_NODE, INVOKE_NODE, PLUGIN_NAME,
+    VERSION,
+};
 
 pub(super) fn manifest() -> types::ExtensionManifest {
     types::ExtensionManifest {

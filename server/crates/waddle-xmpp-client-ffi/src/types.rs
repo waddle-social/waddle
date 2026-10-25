@@ -1,5 +1,6 @@
 // ── Data types ───────────────────────────────────────────────────────────────
 
+use crate::WaddleStatusPreference;
 pub use jid::Jid;
 pub use waddle_xmpp_client::request::StanzaId;
 
@@ -1372,9 +1373,7 @@ pub enum WaddleClientEvent {
     AvatarChanged { jid: Jid, avatar_id: Option<String> },
     /// ADR-010: another resource of this account published a presence
     /// mode to its own `urn:waddle:status-preference:0` PEP node.
-    StatusPreferenceChanged {
-        preference: crate::WaddleStatusPreference,
-    },
+    StatusPreferenceChanged { preference: WaddleStatusPreference },
     /// Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
     /// a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
     /// query-response entries resolve the `fetch_inbox` verb and are

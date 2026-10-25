@@ -2,6 +2,9 @@
 //! Web Push provider wiring, capability snapshot, and shared DB plumbing
 //! (raw execute/query plus per-owner and per-node advisory locks).
 
+use crate::db::DatabaseDriver;
+use crate::db::Rows;
+use crate::db::Transaction;
 use std::sync::Arc;
 
 use jid::BareJid;
@@ -56,7 +59,7 @@ pub(super) struct PushServicePubSubBoundary {
 }
 
 pub(super) async fn lock_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     now_ms: i64,
 ) -> Result<(), XmppError> {
@@ -74,7 +77,7 @@ pub(super) async fn lock_owner_tx(
 }
 
 pub(super) async fn lock_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     now_ms: i64,
 ) -> Result<(), XmppError> {
@@ -414,7 +417,7 @@ impl DatabasePushServiceStore {
         // The old unique node/item pair proves which pending acceptance owns
         // legacy attempts. Preserve it before removing that uniqueness.
         tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
-        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        if tx.driver() == DatabaseDriver::Postgres {
             tx.execute("ALTER TABLE push_publish_jobs DROP CONSTRAINT IF EXISTS push_publish_jobs_node_item_id_key", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
         } else {
             let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
@@ -484,10 +487,10 @@ impl DatabasePushServiceStore {
 
     async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
         let alter_sql = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 format!("ALTER TABLE {table} ADD COLUMN {column_def}")
             }
         };
@@ -554,7 +557,7 @@ impl DatabasePushServiceStore {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, XmppError> {
+    ) -> Result<Rows, XmppError> {
         let conn = self
             .db
             .guard()

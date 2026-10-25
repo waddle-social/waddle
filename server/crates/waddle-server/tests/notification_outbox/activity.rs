@@ -2,13 +2,21 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    activity_store, bare, groupchat_candidate_for, register_push_target, seed_inbox_witness,
+    settings_projection, store, target, StubRoomPolicy,
+};
 use jid::{BareJid, Jid};
 use std::process::Command;
 use waddle_server::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    active_mention_ttl_ms_from_env, NoopDndReader, NotificationCandidate, NotificationClass,
+    NotificationDrainDeps, NotificationThreadId, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+    MAX_ACTIVE_MENTION_TTL_SECONDS, MIN_ACTIVE_MENTION_TTL_SECONDS,
+    WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
+};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 // ─────────────────────────────────────────────────────────────

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    build_config_form, MucRoom, PinPermission, RoomConfig, DATA_FORMS_NS, FIELD_FORUM_MODE,
+    FIELD_PIN_PERMISSION,
+};
 
 #[test]
 fn test_build_config_form() {

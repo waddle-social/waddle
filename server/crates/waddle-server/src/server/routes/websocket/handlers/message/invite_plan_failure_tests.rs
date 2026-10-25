@@ -1,9 +1,13 @@
 //! Invitation prerequisite failures preserve the resumable ingress position.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressStreamIdentity, IngressSubmission,
+use super::{
+    execute_group_dm_membership, handle_group_dm_mediated_invite, restore_recorded_group_dm_invite,
+    tests, ChangeAffiliation, Effect, EffectOutcome, ExternalEffect, GroupDmHistoryVisibility,
+    IngressEffectIntent, MessageEnvelope, PlanFailure, RecordOutcome, RoomMembershipMutation,
+    Session, WebSocketState,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressDecisionClass, IngressStreamIdentity, IngressSubmission};
 use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::effects::{EffectSink, IngressPlan, PlanSink};
 use crate::server::routes::interpret::DeliveryExecutionContext;
@@ -408,7 +412,8 @@ enum CancelAfter {
     LedgerWithoutReceipt,
 }
 async fn membership_cancel_replay(fixture: IngressFixture, cancel_after: CancelAfter) {
-    use crate::server::routes::interpret::effects::{early::RoomMembershipMutation, ImmediateSink};
+    use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+    use crate::server::routes::interpret::effects::ImmediateSink;
     let state = shared_state(&fixture).await;
     let (message, actor) = invite_room(&state, true).await;
     let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");

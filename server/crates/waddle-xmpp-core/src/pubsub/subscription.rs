@@ -1,6 +1,7 @@
 //! XEP-0060 subscription typed payloads.
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use jid::Jid;
 use serde::{Deserialize, Serialize};

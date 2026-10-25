@@ -1,10 +1,16 @@
-use super::*;
-use crate::detached_progress_support::*;
-use waddle_server::ingress::{
-    effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-    ExternalEffect,
+use super::{
+    commit_submission, Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture,
+    PlannedEffect,
 };
-use waddle_xmpp::{ingress::EffectMessageIdentity, registry::ConnectionRegistry, Stanza};
+use crate::detached_progress_support::{
+    assert_pending, attach, cross_archive_retry, detached_effect, execute, queued, registry,
+    resources, restart_and_retry, retry_decision, route,
+};
+use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use waddle_server::ingress::ExternalEffect;
+use waddle_xmpp::ingress::EffectMessageIdentity;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::Stanza;
 
 #[tokio::test]
 async fn detached_progress_restart_retry_sqlite() {
@@ -20,7 +26,8 @@ async fn detached_progress_restart_retry_postgres() {
 
 async fn live_retry(fixture: IngressFixture) {
     use kameo::actor::Spawn;
-    use waddle_server::ingress::{execute::execute_effects, Deps, ImmediateSink};
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{Deps, ImmediateSink};
     use waddle_xmpp::registry::{RegisterUserResource, UserRegistryActor};
     let [a, b, _] = resources();
     let connections = ConnectionRegistry::new();
@@ -324,10 +331,8 @@ async fn detached_progress_cross_archive_retry_postgres() {
 
 async fn live_effects_complete_independently(fixture: IngressFixture) {
     use kameo::actor::Spawn;
-    use waddle_server::ingress::{
-        execute::{execute_effects, ExternalOutcome},
-        Deps, ImmediateSink,
-    };
+    use waddle_server::ingress::execute::{execute_effects, ExternalOutcome};
+    use waddle_server::ingress::{Deps, ImmediateSink};
     use waddle_xmpp::registry::{RegisterUserResource, UserRegistryActor};
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;

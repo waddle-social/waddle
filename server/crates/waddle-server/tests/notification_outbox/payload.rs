@@ -3,7 +3,10 @@
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
 use minidom::Element;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    build_xep0357_notification_payload, RichSummary, WADDLE_PUSH_CONTEXT_NS,
+    XEP0357_SUMMARY_FORM_TYPE,
+};
 use waddle_xmpp::xep::NS_DATA_FORMS;
 
 #[test]

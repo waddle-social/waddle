@@ -2,7 +2,15 @@
 //! XEP-0492 levels, XEP-0513 filters, XEP-0334 hints, XEP-0191 blocks,
 //! and Waddle DND, with per-batch caches.
 
-use super::*;
+use super::{
+    BareJid, BlockingStorage, BlockingStorageError, DndReader, DndState, Jid, NotificationActivity,
+    NotificationActivityReader, NotificationCandidate, NotificationClass, NotificationOutboxError,
+    NotificationOutboxJob, RichSummary, RoomPolicyStore, SuppressedReason,
+};
+use crate::notification_settings_projection::ConversationKind;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::notification_settings_projection::PushDispatchDecision;
+use std::collections::BTreeMap;
 
 /// Typed outcome of `evaluate_push_gate_at_dispatch`.
 ///
@@ -166,8 +174,7 @@ pub(crate) enum PushEvalStage {
 /// supplies the production impl or a typed test double.
 #[derive(Copy, Clone)]
 pub(crate) struct PushEvalDeps<'a> {
-    pub settings_projection:
-        &'a crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    pub settings_projection: &'a NotificationSettingsProjectionStore,
     pub room_policy: &'a dyn RoomPolicyStore,
     pub dnd_reader: &'a dyn DndReader,
     pub activity_reader: &'a dyn NotificationActivityReader,
@@ -184,10 +191,9 @@ pub(crate) struct PushEvalDeps<'a> {
 /// count down and gives callers a single allocation site for the
 /// three caches.
 pub(crate) struct PushEvalCaches<'a> {
-    pub room_policy: &'a mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
-    pub dnd: &'a mut std::collections::BTreeMap<BareJid, DndState>,
-    pub activity:
-        &'a mut std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+    pub room_policy: &'a mut BTreeMap<BareJid, RoomPolicyCacheEntry>,
+    pub dnd: &'a mut BTreeMap<BareJid, DndState>,
+    pub activity: &'a mut BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
 }
 
 pub(crate) async fn evaluate_push_gate_at_dispatch(
@@ -241,14 +247,8 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
     }
 
     let (conversation_kind, is_mention) = match candidate.class() {
-        NotificationClass::DirectMessage => (
-            crate::notification_settings_projection::ConversationKind::Direct,
-            false,
-        ),
-        NotificationClass::DirectMessageMention => (
-            crate::notification_settings_projection::ConversationKind::Direct,
-            true,
-        ),
+        NotificationClass::DirectMessage => (ConversationKind::Direct, false),
+        NotificationClass::DirectMessageMention => (ConversationKind::Direct, true),
         NotificationClass::PersonalMention
         | NotificationClass::ChannelMention
         | NotificationClass::ActiveChannelMention => {
@@ -259,14 +259,8 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             )
             .await
             {
-                RoomPolicyCacheEntry::Private => (
-                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
-                    true,
-                ),
-                RoomPolicyCacheEntry::Public => (
-                    crate::notification_settings_projection::ConversationKind::PublicGroup,
-                    true,
-                ),
+                RoomPolicyCacheEntry::Private => (ConversationKind::PrivateGroup, true),
+                RoomPolicyCacheEntry::Public => (ConversationKind::PublicGroup, true),
                 RoomPolicyCacheEntry::Unknown(_) => {
                     return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
                 }
@@ -280,14 +274,8 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             )
             .await
             {
-                RoomPolicyCacheEntry::Private => (
-                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
-                    false,
-                ),
-                RoomPolicyCacheEntry::Public => (
-                    crate::notification_settings_projection::ConversationKind::PublicGroup,
-                    false,
-                ),
+                RoomPolicyCacheEntry::Private => (ConversationKind::PrivateGroup, false),
+                RoomPolicyCacheEntry::Public => (ConversationKind::PublicGroup, false),
                 RoomPolicyCacheEntry::Unknown(_) => {
                     return Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy);
                 }
@@ -372,10 +360,9 @@ pub(crate) async fn evaluate_push_gate_at_dispatch(
             conversation_kind,
         )
         .await?;
-    let decision =
-        crate::notification_settings_projection::PushDispatchDecision::evaluate(level, is_mention);
+    let decision = PushDispatchDecision::evaluate(level, is_mention);
     Ok(match decision {
-        crate::notification_settings_projection::PushDispatchDecision::Deliver => {
+        PushDispatchDecision::Deliver => {
             let rich = resolve_rich_summary(stage, rich_opt_in, candidate);
             T1PushDispatchOutcome::Deliver { rich }
         }
@@ -461,7 +448,7 @@ async fn resolve_cached_activity(
     activity_reader: &dyn NotificationActivityReader,
     owner: &BareJid,
     conversation: &BareJid,
-    cache: &mut std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+    cache: &mut BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
 ) -> Result<Option<NotificationActivity>, NotificationOutboxError> {
     let key = (owner.clone(), conversation.clone());
     if let Some(entry) = cache.get(&key) {
@@ -475,7 +462,7 @@ async fn resolve_cached_activity(
 async fn resolve_cached_dnd_state(
     dnd_reader: &dyn DndReader,
     user: &BareJid,
-    cache: &mut std::collections::BTreeMap<BareJid, DndState>,
+    cache: &mut BTreeMap<BareJid, DndState>,
 ) -> Result<DndState, NotificationOutboxError> {
     if let Some(state) = cache.get(user) {
         return Ok(*state);
@@ -499,7 +486,7 @@ async fn resolve_cached_dnd_state(
 async fn resolve_cached_room_policy(
     room_policy: &dyn RoomPolicyStore,
     room: &BareJid,
-    cache: &mut std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
+    cache: &mut BTreeMap<BareJid, RoomPolicyCacheEntry>,
 ) -> RoomPolicyCacheEntry {
     if let Some(entry) = cache.get(room) {
         return *entry;
@@ -569,8 +556,20 @@ fn xep0191_block_entry_matches_sender(blocked_jid: &Jid, sender_jid: &Jid) -> bo
 
 #[cfg(test)]
 mod tests {
+    use crate::notification_outbox::{
+        NoopDndReader, NoopRoomPolicy, NotificationMessageHints, NotificationOutboxJobId,
+        NotificationOutboxStatus, NotificationThreadId, PushServiceNodeName,
+    };
+    use minidom::Element;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
     use super::*;
-    use crate::notification_outbox::test_support::*;
+    use crate::notification_outbox::test_support::{
+        active_channel_mention_candidate_for, assert_inbox_witness_unchanged, bare,
+        eval_deps_for_test, fresh_eval_caches, noop_activity_reader, seed_inbox_witness,
+        settings_projection, store, CountingActivityReader, ErroringRoomPolicy, StubRoomPolicy,
+        UnknownRoomPolicy,
+    };
 
     /// A `RoomPolicyStore::room_members_only` returning a typed
     /// `RoomPolicyLookup` error MUST classify the cache entry as

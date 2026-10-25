@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    build_internal_server_error_stream_error, build_stream_features_xml,
+    websocket_stream_close_xml, Element, FromStr,
+};
 
 #[tokio::test]
 async fn xep0237_features_advertise_roster_versioning() {

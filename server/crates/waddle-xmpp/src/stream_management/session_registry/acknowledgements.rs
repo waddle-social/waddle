@@ -1,6 +1,7 @@
 //! Resume ACK evidence survives both source rollback and independent queue outages.
 
-use crate::pending_delivery::{storage::PendingDeliveryStorage, SmSessionId};
+use crate::pending_delivery::storage::PendingDeliveryStorage;
+use crate::pending_delivery::SmSessionId;
 use crate::stream_management::persistence::{SmClaimFence, SmPersistenceError};
 
 use super::{DetachedSession, InMemorySmSessionRegistry, ShutdownSmClaimLoss, SmRegistryError};

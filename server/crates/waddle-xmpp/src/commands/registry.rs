@@ -2,6 +2,7 @@
 //!
 //! Manages command registration, session state, and dispatching for ad-hoc commands.
 
+use crate::xep::xep0050::AllowedActions;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ pub enum CommandResult {
         /// to `AllowedActions::new(Action::Complete).with_complete()`
         /// so generic XEP-0050 clients know `complete` finishes the
         /// wizard.
-        actions: Option<crate::xep::xep0050::AllowedActions>,
+        actions: Option<AllowedActions>,
     },
     /// Command completed successfully.
     Completed {

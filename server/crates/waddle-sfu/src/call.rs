@@ -5,9 +5,11 @@
 //! bridge. The XMPP layer only ever sees these; LiveKit-specific
 //! representations live in [`crate::token`] and [`crate::livekit`].
 
+use crate::UnboundOccupantPolicy;
 use jid::FullJid;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use waddle_xmpp_core::{types::Voice, OccupancySessionGeneration};
+use waddle_xmpp_core::types::Voice;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::error::SfuError;
 
@@ -223,7 +225,7 @@ pub struct CallTeardownIntentLite {
     /// `occupant_session` is `Some` (#1703): `TearDown` for an intent minted
     /// by a CONFIRMED departure (the room actor removed the session or the
     /// live connection asked), `Keep` for stale/unconfirmed cleanup.
-    pub unbound_occupant: crate::UnboundOccupantPolicy,
+    pub unbound_occupant: UnboundOccupantPolicy,
     /// The signaling session whose terminate produced this intent
     /// (#1608): the executor re-checks it against the live
     /// registration's binding immediately before the destructive

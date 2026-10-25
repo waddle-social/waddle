@@ -1,6 +1,10 @@
 //! Extension capabilities, supported payloads, commands, and routing declarations.
 
-use super::*;
+use super::{
+    validate_xml_local_name, ArtifactReference, CommandNode, Deserialize, DisplayText,
+    ExtensionPayload, FrameworkTypeError, PayloadNamespace, PluginId, PluginVersion, PubSubNode,
+    RouteId, Serialize,
+};
 
 /// Explicit extension permissions requested in manifests and granted by the operator.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

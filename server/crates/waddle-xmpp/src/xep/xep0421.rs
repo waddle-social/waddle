@@ -29,6 +29,7 @@
 //! - Strip any `<occupant-id/>` received from clients (prevent spoofing)
 //! - Use a consistent generation algorithm
 
+use crate::xep::xep0317::ServerHats;
 use hmac::{Hmac, KeyInit, Mac};
 use minidom::Element;
 use sha2::Sha256;
@@ -129,7 +130,7 @@ pub struct OccupantIdentity<'a> {
     pub bare_jid: &'a jid::BareJid,
     pub real_jid: Option<&'a jid::FullJid>,
     pub secret: &'a OccupantIdSecret,
-    pub hats: &'a crate::xep::xep0317::ServerHats,
+    pub hats: &'a ServerHats,
 }
 
 /// An opaque occupant identifier.

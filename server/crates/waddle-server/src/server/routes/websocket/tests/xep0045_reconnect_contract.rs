@@ -5,7 +5,13 @@
 //! timing a socket race or accepting both outcomes in a single assertion.
 
 use super::super::cleanup::{cleanup_connection_shutdown, ConnectionShutdownOutcome};
-use super::*;
+use super::{
+    create_test_server_owner_session, create_test_websocket_state, handle_muc_join,
+    handle_muc_join_with_occupancy_session, handle_muc_leave_with_occupancy_session, handlers,
+    mpsc, register_test_connection, snapshot_room, Arc, BareJid, ConnectionPhase, FullJid,
+    OutboundStanza, Stanza, WebSocketState, WsConnState,
+};
+use crate::server::routes::websocket::handlers::presence::handle_muc_join as handle_muc_join_real;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 struct ReplacementFixture {

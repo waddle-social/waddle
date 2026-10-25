@@ -1,6 +1,14 @@
 //! Message enrichment and effect collection across configured extensions.
 
-use super::*;
+use super::{
+    debug, detect_links, join_all, message_has_framework_envelope,
+    message_hook_effect_launches_match_room, reply_target_from_payloads,
+    room_stanza_id_from_payloads, thread_id_from_message, timeout, warn, Arc, BareJid, DisplayText,
+    Duration, ExtensionCapability, ExtensionEffect, ExtensionEnvelope, ExtensionEvent,
+    ExtensionManager, FullJidValue, LinkTarget, Message, MessageContext, MessageExtensionOutcome,
+    MessageHook, MessageHookMode, ObserverOutcome, PluginId, RoomJid, StanzaId, WaddleId,
+    EXTENSION_ENRICH_TIMEOUT, EXTENSION_OBSERVE_TIMEOUT,
+};
 
 impl ExtensionManager {
     /// Plugins whose observer hook is eligible for this exact message.

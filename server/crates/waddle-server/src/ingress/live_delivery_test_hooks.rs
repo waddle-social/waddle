@@ -1,9 +1,7 @@
 //! Exact, message-scoped sink gates for cancellation and ownership race tests.
 use jid::FullJid;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::Notify;
 use waddle_xmpp::ingress::MessageKey;
 

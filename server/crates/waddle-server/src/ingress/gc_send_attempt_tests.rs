@@ -1,18 +1,15 @@
 use super::{run_retention_gc_with_budget, AliasGcProgress, RetentionGcBudget};
-use crate::{
-    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
-    ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, SendAttemptRepository, SendClaim,
-        SendObligation,
-    },
+use crate::ingress::commit::commit_submission;
+use crate::ingress::receipt_key;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{
+    settle_recorded, CanonicalMessageRepository, SendAttemptRepository, SendClaim, SendObligation,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use std::time::Duration;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    ownership::NodeIdentity,
-    telemetry::attributes::IngressGcOutcome,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::ownership::NodeIdentity;
+use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
 
 async fn retention_preserves_unresolved_and_collects_settled_attempts(fixture: IngressFixture) {
     let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");

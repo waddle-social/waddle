@@ -1,14 +1,18 @@
 //! #1805: ordinary local delivery must retain the proof needed by the detach drain.
-use super::*;
-use crate::ingress::{
-    execute::execute_effects,
-    maintenance::{run_maintenance_pass, MaintenanceBudget},
-    ExternalOutcome, RecoveryEnvironment,
+use super::{
+    commit_submission, detach, detaching_socket, outbound, timers, Arc, Blocklist, DetachingSocket,
+    EffectMessageIdentity, IngressEffectIntent, IngressFixture, Message, Stanza,
+    StreamManagementState, STREAM,
 };
+use crate::ingress::execute::execute_effects;
+use crate::ingress::maintenance::{run_maintenance_pass, MaintenanceBudget};
+use crate::ingress::{ExternalOutcome, RecoveryEnvironment};
+use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+use crate::server::routes::interpret::effects::{ImmediateSink, PlanSink};
 use crate::server::routes::interpret::{
     deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
-    effects::{delivery::PeerDeliveryKind, ImmediateSink, PlanSink},
 };
+use waddle_xmpp::stream_management::SmSessionRegistry;
 
 async fn receipt_fault(fixture: &IngressFixture, enabled: bool) {
     match (fixture.db.driver(), enabled) {
@@ -188,10 +192,8 @@ async fn local_actor_detach_recovery(
 }
 
 async fn fail_live_write(socket: &mut DetachingSocket) {
-    use crate::server::routes::websocket::{
-        outbound::{handle_outbound_stanza, OutboundAuthority},
-        timers::TransportTimers,
-    };
+    use crate::server::routes::websocket::outbound::{handle_outbound_stanza, OutboundAuthority};
+    use crate::server::routes::websocket::timers::TransportTimers;
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("live write permit");
     let shutdown = tokio_util::sync::CancellationToken::new();

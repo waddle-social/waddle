@@ -1,10 +1,9 @@
 use super::IngressAuthority;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, Weak},
-    time::Duration,
-};
-use waddle_xmpp::{ingress::MessageKey, stream_management::SmIngressFrameReceipt};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::stream_management::SmIngressFrameReceipt;
 
 /// Proofs outlive socket state. The queue lock never covers database work.
 #[derive(Default)]

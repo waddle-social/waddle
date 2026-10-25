@@ -1,5 +1,8 @@
 //! Durable room observations; room authority and persistence remain host-owned.
-use super::*;
+use super::{
+    BareJid, Deserialize, DisplayText, ExtensionPayload, FrameworkTypeError, ModelId, OriginId,
+    PluginId, ProviderId, Serialize, Sha256Digest, StanzaId, Timestamp,
+};
 
 /// Positive operator-controlled generation that fences durable observer configurations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]

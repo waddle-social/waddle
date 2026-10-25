@@ -42,6 +42,7 @@ use super::super::event::OutboundEvent;
 use super::super::handlers::errors::send_message_error;
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
+use crate::muc::RoomSubjectTexts;
 use crate::types::Role;
 use chrono::{DateTime, Utc};
 use jid::Jid;
@@ -120,7 +121,7 @@ impl RoomHandler for MucSubjectHandler {
         // `ReflectorHandler` is about to emit. Persisting only the
         // first language would silently lose localized subjects on
         // next-join replay.
-        let texts = crate::muc::RoomSubjectTexts::from_message_subjects(&message.subjects);
+        let texts = RoomSubjectTexts::from_message_subjects(&message.subjects);
 
         // Single dispatch clock (matches the `dispatch_timestamp`
         // sharing precedent in inbox.rs / archive.rs). Conversion

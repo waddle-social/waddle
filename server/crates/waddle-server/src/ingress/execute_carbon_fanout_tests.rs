@@ -1,22 +1,23 @@
 //! Actual owner fanout replies must only prove complete remote obligations.
-use super::*;
+use super::{
+    carbon_progress, classify_outcome, completed_receipts, proven_receipts,
+    terminalize_if_complete, Deps, Duration, Effect, EffectOutcome, EffectReceiptRepository,
+    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome,
+    IngressUowError, PlannedEffect, Stanza,
+};
+use crate::clustering::relay::RelayRemoteUserSideEffectStatus;
+use crate::clustering::route_bridge::tests::delivery::remote_carbon_owner_reply;
+use crate::clustering::route_bridge::RemoteCarbonFanout;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::carbons::{remote_carbon_delivery, CarbonFanoutFailure};
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::{
-    clustering::{
-        relay::RelayRemoteUserSideEffectStatus,
-        route_bridge::{tests::delivery::remote_carbon_owner_reply, RemoteCarbonFanout},
-    },
-    ingress::{commit::commit_submission, test_support::IngressFixture},
-    server::routes::interpret::carbons::{remote_carbon_delivery, CarbonFanoutFailure},
-    sm_persistence::DatabaseSmPersistence,
-};
+use crate::sm_persistence::DatabaseSmPersistence;
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    protocol::CarbonKind,
-    registry::ConnectionRegistry,
-    stream_management::{InMemorySmSessionRegistry, SmSessionRegistry},
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
 
 async fn owner_fanout_receipts(fixture: IngressFixture, fail_append: bool) {
     let store = Arc::new(

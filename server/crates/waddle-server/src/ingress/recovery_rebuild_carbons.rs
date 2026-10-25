@@ -1,14 +1,14 @@
 //! Restore the frozen carbon audience without re-running XEP-0280 selection.
-use super::{decision::EffectReceiptKey, RecoveryInput};
-use crate::{
-    ingress_uow::IngressUowError,
-    server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
-        PlanEffectDependency, PlannedEffect,
-    },
+use super::decision::EffectReceiptKey;
+use super::RecoveryInput;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlanEffectDependency, PlannedEffect,
 };
 use jid::BareJid;
-use waddle_xmpp::{ingress::IngressEffectIntent, protocol::CarbonKind};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::CarbonKind;
 
 pub(super) fn restore(
     plan: &mut IngressPlan,

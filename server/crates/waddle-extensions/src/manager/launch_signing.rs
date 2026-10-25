@@ -1,14 +1,18 @@
 //! Generation and verification of signed extension launch tokens.
 
-use super::*;
+use super::{DateTime, Digest, Hmac, KeyInit, LaunchContext, LaunchId, Mac, PluginId, Sha256, Utc};
+use crate::types::ActionId;
+use crate::types::ExtensionPayload;
+use crate::types::FormFieldValue;
+use crate::types::Timestamp;
 
 pub(super) fn sign_launch_token(
     key: &[u8],
     plugin: &PluginId,
-    action: &crate::types::ActionId,
+    action: &ActionId,
     launch_id: &LaunchId,
     context: &LaunchContext,
-    expires_at: Option<&crate::types::Timestamp>,
+    expires_at: Option<&Timestamp>,
     payload_digest: &str,
 ) -> String {
     type HmacSha256 = Hmac<Sha256>;
@@ -37,11 +41,11 @@ pub(super) fn sign_launch_token(
     hex::encode(mac.finalize().into_bytes())
 }
 
-pub(super) fn launch_payload_digest(payloads: &[crate::types::ExtensionPayload]) -> String {
+pub(super) fn launch_payload_digest(payloads: &[ExtensionPayload]) -> String {
     digest_launch_payload_fields(launch_payload_fields(payloads))
 }
 
-pub(super) fn submitted_launch_payload_digest(fields: &[crate::types::FormFieldValue]) -> String {
+pub(super) fn submitted_launch_payload_digest(fields: &[FormFieldValue]) -> String {
     let pairs = fields
         .iter()
         .filter(|field| field.name.as_str().starts_with("payload#"))
@@ -59,9 +63,7 @@ pub(super) fn submitted_launch_payload_digest(fields: &[crate::types::FormFieldV
     digest_launch_payload_fields(pairs)
 }
 
-pub(super) fn launch_payload_fields(
-    payloads: &[crate::types::ExtensionPayload],
-) -> Vec<(String, Vec<String>)> {
+pub(super) fn launch_payload_fields(payloads: &[ExtensionPayload]) -> Vec<(String, Vec<String>)> {
     let mut fields = Vec::new();
     for payload in payloads {
         let prefix = format!("payload#{}", payload.root.local_name);
@@ -129,8 +131,8 @@ pub(super) fn pubsub_node_placeholder_value(
     value
 }
 
-pub(super) fn launch_expiry_at(now: DateTime<Utc>) -> Option<crate::types::Timestamp> {
-    crate::types::Timestamp::try_new((now + chrono::Duration::hours(1)).to_rfc3339()).ok()
+pub(super) fn launch_expiry_at(now: DateTime<Utc>) -> Option<Timestamp> {
+    Timestamp::try_new((now + chrono::Duration::hours(1)).to_rfc3339()).ok()
 }
 
 pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

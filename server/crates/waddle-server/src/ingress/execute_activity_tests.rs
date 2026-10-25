@@ -1,14 +1,16 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, Effect, ExternalDirectEffect,
+    ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::notification_activity::{
     NotificationActivityReader, NotificationActivityStore, NotificationChatState,
 };
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, NotificationActivityMutation},
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, NotificationActivityMutation};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn gone_preserves_newer_activity(fixture: IngressFixture) {
     let store = NotificationActivityStore::try_new(fixture.db.clone())

@@ -1,6 +1,14 @@
 //! Bounded retention of settled observer history (#1901).
 
-use super::*;
+use super::Repo;
+use super::{
+    add_origin_id, add_stanza_id, capture, configured_observer, correction_intent,
+    initialize_room_observations, intent, message, payload, record_message, revert_v1025, room,
+    sender, subscription, BareJid, CanonicalMessageRepository, ConfiguredRoomObserver,
+    EffectReceiptRepository, ExtensionPayload, Id, IngressEffectIntent, IngressFixture, Lang,
+    Message, MessageKey, MessageType, RoomObservationOutcome, RoomObservationResult,
+    RoomObservationScope, RoomObservationSubscription, StanzaId, Utc,
+};
 use crate::db::DatabaseDriver;
 use crate::ingress::gc::RetentionGcBudget;
 use crate::ingress::maintenance::{

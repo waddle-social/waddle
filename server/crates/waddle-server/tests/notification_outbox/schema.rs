@@ -2,10 +2,13 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{bare, db_query, groupchat_candidate_for};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NotificationCandidate, NotificationCandidateInsertOutcome, NotificationClass,
+    NotificationMessageHints, NotificationOutboxStore, NotificationReason, RichSummary,
+};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[tokio::test]

@@ -1,13 +1,13 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use sqlx::{postgres::PgPool, sqlite::SqlitePool};
+use sqlx::postgres::PgPool;
+use sqlx::sqlite::SqlitePool;
 
-use crate::{
-    config::LineageConfig,
-    db::{Database, DatabaseDriver, DatabaseError},
-};
+use crate::config::LineageConfig;
+use crate::db::{Database, DatabaseDriver, DatabaseError};
 
 use super::{
     verify, verify_via_control_plane, verify_via_pg_pool, verify_via_sqlite_pool, AttestedLineage,

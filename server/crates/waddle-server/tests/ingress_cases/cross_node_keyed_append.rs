@@ -1,27 +1,23 @@
 //! XEP-0198 persistence leg of #1778. The crate-private receiver authorization
 //! and origin receipt-failure path are covered in execute_relay_detached_tests.
-use crate::{detached_progress_support, ingress_support::IngressFixture};
-use waddle_server::{
-    clustering::{
-        codec::RemoteStanza,
-        ordered_relay::{
-            OrderedRelayChannel, OrderedRelayClaim, OrderedRelayEnvelopeClaims, OrderedRelayOrigin,
-            OrderedRelayPayload, OrderedRelayReceiverState, OrderedRelayRecipient,
-            OrderedRelayReply, OrderedRelayReservation, OrderedRelaySenderState,
-            OrderedRelaySequence, OriginInboundSequence, RemoteStanzaEnvelope,
-        },
-        NodeId,
-    },
-    ingress::{commit::commit_submission, identity::IngressAppendObligationRef},
+use crate::detached_progress_support;
+use crate::ingress_support::IngressFixture;
+use waddle_server::clustering::codec::RemoteStanza;
+use waddle_server::clustering::ordered_relay::{
+    OrderedRelayChannel, OrderedRelayClaim, OrderedRelayEnvelopeClaims, OrderedRelayOrigin,
+    OrderedRelayPayload, OrderedRelayReceiverState, OrderedRelayRecipient, OrderedRelayReply,
+    OrderedRelayReservation, OrderedRelaySenderState, OrderedRelaySequence, OriginInboundSequence,
+    RemoteStanzaEnvelope,
 };
-use waddle_xmpp::{
-    ownership::{ClaimEpoch, Entity, EntityType},
-    pending_delivery::SmSessionId,
-    stream_management::{
-        SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, StreamManagementState,
-    },
-    Stanza,
+use waddle_server::clustering::NodeId;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::identity::IngressAppendObligationRef;
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::{
+    SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, StreamManagementState,
 };
+use waddle_xmpp::Stanza;
 
 pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
     let [target, _, _] = detached_progress_support::resources();

@@ -27,7 +27,8 @@
 //! - Community "what's happening now" feed
 //! - Auto-cleanup of old content
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use minidom::Element;

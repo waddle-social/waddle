@@ -1,6 +1,11 @@
 //! Stream-management negotiation, acknowledgement clocks, and replay coordination.
 
 use crate::bootstrap::NS_STREAMS;
+use crate::event::SmAckRequestReason;
+use crate::state::SessionPhase;
+use crate::stream_management::SmInboundControl;
+use crate::stream_management::SmState;
+use crate::stream_management::NS_SM;
 
 use crate::error::{ClientError, ClientResult};
 use crate::event::{
@@ -65,7 +70,7 @@ impl XmppRuntime {
         element: &minidom::Element,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
-        let control = match crate::stream_management::SmState::parse_inbound_control(element) {
+        let control = match SmState::parse_inbound_control(element) {
             Ok(control) => control,
             Err(_) => {
                 self.handle_sm_protocol_violation(events);
@@ -74,19 +79,19 @@ impl XmppRuntime {
         };
 
         match control {
-            crate::stream_management::SmInboundControl::RequestAck => {
+            SmInboundControl::RequestAck => {
                 if !matches!(self.sm_negotiation, SmNegotiationState::Enabled) {
                     self.handle_sm_protocol_violation(events);
                     return Ok(());
                 }
                 let h = self.sm_state.inbound_count;
-                let ack = crate::stream_management::SmState::build_ack(h);
+                let ack = SmState::build_ack(h);
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                     TransportMessage::Element(ack),
                 )));
                 events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                     StreamManagementEvent::AckRequested {
-                        reason: crate::event::SmAckRequestReason::PeerRequest,
+                        reason: SmAckRequestReason::PeerRequest,
                     },
                 )));
             }
@@ -156,7 +161,7 @@ impl XmppRuntime {
                 self.sm_negotiation = SmNegotiationState::Enabled;
                 self.snapshot.binding = Some(self.resumed_session_binding()?);
                 self.bootstrap = BootstrapState::Ready;
-                self.set_phase(crate::state::SessionPhase::Established)?;
+                self.set_phase(SessionPhase::Established)?;
                 events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                     StreamManagementEvent::Resumed { h },
                 )));
@@ -173,13 +178,11 @@ impl XmppRuntime {
                 }
                 if self.sm_state.acknowledgement_clock_pending() {
                     events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                        TransportMessage::Element(
-                            crate::stream_management::SmState::build_request_ack(),
-                        ),
+                        TransportMessage::Element(SmState::build_request_ack()),
                     )));
                     events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                         StreamManagementEvent::AckRequested {
-                            reason: crate::event::SmAckRequestReason::ResumedUnackedTail,
+                            reason: SmAckRequestReason::ResumedUnackedTail,
                         },
                     )));
                 }
@@ -229,7 +232,7 @@ impl XmppRuntime {
         let error = Element::builder("error", NS_STREAMS)
             .append(Element::builder("undefined-condition", NS_STREAM_ERRORS).build())
             .append(
-                Element::builder("handled-count-too-high", crate::stream_management::NS_SM)
+                Element::builder("handled-count-too-high", NS_SM)
                     .attr(minidom::rxml::xml_ncname!("h").to_owned(), h.to_string())
                     .attr(
                         minidom::rxml::xml_ncname!("send-count").to_owned(),
@@ -291,8 +294,7 @@ fn stream_error_condition(element: &Element) -> StreamErrorCondition {
 }
 
 fn stream_error_detail(element: &Element) -> Option<StreamErrorDetail> {
-    let handled_count =
-        element.get_child("handled-count-too-high", crate::stream_management::NS_SM)?;
+    let handled_count = element.get_child("handled-count-too-high", NS_SM)?;
     let h = handled_count.attr("h")?.parse().ok()?;
     let send_count = handled_count.attr("send-count")?.parse().ok()?;
     Some(StreamErrorDetail::HandledCountTooHigh { h, send_count })

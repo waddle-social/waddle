@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    async_trait, debug, info, instrument, BareJid, Database, DatabaseConfig, DatabaseDriver,
+    InsertOutcome, IntoParams, PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId,
+    PendingStorageError, QuotaPolicy, SmSessionId,
+};
+use crate::db::Rows;
+use crate::db::Transaction;
+use crate::db::Value;
+use std::collections::HashSet;
 use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, PendingClaimToken};
 
 mod ack_windows;
@@ -431,11 +439,7 @@ impl DatabasePendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))
     }
 
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, PendingStorageError> {
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, PendingStorageError> {
         let conn = self
             .db
             .guard()
@@ -451,7 +455,7 @@ impl DatabasePendingDeliveryStorage {
 /// sequence off (or scrubbed it). An initial detach whose snapshot never
 /// landed has no session row and retains the ordinary at-least-once fallback.
 async fn persisted_replay_already_transferred(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     stream_id: &str,
     sequence: u32,
 ) -> Result<bool, PendingStorageError> {
@@ -494,7 +498,7 @@ async fn persisted_replay_already_transferred(
 /// already serializes the statement. When `fence` is present, its exact SM
 /// claim is asserted before either the advisory lock or the write.
 pub(crate) async fn insert_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     row: &PendingRow,
     quota: QuotaPolicy,
     fence: Option<PendingInsertFence<'_>>,
@@ -567,7 +571,7 @@ pub(crate) async fn insert_in_transaction(
 }
 
 async fn assert_insert_fence(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     fence: PendingInsertFence<'_>,
 ) -> Result<(), PendingStorageError> {
     let owner = fence.claim_fence.owner();
@@ -868,14 +872,14 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         let mut params = crate::db_params![];
         if let Some(after) = after {
             sql.push_str(" AND notification_recovery_ordinal > ?");
-            params.push(crate::db::Value::from(after.to_storage()));
+            params.push(Value::from(after.to_storage()));
         }
         if let Some(through) = through {
             sql.push_str(" AND notification_recovery_ordinal <= ?");
-            params.push(crate::db::Value::from(through.to_storage()));
+            params.push(Value::from(through.to_storage()));
         }
         sql.push_str(" ORDER BY notification_recovery_ordinal ASC LIMIT ?");
-        params.push(crate::db::Value::from(limit as i64));
+        params.push(Value::from(limit as i64));
         let mut rows = self.query(&sql, params).await?;
         let mut out = Vec::new();
         while let Some(row) = rows
@@ -1365,11 +1369,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         &self,
         recipient: &BareJid,
         session: &SmSessionId,
-        sequences: &std::collections::HashSet<u32>,
+        sequences: &HashSet<u32>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if sequences.is_empty() {
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
-                std::collections::HashSet::new(),
+                HashSet::new(),
             );
         }
 
@@ -1388,11 +1392,11 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                AND flushed_in_session = ? \
                AND outbound_sequence IN ({sequence_placeholders})"
         );
-        let mut select_params: Vec<crate::db::Value> = Vec::with_capacity(2 + sequences.len());
-        select_params.push(crate::db::Value::from(recipient.to_string()));
-        select_params.push(crate::db::Value::from(session.as_str().to_string()));
+        let mut select_params: Vec<Value> = Vec::with_capacity(2 + sequences.len());
+        select_params.push(Value::from(recipient.to_string()));
+        select_params.push(Value::from(session.as_str().to_string()));
         for sequence in sequences {
-            select_params.push(crate::db::Value::from(i64::from(*sequence)));
+            select_params.push(Value::from(i64::from(*sequence)));
         }
 
         let tx = self.db.begin_immediate().await;
@@ -1458,7 +1462,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             }
         };
         let mut row_ids = Vec::new();
-        let mut released = std::collections::HashSet::with_capacity(sequences.len());
+        let mut released = HashSet::with_capacity(sequences.len());
         loop {
             let row = match rows.next().await {
                 Ok(row) => row,
@@ -1529,13 +1533,10 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                AND flushed_in_session = ? \
                AND outbound_sequence IN ({sequence_placeholders})"
         );
-        let mut update_params = row_ids
-            .into_iter()
-            .map(crate::db::Value::from)
-            .collect::<Vec<_>>();
-        update_params.push(crate::db::Value::from(session.as_str().to_string()));
+        let mut update_params = row_ids.into_iter().map(Value::from).collect::<Vec<_>>();
+        update_params.push(Value::from(session.as_str().to_string()));
         for sequence in sequences {
-            update_params.push(crate::db::Value::from(i64::from(*sequence)));
+            update_params.push(Value::from(i64::from(*sequence)));
         }
         if let Err(error) = tx.execute(&update_sql, update_params).await {
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
@@ -1605,8 +1606,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 crate::db_params![claimed_before_ms],
             )
             .await?;
-        let live: std::collections::HashSet<&str> =
-            live_sessions.iter().map(SmSessionId::as_str).collect();
+        let live: HashSet<&str> = live_sessions.iter().map(SmSessionId::as_str).collect();
         let mut out = Vec::new();
         while let Some(row) = rows
             .next()
@@ -1847,7 +1847,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
 /// Test for an existing pending row before applying a quota-predicated insert.
 pub(crate) async fn contains_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     id: &PendingRowId,
 ) -> Result<bool, PendingStorageError> {
     let mut rows = tx
@@ -1866,7 +1866,7 @@ pub(crate) async fn contains_in_transaction(
 
 /// Mark the archived notification obligation in the same transaction as its receipt.
 pub(crate) async fn mark_notification_outboxed_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     id: &PendingRowId,
 ) -> Result<u64, PendingStorageError> {
     tx.execute("UPDATE pending_delivery SET notification_outboxed_at_ms = ? WHERE row_id = ? AND notification_outboxed_at_ms IS NULL", crate::db_params![crate::time::now_ms(), id.as_str().to_string()]).await.map_err(|error| PendingStorageError::Other(error.to_string()))

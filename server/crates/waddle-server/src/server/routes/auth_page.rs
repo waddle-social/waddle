@@ -3,13 +3,11 @@
 //! This release intentionally disables the legacy auth page surface.
 
 use super::auth::AuthState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
-};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse};
+use axum::routing::get;
+use axum::Router;
 use std::sync::Arc;
 
 pub fn router(auth_state: Arc<AuthState>) -> Router {

@@ -1,6 +1,13 @@
 //! Internal commands and result channels used by the browser client driver.
 
-use super::*;
+use super::{
+    apply_pagehide_message_sent, js_error, oneshot, publish_resume_state_snapshot, wasm_bindgen,
+    AvatarRequestFailure, ClientError, ClientEvent, ConnectionEvent, DeferredWasmCommand,
+    DriverResult, Element, JsCast, JsValue, PagehideAckRequest, PagehideCommandCompletion, Rc,
+    RefCell, SmState, StreamClose, TransportMessage, WaddleClientInner, WaddleSendMessageOutcome,
+    WasmCommand, WasmDriverCore,
+};
+use crate::state::InboxPage;
 
 pub(crate) async fn send_stanza_command(
     inner: Rc<RefCell<WaddleClientInner>>,
@@ -584,7 +591,7 @@ pub(crate) async fn send_inbox_query_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
     query_id: String,
-) -> Result<crate::state::InboxPage, JsValue> {
+) -> Result<InboxPage, JsValue> {
     let (responder, rx) = oneshot::channel();
     enqueue_command(
         &inner,

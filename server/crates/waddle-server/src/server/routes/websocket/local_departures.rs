@@ -1,21 +1,18 @@
 //! Retained local responsibility for MUC departures that could not be projected.
 
+use crate::metrics::LocalDepartureRetryOutcome;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorId;
 use tracing::warn;
-use waddle_xmpp::muc::{
-    durable::OccupancyLeaveCause,
-    room_actor::{LeaveAttemptId, LeaveSessionSelector},
-    MucRemovalCause,
-};
+use waddle_xmpp::muc::durable::OccupancyLeaveCause;
+use waddle_xmpp::muc::room_actor::{LeaveAttemptId, LeaveSessionSelector};
+use waddle_xmpp::muc::MucRemovalCause;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
@@ -663,9 +660,7 @@ impl PendingLocalMucDepartures {
             // Warn once when the threshold is crossed; the pending gauge keeps
             // reporting the backlog without a per-retry warning storm.
             warn!(?entry.item, attempts = entry.attempts, "local MUC departure remains pending");
-            crate::metrics::record_local_departure_retry(
-                crate::metrics::LocalDepartureRetryOutcome::Stuck,
-            );
+            crate::metrics::record_local_departure_retry(LocalDepartureRetryOutcome::Stuck);
         }
         let mut inventory = self.entries.lock().expect("local departure inventory lock");
         if !inventory.merge_into_existing(entry.clone()) {
@@ -917,9 +912,7 @@ fn evict_oldest_room_scoped_generation_if_at_cap(
         dropped_incoming = incoming_loses,
         "retained generation-scoped MUC departures overflow for one occupancy; dropped the most-retried generation's cleanup responsibility"
     );
-    crate::metrics::record_local_departure_retry(
-        crate::metrics::LocalDepartureRetryOutcome::Overflow,
-    );
+    crate::metrics::record_local_departure_retry(LocalDepartureRetryOutcome::Overflow);
     !incoming_loses
 }
 
@@ -949,9 +942,7 @@ fn evict_oldest_sweep_if_at_cap(inventory: &mut Inventory, cap: usize) {
         cap = inventory.counts[0] + 1,
         "local MUC departure sweep inventory overflow; dropped the oldest sweep's cleanup responsibility"
     );
-    crate::metrics::record_local_departure_retry(
-        crate::metrics::LocalDepartureRetryOutcome::Overflow,
-    );
+    crate::metrics::record_local_departure_retry(LocalDepartureRetryOutcome::Overflow);
 }
 
 /// Spread retries that were minted together (a burst of disconnects during

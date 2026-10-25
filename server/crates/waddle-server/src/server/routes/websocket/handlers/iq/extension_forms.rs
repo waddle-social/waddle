@@ -1,4 +1,6 @@
-use super::*;
+use super::{Element, Feature, WebSocketState};
+use crate::push_service::commands::DISABLE_DEVICE_NODE;
+use crate::push_service::commands::REGISTER_DEVICE_NODE;
 
 pub(super) const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
 pub(super) const EXTENSION_COMMAND_FORM_TYPE: &str = "urn:waddle:extension:1:command";
@@ -31,9 +33,7 @@ impl CommandBoundary {
             || node.starts_with("urn:waddle:extension:1:")
         {
             Self::Extensions
-        } else if node == crate::push_service::commands::REGISTER_DEVICE_NODE
-            || node == crate::push_service::commands::DISABLE_DEVICE_NODE
-        {
+        } else if node == REGISTER_DEVICE_NODE || node == DISABLE_DEVICE_NODE {
             Self::PushService
         } else if node == waddle_xmpp::admin::NS_GROUP_DM_RENAME {
             Self::MucRoom

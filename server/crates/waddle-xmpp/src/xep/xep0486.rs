@@ -14,6 +14,7 @@
 //! - Custom channel icons in sidebar
 //! - Room branding in header
 
+use std::collections::HashMap;
 /// Namespace for vCard avatar updates in presence.
 pub const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
 
@@ -59,7 +60,7 @@ impl MucAvatar {
 /// Cache of room avatar hashes for efficient lookup.
 #[derive(Debug, Default)]
 pub struct MucAvatarCache {
-    avatars: std::collections::HashMap<String, MucAvatar>,
+    avatars: HashMap<String, MucAvatar>,
 }
 
 impl MucAvatarCache {

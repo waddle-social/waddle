@@ -23,10 +23,8 @@ use waddle_sfu::{
     CallId, Identity, MediaCapabilities, ObservedCallSids, SessionScopedTeardown,
     SidObservationDisposition, TeardownDisposition,
 };
-use waddle_xmpp_core::{
-    types::{Moderation, Voice},
-    OccupancySessionGeneration,
-};
+use waddle_xmpp_core::types::{Moderation, Voice};
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use super::state::WebSocketState;
 
@@ -530,7 +528,8 @@ mod tests {
         create_test_websocket_state, create_test_websocket_state_with_sfu, RecordingSfu,
     };
     use std::sync::Arc;
-    use waddle_xmpp::{muc::Occupant, Affiliation, Role};
+    use waddle_xmpp::muc::Occupant;
+    use waddle_xmpp::{Affiliation, Role};
 
     #[tokio::test]
     async fn unregister_is_no_op_when_no_sfu_is_configured() {

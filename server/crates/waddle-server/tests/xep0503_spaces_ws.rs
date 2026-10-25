@@ -5,7 +5,8 @@ use waddle_ws_test_support as ws_common;
 use tokio::sync::Mutex;
 use waddle_xmpp::Stanza;
 use ws_common::{TestServer, WsXmppClient};
-use xmpp_parsers::{iq::Iq, minidom::Element};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::minidom::Element;
 
 const DOMAIN: &str = "localhost";
 const USERNAME: &str = "admin";

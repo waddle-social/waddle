@@ -1,3 +1,9 @@
+use crate::metrics::MucOccupancyHandlerTimer;
+use crate::muc::durable::AffiliationEntry;
+use crate::muc::room::Occupant;
+use crate::muc::RoomMutationEffects;
+use crate::xep::xep0272::Muji;
+use crate::xep::InCallPresenceState;
 use std::convert::Infallible;
 
 use jid::{BareJid, FullJid};
@@ -9,13 +15,11 @@ use super::{
     LeaveOutcome, OccupancyWatermark, PresenceUpdateOutcome, ProjectionGate, RoomActor,
     RoomActorError,
 };
-use crate::muc::{
-    durable::{
-        ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
-        WaddleId,
-    },
-    RoomConfig,
+use crate::muc::durable::{
+    ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
+    WaddleId,
 };
+use crate::muc::RoomConfig;
 use crate::types::{Affiliation, Role};
 
 /// The affiliation a join request carries into the room, typed by
@@ -62,7 +66,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("join");
+        let _handler_timer = MucOccupancyHandlerTimer::start("join");
         // #1108: a caller holding a stale ActorRef must retry through the
         // registry. For an inactivity seal this also re-checks ownership so
         // the seal can strengthen to OwnershipLost before the reaper runs.
@@ -121,13 +125,11 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // exactly one of them the owner.
                 if !self.room.has_owner() {
                     self.commit_durable(
-                        RoomDurableMutation::Affiliation(
-                            crate::muc::durable::AffiliationEntry::new(
-                                msg.sender_jid.to_bare(),
-                                Some(Affiliation::Owner),
-                            ),
-                        ),
-                        crate::muc::RoomMutationEffects::none(),
+                        RoomDurableMutation::Affiliation(AffiliationEntry::new(
+                            msg.sender_jid.to_bare(),
+                            Some(Affiliation::Owner),
+                        )),
+                        RoomMutationEffects::none(),
                     )
                     .await
                     .map_err(|error| match error {
@@ -417,7 +419,7 @@ pub enum LeaveDisposition {
     /// XEP-0045 §7.14 self-presence echo can report it.
     Suppressed {
         nick: crate::muc::MucOccupantNick,
-        affiliation: crate::types::Affiliation,
+        affiliation: Affiliation,
         /// The attempt to acknowledge (see [`super::LeaveOutcome::acknowledge`]).
         attempt: LeaveAttemptId,
     },
@@ -431,7 +433,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
+        let _handler_timer = MucOccupancyHandlerTimer::start("leave");
         // A tombstoned attempt never processes a fresh leave (it must not
         // evict a session that displaced it), but a RETAINED RETRY still
         // falls through to the JID fallback below: the tombstone only says
@@ -809,7 +811,7 @@ impl RoomActor {
 
 pub struct UpsertMujiPresence {
     pub sender_jid: FullJid,
-    pub muji: crate::xep::xep0272::Muji,
+    pub muji: Muji,
     /// The connection's occupancy generation (#1703): the update applies
     /// only while the session still belongs to it (`None` = server-side
     /// callers that carry no connection).
@@ -833,14 +835,14 @@ pub struct MujiPresenceUpdateOutcome {
     /// Exact Muji payload to reflect to the sending session. This
     /// preserves the XEP-0272 preparing echo even when another
     /// same-nick resource already has active contents.
-    pub sender_muji: Option<crate::xep::xep0272::Muji>,
+    pub sender_muji: Option<Muji>,
     /// Aggregate Muji payload for the occupant nick. Other occupants
     /// receive this authoritative state so one resource's preparing
     /// update cannot hide a sibling resource's active call.
-    pub active_muji: Option<crate::xep::xep0272::Muji>,
+    pub active_muji: Option<Muji>,
     /// Exact per-session Muji payloads still advertised for this nick
     /// after the update.
-    pub session_mujis: Vec<(FullJid, crate::xep::xep0272::Muji)>,
+    pub session_mujis: Vec<(FullJid, Muji)>,
     /// True when this update starts the room's active call state.
     pub active_call_started: bool,
 }
@@ -981,7 +983,7 @@ impl kameo::message::Message<GetActiveMujiSessions> for RoomActor {
 /// to the join path.
 pub struct UpsertInCallState {
     pub sender_jid: FullJid,
-    pub state: crate::xep::InCallPresenceState,
+    pub state: InCallPresenceState,
     /// See [`UpsertMujiPresence::occupant`].
     pub occupant: Option<OccupancySessionGeneration>,
 }
@@ -994,7 +996,7 @@ pub struct InCallPresenceUpdateOutcome {
     /// sessions advertising a non-empty state). The presence broadcaster
     /// decorates each reflected per-session presence with its owner's
     /// state from this list.
-    pub in_call_sessions: Vec<(FullJid, crate::xep::InCallPresenceState)>,
+    pub in_call_sessions: Vec<(FullJid, InCallPresenceState)>,
 }
 
 impl kameo::message::Message<UpsertInCallState> for RoomActor {
@@ -1101,7 +1103,7 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
                 waddle_id: waddle_id.clone(),
                 channel_id: channel_id.clone(),
             },
-            crate::muc::RoomMutationEffects::none(),
+            RoomMutationEffects::none(),
         )
         .await?;
         self.room.waddle_id = waddle_id.into_string();
@@ -1213,7 +1215,7 @@ impl RoomActor {
     fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
         let nick = receipt_nick(receipt);
         let holder = self.room.occupant(nick);
-        let same_generation_and_account = |occupant: &crate::muc::room::Occupant| {
+        let same_generation_and_account = |occupant: &Occupant| {
             occupant.real_jid.to_bare() == receipt.jid.to_bare()
                 && self.room.current_nickname_generation(nick) == receipt.nick_generation
         };

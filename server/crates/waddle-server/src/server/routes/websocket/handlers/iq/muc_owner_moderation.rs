@@ -1,5 +1,18 @@
-use super::*;
+use super::{
+    add_stanza_id_xep0359, apply_muc_owner_config, bad_request_iq_error, build_iq_error_xml_typed,
+    build_iq_result_xml, build_moderation_result_message, build_muc_owner_config_response, chrono,
+    debug, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
+    is_muc_room_jid, item_not_found_iq_error, jid_malformed_iq_error, muc_owner_authorized,
+    not_authorized_iq_error, parse_moderation_iq, response_batch_from_inline_room_effect_frames,
+    stanza_to_xml, warn, ArchivedMessage, ArchivedModeration, ArchivedRichMessage,
+    ArchivedRichPayload, BareJid, ConnectionPhase, FullJid, GetAdminContext, GetSnapshot,
+    IqHandlerContext, Jid, ResponseBatch, RichMessageId, RichText, Session, Stanza, WebSocketState,
+    Xep0359StanzaId,
+};
+use crate::db::actor::DbExecute;
+use crate::db::actor::DbQuery;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use waddle_xmpp::muc::{build_destroy_notification, DestroyRequest, RoomRegistry, NS_MUC_OWNER};
 
 use crate::server::routes::websocket::cleanup::{
@@ -109,25 +122,23 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 .map(|entry| entry.jid)
                 .collect(),
             recipients: {
-                let mut by_nick: std::collections::BTreeMap<
-                    waddle_xmpp::muc::MucOccupantNick,
-                    Vec<FullJid>,
-                > = completion
-                    .room
-                    .occupants
-                    .values()
-                    .map(|occupant| {
-                        (
-                            waddle_xmpp::muc::MucOccupantNick::try_new(occupant.nick.clone())
-                                .expect("occupant nicks are validated at join"),
-                            completion
-                                .room
-                                .occupant_sessions(&occupant.nick)
-                                .into_iter()
-                                .collect(),
-                        )
-                    })
-                    .collect();
+                let mut by_nick: BTreeMap<waddle_xmpp::muc::MucOccupantNick, Vec<FullJid>> =
+                    completion
+                        .room
+                        .occupants
+                        .values()
+                        .map(|occupant| {
+                            (
+                                waddle_xmpp::muc::MucOccupantNick::try_new(occupant.nick.clone())
+                                    .expect("occupant nicks are validated at join"),
+                                completion
+                                    .room
+                                    .occupant_sessions(&occupant.nick)
+                                    .into_iter()
+                                    .collect(),
+                            )
+                        })
+                        .collect();
                 // #1647: receipt holders already left the roster, but their
                 // leave reply was lost. The terminal destroy notification is
                 // the effect that settles their owed self-unavailable —
@@ -300,7 +311,7 @@ async fn wipe_destroyed_room_durable_state(
             return Ok(false);
         }
         if let Err(error) = db_actor
-            .ask(crate::db::actor::DbExecute {
+            .ask(DbExecute {
                 sql: "DELETE FROM group_dm_archive_boundaries WHERE room_jid = ?".to_string(),
                 params: vec![room_jid.to_string().into()],
             })
@@ -376,7 +387,7 @@ async fn destroyed_lifecycle_is_current(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbQuery {
+        .ask(DbQuery {
             sql: "SELECT EXISTS ( \
                   SELECT 1 FROM clustering_muc_room_lifecycles destroyed \
                   WHERE destroyed.lifecycle_id = ? AND destroyed.room_jid = ? \
@@ -632,7 +643,7 @@ pub(crate) async fn persist_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "INSERT INTO clustering_muc_destroy_outbox \
                   (attempt_id, payload_json, origin_instance_id, available_at_ms, lease_token, leased_at_ms) \
                   VALUES (?, ?, ?, ?, NULL, NULL) ON CONFLICT (attempt_id) DO NOTHING"
@@ -665,7 +676,7 @@ pub(crate) async fn arm_destroy_completion_recovery(
             .app_state
             .db_pool
             .global_actor()
-            .ask(crate::db::actor::DbExecute {
+            .ask(DbExecute {
                 sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
                       WHERE attempt_id = ? AND lifecycle_id IS NULL AND \
                       (available_at_ms = ? OR available_at_ms <= ?)"
@@ -700,7 +711,7 @@ async fn arm_recovered_inert_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "UPDATE clustering_muc_destroy_outbox SET available_at_ms = ? \
                   WHERE attempt_id = ? AND available_at_ms = ?"
                 .to_string(),
@@ -733,7 +744,7 @@ async fn reclaim_foreign_inert_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "DELETE FROM clustering_muc_destroy_outbox \
                   WHERE attempt_id = ? AND available_at_ms = ? AND lease_token IS NULL AND lifecycle_id IS NULL"
                 .to_string(),
@@ -765,7 +776,7 @@ pub(crate) async fn discard_persisted_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "DELETE FROM clustering_muc_destroy_outbox WHERE attempt_id = ? AND available_at_ms = ?"
                 .to_string(),
             params: crate::db_params![attempt.as_uuid().to_string(), i64::MAX],
@@ -793,7 +804,7 @@ pub(crate) async fn claim_persisted_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "UPDATE clustering_muc_destroy_outbox \
                   SET lease_token = ?, leased_at_ms = ? \
                   WHERE attempt_id = ? AND available_at_ms <= ? AND \
@@ -823,7 +834,7 @@ pub(crate) async fn claim_persisted_destroy_completion(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbQuery {
+        .ask(DbQuery {
             sql: "SELECT payload_json, lifecycle_id FROM clustering_muc_destroy_outbox \
                   WHERE attempt_id = ? AND lease_token = ?"
                 .to_string(),
@@ -893,7 +904,7 @@ pub(crate) async fn persisted_destroy_completion_exists(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbQuery {
+        .ask(DbQuery {
             sql: "SELECT EXISTS (SELECT 1 FROM clustering_muc_destroy_outbox WHERE attempt_id = ?)"
                 .to_string(),
             params: crate::db_params![attempt.as_uuid().to_string()],
@@ -926,7 +937,7 @@ async fn renew_persisted_destroy_completion_lease(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "UPDATE clustering_muc_destroy_outbox SET leased_at_ms = ? \
                   WHERE attempt_id = ? AND lease_token = ?"
                 .to_string(),
@@ -1034,7 +1045,7 @@ pub(crate) async fn finalize_persisted_destroy_completion(
                 .app_state
                 .db_pool
                 .global_actor()
-                .ask(crate::db::actor::DbExecute {
+                .ask(DbExecute {
                     sql: sql.to_string(),
                     params,
                 })
@@ -1059,7 +1070,7 @@ async fn list_due_destroy_completion_attempts(
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbQuery {
+        .ask(DbQuery {
             sql: "SELECT attempt_id FROM clustering_muc_destroy_outbox \
                   WHERE available_at_ms <= ? AND \
                   (lease_token IS NULL OR leased_at_ms < ?) \
@@ -1120,7 +1131,7 @@ async fn reconcile_foreign_inert_destroy_completions(state: &WebSocketState) {
         .app_state
         .db_pool
         .global_actor()
-        .ask(crate::db::actor::DbQuery {
+        .ask(DbQuery {
             sql: "SELECT attempt_id, origin_instance_id, lifecycle_id FROM clustering_muc_destroy_outbox \
                   WHERE available_at_ms = ? AND lease_token IS NULL"
                 .to_string(),

@@ -48,6 +48,10 @@
 //! preparation, while the legacy pre-fanout groupchat dispatch/MAM cache is
 //! still published only with the matching ready registry entry.
 
+use crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
+use crate::room_effect_outbox::RoomEffectEnqueue;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
+use crate::room_effect_outbox::RoomEffectProducingNode;
 use dashmap::DashMap;
 use jid::BareJid;
 use tokio_util::sync::CancellationToken;
@@ -323,7 +327,7 @@ fn affiliation_from_db_str(value: &str) -> Option<Affiliation> {
 /// module doc for the schema and fencing design.
 pub struct PostgresMucRoomStore {
     db: Database,
-    room_effect_outbox: crate::room_effect_outbox::RoomEffectOutboxStore,
+    room_effect_outbox: RoomEffectOutboxStore,
     /// Live process incarnation. Cached room fences remain immutable; every
     /// use must still match this handle so a self-fenced old incarnation
     /// cannot write merely because its old claim row remains in Postgres.
@@ -361,11 +365,11 @@ impl PostgresMucRoomStore {
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, XmppError> {
         Self::ensure_schema(&db).await.map_err(db_err)?;
-        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(db.clone())
+        MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
             .map_err(db_err)?;
         let room_effect_outbox =
-            crate::room_effect_outbox::RoomEffectOutboxStore::try_new(db.clone())
+            RoomEffectOutboxStore::try_new(db.clone())
                 .await
                 .map_err(|error| {
                     crate::telemetry::mark_span_error("MUC durable storage operation failed");
@@ -1312,7 +1316,7 @@ impl PostgresMucRoomStore {
         intent: &RoomDurableMutation,
         coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
         effects: &RoomMutationEffects,
-        producing_node: &crate::room_effect_outbox::RoomEffectProducingNode,
+        producing_node: &RoomEffectProducingNode,
     ) -> Result<Option<waddle_xmpp::muc::RoomEffectReservation>, RoomCommitError> {
         let waddle_xmpp::muc::RoomCommittedCoordinates {
             lifecycle,
@@ -1363,7 +1367,7 @@ impl PostgresMucRoomStore {
         self.room_effect_outbox
             .enqueue_in_tx(
                 tx,
-                crate::room_effect_outbox::RoomEffectEnqueue {
+                RoomEffectEnqueue {
                     lifecycle,
                     revision,
                     effects,
@@ -1401,13 +1405,9 @@ impl PostgresMucRoomStore {
             return Err(RoomCommitError::NotOwner);
         }
         let producing_node = if let Some(authority) = authority {
-            crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
-                authority.identity().clone(),
-            )
+            RoomEffectProducingNode::from_node_identity(authority.identity().clone())
         } else if let Some(identity_guard) = identity_guard.as_ref() {
-            crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
-                identity_guard.identity().clone(),
-            )
+            RoomEffectProducingNode::from_node_identity(identity_guard.identity().clone())
         } else {
             return Err(RoomCommitError::NotOwner);
         };
@@ -2596,7 +2596,8 @@ mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
-    use kameo::{actor::Spawn, error::SendError};
+    use kameo::actor::Spawn;
+    use kameo::error::SendError;
     use std::io;
     use std::sync::Arc;
     use waddle_xmpp::muc::durable::{

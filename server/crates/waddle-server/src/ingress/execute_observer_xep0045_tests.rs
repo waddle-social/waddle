@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    commit_submission, execute_with_manager, plugin, select_observers, Effect, ExtensionManager,
+    ExternalEffect, ExternalOutcome, ExternalRoomEffect, IngressFixture,
+};
 
 // XEP-0045 §7.4: observers see the committed groupchat reflection, including
 // the room occupant sender in each frozen obligation across an ingress replay.

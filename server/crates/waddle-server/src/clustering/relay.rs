@@ -19,6 +19,11 @@
 //! Phase 4 wires DM/MUC/presence routing through this relay. Kademlia still
 //! discovers node relays only; entity ownership remains in Postgres claims.
 
+use crate::config::ClusteringMessagingConfig;
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::server::routes::interpret::carbons::CarbonFanoutFailure;
+use crate::server::routes::interpret::RecipientInventory;
+use crate::server::routes::websocket::AdminListAnswer;
 pub(crate) mod frame_receipts;
 mod muc_cleanup;
 mod remote_resource_compat;
@@ -409,7 +414,7 @@ async fn finish_ordered_reservation(
                     let token = if let Some(completion) = completion {
                         Some(receipts.lock().await.register_reserved(
                             permit,
-                            crate::ingress::execute::RelayFrameReceiptCompletion::new(completion),
+                            RelayFrameReceiptCompletion::new(completion),
                         ))
                     } else {
                         None
@@ -685,9 +690,7 @@ pub struct RelayRemoteUserSideEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayRemoteUserSideEffectStatus {
     Applied,
-    Incomplete {
-        reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
-    },
+    Incomplete { reason: CarbonFanoutFailure },
     StaleRegistration,
     Unavailable,
 }
@@ -1131,7 +1134,7 @@ pub(crate) struct RelayRecipientInventory {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Reply)]
 pub(crate) enum RelayRecipientInventoryReply {
-    Inventory(crate::server::routes::interpret::RecipientInventory),
+    Inventory(RecipientInventory),
     Unavailable,
 }
 
@@ -1240,7 +1243,7 @@ pub struct RelayMucAdminQueryItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
 pub enum RelayMucAdminQueryReply {
     /// The owner's answer; the origin builds the response stanza from it.
-    Answered(crate::server::routes::websocket::AdminListAnswer),
+    Answered(AdminListAnswer),
     /// The answer would not fit one relay reply; nothing to retry.
     TooLarge,
     /// The receiver has no live local `RoomActor` for the room; nothing ran.
@@ -1732,7 +1735,7 @@ where
 
 impl RelayHandle {
     pub fn new(node_id: NodeId, stop_token: CancellationToken) -> Self {
-        let defaults = crate::config::ClusteringMessagingConfig::default();
+        let defaults = ClusteringMessagingConfig::default();
         Self {
             node_id,
             cached: None,

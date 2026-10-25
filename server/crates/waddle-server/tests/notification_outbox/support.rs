@@ -4,7 +4,11 @@ use std::ops::Deref;
 
 use jid::{BareJid, Jid};
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    DndReader, NoopDndReader, NotificationCandidate, NotificationClass, NotificationDrainDeps,
+    NotificationOutboxError, NotificationOutboxStore, NotificationOutboxTarget,
+    NotificationThreadId, PushServiceNodeName, RoomPolicyStore,
+};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};

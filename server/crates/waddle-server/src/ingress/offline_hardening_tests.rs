@@ -1,31 +1,24 @@
-use crate::{
-    ingress::{
-        commit::commit_submission,
-        effects::{
-            delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-            Effect,
-        },
-        execute::execute_effects,
-        test_support::IngressFixture,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
-    },
-    notification_outbox::NotificationOutboxStore,
-    pending_delivery::DatabasePendingDeliveryStorage,
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::delivery::{ExternalDeliveryEffect, PreparedOfflineNotification};
+use crate::ingress::effects::Effect;
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect};
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
+    PendingDeliveryMutation,
 };
-use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-    },
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 use crate::ingress::{IngressEffectCapture, IngressSubmission};
-use crate::server::routes::interpret::{effects::PlanSink, interpret};
+use crate::server::routes::interpret::effects::PlanSink;
+use crate::server::routes::interpret::interpret;
 use waddle_xmpp::protocol::OutboundEvent;
 
 async fn pending_storage(fixture: &IngressFixture) -> Arc<dyn PendingDeliveryStorage> {

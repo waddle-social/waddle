@@ -1,4 +1,5 @@
-use super::*;
+use super::Stanza;
+use crate::ingress::execute::RelayFrameReceiptCompletion;
 use waddle_xmpp::ingress::RelayTargetIdentity;
 
 #[derive(Debug, Clone)]
@@ -6,7 +7,7 @@ pub(crate) enum OrderedRelayMucProxyOutcome {
     Delivered(Vec<Stanza>),
     PendingFrames {
         frames: Vec<Stanza>,
-        completion: crate::ingress::execute::RelayFrameReceiptCompletion,
+        completion: RelayFrameReceiptCompletion,
     },
     Unavailable,
     Dropped,

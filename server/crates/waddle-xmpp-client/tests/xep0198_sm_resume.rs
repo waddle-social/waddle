@@ -6,12 +6,10 @@
 
 use chrono::{TimeZone, Utc};
 use minidom::Element;
-use waddle_xmpp_client::{
-    stream_management::{
-        InvalidSmInboundControl, SmAcknowledgementClockAction, SmInboundControl, SmState,
-    },
-    SmResumeState, StreamId, UnhandledOutboundEntry,
+use waddle_xmpp_client::stream_management::{
+    InvalidSmInboundControl, SmAcknowledgementClockAction, SmInboundControl, SmState,
 };
+use waddle_xmpp_client::{SmResumeState, StreamId, UnhandledOutboundEntry};
 
 fn persisted(xml: &str, second: u32) -> UnhandledOutboundEntry {
     UnhandledOutboundEntry::try_new(

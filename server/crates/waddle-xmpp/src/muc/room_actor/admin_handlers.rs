@@ -1,7 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    convert::Infallible,
-};
+use crate::muc::MucConfigStatusCode;
+use crate::muc::RoomMutationEffects;
+use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
@@ -144,13 +144,13 @@ fn admin_effects_for_applied(
     durable_updates: Vec<DurableAdminUpdate>,
     removed_by_moderation: Vec<FullJid>,
     voice_changes: &[(FullJid, Voice)],
-) -> crate::muc::RoomMutationEffects {
+) -> RoomMutationEffects {
     if durable_updates.is_empty() && removed_by_moderation.is_empty() && voice_changes.is_empty() {
-        return crate::muc::RoomMutationEffects::none();
+        return RoomMutationEffects::none();
     }
 
     let (self_updates, remaining_updates) = split_admin_effect_updates(durable_updates);
-    crate::muc::RoomMutationEffects::admin(
+    RoomMutationEffects::admin(
         room_jid,
         self_updates,
         remaining_updates,
@@ -170,9 +170,9 @@ pub(super) fn restored_roster_removal_effects(
     room: &MucRoom,
     removed_sessions: &[FullJid],
     already_removed: &[FullJid],
-) -> crate::muc::RoomMutationEffects {
+) -> RoomMutationEffects {
     if removed_sessions.is_empty() {
-        return crate::muc::RoomMutationEffects::none();
+        return RoomMutationEffects::none();
     }
     let recipients: Vec<_> = all_room_sessions(room)
         .into_iter()
@@ -222,7 +222,7 @@ pub(super) fn restored_roster_removal_effects(
             }
         }
     }
-    crate::muc::RoomMutationEffects::admin(
+    RoomMutationEffects::admin(
         room.room_jid.clone(),
         self_updates,
         remaining_updates,
@@ -1203,7 +1203,7 @@ impl kameo::message::Message<EnforceMembersOnly> for RoomActor {
 pub struct EnforceMembersOnlyAffiliations {
     pub affiliations: Vec<(BareJid, Affiliation)>,
     pub fallback_reservation: Option<RoomEffectReservation>,
-    pub config_status_codes: Vec<crate::muc::MucConfigStatusCode>,
+    pub config_status_codes: Vec<MucConfigStatusCode>,
 }
 
 impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
@@ -1312,11 +1312,11 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
                 .collect()
         };
         let effects = if config_status_codes.is_empty() {
-            crate::muc::RoomMutationEffects::none()
+            RoomMutationEffects::none()
         } else {
             let (self_updates, remaining_updates) =
                 split_admin_effect_updates(durable_effect_updates);
-            let effects = crate::muc::RoomMutationEffects::members_only_enforcement(
+            let effects = RoomMutationEffects::members_only_enforcement(
                 self.room.room_jid.clone(),
                 self_updates,
                 remaining_updates,

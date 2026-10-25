@@ -1,6 +1,12 @@
 //! JavaScript client methods for archived messages and history search.
 
-use super::*;
+use super::{
+    bare_jid, build_dm_search_history_iq, build_mam_iq, build_room_search_history_iq,
+    build_user_search_iq, future_to_promise, jid_domain, js_error, mam_page_to_js,
+    parse_user_search_result, send_iq_command, send_mam_query_command, to_js_value, wasm_bindgen,
+    Element, JsValue, MamIqBuilder, Promise, UserSearchQuery, WaddleClient, WaddleMamPageParam,
+    WaddleUserSearchResult, NS_USER_SEARCH,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {

@@ -1,6 +1,12 @@
 //! Conversion and delivery of typed client events to JavaScript callbacks.
 
-use super::*;
+use super::{
+    bare_jid, call_event_to_js, inbound_to_js, inbox_push_to_js, mpsc, presence_to_js,
+    pubsub_event_to_js, to_js_value, ClientEvent, ConnectionEvent, DriverEvent, JsMessageRejection,
+    JsStreamManagementTelemetry, JsValue, LifecycleEvent, MessageDeliveryEvent, Rc, RefCell,
+    Serialize, StreamErrorCondition, StreamErrorDetail, StreamExt, StreamManagementEvent,
+    WaddleAvatarChanged, WaddleClientInner, WaddleMdsDisplayedEntry,
+};
 
 pub(crate) async fn event_dispatch_loop(
     inner: Rc<RefCell<WaddleClientInner>>,

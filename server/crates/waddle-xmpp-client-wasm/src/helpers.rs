@@ -1,6 +1,9 @@
 //! Shared browser-client stanza, error, and request helpers.
 
-use super::*;
+use super::{
+    AccessToken, BareJid, ClientConfig, ClientResource, ConnectionConfig, Element, JsValue,
+    MucAffiliation, OAuthBearerConfig, Serialize, StanzaId, StoredConfig, WebSocketConfig,
+};
 
 pub(crate) fn build_client_config(config: &StoredConfig) -> Result<ClientConfig, JsValue> {
     let jid: BareJid = config

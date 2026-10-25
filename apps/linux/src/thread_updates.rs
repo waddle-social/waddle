@@ -2,7 +2,8 @@
 //! root context. Preserve author candidates and exact judgment revisions.
 
 use std::collections::{HashMap, HashSet};
-use waddle_client_session::{judgments::ScoreTarget, IncomingMessage};
+use waddle_client_session::judgments::ScoreTarget;
+use waddle_client_session::IncomingMessage;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Author {

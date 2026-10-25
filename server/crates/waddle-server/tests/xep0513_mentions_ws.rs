@@ -504,9 +504,8 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         candidate_from_envelope, GroupchatCandidateIdentity, NotificationClass,
         NotificationThreadId,
     };
-    use waddle_xmpp::xep::{
-        build_mention_element, generate_occupant_id, xep0421::OccupantIdSecret, ExplicitMention,
-    };
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+    use waddle_xmpp::xep::{build_mention_element, generate_occupant_id, ExplicitMention};
 
     let owner = "juliet@example.com".parse().expect("owner");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");

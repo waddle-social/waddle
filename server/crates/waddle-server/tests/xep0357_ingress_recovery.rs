@@ -4,17 +4,14 @@ mod extension_recovery_support;
 pub mod ingress_support;
 
 use ingress_support::IngressFixture;
-use std::{sync::Arc, time::Duration};
-use waddle_server::{
-    ingress::Deps,
-    ingress::{IngressDecisionClass, IngressSubmission, RecoveryEnvironment},
-    notification_outbox::NotificationOutboxStore,
-    pending_delivery::DatabasePendingDeliveryStorage,
-};
-use waddle_xmpp::{
-    pending_delivery::{storage::PendingDeliveryStorage, QuotaPolicy},
-    registry::ConnectionRegistry,
-};
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_server::ingress::{Deps, IngressDecisionClass, IngressSubmission, RecoveryEnvironment};
+use waddle_server::notification_outbox::NotificationOutboxStore;
+use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::QuotaPolicy;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 struct OfflineRecoveryEnvironment {
     connections: ConnectionRegistry,

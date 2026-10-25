@@ -2,10 +2,10 @@
 use waddle_xmpp::ingress::{IngressEffectIntent, MucInviteLedgerAction, PendingDeliveryMutation};
 use xmpp_parsers::message::Message;
 
-use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::IngressUowError,
-    server::routes::websocket::handlers::message::{group_dm_invite, muc_direct, muc_invite},
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::websocket::handlers::message::{
+    group_dm_invite, muc_direct, muc_invite,
 };
 
 /// `None` denotes an ordinary direct route. Generated invitation routes are

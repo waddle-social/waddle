@@ -1,6 +1,7 @@
 //! XEP-0060 §4.1 affiliations.
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 

@@ -3,13 +3,11 @@
 use super::auth::{AuthState, DeviceAuthStatus, DeviceAuthorization, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::localpart_to_jid;
-use axum::{
-    extract::{Form, Query, State},
-    http::StatusCode,
-    response::{Html, IntoResponse, Json},
-    routing::{get, post},
-    Router,
-};
+use axum::extract::{Form, Query, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Json};
+use axum::routing::{get, post};
+use axum::Router;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

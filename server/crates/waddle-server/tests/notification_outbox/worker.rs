@@ -2,9 +2,16 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate, candidate_for, candidate_for_sender_jid, drain_deps_with_noop_activity,
+    failed_outbox_jobs_count, groupchat_candidate_for, noop_activity_reader, register_push_target,
+    settings_projection, store, target, FailingBlockingStorage, StubRoomPolicy,
+};
 use jid::{BareJid, Jid};
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NoopDndReader, NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,
+    RoomPolicyStore,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 
 /// Test stub that returns `Ok(None)` — the "room not currently

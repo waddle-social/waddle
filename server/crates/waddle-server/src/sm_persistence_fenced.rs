@@ -127,7 +127,10 @@
 //! self-reacquire path once that same node's own restore/reaper pass claims
 //! it — see those modules' doc comments for the full lifecycle.
 
-use std::{sync::Arc, time::Duration};
+use crate::db::Rows;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -138,6 +141,7 @@ use waddle_xmpp::ownership::{
     ClaimError, ClaimStore, CurrentNodeIdentityGuard, Entity, EntityType, SharedNodeIdentity,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::persistence::SmAcknowledgementMode;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedDetachedAppend,
     PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PromotionAppendOutcome,
@@ -639,7 +643,7 @@ impl PostgresFencedSmPersistence {
         &self,
         sql: &str,
         params: impl crate::db::IntoParams,
-    ) -> Result<crate::db::Rows, SmPersistenceError> {
+    ) -> Result<Rows, SmPersistenceError> {
         let conn = self
             .db
             .guard()
@@ -904,8 +908,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             &mut tx,
             stream_id,
             acknowledged_h,
-            crate::db::DatabaseDriver::Postgres,
-            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::RetireForPromotion,
+            DatabaseDriver::Postgres,
+            SmAcknowledgementMode::RetireForPromotion,
         )
         .await?;
         tx.commit()
@@ -939,8 +943,8 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             &mut tx,
             stream_id,
             acknowledged_h,
-            crate::db::DatabaseDriver::Postgres,
-            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::PreserveResumability,
+            DatabaseDriver::Postgres,
+            SmAcknowledgementMode::PreserveResumability,
         )
         .await?;
         tx.commit()
@@ -981,7 +985,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             )
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        let mut streams = std::collections::HashSet::new();
+        let mut streams = HashSet::new();
         while let Some(row) = rows
             .next()
             .await

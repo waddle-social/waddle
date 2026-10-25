@@ -19,6 +19,7 @@
 //! wire publishes for the same user during a backfill pass do not
 //! race the user-managed guard.
 
+use crate::db::Value;
 use chrono::{DateTime, Duration, Utc};
 use futures::stream::{self, StreamExt};
 use jid::BareJid;
@@ -506,7 +507,7 @@ async fn persist_attempt(
     error_kind: Option<&str>,
 ) -> Result<(), BackfillError> {
     let now_str = now.to_rfc3339();
-    let error_value: crate::db::Value = error_kind.into();
+    let error_value: Value = error_kind.into();
     let digest = fetch_policy_digest().to_string();
     db_actor
         .ask(DbExecute {

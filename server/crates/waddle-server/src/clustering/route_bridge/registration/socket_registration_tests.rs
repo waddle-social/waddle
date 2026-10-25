@@ -1,11 +1,19 @@
-use super::*;
+use super::{
+    user_entity, Arc, ConnectionEntry, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    RemoteResourceRegisterOutcome,
+};
+use crate::clustering::claims::NodeLeaseStore;
 use crate::clustering::route_bridge::tests::{
     origin_identity, receiver_identity, services_with_claims, test_peer_id,
 };
+use crate::config::ClusteringMessagingConfig;
 use std::collections::VecDeque;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ResumeIdentityProof, StalePredicate,
 };
+use waddle_xmpp::ownership::{ClaimStore, Entity, NodeIdentity};
 
 #[derive(Clone)]
 struct RegistrationLeaseFixture {

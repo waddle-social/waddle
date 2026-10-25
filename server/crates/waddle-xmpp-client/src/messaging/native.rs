@@ -10,7 +10,7 @@ use super::builders::{
     build_chat_state_message, build_displayed_message, build_outbound_message,
     build_retraction_message,
 };
-use super::namespaces::*;
+use super::namespaces::{NS_CLIENT, NS_MUC};
 use super::types::SendMessageOptions;
 use crate::xep::thread::ThreadRef;
 

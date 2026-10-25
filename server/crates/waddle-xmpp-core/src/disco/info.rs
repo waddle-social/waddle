@@ -1,6 +1,7 @@
 //! Service Discovery: disco#info handling.
 
 use minidom::Element;
+use std::collections::HashSet;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 
@@ -243,10 +244,9 @@ pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, C
     // §5.4 step 2.4 well-formedness tracking: duplicate identity
     // tuples (category, type, xml:lang, name), duplicate feature
     // vars, or multi-FORM_TYPE forms invalidate the entire response.
-    let mut seen_identities: std::collections::HashSet<(String, String, String, String)> =
-        std::collections::HashSet::new();
-    let mut seen_features: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_form_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_identities: HashSet<(String, String, String, String)> = HashSet::new();
+    let mut seen_features: HashSet<String> = HashSet::new();
+    let mut seen_form_types: HashSet<String> = HashSet::new();
     let mut ill_formed = false;
 
     for child in query.children() {
@@ -396,9 +396,8 @@ pub fn build_disco_info_response_with_extensions(
     // caps-verifying clients MUST discard it (#1259). Dedupe here so no
     // call site can compose an ill-formed response; first occurrence wins,
     // preserving caller ordering.
-    let mut seen_identities: std::collections::HashSet<(&str, &str, Option<&str>, Option<&str>)> =
-        std::collections::HashSet::new();
-    let mut seen_features: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen_identities: HashSet<(&str, &str, Option<&str>, Option<&str>)> = HashSet::new();
+    let mut seen_features: HashSet<&str> = HashSet::new();
 
     for identity in identities {
         if !seen_identities.insert((

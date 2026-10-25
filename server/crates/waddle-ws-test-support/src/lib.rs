@@ -10,10 +10,12 @@
 //! still reachable public API of this crate, so per-binary `dead_code`
 //! warnings cannot fire and no lint suppressions are needed.
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -455,7 +457,7 @@ impl WsXmppClient {
         .map_err(|e| format!("Bad UTF-8 in challenge: {e}"))?;
 
         // Parse server-first
-        let params: std::collections::HashMap<&str, &str> = server_first
+        let params: HashMap<&str, &str> = server_first
             .split(',')
             .filter_map(|p| p.split_once('='))
             .collect();

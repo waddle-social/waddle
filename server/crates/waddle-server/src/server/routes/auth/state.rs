@@ -1,6 +1,14 @@
+use crate::auth::redirect::TrustedWebOrigins;
+use crate::profile::ProfileSource;
+use crate::server::caps_resolution::ServerDomainJid;
 use std::sync::OnceLock;
 
-use super::*;
+use super::{
+    header, oidc, ActorRef, AppState, Arc, AuthError, AuthHandshakeStore, AuthProviderConfig,
+    AuthProviderKind, AuthProviderTokenEndpointAuthMethod, BootstrapMembershipConfig, DashMap,
+    Digest, Engine, IdentityService, Mutex, PendingAuthorization, PendingFlow, PermissionActor,
+    ProviderRegistry, ServerConfig, SessionManager, Sha256, Utc, URL_SAFE_NO_PAD,
+};
 
 /// Typed callback the OIDC callback handler fires after a successful
 /// login to materialize a conformant PEP avatar + vCard set. The hook
@@ -9,8 +17,7 @@ use super::*;
 /// internally so login latency is unaffected AND the
 /// graceful-shutdown drain can `wait()` on in-flight publishes
 /// before tearing down the runtime.
-pub type ProfilePublishHook =
-    Arc<dyn Fn(jid::BareJid, crate::profile::ProfileSource) + Send + Sync + 'static>;
+pub type ProfilePublishHook = Arc<dyn Fn(jid::BareJid, ProfileSource) + Send + Sync + 'static>;
 
 /// Shared auth state.
 pub struct AuthState {
@@ -20,7 +27,7 @@ pub struct AuthState {
     pub base_url: String,
     /// Where a browser sign-in may return to; see
     /// [`crate::auth::redirect::TrustedWebOrigins`].
-    pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
+    pub trusted_web_origins: TrustedWebOrigins,
     /// Trusted public RFC 7395 endpoint advertised to XMPP clients. Kept
     /// separate from `base_url`, which describes the HTTP application and may
     /// have a different external scheme/authority behind a TLS terminator.
@@ -30,7 +37,7 @@ pub struct AuthState {
     /// (e.g. XEP-0115 caps disco#info queries). Validated at startup
     /// so downstream construction sites cannot panic on a malformed
     /// `WADDLE_XMPP_DOMAIN` value at runtime.
-    pub caps_server_domain: crate::server::caps_resolution::ServerDomainJid,
+    pub caps_server_domain: ServerDomainJid,
     pub http_client: reqwest::Client,
     /// Durable OIDC/OAuth handshake state (`pending_auth`,
     /// `device_auth`, `xmpp_auth_codes`) shared across replicas via the
@@ -63,10 +70,7 @@ impl AuthState {
 
         let xmpp_domain =
             std::env::var("WADDLE_XMPP_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-        let caps_server_domain = crate::server::caps_resolution::ServerDomainJid::parse(
-            &xmpp_domain,
-        )
-        .unwrap_or_else(|error| {
+        let caps_server_domain = ServerDomainJid::parse(&xmpp_domain).unwrap_or_else(|error| {
             panic!("WADDLE_XMPP_DOMAIN={xmpp_domain:?} is not a valid JID at startup: {error}")
         });
         Self {

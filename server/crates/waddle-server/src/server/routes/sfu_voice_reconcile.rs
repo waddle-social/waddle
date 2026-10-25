@@ -5,6 +5,7 @@
 //! the guarantee that the enforcement happens at all regardless of which
 //! replica received that webhook.
 
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use waddle_sfu::{CallId, SfuReconciler};
 
@@ -25,7 +26,7 @@ const NON_OCCUPANT_PASSES_BEFORE_EVICTION: u32 = 2;
 /// reconciliation task so it survives across ticks; entries are dropped
 /// as soon as the session is seen as an occupant again, or once it is
 /// evicted.
-pub(super) type NonOccupantStreaks = std::collections::HashMap<(CallId, jid::FullJid), u32>;
+pub(super) type NonOccupantStreaks = HashMap<(CallId, jid::FullJid), u32>;
 
 /// Reply budget for the room-actor asks this pass makes. Bounded so a
 /// single wedged room actor cannot stall the pass and starve every later

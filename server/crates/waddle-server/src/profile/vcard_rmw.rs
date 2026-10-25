@@ -6,7 +6,8 @@
 //! values and returns a freshly built element with PHOTO/FN replaced
 //! or inserted, leaving every other field untouched.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use waddle_xmpp::xep::xep0054::NS_VCARD as NS_VCARD_TEMP;
 use waddle_xmpp::xep::xep0292::NS_VCARD4;
 use xmpp_parsers::minidom::Element;

@@ -1,5 +1,20 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
-use super::super::*;
+use super::super::{
+    ask_error_definitively_proves_remote_resource_ref_stale, ask_error_is_owner_lookup_miss, Arc,
+    AtomicBool, ClaimSnapshot, ConnectionEntry, ForceDetachOutcome, ForceDetachRequest, NodeId,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, PendingRemoteSocketUnregister,
+    PendingRemoteSocketUnregisterKey, RelayAskError, RelayForceDetachRemoteUserResource,
+    RelayForceDetachRemoteUserResourceReply, RelayHandle, RelayRegisterRemoteUserResource,
+    RelayRemoteResourceForceDetachStatus, RelayRemoteResourceRegistrationReply,
+    RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterStatus,
+    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus, RelaySendFailure,
+    RelayTraceContext, RelayUnregisterRemoteUserResource, RelayUpdateRemoteUserResource,
+    RemotePresenceStateSnapshot, RemoteResourceOriginRefresh, RemoteResourceOriginSnapshot,
+    RemoteResourceRegisterOutcome, RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
+    RemoteResourceStateSnapshot, RemoteResourceStateUpdate, RemoteResourceUnregisterOutcome,
+    RemoteSocketRegistration, ORDERED_DELIVERY_REPLY_TIMEOUT, REMOTE_OWNER_REGISTER_REPLY_TIMEOUT,
+};
+use crate::server::dual_registration::MirrorRegisterOutcome;
 
 #[derive(Clone, Copy, Debug)]
 enum RemoteAskErrorClass {
@@ -957,7 +972,7 @@ impl OrderedRelayDeliveryBridge {
                     )
                     .await
                     {
-                        crate::server::dual_registration::MirrorRegisterOutcome::Registered => {
+                        MirrorRegisterOutcome::Registered => {
                             tracing::info!(
                                 jid = %jid,
                                 "clustered remote-resource resync locally mirrored a \
@@ -965,9 +980,9 @@ impl OrderedRelayDeliveryBridge {
                             );
                             true
                         }
-                        crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
-                        | crate::server::dual_registration::MirrorRegisterOutcome::Busy
-                        | crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
+                        MirrorRegisterOutcome::ForeignOwner
+                        | MirrorRegisterOutcome::Busy
+                        | MirrorRegisterOutcome::Failed => false,
                     }
                 }
                 RemoteResourceRegisterOutcome::Retryable
@@ -1368,12 +1383,20 @@ mod retirement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clustering::relay::RelaySendEffect;
+    use crate::clustering::route_bridge::ask_error_proves_remote_resource_ref_stale;
     use crate::clustering::route_bridge::tests::{
         origin_identity, receiver_identity, services_with_claims, test_peer_id,
     };
     use crate::config::REMOTE_OWNER_REGISTER_POST_REGISTRATION_REPLY_TIMEOUT;
+    use crate::config::{
+        ClusteringMessagingConfig, REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn reply_timeout_retries_the_idempotent_remote_registration() {

@@ -1,25 +1,23 @@
 //! Keep a frozen invitation's live fanout mutually exclusive with its fallback.
 use std::time::Duration;
 
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey, PendingDeliveryMutation},
-    pending_delivery::{InsertOutcome, PendingPayload, QuotaPolicy},
-    Stanza,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, PendingDeliveryMutation};
+use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, QuotaPolicy};
+use waddle_xmpp::Stanza;
 
 use crate::ingress::append_authority::AppendAuthority;
-use crate::{
-    ingress::{decision::IngressDecision, live_delivery},
-    ingress_uow::{
-        settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
-        EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-        IngressUowTransaction, PendingReceiptRepository, SendAttemptRepository, SendObligation,
-    },
-    server::routes::interpret::{
-        deliver_direct_to_full_locally, deliver_registered_remote_resource,
-        effects::{invite::MucUserRoute, EffectOutcome, SettledCompletion, SettledOutcome},
-        Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
-    },
+use crate::ingress::decision::IngressDecision;
+use crate::ingress::live_delivery;
+use crate::ingress_uow::{
+    settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository, EffectIntentRepository,
+    EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
+    PendingReceiptRepository, SendAttemptRepository, SendObligation,
+};
+use crate::server::routes::interpret::effects::invite::MucUserRoute;
+use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
+use crate::server::routes::interpret::{
+    deliver_direct_to_full_locally, deliver_registered_remote_resource, Deps,
+    FullJidDeliveryOutcome, SmIngressAppendContext,
 };
 
 #[derive(Debug, thiserror::Error)]

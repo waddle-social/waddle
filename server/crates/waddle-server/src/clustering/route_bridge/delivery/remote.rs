@@ -1,5 +1,20 @@
 use super::muc::MucProxyRouteAttempt;
-use super::*;
+use super::{
+    ask_error_allows_target_refresh, defer_until_relay_completion,
+    deliver_local_full_jid_after_target_refresh_at, deliver_reserved_muc_proxy,
+    log_remote_resource_route_outcome, muc_proxy_result_to_ordered_outcome, outcome_for_ask_error,
+    remote_resource_muc_ask_error_outcome, remote_resource_muc_outcome, replies_for_origin_handoff,
+    route_local_bare_jid_with_timeout, route_outcome_log, route_target_stanza_is_iq, user_entity,
+    Arc, FullJidDeliveryOutcome, MucProxyRouteDecision, OrderedRelayDeliveryBridge,
+    OrderedRelayMucProxyOutcome, OrderedRelayNackReason, OrderedRelayRouteOrigin,
+    OrderedRelayRouteOriginKind, RelayAskError, RelayHandle, RelayRouteRemoteResourceStanza,
+    RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteResourceOriginRefresh,
+    RemoteResourceOriginSnapshot, RemoteResourceRegisterOutcome, RemoteResourceRouteOutcome,
+    RemoteResourceRouteTarget, Stanza,
+};
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::server::dual_registration::MirrorRegisterOutcome;
 use waddle_xmpp::ingress::RelayTargetIdentity;
 
 impl OrderedRelayDeliveryBridge {
@@ -428,11 +443,7 @@ impl OrderedRelayDeliveryBridge {
             });
         };
         let origin = local_origin_for_remote_resource(remote_origin);
-        let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
-            canonical,
-            principal,
-            stanza_lang,
-        );
+        let admission = IngressRelayAdmission::from_parts(canonical, principal, stanza_lang);
         match self
             .try_proxy_muc_remote_from_local_origin_decision(
                 &room_jid,
@@ -467,9 +478,7 @@ impl OrderedRelayDeliveryBridge {
                     (OrderedRelayMucProxyOutcome::Delivered(frames), Some(completion)) => {
                         OrderedRelayMucProxyOutcome::PendingFrames {
                             frames,
-                            completion: crate::ingress::execute::RelayFrameReceiptCompletion::new(
-                                completion,
-                            ),
+                            completion: RelayFrameReceiptCompletion::new(completion),
                         }
                     }
                     (outcome, _) => outcome,
@@ -540,10 +549,10 @@ impl OrderedRelayDeliveryBridge {
             )
             .await
             {
-                crate::server::dual_registration::MirrorRegisterOutcome::Registered => {}
-                crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
-                | crate::server::dual_registration::MirrorRegisterOutcome::Busy
-                | crate::server::dual_registration::MirrorRegisterOutcome::Failed => {
+                MirrorRegisterOutcome::Registered => {}
+                MirrorRegisterOutcome::ForeignOwner
+                | MirrorRegisterOutcome::Busy
+                | MirrorRegisterOutcome::Failed => {
                     return RemoteResourceOriginRefresh::Failed;
                 }
             }

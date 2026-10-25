@@ -9,10 +9,8 @@ use std::time::Duration;
 use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::stream_management::{
-    persistence::{PersistedSession, SmPersistenceStorage},
-    SM_NS,
-};
+use waddle_xmpp::stream_management::persistence::{PersistedSession, SmPersistenceStorage};
+use waddle_xmpp::stream_management::SM_NS;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 

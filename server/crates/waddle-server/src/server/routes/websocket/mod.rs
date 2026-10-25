@@ -5,48 +5,42 @@
 //! (Unauthenticated → Authenticated → Ready → Closing) with no TCP fallback
 //! and no legacy dispatch paths.
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    response::Response,
-    routing::get,
-    Router,
-};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
+use axum::response::Response;
+use axum::routing::get;
+use axum::Router;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use futures::{Sink, SinkExt, StreamExt};
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use quick_xml::{
-    events::{BytesEnd, BytesStart, BytesText, Event},
-    Writer,
-};
-use std::{str::FromStr, sync::Arc};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
+use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use waddle_xmpp::{
-    auth::{parse_oauthbearer, OAuthBearerResult},
-    commands::CommandRegistry,
-    inbox::storage::InboxStorage,
-    mam::MamStorage,
-    muc::{
-        room_actor::{LeaveByRealJid, RoomActor},
-        room_registry_actor::RoomRegistryActor,
-        RoomConfig,
-    },
-    protocol::{
-        frame::{inject_client_ns_if_missing, InboundFrame, ParseError, MAX_FRAME_SIZE},
-        Blocklist, ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState,
-        StanzaDispatcher, XmppStateMachine,
-    },
-    registry::{ConnectionRegistry, DeliveryKind, OutboundStanza},
-    stream_management::{
-        InMemorySmSessionRegistry, SmEnable, SmResume, SmStanza, StreamManagementState, SM_NS,
-    },
-    xep::xep0421::OccupantIdSecret,
-    Stanza,
+use waddle_xmpp::auth::{parse_oauthbearer, OAuthBearerResult};
+use waddle_xmpp::commands::CommandRegistry;
+use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::mam::MamStorage;
+use waddle_xmpp::muc::room_actor::{LeaveByRealJid, RoomActor};
+use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::muc::RoomConfig;
+use waddle_xmpp::protocol::frame::{
+    inject_client_ns_if_missing, InboundFrame, ParseError, MAX_FRAME_SIZE,
 };
+use waddle_xmpp::protocol::{
+    Blocklist, ConnectionPhase, InboundEvent, OutboundEvent, ScramPendingState, StanzaDispatcher,
+    XmppStateMachine,
+};
+use waddle_xmpp::registry::{ConnectionRegistry, DeliveryKind, OutboundStanza};
+use waddle_xmpp::stream_management::{
+    InMemorySmSessionRegistry, SmEnable, SmResume, SmStanza, StreamManagementState, SM_NS,
+};
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::minidom::Element;
 
 use crate::server::routes::websocket::handlers::iq::errors::{

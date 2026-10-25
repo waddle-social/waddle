@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ActorRef, Arc, ConnectionRegistry, FullJid, Iq, Jid, RouterConfig, RoutingDestination,
+    RoutingResult, StanzaRouter, UserRegistryActor,
+};
 use kameo::actor::Spawn;
 use minidom::Element;
 use tokio::sync::mpsc;

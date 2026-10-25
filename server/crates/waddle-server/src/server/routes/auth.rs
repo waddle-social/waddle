@@ -15,6 +15,7 @@ use crate::auth::{
     AuthProviderTokenEndpointAuthMethod, ProviderRegistry, Session, SessionManager,
 };
 use crate::config::ServerConfig;
+use crate::db::actor::DbActor;
 use crate::db::actor::{DbExecute, DbQueryOne};
 use crate::db::{row_value, ValueExt};
 use crate::permissions::PermissionActor;
@@ -23,14 +24,13 @@ use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
 use crate::server::AppState;
-use axum::{
-    extract::{Query, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Json, Redirect, Response},
-    routing::{get, post},
-    Router,
-};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use axum::extract::{Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Json, Redirect, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use kameo::actor::ActorRef;
@@ -302,7 +302,7 @@ pub(super) fn auth_error_response(provider: &str, stage: AuthStage, err: AuthErr
 }
 
 async fn load_avatar_url(
-    actor: &kameo::actor::ActorRef<crate::db::actor::DbActor>,
+    actor: &kameo::actor::ActorRef<DbActor>,
     user_jid: &str,
 ) -> Result<Option<String>, AuthError> {
     let row = actor

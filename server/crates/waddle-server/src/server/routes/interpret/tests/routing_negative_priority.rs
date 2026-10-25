@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    chat_msg, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
+    pipelined_dispatcher, register_into_both_tiers, Arc, BareJid, BlockingStorage,
+    ConnectionRegistry, Deps, FullJid, InboxStorage, Jid, MamStorage, OutboundEvent, Stanza,
+};
+use kameo::actor::Spawn;
 
 // ---------------------------------------------------------------------
 // #1266 item 4 — RFC 6121 §8.5.2.1.1: bare-JID delivery MUST NOT reach

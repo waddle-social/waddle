@@ -2,10 +2,17 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate, enqueue_jobs_for_test, failed_outbox_jobs_count, groupchat_candidate_for,
+    inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
+};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
+    PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 
 fn foreign_target() -> NotificationOutboxTarget {

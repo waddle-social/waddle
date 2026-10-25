@@ -12,14 +12,12 @@ use crate::db::actor::{DbActor, DbExecute, DbQueryOne};
 use crate::db::Database;
 use crate::db::{row_value, ValueExt};
 use crate::server::AppState;
-use axum::{
-    body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::{get, put},
-    Json, Router,
-};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::{get, put};
+use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};

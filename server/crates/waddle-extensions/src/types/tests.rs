@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    DataForm, DataFormType, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionManifest,
+    ExtensionPayload, HashSet, PayloadNamespace, PluginId, PluginVersion, ProviderFieldText,
+    PubSubNode, PubSubPublish, XmlElement, EXTENSION_ITEM_LOCAL_NAME, FRAMEWORK_NAMESPACE,
+};
 
 fn manifest_with(capabilities: Vec<ExtensionCapability>) -> ExtensionManifest {
     ExtensionManifest {

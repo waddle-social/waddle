@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_waddle_context, load_page, AdoptionPhase, BareJid, DatabaseDriver, Digest,
+    EffectDescendantRepository, Element, IngressEffectIntent, IngressUowError, Jid, MessageKey,
+    NotificationActivityMutation, NotificationCandidate, NotificationClass,
+    NotificationOutboxStore, NotificationThreadId, Sha256, SuppressedReason, Uuid,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope, ALIAS_RETENTION};
 use crate::ingress_uow::{
@@ -6,6 +11,9 @@ use crate::ingress_uow::{
 };
 use crate::notification_outbox::drain::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
 use crate::notification_outbox::test_support::{candidate, target_named};
+use crate::notification_outbox::{
+    NotificationOutboxTarget, NotificationReason, PushServiceNodeName, RichSummary,
+};
 use waddle_xmpp::ingress::{NotificationCandidateOutcome, SemanticDigest};
 use xmpp_parsers::message::Message;
 

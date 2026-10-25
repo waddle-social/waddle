@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_rsm_request_element, build_rsm_response_element, extract_rsm_request,
+    extract_rsm_response, is_rsm_element, parse_rsm_request, parse_rsm_response, Element, RsmError,
+    RsmRequest, RsmResponse, NS_RSM,
+};
 
 #[test]
 fn test_is_rsm_element() {

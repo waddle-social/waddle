@@ -1,17 +1,21 @@
+use crate::clustering::relay::RelayExtensionRoomSend;
 use async_trait::async_trait;
 use jid::{BareJid, DomainRef, Jid, NodeRef};
 use waddle_extensions::types::PubSubNode as ExtensionPubSubNode;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
 use waddle_xmpp::mam::MamQuery;
 
-use crate::{
-    auth::Session,
-    db::{actor::DbQueryOne, row_value, ValueExt},
-};
+use crate::auth::Session;
+use crate::db::actor::DbQueryOne;
+use crate::db::{row_value, ValueExt};
 
+use super::conversions::{
+    ext_archived_message, ext_muc_affiliation, ext_muc_role, ext_presence_show,
+    ext_roster_subscription, host_tool_error,
+};
 use super::{
-    conversions::*, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
-    HostMessageTarget, HostSendMessage,
+    ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation, HostMessageTarget,
+    HostSendMessage,
 };
 
 #[async_trait]
@@ -298,7 +302,7 @@ impl ExtensionHostAdapter {
                 return self
                     .send_room_routed(
                         &invocation,
-                        crate::clustering::relay::RelayExtensionRoomSend {
+                        RelayExtensionRoomSend {
                             context: context.clone(),
                             room,
                             offered_id,

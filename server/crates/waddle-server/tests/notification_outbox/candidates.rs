@@ -2,9 +2,11 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{bare, candidate, store};
 use jid::Jid;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NotificationCandidate, NotificationMessageHints, NotificationOutboxError,
+};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[test]

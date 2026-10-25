@@ -1,5 +1,12 @@
-use super::*;
-use crate::ingress::{identity::IngressAppendObligationRef, EffectReceiptKey};
+use super::{
+    channel, envelope_is_consistent, inbound, message_payload, message_payload_to, origin_claim,
+    origin_node, sender_claim, target_claim, OrderedRelayAck, OrderedRelayChannel,
+    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayReceiverState,
+    OrderedRelayRecipient, OrderedRelayReply, OrderedRelayReservation, OrderedRelaySequence,
+    RemoteStanzaEnvelope,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::EffectReceiptKey;
 use crate::ingress_substrate::EffectReceiptKind;
 use libp2p::identity::Keypair;
 use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};

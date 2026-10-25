@@ -4,6 +4,10 @@
 //! rounds 8-12). Split out of `muc_muji_clear` so protocol handling
 //! and persistence/retry concerns evolve independently.
 
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxError;
+use crate::call_teardown_outbox::TeardownTarget;
+use crate::server::routes::websocket::ActiveCallThread;
 use std::sync::Arc;
 
 use jid::BareJid;
@@ -16,9 +20,8 @@ use waddle_xmpp::xep::{
 use xmpp_parsers::message::{Message, MessageType};
 
 use super::muc_muji_clear::WebhookEffectOutcome;
-use super::websocket::{
-    get_room_actor_result, interpret_loop::build_interpret_deps, WebSocketState,
-};
+use super::websocket::interpret_loop::build_interpret_deps;
+use super::websocket::{get_room_actor_result, WebSocketState};
 
 fn call_thread_end_lock(state: &WebSocketState, room_jid: &BareJid) -> Arc<tokio::sync::Mutex<()>> {
     state
@@ -41,7 +44,7 @@ fn call_thread_end_lock(state: &WebSocketState, room_jid: &BareJid) -> Arc<tokio
 async fn persist_completion_retry_if_first_attempt(
     state: &WebSocketState,
     room_jid: &BareJid,
-    active: &crate::server::routes::websocket::ActiveCallThread,
+    active: &ActiveCallThread,
     ended: chrono::DateTime<chrono::Utc>,
     first_attempt: bool,
 ) {
@@ -76,7 +79,7 @@ pub(crate) async fn enqueue_call_thread_end_retry(
     anchor_origin_id: waddle_xmpp_core::xep0359::OriginId,
     started: chrono::DateTime<chrono::Utc>,
     ended: chrono::DateTime<chrono::Utc>,
-) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+) -> Result<(), CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -88,9 +91,9 @@ pub(crate) async fn enqueue_call_thread_end_retry(
             return Ok(());
         }
     };
-    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+    let intent = CallTeardownIntent {
         call_id,
-        target: crate::call_teardown_outbox::TeardownTarget::CallThreadEndRetry {
+        target: TeardownTarget::CallThreadEndRetry {
             room_jid: room_jid.clone(),
             thread_id,
             anchor_origin_id,
@@ -285,7 +288,7 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
 pub(crate) fn remove_completed_call_thread(
     state: &WebSocketState,
     room_jid: &BareJid,
-    completed: &crate::server::routes::websocket::ActiveCallThread,
+    completed: &ActiveCallThread,
 ) {
     state
         .deps

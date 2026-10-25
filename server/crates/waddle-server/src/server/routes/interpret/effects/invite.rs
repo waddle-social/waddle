@@ -1,14 +1,13 @@
 //! Frozen invitation fan-out and its delivery-failure compensation.
 use super::super::Deps;
-use crate::server::routes::websocket::{
-    handlers::message::{
-        group_dm_invite::GroupDmMembershipMutation,
-        muc_invite::{self, MucMembershipMutation},
-    },
-    muc_invites::{self, OutstandingInvite},
+use crate::server::routes::websocket::handlers::message::group_dm_invite::GroupDmMembershipMutation;
+use crate::server::routes::websocket::handlers::message::muc_invite::{
+    self, MucMembershipMutation,
 };
+use crate::server::routes::websocket::muc_invites::{self, OutstandingInvite};
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{pending_delivery::PendingRow, Stanza};
+use waddle_xmpp::pending_delivery::PendingRow;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 #[derive(Clone, Debug)]

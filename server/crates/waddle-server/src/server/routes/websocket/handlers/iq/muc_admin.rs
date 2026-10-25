@@ -1,9 +1,21 @@
-use super::*;
+use super::{
+    bad_request_iq_error, build_admin_result, build_admin_set_result, build_iq_error_xml_typed,
+    build_iq_error_xml_with_payload, build_role_result, build_xmpp_error_response,
+    conflict_iq_error, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
+    iq_to_xml, is_role_change_query, item_not_found_iq_error, not_allowed_iq_error,
+    not_authorized_iq_error, parse_admin_query, response_batch_from_inline_room_effect_frames,
+    stanza_to_xml, warn, AdminItem, Affiliation, ApplyAdminItems, BareJid, FullJid,
+    GetAdminContext, GetSnapshot, Jid, Object, ObjectType, Relation, ResponseBatch, Stanza,
+    Subject, WebSocketState,
+};
 use crate::admin::channels::{
     acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
 };
 use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary;
+use crate::room_effect_outbox::RoomEffectOutboxError;
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
+use std::collections::BTreeMap;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
 /// awaits the durable-membership source inside its affiliation
@@ -220,10 +232,7 @@ async fn extend_batch_with_inline_room_effect_frames(
     state: &WebSocketState,
     reservation: &waddle_xmpp::muc::RoomEffectReservation,
     initiator: Option<&FullJid>,
-) -> Result<
-    crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary,
-    crate::room_effect_outbox::RoomEffectOutboxError,
-> {
+) -> Result<InlineRoomEffectDrainSummary, RoomEffectOutboxError> {
     let drained =
         crate::room_effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
             .await?;
@@ -250,7 +259,7 @@ fn final_affiliation_updates(
     before: &waddle_xmpp::muc::MucRoom,
     items: &[AdminItem],
 ) -> Vec<(BareJid, Affiliation)> {
-    let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> = before
+    let mut final_affiliations: BTreeMap<BareJid, Affiliation> = before
         .all_affiliations()
         .into_iter()
         .map(|entry| (entry.jid, entry.affiliation))
@@ -392,10 +401,7 @@ async fn recover_committed_admin_effects_after_ambiguity(
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
-) -> Result<
-    (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
-    crate::room_effect_outbox::RoomEffectOutboxError,
-> {
+) -> Result<(waddle_xmpp::muc::room_actor::AdminItemsApplied, bool), RoomEffectOutboxError> {
     let mut applied = recover_committed_admin_effects(
         room,
         items,
@@ -667,10 +673,8 @@ fn changed_session_voices(
     before: &[(FullJid, waddle_xmpp::Voice)],
     after: &[(FullJid, waddle_xmpp::Voice)],
 ) -> Vec<(FullJid, waddle_xmpp::Voice)> {
-    let before_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
-        before.iter().cloned().collect();
-    let after_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
-        after.iter().cloned().collect();
+    let before_map: BTreeMap<FullJid, waddle_xmpp::Voice> = before.iter().cloned().collect();
+    let after_map: BTreeMap<FullJid, waddle_xmpp::Voice> = after.iter().cloned().collect();
     after_map
         .into_iter()
         .filter(|(session, voice)| before_map.get(session) != Some(voice))
@@ -1257,13 +1261,12 @@ pub(super) async fn handle_muc_admin_iq(
             .await
         {
             Ok(snapshot) => {
-                let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> =
-                    snapshot
-                        .room
-                        .all_affiliations()
-                        .into_iter()
-                        .map(|entry| (entry.jid, entry.affiliation))
-                        .collect();
+                let mut final_affiliations: BTreeMap<BareJid, Affiliation> = snapshot
+                    .room
+                    .all_affiliations()
+                    .into_iter()
+                    .map(|entry| (entry.jid, entry.affiliation))
+                    .collect();
                 let current_owner_count =
                     snapshot.room.jids_by_affiliation(Affiliation::Owner).len();
                 for (jid, affiliation) in &affiliation_updates {

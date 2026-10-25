@@ -6,14 +6,13 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Json, Router,
-};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use jid::BareJid;

@@ -1,3 +1,4 @@
+use crate::db::DatabaseError;
 use jid::BareJid;
 use waddle_xmpp_core::roster::RosterVersion;
 
@@ -61,7 +62,7 @@ pub enum RosterStorageError {
     /// Carries the typed [`DatabaseError`](crate::db::DatabaseError) verbatim
     /// so callers can branch on the underlying cause if needed.
     #[error("Database error: {0}")]
-    Database(#[from] crate::db::DatabaseError),
+    Database(#[from] DatabaseError),
 
     /// Connection acquisition failed at the storage layer (pre-existing variant).
     #[error("Failed to connect to database: {0}")]

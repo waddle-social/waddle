@@ -1,21 +1,19 @@
+use crate::WaddleStickerRef;
 use jid::Jid;
+use waddle_xmpp_client::inbox::{InboxStreamEntry, InboxStreamEntrySource};
+use waddle_xmpp_client::mds::MdsCatchupEntry;
+use waddle_xmpp_client::messaging::{
+    self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
+    JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan, MarkupSpanData,
+    MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
+};
+use waddle_xmpp_client::pin::{PinEntry, PinEvent, PinEventAction, PinPreview};
+use waddle_xmpp_client::request::StanzaId;
+use waddle_xmpp_client::xep::call_thread::CallThreadEnded;
+use waddle_xmpp_client::xep::reply::{FallbackRange, ReplyMarker};
+use waddle_xmpp_client::xep::thread::ThreadRef;
 use waddle_xmpp_client::{
-    inbox::{InboxStreamEntry, InboxStreamEntrySource},
-    mds::MdsCatchupEntry,
-    messaging::{
-        self, CallEventKind, CallMedia, CarbonDirection, InboundCallEvent, InboundPresence,
-        JingleReason, LinkPreviewData, LinkPreviewLookup, LiveKitJoin, MarkupSpan, MarkupSpanData,
-        MarkupSpanType, MdsDisplayedEntry, MujiPresence, ReferenceData, SendMessageOptions,
-    },
-    pin::{PinEntry, PinEvent, PinEventAction, PinPreview},
-    request::StanzaId,
-    stickers,
-    xep::{
-        call_thread::CallThreadEnded,
-        reply::{FallbackRange, ReplyMarker},
-        thread::ThreadRef,
-    },
-    ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
+    stickers, ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
     MessagingEvent, SessionPhase,
 };
 
@@ -305,9 +303,7 @@ pub(super) fn sticker_pack_from_ffi(
     })
 }
 
-fn sticker_marker_from_ffi(
-    sticker: crate::WaddleStickerRef,
-) -> Result<stickers::StickerMarker, String> {
+fn sticker_marker_from_ffi(sticker: WaddleStickerRef) -> Result<stickers::StickerMarker, String> {
     let id = stickers::PackId::try_new(sticker.pack_id)
         .ok_or_else(|| "sticker pack id must not be empty".to_string())?;
     let jid = sticker

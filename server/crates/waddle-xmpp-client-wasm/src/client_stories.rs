@@ -16,7 +16,7 @@ use waddle_xmpp_client::pubsub::{
 use waddle_xmpp_core::xep0501::{
     build_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS, NS_ATOM, PUBSUB_NODE_STORIES,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 

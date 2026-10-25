@@ -1,14 +1,20 @@
 //! The registered socket endpoint retains ingress authority without archive ordering.
+use super::Message;
 #[path = "live_invitation.rs"]
 mod invitation;
 
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, identity::IngressAppendObligationRef, test_support::IngressFixture,
+use super::{
+    mpsc, origin_identity, receiver_identity, services_with_claims, test_peer_id, Arc,
+    CancellationToken, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, Duration, Lang,
+    NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OutboundStanza,
+    RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus, RelayTraceContext,
+    RemoteResourceOutboundFrame, RemoteStanza, Stanza,
 };
-use crate::server::routes::websocket::{
-    tests::create_test_websocket_state_with_db_pool_and_ingress, WebSocketState,
-};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::websocket::tests::create_test_websocket_state_with_db_pool_and_ingress;
+use crate::server::routes::websocket::WebSocketState;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 
 struct SocketFixture {

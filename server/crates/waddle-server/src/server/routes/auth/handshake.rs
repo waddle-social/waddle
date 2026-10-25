@@ -11,7 +11,10 @@
 //! rows-affected count of the `DELETE`, so exactly one caller wins even
 //! when two pods race on the same key.
 
-use super::*;
+use super::{
+    ActorRef, AuthError, DateTime, DbExecute, DbQueryOne, DeviceAuthStatus, DeviceAuthorization,
+    PendingAuthorization, Serialize, Utc, XmppAuthCode,
+};
 
 use crate::db::actor::DbActor;
 use crate::db::{row_value, ValueExt};
@@ -353,8 +356,14 @@ impl AuthHandshakeStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::server::routes::auth::{
+        AuthProviderTokenEndpointAuthMethod, BrowserSessionTransport, PendingFlow,
+    };
+    use chrono::Duration;
+
     use super::*;
-    use crate::db::{actor::DbActor, Database, MigrationRunner};
+    use crate::db::actor::DbActor;
+    use crate::db::{Database, MigrationRunner};
     use kameo::actor::Spawn;
 
     async fn create_store(db_name: &str) -> AuthHandshakeStore {

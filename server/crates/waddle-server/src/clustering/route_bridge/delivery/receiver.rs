@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    build_interpret_deps, BroadcastOutcome, ClaimSnapshot, DeliveryKind, Entity, EntityType,
+    FullJidDeliveryOutcome, MucProxyOrigin, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, OrderedRelayMucProxyKind, OrderedRelayNackReason,
+    OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayRouteOrigin,
+    OrderedRelayRouteOriginKind, RemoteStanzaEnvelope, Stanza, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+    ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+};
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::server::routes::interpret::SmIngressAppendContext;
+use std::collections::HashSet;
 
 impl OrderedRelayDeliveryBridge {
     pub(super) async fn deliver_processed_resource(
@@ -6,7 +16,7 @@ impl OrderedRelayDeliveryBridge {
         services: &OrderedRelayDeliveryServices,
         target: &jid::FullJid,
         stanza: &Stanza,
-        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        context: Option<&SmIngressAppendContext>,
     ) -> Result<(), OrderedRelayNackReason> {
         if let Some(result) =
             deliver_ordered_local_copy(services, target, stanza, context, DeliveryKind::DirectFrame)
@@ -48,7 +58,7 @@ impl OrderedRelayDeliveryBridge {
         services: &OrderedRelayDeliveryServices,
         target: &jid::FullJid,
         stanza: &Stanza,
-        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<&SmIngressAppendContext>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<(), OrderedRelayNackReason> {
         if let Some(result) = deliver_ordered_local_copy(
@@ -110,7 +120,7 @@ async fn deliver_ordered_local_copy(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
     stanza: &Stanza,
-    context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    context: Option<&SmIngressAppendContext>,
     kind: DeliveryKind,
 ) -> Option<Result<(), OrderedRelayNackReason>> {
     let context = context?;
@@ -231,8 +241,7 @@ pub(in super::super) async fn deliver_reserved_bare_presence_direct(
 
     let live_targets =
         waddle_xmpp::registry::available_resources_for_user(&services.user_registry, target).await;
-    let live_set: std::collections::HashSet<jid::FullJid> =
-        live_targets.iter().map(|(jid, _)| jid.clone()).collect();
+    let live_set: HashSet<jid::FullJid> = live_targets.iter().map(|(jid, _)| jid.clone()).collect();
     let mut landed = false;
     for resource in live_targets.into_iter().map(|(jid, _)| jid) {
         match deliver_direct_or_registered_remote_resource(services, &resource, stanza).await {
@@ -464,7 +473,7 @@ pub(in super::super) enum RelayPayloadTarget<'a> {
         OrderedRelayMucProxyKind,
         MucProxyOrigin,
         &'a Stanza,
-        Option<crate::ingress::identity::IngressRelayAdmission>,
+        Option<IngressRelayAdmission>,
     ),
 }
 
@@ -494,7 +503,7 @@ pub(in super::super) fn relay_payload_target(
                 *kind,
                 *origin,
                 &stanza.0,
-                crate::ingress::identity::IngressRelayAdmission::from_parts(
+                IngressRelayAdmission::from_parts(
                     canonical.clone(),
                     principal.clone(),
                     stanza_lang.clone(),

@@ -22,6 +22,7 @@
 //! - Visual distinction for pinned vs unpinned channels
 //! - Syncs across devices via PEP
 
+use crate::xep::xep0402::NS_BOOKMARKS2;
 use minidom::Element;
 
 /// Namespace for XEP-0469 Bookmark Pinning.
@@ -74,7 +75,7 @@ pub fn is_pinned_element(elem: &Element) -> bool {
 /// Check if a bookmark conference element has a `<pinned/>` child.
 pub fn is_bookmark_pinned(conference_elem: &Element) -> bool {
     conference_elem
-        .get_child("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+        .get_child("extensions", NS_BOOKMARKS2)
         .is_some_and(|extensions| extensions.children().any(is_pinned_element))
 }
 
@@ -93,13 +94,13 @@ pub fn pin_bookmark(conference_elem: &mut Element) {
         return;
     }
 
-    match conference_elem.get_child_mut("extensions", crate::xep::xep0402::NS_BOOKMARKS2) {
+    match conference_elem.get_child_mut("extensions", NS_BOOKMARKS2) {
         Some(extensions) => {
             extensions.append_child(build_pinned_element());
         }
         None => {
             conference_elem.append_child(
-                Element::builder("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+                Element::builder("extensions", NS_BOOKMARKS2)
                     .append(build_pinned_element())
                     .build(),
             );
@@ -110,14 +111,14 @@ pub fn pin_bookmark(conference_elem: &mut Element) {
 /// Remove the `<pinned/>` element from a bookmark conference element.
 pub fn unpin_bookmark(conference_elem: &mut Element) {
     let remove_extensions = conference_elem
-        .get_child_mut("extensions", crate::xep::xep0402::NS_BOOKMARKS2)
+        .get_child_mut("extensions", NS_BOOKMARKS2)
         .map(|extensions| {
             extensions.remove_child("pinned", NS_BOOKMARKS_PINNING);
             extensions.children().next().is_none()
         })
         .unwrap_or(false);
     if remove_extensions {
-        conference_elem.remove_child("extensions", crate::xep::xep0402::NS_BOOKMARKS2);
+        conference_elem.remove_child("extensions", NS_BOOKMARKS2);
     }
 }
 

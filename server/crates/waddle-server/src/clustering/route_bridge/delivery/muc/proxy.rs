@@ -1,5 +1,13 @@
 use super::types::{MucProxyRouteAttempt, MucProxyRouteDecision, OrderedRelayMucProxyOutcome};
-use super::*;
+use super::{
+    current_claim, current_fresh_local_relay_claim, remote_resource_origin, room_entity,
+    route_origin_claim, user_entity, Arc, FullJidDeliveryOutcome, MucProxyOrigin, NodeId,
+    OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind,
+    OrderedRelayOrigin, OrderedRelayPayload, OrderedRelayRecipient, OrderedRelayRouteOrigin,
+    OriginInboundSequence, RemoteDeliveryOutcome, RemoteDeliverySeed, RemoteResourceRouteTarget,
+    RemoteStanza, Stanza,
+};
+use crate::ingress::identity::IngressRelayAdmission;
 use waddle_xmpp::ingress::RelayTargetIdentity;
 
 fn relay_target_identity_from_owner(
@@ -32,7 +40,7 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
-        admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+        admission: Option<&IngressRelayAdmission>,
     ) -> Option<OrderedRelayMucProxyOutcome> {
         self.try_proxy_muc_remote_decision(room_jid, stanza, kind, muc_origin, origin, admission)
             .await
@@ -49,7 +57,7 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
-        admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+        admission: Option<&IngressRelayAdmission>,
     ) -> MucProxyRouteDecision {
         if let Some(remote_origin) = remote_resource_origin(origin) {
             return match Arc::clone(self)
@@ -88,7 +96,7 @@ impl OrderedRelayDeliveryBridge {
         kind: OrderedRelayMucProxyKind,
         muc_origin: MucProxyOrigin,
         origin: &OrderedRelayRouteOrigin,
-        admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+        admission: Option<&IngressRelayAdmission>,
     ) -> MucProxyRouteDecision {
         let Some(services) = self.services.get().cloned() else {
             return MucProxyRouteDecision::RoomClaimUnavailable;

@@ -1,10 +1,8 @@
 //! The host consumes sender frames while authority-owned settlement continues.
 use std::time::Duration;
 
-use crate::ingress::{
-    nested::{NestedOutcome, NestedRefusal},
-    IngressDecisionClass,
-};
+use crate::ingress::nested::{NestedOutcome, NestedRefusal};
+use crate::ingress::IngressDecisionClass;
 
 use super::ExtensionHostAdapterError;
 

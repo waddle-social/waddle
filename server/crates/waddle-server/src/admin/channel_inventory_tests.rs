@@ -1,5 +1,10 @@
 //! Regression tests for durable admin inventory and filtered pagination.
-use super::*;
+use super::{
+    run_list, upsert_xmpp_channel, Affiliation, AppState, Arc, BareJid, ChannelSpaceLink,
+    ChannelType, ChannelsListArgs, ChannelsListResult, CreateRoom,
+    CreateRoomWithInitialAffiliations, ListRooms, PinPermission, Role, RoomConfig, SpaceNode,
+    XmppChannelUpsert,
+};
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
 use waddle_xmpp::muc::room_actor::{Join, OccupancySessionGeneration};

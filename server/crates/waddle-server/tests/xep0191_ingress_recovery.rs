@@ -6,21 +6,20 @@
 pub mod detached_progress_support;
 pub mod ingress_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ingress_support::IngressFixture;
 use jid::{BareJid, FullJid, Jid};
-use waddle_server::{
-    db::blocking::DatabaseBlockingStorage,
-    ingress::{Deps, IngressAuthority, IngressDecision, IngressDecisionClass, RecoveryEnvironment},
-    ingress_uow::EffectReceiptRepository,
+use waddle_server::db::blocking::DatabaseBlockingStorage;
+use waddle_server::ingress::{
+    Deps, IngressAuthority, IngressDecision, IngressDecisionClass, RecoveryEnvironment,
 };
-use waddle_xmpp::{
-    ingress::{DigestContext, DigestInput, NormalizedTarget},
-    registry::ConnectionRegistry,
-    stream_management::InMemorySmSessionRegistry,
-    xep::xep0191::{BlockingStorage, BlockingStorageError},
-};
+use waddle_server::ingress_uow::EffectReceiptRepository;
+use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
 
 struct BlockingRecoveryEnvironment {
     connections: ConnectionRegistry,
@@ -334,12 +333,11 @@ async fn postgres_blocklist_storage_failure_defers_recovery_fail_closed() {
 pub mod extension_recovery_support;
 
 async fn extension_sender_receives_terminal_cancel_bounce(fixture: IngressFixture) {
-    use waddle_server::ingress::{execute::execute_effects, plan_message_dispatch, ImmediateSink};
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{plan_message_dispatch, ImmediateSink};
     use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
-    use xmpp_parsers::{
-        message::MessageType,
-        stanza_error::{DefinedCondition, ErrorType, StanzaError},
-    };
+    use xmpp_parsers::message::MessageType;
+    use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let mut submission = extension_recovery_support::extension_submission(
         &fixture,
         "extension-blocked",

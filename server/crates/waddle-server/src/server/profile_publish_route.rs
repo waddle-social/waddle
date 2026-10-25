@@ -49,6 +49,8 @@
 //! - 502 — upstream HTTP error / network / DNS / vCard storage
 //! - 500 — database actor unavailable
 
+use crate::db::actor::GetDatabase;
+use crate::vcard::VCardStore;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -207,12 +209,12 @@ async fn handler(
         .db_pool
         .global_actor()
         .clone()
-        .ask(crate::db::actor::GetDatabase)
+        .ask(GetDatabase)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
     let deps = ProfilePublishDeps {
         state: Arc::clone(&state.websocket),
-        vcard_store: crate::vcard::VCardStore::new(db.into()),
+        vcard_store: VCardStore::new(db.into()),
         // Tests serve avatars from wiremock on 127.0.0.1 over plain
         // HTTP. The fetcher's defense in depth requires loopback for
         // any non-https URL; the route is also gated on a

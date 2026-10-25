@@ -1,13 +1,15 @@
-use super::*;
+use super::{NodeId, NodeIdentity, OrderedRelayDeliveryBridge, RelayHandle};
 use crate::clustering::relay::{RelayMucAdminQuery, RelayMucAdminQueryReply};
+use crate::server::routes::websocket::MUC_ADMIN_QUERY_MAILBOX_TIMEOUT;
+use crate::server::routes::websocket::MUC_ADMIN_QUERY_REPLY_TIMEOUT;
 
 impl OrderedRelayDeliveryBridge {
     /// Origin side of a forwarded muc#admin list GET (#1298).
     pub(crate) fn muc_admin_query_handle(&self, owner: &NodeIdentity) -> RelayHandle {
         RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
             .with_ask_timeouts(
-                crate::server::routes::websocket::MUC_ADMIN_QUERY_MAILBOX_TIMEOUT,
-                crate::server::routes::websocket::MUC_ADMIN_QUERY_REPLY_TIMEOUT,
+                MUC_ADMIN_QUERY_MAILBOX_TIMEOUT,
+                MUC_ADMIN_QUERY_REPLY_TIMEOUT,
             )
     }
 

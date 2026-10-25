@@ -8,7 +8,12 @@ use minidom::Element;
 use crate::discovery::WADDLE_GROUP_DM_FEATURE_NS;
 use crate::xep::xep0050::{NS_COMMANDS, NS_DATA_FORMS};
 
-use super::*;
+use super::{
+    build_group_dm_create_iq, build_group_dm_invite_message, build_group_dm_leave_iq,
+    build_group_dm_rename_iq, parse_group_dm_create_result, parse_group_dm_leave_result,
+    parse_group_dm_rename_result, GroupDmCreateArgs, GroupDmHistoryAccess, GroupDmResponseError,
+    NODE_GROUP_DM_CREATE, NODE_GROUP_DM_LEAVE, NODE_GROUP_DM_RENAME,
+};
 
 const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 

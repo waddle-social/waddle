@@ -357,7 +357,8 @@ async fn publish_avatar_data(
     item_id: &str,
     bytes: &AvatarBytes,
 ) -> Result<(), ProfileSyncError> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
 
     ensure_canonical_pep_node(state, jid, NODE_AVATAR_DATA).await?;
 

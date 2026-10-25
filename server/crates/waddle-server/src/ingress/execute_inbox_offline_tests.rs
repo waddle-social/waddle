@@ -1,11 +1,16 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
-use crate::server::routes::{
-    interpret::{effects::PlanSink, interpret},
-    websocket::{interpret_loop::build_interpret_deps, tests as socket_tests},
+use super::{
+    execute_effects, proven_receipts, Duration, EffectOutcome, EffectReceiptRepository,
+    ExternalDeliveryEffect, ExternalDirectEffect, ExternalEffect, ImmediateSink, Stanza,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::effects::PlanSink;
+use crate::server::routes::interpret::interpret;
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::tests as socket_tests;
 use std::sync::Arc;
-use waddle_xmpp::{ingress::IngressEffectIntent, protocol::OutboundEvent};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::OutboundEvent;
 
 async fn socket_state(
     fixture: &IngressFixture,
@@ -34,10 +39,8 @@ async fn inbox_push_receipt(fixture: IngressFixture, disconnect: bool) {
     let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
     socket_tests::register_test_connection(&state, &sender, sender_tx).await;
     socket_tests::create_test_session(&state, "juliet").await;
-    use waddle_xmpp::muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
-    };
+    use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     let actor = state
         .deps
         .protocol
@@ -215,9 +218,8 @@ async fn offline_receipts(
     detach_post_commit_state: bool,
     quota_exceeded: bool,
 ) {
-    use waddle_xmpp::pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, QuotaPolicy,
-    };
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, QuotaPolicy};
     let state = socket_state(&fixture).await;
     socket_tests::create_test_session(&state, "juliet").await;
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");

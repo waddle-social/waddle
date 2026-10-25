@@ -1,4 +1,4 @@
-use super::*;
+use super::{debug, DatabaseDriver, DatabaseSmPersistence, SmPersistenceError};
 
 async fn add_column_if_missing(
     storage: &DatabaseSmPersistence,

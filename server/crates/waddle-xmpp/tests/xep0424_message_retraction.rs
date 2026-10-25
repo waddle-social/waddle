@@ -596,13 +596,11 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
 
 #[tokio::test]
 async fn tombstone_replay_snapshot_precedes_pending_deletion_and_preserves_other_authors() {
-    use waddle_xmpp::{
-        pending_delivery::{
-            storage::{InMemoryPendingDeliveryStorage, PendingDeliveryStorage},
-            PendingPayload, PendingRow, PendingRowId,
-        },
-        tombstone::TombstoneTarget,
+    use waddle_xmpp::pending_delivery::storage::{
+        InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
     };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+    use waddle_xmpp::tombstone::TombstoneTarget;
     let storage =
         InMemoryPendingDeliveryStorage::new(waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited);
     let recipient: jid::BareJid = "reader@example.com".parse().expect("reader");

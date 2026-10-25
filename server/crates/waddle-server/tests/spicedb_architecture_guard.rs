@@ -1,7 +1,5 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 fn crate_path(relative: &str) -> PathBuf {
     Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"))
@@ -15,7 +13,11 @@ fn read(relative: &str) -> String {
 
 #[test]
 fn active_server_permissions_stay_actor_only() {
-    for relative in ["src/server/mod.rs", "src/server/xmpp_state.rs"] {
+    for relative in [
+        "src/server/mod.rs",
+        "src/server/lifecycle.rs",
+        "src/server/xmpp_state.rs",
+    ] {
         let contents = read(relative);
         assert!(
             contents.contains("PermissionActor"),

@@ -5,28 +5,26 @@ use ingress_support::IngressFixture;
 use kameo::actor::Spawn;
 use std::sync::Arc;
 use std::time::Duration;
-use waddle_server::{
-    db::DatabaseDriver, pending_delivery::DatabasePendingDeliveryStorage,
-    sm_persistence::DatabaseSmPersistence, sm_promotion::promote_session_unacked,
+use waddle_server::db::DatabaseDriver;
+use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
+use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_server::sm_promotion::promote_session_unacked;
+use waddle_xmpp::ownership::{
+    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::{
-    ownership::{
-        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
-    },
-    pending_delivery::{
-        storage::PendingDeliveryStorage, InsertOutcome, PendingPayload, PendingRow, PendingRowId,
-        QuotaPolicy, SmSessionId,
-    },
-    protocol::session_state::Blocklist,
-    registry::{ConnectionRegistry, UserRegistryActor},
-    stream_management::persistence::SmPersistenceStorage,
-    stream_management::{
-        DetachedSessionSnapshot, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
-        StreamManagementState,
-    },
-    telemetry::attributes::SmEvictionPath,
-    Stanza,
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{
+    InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
 };
+use waddle_xmpp::protocol::session_state::Blocklist;
+use waddle_xmpp::registry::{ConnectionRegistry, UserRegistryActor};
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+use waddle_xmpp::stream_management::{
+    DetachedSessionSnapshot, InMemorySmSessionRegistry, SmClaimCompletion, SmSessionRegistry,
+    StreamManagementState,
+};
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
+use waddle_xmpp::Stanza;
 
 fn message(id: &str) -> Stanza {
     let mut message =
@@ -558,16 +556,12 @@ async fn postgres_expired_resume_completion_retains_exact_queue_until_promotion(
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_epoch() {
-    use waddle_server::{
-        clustering::claims::{NodeLeaseStore, PostgresClaimStore},
-        db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
-        sm_persistence_fenced::PostgresFencedSmPersistence,
-    };
-    use waddle_xmpp::{
-        ownership::StalePredicate,
-        pending_delivery::storage::PendingStorageError,
-        stream_management::persistence::{SmClaimFence, SmPersistenceError},
-    };
+    use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
+    use waddle_server::db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_server::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use waddle_xmpp::ownership::StalePredicate;
+    use waddle_xmpp::pending_delivery::storage::PendingStorageError;
+    use waddle_xmpp::stream_management::persistence::{SmClaimFence, SmPersistenceError};
 
     let Some(fixture) = IngressFixture::postgres("smfencedexpiry").await else {
         return;
@@ -968,18 +962,14 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
 
 #[cfg(feature = "clustering")]
 async fn postgres_fenced_poison_settles_ack_before_quarantine(corrupt_header: bool) {
-    use waddle_server::{
-        clustering::claims::{NodeLeaseStore, PostgresClaimStore},
-        db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
-        sm_persistence_fenced::PostgresFencedSmPersistence,
+    use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
+    use waddle_server::db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_server::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use waddle_xmpp::ownership::{ExactReleaseOutcome, StalePredicate};
+    use waddle_xmpp::stream_management::persistence::{
+        SmAckWindow, SmClaimFence, SmPersistenceError,
     };
-    use waddle_xmpp::{
-        ownership::{ExactReleaseOutcome, StalePredicate},
-        stream_management::{
-            persistence::{SmAckWindow, SmClaimFence, SmPersistenceError},
-            ReclaimedHydrationOutcome,
-        },
-    };
+    use waddle_xmpp::stream_management::ReclaimedHydrationOutcome;
 
     let Some(fixture) = IngressFixture::postgres("smackpoison").await else {
         return;

@@ -1,4 +1,9 @@
 //! Apply the payload-complete policy decisions retained by reconciliation.
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_substrate::MucArchiveContext;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::effects::PlannedEffect;
 #[path = "recorded/preview_restore.rs"]
 mod preview_restore;
 pub(super) use preview_restore::{freeze_preview_intents, restore_pending_preview_effects};
@@ -11,12 +16,13 @@ mod preview_replay_tests;
 #[cfg(test)]
 mod tests;
 
+use crate::server::routes::interpret::effects::direct::{
+    DurableDirectEffect, ExternalDirectEffect,
+};
+use crate::server::routes::interpret::effects::room::{
+    DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery, RoomActorMutation,
+};
 use crate::server::routes::interpret::effects::{
-    direct::{DurableDirectEffect, ExternalDirectEffect},
-    room::{
-        DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
-        RoomActorMutation,
-    },
     DurableEffect, Effect, ExternalEffect, IngressPlan, PlanEffectDependency,
 };
 use waddle_xmpp::ingress::{
@@ -34,7 +40,7 @@ pub(super) use reflection::prepare_attempt_reflections;
 /// content plus recorded archive authority. Invitations retain their own restorer.
 pub fn restore_delivery_payloads(
     plan: &mut IngressPlan,
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     route_progress: &[RouteProgress],
     sender: &jid::FullJid,
 ) {
@@ -167,7 +173,7 @@ pub fn restore_delivery_payloads(
 /// A prepared route is authority only for its own immutable message and audience.
 /// Legacy rows have no such evidence and retain the older reconstruction rules.
 pub(super) fn prepared_direct_message<'a>(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     intent: &'a IngressEffectIntent,
 ) -> Option<&'a xmpp_parsers::message::Message> {
     let IngressEffectIntent::RouteDirect {
@@ -204,7 +210,7 @@ pub(super) fn prepared_direct_message<'a>(
 }
 
 pub(super) fn delivery_message(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     recipient: &jid::BareJid,
     intents: &[IngressEffectIntent],
 ) -> xmpp_parsers::message::Message {
@@ -331,12 +337,8 @@ fn restore_dm_call_state(plan: &mut IngressPlan, recorded: &[IngressEffectIntent
         if let Some(existing) = existing {
             existing.effect = effect;
         } else {
-            plan.plan.push(
-                crate::server::routes::interpret::effects::PlannedEffect::new(effect)
-                    .with_suppression(
-                        crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always,
-                    ),
-            );
+            plan.plan
+                .push(PlannedEffect::new(effect).with_suppression(PlanSuppressionPolicy::Always));
         }
         if !plan.intents.contains(intent) {
             plan.intents.push(intent.clone());
@@ -348,8 +350,8 @@ fn restore_dm_call_state(plan: &mut IngressPlan, recorded: &[IngressEffectIntent
 pub fn restore_room_observer_envelope(
     plan: &mut IngressPlan,
     recorded: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+    envelope: &MessageEnvelope,
+) -> Result<(), IngressUowError> {
     for effect in &mut plan.plan {
         if let Effect::External(ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
             message,
@@ -360,12 +362,12 @@ pub fn restore_room_observer_envelope(
             **message = envelope.message().clone();
             **error_request = envelope
                 .room_observer_request()
-                .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+                .ok_or(IngressUowError::EffectIntentMessageMissing)?;
         }
     }
     let error_request = envelope
         .room_observer_request()
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     for intent in recorded {
         let IngressEffectIntent::RoomObserver {
             room,
@@ -394,20 +396,17 @@ pub fn restore_room_observer_envelope(
                 crate::server::routes::interpret::effects::room::message_dependencies(
                     room, &message,
                 );
-            let mut planned =
-                crate::server::routes::interpret::effects::PlannedEffect::new(Effect::External(
-                    ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage {
-                        room: room.clone(),
-                        plugin: plugin.clone(),
-                        message: Box::new(message),
-                        requester: requester.clone(),
-                        sender: sender.clone(),
-                        error_request: Box::new(error_request.clone()),
-                    }),
-                ))
-                .with_suppression(
-                    crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always,
-                );
+            let mut planned = PlannedEffect::new(Effect::External(ExternalEffect::Room(
+                ExternalRoomEffect::ObserveRoomMessage {
+                    room: room.clone(),
+                    plugin: plugin.clone(),
+                    message: Box::new(message),
+                    requester: requester.clone(),
+                    sender: sender.clone(),
+                    error_request: Box::new(error_request.clone()),
+                },
+            )))
+            .with_suppression(PlanSuppressionPolicy::Always);
             planned.dependencies = dependencies;
             plan.plan.push(planned);
         }
@@ -422,8 +421,8 @@ pub fn restore_room_observer_envelope(
 /// so a retry never substitutes today's provisional payload or error text.
 pub fn restore_subject_rejection_replies(
     plan: &mut IngressPlan,
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+    envelope: &MessageEnvelope,
+) -> Result<(), IngressUowError> {
     use crate::ingress_uow::IngressUowError;
     for effect in &mut plan.plan {
         let Effect::External(ExternalEffect::Room(ExternalRoomEffect::RoomActorMutation {
@@ -464,7 +463,7 @@ pub fn restore_subject_rejection_replies(
 pub fn room_canonical_envelope(
     plan: &IngressPlan,
     recorded: &[IngressEffectIntent],
-) -> Option<crate::ingress_substrate::MessageEnvelope> {
+) -> Option<MessageEnvelope> {
     if !plan.intents.iter().any(|intent| {
         matches!(
             intent,
@@ -488,11 +487,8 @@ pub fn room_canonical_envelope(
         }
     });
     let mut envelope = match request {
-        Some(request) => crate::ingress_substrate::MessageEnvelope::with_room_observer(
-            message.clone(),
-            request.clone(),
-        ),
-        None => crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+        Some(request) => MessageEnvelope::with_room_observer(message.clone(), request.clone()),
+        None => MessageEnvelope::new(message.clone()),
     };
     for effect in &plan.plan {
         let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
@@ -513,7 +509,7 @@ pub fn room_canonical_envelope(
             // Never manufacture legacy authority from a retry's current session.
             continue;
         }
-        envelope = envelope.with_archive_context(crate::ingress_substrate::MucArchiveContext {
+        envelope = envelope.with_archive_context(MucArchiveContext {
             stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
                 message.id.clone(),
                 room.clone().into(),
@@ -534,8 +530,8 @@ pub fn room_canonical_envelope(
 /// Legacy envelopes without this context retain strict candidate comparison.
 pub(super) fn restore_archive_projections(
     plan: &mut IngressPlan,
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+    envelope: &MessageEnvelope,
+) -> Result<(), IngressUowError> {
     for planned in &mut plan.plan {
         if let Effect::Durable(DurableEffect::Direct(DurableDirectEffect::ArchiveDirect {
             archive,

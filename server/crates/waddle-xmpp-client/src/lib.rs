@@ -134,11 +134,9 @@ pub use transport::{
 pub use transport::{DefaultTransportFactory, WebSocketTransport, WebSocketTransportFactory};
 #[cfg(feature = "wasm")]
 pub use transport_wasm::{WasmTransportEvent, WasmWebSocket};
+pub use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD};
 pub use waddle_xmpp_core::roster::{AskType, RosterItem, Subscription, ROSTER_NS};
-pub use waddle_xmpp_core::{
-    mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD},
-    ConnectionConfig,
-};
+pub use waddle_xmpp_core::ConnectionConfig;
 pub use xep::xep0292::{
     build_fetch_vcard4_iq, build_publish_vcard4_iq, build_vcard4_element, parse_pep_vcard4,
     parse_vcard4_element, VCard4, NS_VCARD4, PEP_NODE_VCARD4,

@@ -1,24 +1,23 @@
 //! Freeze preview-reference writes from read-only database and plan snapshots.
+use crate::db::actor::DbExecute;
+use crate::db::DatabaseDriver;
 use std::collections::BTreeMap;
 
 use jid::BareJid;
 use tracing::warn;
 use uuid::Uuid;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState},
-    mam::RichMessageId,
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, LinkPreviewMediaRefMutation, LinkPreviewMediaRefState,
 };
+use waddle_xmpp::mam::RichMessageId;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
-use super::{
-    effects::{
-        direct::{external, ExternalDirectEffect},
-        Effect, ExternalEffect, PlanFailure,
-    },
-    Deps,
-};
-use crate::db::{actor::DbQuery, row_value, Value, ValueExt};
+use super::effects::direct::{external, ExternalDirectEffect};
+use super::effects::{Effect, ExternalEffect, PlanFailure};
+use super::Deps;
+use crate::db::actor::DbQuery;
+use crate::db::{row_value, Value, ValueExt};
 
 pub(super) async fn update(
     deps: &Deps<'_>,
@@ -184,8 +183,8 @@ pub(super) async fn execute(
 pub(crate) fn mutation_write(
     mutation: &LinkPreviewMediaRefMutation,
     now: chrono::DateTime<chrono::Utc>,
-    driver: crate::db::DatabaseDriver,
-) -> crate::db::actor::DbExecute {
+    driver: DatabaseDriver,
+) -> DbExecute {
     use crate::db::actor::DbExecute;
     let now = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
     let mut query = match mutation.state {
@@ -255,10 +254,10 @@ pub(crate) fn mutation_write(
         },
     };
     match driver {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             query.sql = query.sql.replace("link_preview_media_refs.updated_at <= excluded.updated_at", "julianday(link_preview_media_refs.updated_at) <= julianday(excluded.updated_at)").replace("link_preview_media_refs.updated_at < excluded.updated_at", "julianday(link_preview_media_refs.updated_at) < julianday(excluded.updated_at)").replace("updated_at <= ?", "julianday(updated_at) <= julianday(?)");
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             query.sql = query.sql.replace("link_preview_media_refs.updated_at <= excluded.updated_at", "link_preview_media_refs.updated_at::timestamptz <= excluded.updated_at::timestamptz").replace("link_preview_media_refs.updated_at < excluded.updated_at", "link_preview_media_refs.updated_at::timestamptz < excluded.updated_at::timestamptz").replace("updated_at <= ?", "updated_at::timestamptz <= ?::timestamptz");
         }
     }
@@ -277,7 +276,8 @@ mod tests {
         correction: bool,
     ) {
         use crate::db::{DatabaseConfig, DatabasePool, PoolConfig};
-        use crate::ingress::{commit::commit_submission, IngressDecisionClass};
+        use crate::ingress::commit::commit_submission;
+        use crate::ingress::IngressDecisionClass;
         use crate::server::routes::interpret::message_plan::finish_plan;
         use crate::server::routes::websocket::tests::{
             create_test_websocket_state, create_test_websocket_state_with_db_pool_and_ingress,

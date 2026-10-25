@@ -19,6 +19,7 @@
 //! the type/hint matrix) and the resulting [`DmRouting`] gates which
 //! branch fires.
 
+use std::collections::HashMap;
 mod custody;
 pub(crate) use custody::{promote_ingress_custody, promote_session_with_custody};
 mod live;
@@ -145,15 +146,15 @@ async fn promote_session_unacked_with_policy(
     // TOMBSTONE_CLOCK_SKEW_SLACK "after" the recording still scrubs.
     // Real wire-id reuse arriving that close to its own retraction is
     // implausible; retracted-content delivery is the worse failure.
-    let tombstoned_sequences: std::collections::HashSet<u32> = if recent_tombstones.is_empty() {
-        std::collections::HashSet::new()
+    let tombstoned_sequences: HashSet<u32> = if recent_tombstones.is_empty() {
+        HashSet::new()
     } else {
         let entries: Vec<(u32, String)> = session
             .unacked_stanzas
             .iter()
             .map(|entry| (entry.sequence, entry.stanza_xml.clone()))
             .collect();
-        let receipt_by_sequence: std::collections::HashMap<u32, DateTime<Utc>> = session
+        let receipt_by_sequence: HashMap<u32, DateTime<Utc>> = session
             .unacked_stanzas
             .iter()
             .map(|entry| (entry.sequence, entry.original_receipt_at))

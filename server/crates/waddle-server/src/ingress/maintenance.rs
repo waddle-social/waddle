@@ -1,14 +1,11 @@
 //! Periodic, bounded repair of terminal proofs followed by retention collection.
 
+use crate::ingress_substrate::TerminalizeOutcome;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use waddle_xmpp::ingress::MessageKey;
@@ -449,14 +446,11 @@ async fn terminalize_candidates(
             )
             .await
             {
-                Ok(Some(crate::ingress_substrate::TerminalizeOutcome::Terminalized)) => {
+                Ok(Some(TerminalizeOutcome::Terminalized)) => {
                     waddle_xmpp::telemetry::reliability::add_ingress_maintenance_terminalized_messages(1);
                 }
                 Ok(
-                    Some(
-                        crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
-                        | crate::ingress_substrate::TerminalizeOutcome::MessageVanished,
-                    )
+                    Some(TerminalizeOutcome::AlreadyTerminal | TerminalizeOutcome::MessageVanished)
                     | None,
                 ) => {}
                 Err(error) => {

@@ -4,10 +4,8 @@ use super::{
     adopt_if_matched, enroll, ensure_table, verify, AdoptOutcome, DeploymentUuid, DurableStore,
     LineageError, LineageRegistryBuilder, LineageStatus, LineageUuid, PgSystemIdentifier,
 };
-use crate::{
-    config::LineageConfig,
-    db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError},
-};
+use crate::config::LineageConfig;
+use crate::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError};
 
 fn configured() -> LineageConfig {
     LineageConfig {
@@ -695,10 +693,8 @@ mod sticky_success {
         AttestedLineage, DurableStore, LineageAttestor, LineageError, LineageRegistryBuilder,
         LineageStatus,
     };
-    use crate::{
-        config::LineageConfig,
-        db::{DatabaseDriver, DatabaseError},
-    };
+    use crate::config::LineageConfig;
+    use crate::db::{DatabaseDriver, DatabaseError};
     use std::collections::VecDeque;
     use std::str::FromStr;
 

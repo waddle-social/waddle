@@ -1,3 +1,4 @@
+use crate::tombstone::TombstoneTarget;
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -147,7 +148,7 @@ pub trait SmSessionRegistry: Send + Sync {
     /// overrides it.
     async fn scrub_unacked_for_tombstone(
         &self,
-        _target: &crate::tombstone::TombstoneTarget,
+        _target: &TombstoneTarget,
     ) -> Result<usize, SmRegistryError> {
         Ok(0)
     }
@@ -161,7 +162,7 @@ pub trait SmSessionRegistry: Send + Sync {
     /// identities.
     async fn scrub_unacked_for_tombstone_with_entries(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<TombstoneScrubbedSmEntries, SmRegistryError> {
         Ok(TombstoneScrubbedSmEntries::count_only(
             self.scrub_unacked_for_tombstone(target).await?,

@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    relay_dispatch_span, spawn_test_relay_actor, Demote, DemoteReply, Deserialize,
+    RelayDispatchKind, RelayReassertMediaGrants, RelayReassertMediaGrantsReply, RelayResumeSteal,
+    RelayResumeStealReply, RelayTraceContext, Serialize,
+};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 
 /// #1485: when the sending node propagated its W3C trace context, the

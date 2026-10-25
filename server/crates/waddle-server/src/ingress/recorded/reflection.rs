@@ -1,11 +1,9 @@
 //! Separate this attempt's reflection from repair of its historical occupant copy.
 use super::{single_target, RouteProgress};
-use crate::{
-    ingress_substrate::MessageEnvelope,
-    server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
-        PlanSuppressionPolicy, PlannedEffect,
-    },
+use crate::ingress_substrate::MessageEnvelope;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlanSuppressionPolicy, PlannedEffect,
 };
 use jid::FullJid;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
@@ -138,7 +136,8 @@ fn delivery_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::{ingress::EntityGeneration, Stanza};
+    use waddle_xmpp::ingress::EntityGeneration;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::message::{Message, MessageType};
 
     #[test]

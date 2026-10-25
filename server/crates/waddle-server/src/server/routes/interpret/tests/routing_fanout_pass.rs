@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    chat_msg, effects, extract_stanza_id_by, interpret, io, jid,
+    offline_pass_deps_with_user_registry, pipelined_dispatcher, register_into_both_tiers, Arc,
+    BareJid, BlockingStorage, ConnectionRegistry, DeliveryExecutionContext, Deps, FullJid,
+    InboxStorage, Jid, MamStorage, OutboundEvent, Stanza,
+};
+use kameo::actor::Spawn;
 
 // -----------------------------------------------------------------
 // #1106 — shared fan-out recipient pass: blocklist-load failure

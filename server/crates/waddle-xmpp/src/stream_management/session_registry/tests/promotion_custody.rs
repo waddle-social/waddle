@@ -1,4 +1,5 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::{
     make_test_session, realistic_test_session_for_jid, EnsureClaimTestAction,

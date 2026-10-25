@@ -1,17 +1,17 @@
 //! Exact routing for effects that commit their work and receipts together.
-use crate::{
-    db::Database,
-    ingress_uow::IngressUnitOfWork,
-    server::routes::interpret::{
-        effects::{
-            delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect,
-            room::ExternalRoomEffect, EffectOutcome, ExternalEffect,
-        },
-        Deps,
-    },
-};
+use crate::db::Database;
+use crate::ingress_uow::CarbonReceiptRepository;
+use crate::ingress_uow::IngressUnitOfWork;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+use crate::server::routes::interpret::effects::SettledCompletion;
+use crate::server::routes::interpret::effects::SettledOutcome;
+use crate::server::routes::interpret::effects::{EffectOutcome, ExternalEffect};
+use crate::server::routes::interpret::Deps;
 
-use super::{decision::IngressDecision, recorded::RouteProgress};
+use super::decision::IngressDecision;
+use super::recorded::RouteProgress;
 
 #[path = "execute_offline.rs"]
 mod offline;
@@ -46,22 +46,22 @@ pub(super) async fn execute_legacy_remote(
         return None;
     };
     match relay_copy::attempt_before_readiness(uow, decision, index, delivery, target, deps).await {
-        Ok(Some(relay_copy::LegacyRemoteAttempt::Wire(outcome))) => Some(EffectOutcome::Settled(
-            crate::server::routes::interpret::effects::SettledOutcome {
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Wire(outcome))) => {
+            Some(EffectOutcome::Settled(SettledOutcome {
                 refusal: None,
                 persisted: Vec::new(),
-                completion: crate::server::routes::interpret::effects::SettledCompletion::Uncertain,
+                completion: SettledCompletion::Uncertain,
                 detached: Some(vec![(target.clone(), outcome)]),
-            },
-        )),
-        Ok(Some(relay_copy::LegacyRemoteAttempt::Superseded(persisted))) => Some(
-            EffectOutcome::Settled(crate::server::routes::interpret::effects::SettledOutcome {
+            }))
+        }
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Superseded(persisted))) => {
+            Some(EffectOutcome::Settled(SettledOutcome {
                 refusal: None,
                 persisted,
-                completion: crate::server::routes::interpret::effects::SettledCompletion::Complete,
+                completion: SettledCompletion::Complete,
                 detached: None,
-            }),
-        ),
+            }))
+        }
         Ok(None) => None,
         Err(error) => {
             tracing::debug!(%error, "live legacy remote child authority unavailable");
@@ -185,15 +185,11 @@ pub(super) async fn execute_with_uow(
             let Some(key) = decision.message_key else {
                 return Some(EffectOutcome::Unavailable);
             };
-            let (envelope, _) = match crate::ingress_uow::CarbonReceiptRepository::load_authority(
-                uow.database(),
-                key,
-            )
-            .await
-            {
-                Ok(authority) => authority,
-                Err(_) => return Some(EffectOutcome::Unavailable),
-            };
+            let (envelope, _) =
+                match CarbonReceiptRepository::load_authority(uow.database(), key).await {
+                    Ok(authority) => authority,
+                    Err(_) => return Some(EffectOutcome::Unavailable),
+                };
             if envelope.room_manifest().is_some() {
                 return Some(detached::execute(uow, decision, index, delivery, deps).await);
             }

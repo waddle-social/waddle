@@ -1,9 +1,7 @@
 //! Finalize derived archive authority under the canonical message lock.
 use sha2::{Digest, Sha256};
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, IngressEffectKey, MessageKey},
-    mam::ArchiveOrdinal,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey, MessageKey};
+use waddle_xmpp::mam::ArchiveOrdinal;
 
 use super::{EffectIntentRepository, IngressUowError, IngressUowTransaction};
 use crate::db::DatabaseDriver;

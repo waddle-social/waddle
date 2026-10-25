@@ -1,3 +1,4 @@
+use crate::pubsub::AccessModel;
 use jid::BareJid;
 use waddle_xmpp_core::{ChannelInfo, ChannelRoomInfo, UploadSlotInfo};
 use xmpp_parsers::minidom::Element;
@@ -19,13 +20,11 @@ impl SpaceAccessModel {
         }
     }
 
-    pub fn from_pubsub(access_model: crate::pubsub::AccessModel) -> Option<Self> {
+    pub fn from_pubsub(access_model: AccessModel) -> Option<Self> {
         match access_model {
-            crate::pubsub::AccessModel::Open => Some(Self::Open),
-            crate::pubsub::AccessModel::Whitelist => Some(Self::Whitelist),
-            crate::pubsub::AccessModel::Presence
-            | crate::pubsub::AccessModel::Roster
-            | crate::pubsub::AccessModel::Authorize => None,
+            AccessModel::Open => Some(Self::Open),
+            AccessModel::Whitelist => Some(Self::Whitelist),
+            AccessModel::Presence | AccessModel::Roster | AccessModel::Authorize => None,
         }
     }
 }

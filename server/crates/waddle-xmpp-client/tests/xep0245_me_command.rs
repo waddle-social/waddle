@@ -10,13 +10,11 @@
 //! unmodified, with markup offsets still indexing the full body.
 
 use minidom::Element;
-use waddle_xmpp_client::{
-    messaging::{
-        build_correction_message, build_outbound_message, parse, MarkupSpanData, MarkupSpanType,
-        MessagingEvent, SendMessageOptions, NS_CLIENT, NS_MESSAGE_CORRECT,
-    },
-    StanzaId,
+use waddle_xmpp_client::messaging::{
+    build_correction_message, build_outbound_message, parse, MarkupSpanData, MarkupSpanType,
+    MessagingEvent, SendMessageOptions, NS_CLIENT, NS_MESSAGE_CORRECT,
 };
+use waddle_xmpp_client::StanzaId;
 
 /// XEP-0394 Message Markup namespace.
 const NS_MARKUP: &str = "urn:xmpp:markup:0";

@@ -3,56 +3,39 @@
 //! Two server nodes share one database. Only the relay hop is replaced: the
 //! request and reply cross the kameo codec, and the owner runs its real host
 //! send path.
-use super::{
-    direct_ingress,
-    groupchat_ingress::{
-        close_node, groupchat_message, managed_room, managed_send, GroupchatFixture,
-    },
-    groupchat_receipts,
+use super::groupchat_ingress::{
+    close_node, groupchat_message, managed_room, managed_send, GroupchatFixture,
 };
-use crate::{
-    clustering::relay::{
-        RelayAskError, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelaySendEffect,
-        RelaySendFailure,
-    },
-    ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
-    server::{
-        extension_host_adapter::{
-            relayed_room_send,
-            remote_room::{TestRoomOwnerRelay, OWNER_REPLY_RESERVE, TEST_ROOM_OWNER_RELAY},
-            ExtensionHostAdapterError,
-        },
-        routes::{
-            interpret::{
-                BotSnapshotGate, PlanningClaims, TestJoinPresenceRoute, TEST_BOT_SNAPSHOT_GATE,
-                TEST_JOIN_PRESENCE_ROUTE,
-            },
-            websocket::WebSocketState,
-        },
-    },
+use super::{direct_ingress, groupchat_receipts};
+use crate::clustering::relay::{
+    RelayAskError, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelaySendEffect,
+    RelaySendFailure,
 };
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
+use crate::ingress::commit::commit_race_gate::Registration;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use crate::server::extension_host_adapter::remote_room::{
+    TestRoomOwnerRelay, OWNER_REPLY_RESERVE, TEST_ROOM_OWNER_RELAY,
 };
-use waddle_extensions::{
-    host_tools::{
-        HostToolError, HostToolErrorCode, InvocationContext, InvocationKind, MessageTarget,
-        SendMessageRequest,
-    },
-    DisplayText, PluginId, StanzaId,
+use crate::server::extension_host_adapter::{relayed_room_send, ExtensionHostAdapterError};
+use crate::server::routes::interpret::{
+    BotSnapshotGate, PlanningClaims, TestJoinPresenceRoute, TEST_BOT_SNAPSHOT_GATE,
+    TEST_JOIN_PRESENCE_ROUTE,
 };
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    muc::room_actor::{ChangeAffiliation, GetSnapshot, Join},
-    ownership::{NodeIdentity, SharedNodeIdentity},
-    Affiliation, Role, Stanza,
+use crate::server::routes::websocket::WebSocketState;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use waddle_extensions::host_tools::{
+    HostToolError, HostToolErrorCode, InvocationContext, InvocationKind, MessageTarget,
+    SendMessageRequest,
 };
+use waddle_extensions::{DisplayText, PluginId, StanzaId};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, Join};
+use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::{Affiliation, Role, Stanza};
 use waddle_xmpp_core::xep0359::OriginId;
 
 fn origin_node() -> NodeIdentity {
@@ -1104,10 +1087,8 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
 /// is loaded, joined or committed on this node.
 async fn claim_held_elsewhere_is_owned_remotely(f: IngressFixture) {
     use crate::server::routes::interpret::effects::PlanFailure;
-    use waddle_xmpp::{
-        muc::room_registry_actor::{GetRoom, WireClusteringClaims},
-        ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore},
-    };
+    use waddle_xmpp::muc::room_registry_actor::{GetRoom, WireClusteringClaims};
+    use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore};
     let adapter = direct_ingress::adapter(&f).await;
     let (room, invocation) = managed_room(&f, &adapter, "text").await;
     let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());

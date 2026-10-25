@@ -1,3 +1,30 @@
+use crate::clustering::claims::OrphanReaperCursorUpdate;
+use crate::clustering::claims::OrphanedSmSessionClaimPage;
+use crate::clustering::claims::RoomOrphanScanCursor;
+use crate::clustering::claims::SmOrphanScanCursor;
+use crate::clustering::metrics::OrphanTerminalCleanupFailureReason;
+use crate::clustering::metrics::OrphanTerminalCleanupLane;
+use crate::clustering::metrics::OrphanWorkQueue;
+use crate::clustering::metrics::OrphanWorker;
+use crate::clustering::metrics::OrphanWorkerFailureReason;
+use crate::clustering::metrics::RoomOrphanReconciliationOutcome;
+use crate::clustering::CriticalNodeFailure;
+use crate::clustering::NodeLifecycle;
+use crate::db::actor::DbExecute;
+use crate::metrics::LocalDepartureRetryOutcome;
+use crate::notification_outbox::NotificationDrainDeps;
+use crate::pending_delivery::PendingRecovery;
+use crate::server::dual_registration::MirrorUnregisterOutcome;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
+use crate::server::routes::websocket::MembershipGenerationFilter;
+use crate::sm_promotion::PromotionBatchGuard;
+use crate::sm_promotion::PromotionScrubOutcome;
+use crate::sm_promotion::PromotionSessionGuard;
+use crate::sm_promotion::TerminalOverflowPromotionDeps;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 mod ingress_custody;
 pub(crate) use ingress_custody::run_ingress_custody_sweep;
 #[cfg(feature = "clustering")]
@@ -178,7 +205,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     {
                         routes::websocket::MucCleanupOutcome::Completed => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                                LocalDepartureRetryOutcome::Completed,
                             );
                         }
                         routes::websocket::MucCleanupOutcome::Failed => {
@@ -201,7 +228,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     not_before: pending.not_before,
                                 });
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                         }
                     }
@@ -226,7 +253,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         Ok(Some(actor)) => actor,
                         Ok(None) => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::ActorGone,
+                                LocalDepartureRetryOutcome::ActorGone,
                             );
 
                             break;
@@ -250,7 +277,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     not_before: pending.not_before,
                                 });
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             break;
                         }
@@ -275,7 +302,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .pending_local_muc_departures
                                 .complete_ack(&room, &jid, ack_attempt);
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Acknowledged,
+                                LocalDepartureRetryOutcome::Acknowledged,
                             );
                         } else {
                             ack_blocked = true;
@@ -301,7 +328,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 not_before: pending.not_before,
                             });
                         crate::metrics::record_local_departure_retry(
-                            crate::metrics::LocalDepartureRetryOutcome::AckBarrier,
+                            LocalDepartureRetryOutcome::AckBarrier,
                         );
                         break;
                     }
@@ -335,7 +362,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 not_before: pending.not_before,
                             });
                         crate::metrics::record_local_departure_retry(
-                            crate::metrics::LocalDepartureRetryOutcome::InFlightBarrier,
+                            LocalDepartureRetryOutcome::InFlightBarrier,
                         );
                         break;
                     }
@@ -520,7 +547,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             )
                             .await;
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                                LocalDepartureRetryOutcome::Completed,
                             );
                             if drained_receipts < MAX_RECEIPT_DRAIN {
                                 drained_receipts += 1;
@@ -537,7 +564,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     cause,
                                     selector,
                                     attempt,
-                                    notified: std::collections::HashSet::new(),
+                                    notified: HashSet::new(),
                                     removal,
                                 };
                                 continue;
@@ -557,14 +584,14 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         cause,
                                         selector,
                                         attempt,
-                                        notified: std::collections::HashSet::new(),
+                                        notified: HashSet::new(),
                                         removal,
                                     },
                                     attempts: pending.attempts,
                                     not_before: pending.not_before,
                                 });
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             break;
                         }
@@ -593,7 +620,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     not_before: pending.not_before,
                                 });
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             break;
                         }
@@ -603,7 +630,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     state, &room, &jid, occupant, waddle_sfu::UnboundOccupantPolicy::Keep, None,);
                             }
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::NotOccupant,
+                                LocalDepartureRetryOutcome::NotOccupant,
                             );
 
                             break;
@@ -618,7 +645,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 }
                             }
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Superseded,
+                                LocalDepartureRetryOutcome::Superseded,
                             );
                             // #1647 (codex round 28): a Superseded answer
                             // consumed ONE unreplayable receipt (or bounced
@@ -635,7 +662,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     cause,
                                     selector,
                                     attempt,
-                                    notified: std::collections::HashSet::new(),
+                                    notified: HashSet::new(),
                                     removal,
                                 };
                                 continue;
@@ -679,7 +706,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 | LeaveSessionSelector::JoinedAtOrBefore(_) => {}
                             }
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                                LocalDepartureRetryOutcome::Completed,
                             );
                             routes::websocket::ack_departure_receipt(
                                 &state.deps.protocol.pending_local_muc_departures,
@@ -712,7 +739,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                     not_before: pending.not_before,
                                 });
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             break;
                         }
@@ -771,7 +798,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         // newer join bumped the revision: definitive.
                         Ok(outcome) if outcome.is_definitive() => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Completed,
+                                LocalDepartureRetryOutcome::Completed,
                             );
                             break;
                         }
@@ -780,7 +807,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         // failed: still owed.
                         Ok(_) | Err(_) => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             state
                                 .deps
@@ -814,13 +841,13 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                         // timeouts and NotAuthoritative answers do not count).
                         Ok(None) if absent_sweeps >= routes::websocket::ACK_ABSENT_ROOM_RETRIES => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Abandoned,
+                                LocalDepartureRetryOutcome::Abandoned,
                             );
                             break;
                         }
                         Ok(None) => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             state
                                 .deps
@@ -843,13 +870,13 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                 .await =>
                         {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Acknowledged,
+                                LocalDepartureRetryOutcome::Acknowledged,
                             );
                             break;
                         }
                         Ok(Some(_)) | Err(_) => {
                             crate::metrics::record_local_departure_retry(
-                                crate::metrics::LocalDepartureRetryOutcome::Requeued,
+                                LocalDepartureRetryOutcome::Requeued,
                             );
                             state
                                 .deps
@@ -883,7 +910,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                 } => match get_room_actor_result(state, &room).await {
                     Ok(None) => {
                         crate::metrics::record_local_departure_retry(
-                            crate::metrics::LocalDepartureRetryOutcome::Retired,
+                            LocalDepartureRetryOutcome::Retired,
                         );
                         break;
                     }
@@ -900,7 +927,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     }
                     Ok(Some(_)) | Err(_) => {
                         crate::metrics::record_local_departure_retry(
-                            crate::metrics::LocalDepartureRetryOutcome::AwaitingReap,
+                            LocalDepartureRetryOutcome::AwaitingReap,
                         );
                         state
                             .deps
@@ -1065,7 +1092,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
 /// as expiry instead of leaving pre-cutover sessions stranded until timeout.
 async fn drain_noncurrent_occupancy_sessions(
     state: &WebSocketState,
-    promotion_batch: &mut crate::sm_promotion::PromotionBatchGuard<'_>,
+    promotion_batch: &mut PromotionBatchGuard<'_>,
 ) -> bool {
     let registry = &state.deps.protocol.sm_session_registry;
     let candidates = match registry.detached_occupancy_inventory() {
@@ -1139,17 +1166,14 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 count = drained.len(),
                 "SM janitor: cleaning up expired detached sessions"
             );
-
         }
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
-            &state.deps.protocol.sm_session_registry,
-            drained,
-        );
+        let mut promotion_batch =
+            PromotionBatchGuard::new(&state.deps.protocol.sm_session_registry, drained);
         if !drain_noncurrent_occupancy_sessions(state, &mut promotion_batch).await {
             sweep_failed = true;
         }
         while let Some(pending_session) = promotion_batch.pop() {
-            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+            let mut promotion_guard = PromotionSessionGuard::new(
                 &state.deps.protocol.sm_session_registry,
                 pending_session,
             );
@@ -1192,7 +1216,8 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 routes::websocket::redrive_terminal_pending_rows_to_live_resource(
                     state,
                     &session.jid.to_bare(),
-                ).await
+                )
+                .await
             } else {
                 routes::websocket::TerminalRedriveOutcome::Settled
             };
@@ -1206,7 +1231,9 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 if crate::sm_promotion::reinsert_failed_session_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
-                ).await {
+                )
+                .await
+                {
                     promotion_guard.complete();
                 } else {
                     sweep_failed = true;
@@ -1261,8 +1288,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                         "SM janitor: row reconciliation has repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if confirm_expired_ingress_stream(state, &session).await
-                    {
+                    if confirm_expired_ingress_stream(state, &session).await {
                         promotion_guard.complete();
                         // Dead-lettering discards the replay queue, but the
                         // rows the dead stream still claims must go back to
@@ -1374,8 +1400,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                             "SM janitor: blocklist load has repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
-                        if confirm_expired_ingress_stream(state, &session).await
-                        {
+                        if confirm_expired_ingress_stream(state, &session).await {
                             promotion_guard.complete();
                         }
                         continue;
@@ -1420,7 +1445,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             };
             let summary = crate::sm_promotion::promote_session_with_custody(
                 &session,
-                crate::sm_promotion::TerminalOverflowPromotionDeps {
+                TerminalOverflowPromotionDeps {
                     sm_registry: &state.deps.protocol.sm_session_registry,
                     registry: &state.deps.protocol.connection_registry,
                     user_registry: &state.deps.protocol.user_registry,
@@ -1443,12 +1468,11 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 "SM janitor",
             )
             .await
-                == crate::sm_promotion::PromotionScrubOutcome::Failed
+                == PromotionScrubOutcome::Failed
             {
                 sweep_failed = true;
             }
-            if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable
-                > 0
+            if summary.queued + summary.redelivered + summary.bounced + summary.not_promotable > 0
                 || summary.storage_failed > 0
             {
                 info!(
@@ -1466,9 +1490,9 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             }
             if summary.has_storage_failure() {
                 sweep_failed = true;
-                waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(
-                    u64::from(summary.storage_failed),
-                );
+                waddle_xmpp::telemetry::reliability::add_sm_promotion_storage_failed(u64::from(
+                    summary.storage_failed,
+                ));
                 let attempts = match state
                     .deps
                     .protocol
@@ -1506,8 +1530,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                         "SM janitor: Q6 promotion repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if confirm_expired_ingress_stream(state, &session).await
-                    {
+                    if confirm_expired_ingress_stream(state, &session).await {
                         promotion_guard.complete();
                     }
                     continue;
@@ -1530,8 +1553,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 }
                 continue;
             }
-            if confirm_expired_ingress_stream(state, &session).await
-            {
+            if confirm_expired_ingress_stream(state, &session).await {
                 promotion_guard.complete();
             } else {
                 sweep_failed = true;
@@ -1590,7 +1612,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     Some(std::sync::Arc::clone(&entry.carbons_enabled)),
                 )
                 .await
-                    == crate::server::dual_registration::MirrorUnregisterOutcome::Failed
+                    == MirrorUnregisterOutcome::Failed
                 {
                     sweep_failed = true;
                 }
@@ -1614,18 +1636,15 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             {
                 #[cfg(feature = "clustering")]
                 {
-                    let cleanup_origin =
-                        crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
-                                session_id.clone(),
-                            ),
-                            sender_entity: waddle_xmpp::ownership::Entity::new(
-                                waddle_xmpp::ownership::EntityType::UserActor,
-                                session.jid.to_bare().to_string(),
-                            ),
-                            inbound_sequence: 0,
-                            handoff: None,
-                        };
+                    let cleanup_origin = OrderedRelayRouteOrigin {
+                        kind: OrderedRelayRouteOriginKind::SmSession(session_id.clone()),
+                        sender_entity: waddle_xmpp::ownership::Entity::new(
+                            waddle_xmpp::ownership::EntityType::UserActor,
+                            session.jid.to_bare().to_string(),
+                        ),
+                        inbound_sequence: 0,
+                        handoff: None,
+                    };
                     if routes::websocket::cleanup_muc_presence_for_jid_with_origin(
                         state,
                         &session.jid,
@@ -2453,7 +2472,7 @@ fn orphan_sweep_heartbeat_outcome(
 async fn supervise_orphan_reaper_sweep<F>(
     cancel: &tokio_util::sync::CancellationToken,
     fatal_fence: &tokio_util::sync::CancellationToken,
-    node_lifecycle: &crate::clustering::NodeLifecycle,
+    node_lifecycle: &NodeLifecycle,
     timeout: Duration,
     sweep: F,
 ) -> OrphanSweepOutcome
@@ -2875,10 +2894,10 @@ pub(crate) async fn spawn_critical_registry_supervisor(websocket_state: &Arc<Web
     let (room_arm, user_arm) = tokio::join!(room_armed, user_armed);
     for outcome in [
         room_arm.unwrap_or(CriticalRegistryArm::Failed(
-            crate::clustering::CriticalNodeFailure::RoomRegistryTerminated,
+            CriticalNodeFailure::RoomRegistryTerminated,
         )),
         user_arm.unwrap_or(CriticalRegistryArm::Failed(
-            crate::clustering::CriticalNodeFailure::UserRegistryTerminated,
+            CriticalNodeFailure::UserRegistryTerminated,
         )),
     ] {
         if let CriticalRegistryArm::Failed(failure) = outcome {
@@ -2894,7 +2913,7 @@ pub(crate) async fn spawn_critical_registry_supervisor(websocket_state: &Arc<Web
             .deps
             .app_state
             .node_lifecycle
-            .fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+            .fail(CriticalNodeFailure::RoomRegistryTerminated);
         websocket_state.deps.shutdown.stop_token().cancel();
     }
     if !user_registry_liveness.is_alive() {
@@ -2902,7 +2921,7 @@ pub(crate) async fn spawn_critical_registry_supervisor(websocket_state: &Arc<Web
             .deps
             .app_state
             .node_lifecycle
-            .fail(crate::clustering::CriticalNodeFailure::UserRegistryTerminated);
+            .fail(CriticalNodeFailure::UserRegistryTerminated);
         websocket_state.deps.shutdown.stop_token().cancel();
     }
 }
@@ -2910,12 +2929,12 @@ pub(crate) async fn spawn_critical_registry_supervisor(websocket_state: &Arc<Web
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CriticalRegistryArm {
     Armed,
-    Failed(crate::clustering::CriticalNodeFailure),
+    Failed(CriticalNodeFailure),
 }
 
 fn spawn_room_registry_lifetime_watch(
     room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    node_lifecycle: crate::clustering::NodeLifecycle,
+    node_lifecycle: NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
 ) -> tokio::sync::oneshot::Receiver<CriticalRegistryArm> {
     let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
@@ -2923,10 +2942,10 @@ fn spawn_room_registry_lifetime_watch(
         let shutdown = room_registry.wait_for_shutdown();
         tokio::pin!(shutdown);
         if futures::poll!(shutdown.as_mut()).is_ready() {
-            node_lifecycle.fail(crate::clustering::CriticalNodeFailure::RoomRegistryTerminated);
+            node_lifecycle.fail(CriticalNodeFailure::RoomRegistryTerminated);
             process_stop.cancel();
             let _ = armed_tx.send(CriticalRegistryArm::Failed(
-                crate::clustering::CriticalNodeFailure::RoomRegistryTerminated,
+                CriticalNodeFailure::RoomRegistryTerminated,
             ));
             return;
         }
@@ -2952,7 +2971,7 @@ fn spawn_room_registry_lifetime_watch(
 
 fn spawn_user_registry_lifetime_watch(
     user_registry: kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
-    node_lifecycle: crate::clustering::NodeLifecycle,
+    node_lifecycle: NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
 ) -> tokio::sync::oneshot::Receiver<CriticalRegistryArm> {
     let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
@@ -2960,10 +2979,10 @@ fn spawn_user_registry_lifetime_watch(
         let shutdown = user_registry.wait_for_shutdown();
         tokio::pin!(shutdown);
         if futures::poll!(shutdown.as_mut()).is_ready() {
-            node_lifecycle.fail(crate::clustering::CriticalNodeFailure::UserRegistryTerminated);
+            node_lifecycle.fail(CriticalNodeFailure::UserRegistryTerminated);
             process_stop.cancel();
             let _ = armed_tx.send(CriticalRegistryArm::Failed(
-                crate::clustering::CriticalNodeFailure::UserRegistryTerminated,
+                CriticalNodeFailure::UserRegistryTerminated,
             ));
             return;
         }
@@ -3121,26 +3140,25 @@ impl WorkEnqueueOutcome {
 struct OrphanReaperWorkers {
     hydration_tx: tokio::sync::mpsc::Sender<SmHydrationWork>,
     release_tx: tokio::sync::mpsc::Sender<ExactReleaseWork>,
-    hydration_pending: Arc<std::sync::Mutex<std::collections::HashMap<String, PendingSmHydration>>>,
-    release_pending:
-        Arc<std::sync::Mutex<std::collections::HashMap<ExactReleaseKey, ExactReleaseWork>>>,
+    hydration_pending: Arc<std::sync::Mutex<HashMap<String, PendingSmHydration>>>,
+    release_pending: Arc<std::sync::Mutex<HashMap<ExactReleaseKey, ExactReleaseWork>>>,
     /// Exact RoomActor epochs observed as won but not yet accepted into the
     /// registry actor's pending inventory. This synchronous bridge closes the
     /// cancellation gap between the steal CAS returning and the first
     /// subsequent mailbox await.
     room_handoff_pending: Arc<
         std::sync::Mutex<
-            std::collections::HashMap<
+            HashMap<
                 (jid::BareJid, waddle_xmpp::muc::RoomClaimFenceContext),
                 waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom,
             >,
         >,
     >,
-    room_cursor: Arc<std::sync::Mutex<Option<crate::clustering::claims::RoomOrphanScanCursor>>>,
-    sm_cursor: Arc<std::sync::Mutex<Option<crate::clustering::claims::SmOrphanScanCursor>>>,
+    room_cursor: Arc<std::sync::Mutex<Option<RoomOrphanScanCursor>>>,
+    sm_cursor: Arc<std::sync::Mutex<Option<SmOrphanScanCursor>>>,
     cancel: tokio_util::sync::CancellationToken,
     fatal_fence: tokio_util::sync::CancellationToken,
-    node_lifecycle: crate::clustering::NodeLifecycle,
+    node_lifecycle: NodeLifecycle,
 }
 
 #[cfg(feature = "clustering")]
@@ -3172,7 +3190,7 @@ impl OrphanReaperWorkers {
         }
         if pending.len() >= ORPHAN_WORK_QUEUE_CAPACITY {
             crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                OrphanWorkQueue::SmHydration,
             );
             return false;
         }
@@ -3185,7 +3203,7 @@ impl OrphanReaperWorkers {
             },
         );
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            OrphanWorkQueue::SmHydration,
             pending.len(),
         );
         true
@@ -3198,7 +3216,7 @@ impl OrphanReaperWorkers {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         pending.remove(&entity.id);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            OrphanWorkQueue::SmHydration,
             pending.len(),
         );
     }
@@ -3224,7 +3242,7 @@ impl OrphanReaperWorkers {
             Ok(()) => WorkEnqueueOutcome::Enqueued,
             Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
                 crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                    OrphanWorkQueue::SmHydration,
                 );
                 let tx = self.hydration_tx.clone();
                 tokio::spawn(async move {
@@ -3236,7 +3254,7 @@ impl OrphanReaperWorkers {
                 // The supervisor snapshots this map when it replaces a dead
                 // worker. Retain the exact work so restart can requeue it.
                 crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                    OrphanWorkQueue::SmHydration,
                 );
                 WorkEnqueueOutcome::RetainedForRestart
             }
@@ -3296,7 +3314,7 @@ impl OrphanReaperWorkers {
         }
         if pending.len() >= ORPHAN_WORK_QUEUE_CAPACITY {
             crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                OrphanWorkQueue::RoomRelease,
             );
             return WorkEnqueueOutcome::Rejected;
         }
@@ -3304,14 +3322,14 @@ impl OrphanReaperWorkers {
         match self.release_tx.try_send(work) {
             Ok(()) => {
                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                    OrphanWorkQueue::RoomRelease,
                     pending.len(),
                 );
                 WorkEnqueueOutcome::Enqueued
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(work)) => {
                 crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                    OrphanWorkQueue::RoomRelease,
                 );
                 let tx = self.release_tx.clone();
                 tokio::spawn(async move {
@@ -3323,7 +3341,7 @@ impl OrphanReaperWorkers {
                 // A closed receiver means the supervisor must restart the
                 // worker. Keep this exact fence in its restart inventory.
                 crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                    OrphanWorkQueue::RoomRelease,
                 );
                 WorkEnqueueOutcome::RetainedForRestart
             }
@@ -3391,7 +3409,7 @@ impl OrphanReaperWorkers {
         }
         debug_assert!(hydration_pending.len() <= ORPHAN_WORK_QUEUE_CAPACITY);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+            OrphanWorkQueue::SmHydration,
             hydration_pending.len(),
         );
         drop(hydration_pending);
@@ -3405,7 +3423,7 @@ impl OrphanReaperWorkers {
         }
         debug_assert!(release_pending.len() <= ORPHAN_WORK_QUEUE_CAPACITY);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+            OrphanWorkQueue::RoomRelease,
             release_pending.len(),
         );
     }
@@ -3429,7 +3447,7 @@ impl OrphanReaperWorkers {
         debug_assert!(handoffs.len() < ORPHAN_WORK_QUEUE_CAPACITY);
         handoffs.insert(key, pending);
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
+            OrphanWorkQueue::RoomHandoff,
             handoffs.len(),
         );
     }
@@ -3445,7 +3463,7 @@ impl OrphanReaperWorkers {
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         handoffs.remove(&(room_jid.clone(), claim_fence.clone()));
         crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
+            OrphanWorkQueue::RoomHandoff,
             handoffs.len(),
         );
     }
@@ -3461,28 +3479,28 @@ impl OrphanReaperWorkers {
             .collect()
     }
 
-    fn sm_cursor(&self) -> Option<crate::clustering::claims::SmOrphanScanCursor> {
+    fn sm_cursor(&self) -> Option<SmOrphanScanCursor> {
         self.sm_cursor
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
-    fn set_sm_cursor(&self, cursor: Option<crate::clustering::claims::SmOrphanScanCursor>) {
+    fn set_sm_cursor(&self, cursor: Option<SmOrphanScanCursor>) {
         *self
             .sm_cursor
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = cursor;
     }
 
-    fn room_cursor(&self) -> Option<crate::clustering::claims::RoomOrphanScanCursor> {
+    fn room_cursor(&self) -> Option<RoomOrphanScanCursor> {
         self.room_cursor
             .lock()
             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
-    fn set_room_cursor(&self, cursor: Option<crate::clustering::claims::RoomOrphanScanCursor>) {
+    fn set_room_cursor(&self, cursor: Option<RoomOrphanScanCursor>) {
         *self
             .room_cursor
             .lock()
@@ -3497,7 +3515,7 @@ impl OrphanReaperSupervisor {
         registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
         parent_cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
-        let node_lifecycle = crate::clustering::NodeLifecycle::new();
+        let node_lifecycle = NodeLifecycle::new();
         let fatal_fence = node_lifecycle.fatal_fence_token();
         Self::new_with_fatal_fence(registry, parent_cancel, fatal_fence, node_lifecycle)
     }
@@ -3506,16 +3524,15 @@ impl OrphanReaperSupervisor {
         registry: Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>,
         parent_cancel: tokio_util::sync::CancellationToken,
         fatal_fence: tokio_util::sync::CancellationToken,
-        node_lifecycle: crate::clustering::NodeLifecycle,
+        node_lifecycle: NodeLifecycle,
     ) -> Self {
         let cancel = parent_cancel.child_token();
         let (hydration_tx, mut hydration_rx) =
             tokio::sync::mpsc::channel(ORPHAN_WORK_QUEUE_CAPACITY);
         let (release_tx, mut release_rx) = tokio::sync::mpsc::channel(ORPHAN_WORK_QUEUE_CAPACITY);
-        let hydration_pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let release_pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let room_handoff_pending =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let hydration_pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let release_pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let room_handoff_pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let workers = OrphanReaperWorkers {
             hydration_tx,
             release_tx,
@@ -3532,7 +3549,7 @@ impl OrphanReaperSupervisor {
         let hydration_cancel = cancel.clone();
         let hydration_registry = registry.clone();
         let hydration_task = tokio::spawn(async move {
-            let mut queue = std::collections::VecDeque::new();
+            let mut queue = VecDeque::new();
             loop {
                 if queue.is_empty() {
                     tokio::select! {
@@ -3577,7 +3594,7 @@ impl OrphanReaperSupervisor {
                             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
-                            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                            OrphanWorkQueue::SmHydration,
                             pending.len(),
                         );
                         info!("orphan reaper: targeted hydration work complete");
@@ -3609,7 +3626,7 @@ impl OrphanReaperSupervisor {
                                     .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                                    OrphanWorkQueue::SmHydration,
                                     pending.len(),
                                 );
                             }
@@ -3646,7 +3663,7 @@ impl OrphanReaperSupervisor {
                                     .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
-                                    crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                                    OrphanWorkQueue::SmHydration,
                                     pending.len(),
                                 );
                             }
@@ -3676,14 +3693,14 @@ impl OrphanReaperSupervisor {
                 .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .clear();
             crate::clustering::metrics::record_orphan_work_queue_depth(
-                crate::clustering::metrics::OrphanWorkQueue::SmHydration,
+                OrphanWorkQueue::SmHydration,
                 0,
             );
         });
 
         let release_cancel = cancel.clone();
         let release_task = tokio::spawn(async move {
-            let mut queue = std::collections::VecDeque::new();
+            let mut queue = VecDeque::new();
             loop {
                 if queue.is_empty() {
                     tokio::select! {
@@ -3719,7 +3736,7 @@ impl OrphanReaperSupervisor {
                             .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
-                            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                            OrphanWorkQueue::RoomRelease,
                             pending.len(),
                         );
                     }
@@ -3744,7 +3761,7 @@ impl OrphanReaperSupervisor {
                 .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .clear();
             crate::clustering::metrics::record_orphan_work_queue_depth(
-                crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                OrphanWorkQueue::RoomRelease,
                 0,
             );
         });
@@ -3842,13 +3859,13 @@ impl OrphanReaperSupervisor {
         for (worker, task) in self.tasks.drain(..) {
             if let Err(error) = task.await {
                 let reason = if error.is_panic() {
-                    crate::clustering::metrics::OrphanWorkerFailureReason::Panic
+                    OrphanWorkerFailureReason::Panic
                 } else {
-                    crate::clustering::metrics::OrphanWorkerFailureReason::Cancelled
+                    OrphanWorkerFailureReason::Cancelled
                 };
                 let worker = match worker {
-                    "sm_hydration" => crate::clustering::metrics::OrphanWorker::SmHydration,
-                    "room_release" => crate::clustering::metrics::OrphanWorker::RoomRelease,
+                    "sm_hydration" => OrphanWorker::SmHydration,
+                    "room_release" => OrphanWorker::RoomRelease,
                     _ => continue,
                 };
                 crate::clustering::metrics::record_orphan_worker_failure(worker, reason);
@@ -3873,13 +3890,13 @@ impl OrphanReaperSupervisor {
         for (worker, task) in self.tasks.drain(..) {
             if let Err(error) = task.await {
                 let reason = if error.is_panic() {
-                    crate::clustering::metrics::OrphanWorkerFailureReason::Panic
+                    OrphanWorkerFailureReason::Panic
                 } else {
-                    crate::clustering::metrics::OrphanWorkerFailureReason::Cancelled
+                    OrphanWorkerFailureReason::Cancelled
                 };
                 let worker = match worker {
-                    "sm_hydration" => crate::clustering::metrics::OrphanWorker::SmHydration,
-                    "room_release" => crate::clustering::metrics::OrphanWorker::RoomRelease,
+                    "sm_hydration" => OrphanWorker::SmHydration,
+                    "room_release" => OrphanWorker::RoomRelease,
                     _ => continue,
                 };
                 crate::clustering::metrics::record_orphan_worker_failure(worker, reason);
@@ -3925,8 +3942,8 @@ impl OrphanReaperSupervisor {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            crate::clustering::metrics::OrphanTerminalCleanupLane::SmHydration,
-                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Error,
+                            OrphanTerminalCleanupLane::SmHydration,
+                            OrphanTerminalCleanupFailureReason::Error,
                         );
                         let _ = error;
                         debug!(
@@ -3937,8 +3954,8 @@ impl OrphanReaperSupervisor {
                     }
                     Err(_) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            crate::clustering::metrics::OrphanTerminalCleanupLane::SmHydration,
-                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Timeout,
+                            OrphanTerminalCleanupLane::SmHydration,
+                            OrphanTerminalCleanupFailureReason::Timeout,
                         );
                         debug!(entity_id = %work.entity.id, "orphan reaper: terminal SM cleanup timed out");
                     }
@@ -3947,10 +3964,7 @@ impl OrphanReaperSupervisor {
             .instrument(span)
         }))
         .await;
-        crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::SmHydration,
-            0,
-        );
+        crate::clustering::metrics::record_orphan_work_queue_depth(OrphanWorkQueue::SmHydration, 0);
         futures::future::join_all(releases.into_iter().map(|work| {
             let span = orphan_work_span("room_release", &work.sweep_context);
             async move {
@@ -3964,8 +3978,8 @@ impl OrphanReaperSupervisor {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            crate::clustering::metrics::OrphanTerminalCleanupLane::RoomRelease,
-                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Error,
+                            OrphanTerminalCleanupLane::RoomRelease,
+                            OrphanTerminalCleanupFailureReason::Error,
                         );
                         let _ = error;
                         debug!(
@@ -3976,8 +3990,8 @@ impl OrphanReaperSupervisor {
                     }
                     Err(_) => {
                         crate::clustering::metrics::record_orphan_terminal_cleanup_failure(
-                            crate::clustering::metrics::OrphanTerminalCleanupLane::RoomRelease,
-                            crate::clustering::metrics::OrphanTerminalCleanupFailureReason::Timeout,
+                            OrphanTerminalCleanupLane::RoomRelease,
+                            OrphanTerminalCleanupFailureReason::Timeout,
                         );
                         debug!(entity_id = %work.entity.id, "orphan reaper: terminal exact cleanup timed out");
                     }
@@ -3986,14 +4000,8 @@ impl OrphanReaperSupervisor {
             .instrument(span)
         }))
         .await;
-        crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
-            0,
-        );
-        crate::clustering::metrics::record_orphan_work_queue_depth(
-            crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
-            0,
-        );
+        crate::clustering::metrics::record_orphan_work_queue_depth(OrphanWorkQueue::RoomRelease, 0);
+        crate::clustering::metrics::record_orphan_work_queue_depth(OrphanWorkQueue::RoomHandoff, 0);
         room_handoffs
     }
 
@@ -6254,7 +6262,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             if !workers.has_release_capacity() {
                 room_page_processed = false;
                 crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                    crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
+                    OrphanWorkQueue::RoomRelease,
                 );
                 warn!("orphan reaper: pausing RoomActor steals because exact-release cleanup capacity is exhausted");
                 break;
@@ -6276,7 +6284,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                 Ok(false) => {
                     room_page_processed = false;
                     crate::clustering::metrics::record_orphan_work_queue_backpressure(
-                        crate::clustering::metrics::OrphanWorkQueue::RoomAdoption,
+                        OrphanWorkQueue::RoomAdoption,
                     );
                     warn!("orphan reaper: pausing RoomActor steals because adoption capacity is exhausted");
                     break;
@@ -6453,7 +6461,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             workers.set_room_cursor(committed_cursor.clone());
             if let Err(error) = node_lease
                 .persist_orphan_reaper_cursor(
-                    crate::clustering::claims::OrphanReaperCursorUpdate::RoomActor(committed_cursor),
+                    OrphanReaperCursorUpdate::RoomActor(committed_cursor),
                 )
                 .await
             {
@@ -6466,27 +6474,27 @@ async fn run_orphan_reaper_sweep_with_workers(
         }
         for (outcome, count) in [
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Hydrated,
+                RoomOrphanReconciliationOutcome::Hydrated,
                 room_hydrated,
             ),
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Released,
+                RoomOrphanReconciliationOutcome::Released,
                 room_released,
             ),
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::AlreadyLive,
+                RoomOrphanReconciliationOutcome::AlreadyLive,
                 room_already_live,
             ),
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::PendingRetry,
+                RoomOrphanReconciliationOutcome::PendingRetry,
                 room_pending_retry,
             ),
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::LostRace,
+                RoomOrphanReconciliationOutcome::LostRace,
                 room_lost_race,
             ),
             (
-                crate::clustering::metrics::RoomOrphanReconciliationOutcome::Failed,
+                RoomOrphanReconciliationOutcome::Failed,
                 room_failed,
             ),
         ] {
@@ -6531,7 +6539,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             Ok(Err(error)) => {
                 debug!(%error, "orphan reaper: SM-session candidate page failed; room lane already completed");
                 (
-                    crate::clustering::claims::OrphanedSmSessionClaimPage {
+                    OrphanedSmSessionClaimPage {
                         candidates: Vec::new(),
                         next_cursor: workers.sm_cursor(),
                         has_more: false,
@@ -6545,7 +6553,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                     "orphan reaper: SM-session candidate scan timed out; room lane already completed"
                 );
                 (
-                    crate::clustering::claims::OrphanedSmSessionClaimPage {
+                    OrphanedSmSessionClaimPage {
                         candidates: Vec::new(),
                         next_cursor: workers.sm_cursor(),
                         has_more: false,
@@ -6692,7 +6700,7 @@ async fn run_orphan_reaper_sweep_with_workers(
             workers.set_sm_cursor(committed_cursor.clone());
             if let Err(error) = node_lease
                 .persist_orphan_reaper_cursor(
-                    crate::clustering::claims::OrphanReaperCursorUpdate::SmSession(committed_cursor),
+                    OrphanReaperCursorUpdate::SmSession(committed_cursor),
                 )
                 .await
             {
@@ -7273,7 +7281,7 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
         .map(|v| v.max(1))
         .unwrap_or(60);
     tokio::spawn(async move {
-        let mut recovery = crate::pending_delivery::PendingRecovery::default();
+        let mut recovery = PendingRecovery::default();
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Skip the first tick (immediate) so we don't sweep before
         // any flush has had a chance to run.
@@ -7291,7 +7299,7 @@ pub(crate) fn spawn_pending_delivery_claim_janitor(websocket_state: &Arc<WebSock
 pub(crate) async fn run_pending_delivery_claim_sweep(
     state: &Arc<WebSocketState>,
     interval_secs: u64,
-    recovery: &mut crate::pending_delivery::PendingRecovery,
+    recovery: &mut PendingRecovery,
 ) {
     let claim_release_floor_ms = i64::try_from(interval_secs)
         .unwrap_or(i64::MAX)
@@ -8182,7 +8190,7 @@ pub(crate) async fn run_notification_outbox_sweep(
         let room_policy = RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
         let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
         let activity_reader = state.deps.protocol.notification_activity.as_ref();
-        let deps = crate::notification_outbox::NotificationDrainDeps::new(
+        let deps = NotificationDrainDeps::new(
             &room_policy,
             dnd_reader,
             activity_reader,
@@ -8384,8 +8392,8 @@ fn remaining_sm_drain_count(
 struct RemainingSmDrainOutcomes<'a> {
     registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     fatal_fence: tokio_util::sync::CancellationToken,
-    observed: std::collections::HashSet<String>,
-    accounted: std::collections::HashSet<String>,
+    observed: HashSet<String>,
+    accounted: HashSet<String>,
     recorded: bool,
 }
 
@@ -8434,7 +8442,7 @@ impl Drop for RemainingSmDrainOutcomes<'_> {
 
 async fn abandon_shutdown_session_with_loss(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut PromotionSessionGuard<'_>,
     loss: &waddle_xmpp::stream_management::ShutdownSmClaimLoss,
 ) {
     let session = promotion_guard.session();
@@ -8459,7 +8467,7 @@ async fn abandon_shutdown_session_with_loss(
 
 async fn abandon_shutdown_session_if_claim_lost(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut PromotionSessionGuard<'_>,
 ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
     let stream_id = promotion_guard.session().stream_id.clone();
     let loss = match registry.shutdown_drain_claim_lost(&stream_id).await {
@@ -8480,7 +8488,7 @@ async fn abandon_shutdown_session_if_claim_lost(
 /// abandoned. Keep this policy identical at every shutdown await boundary.
 async fn shutdown_promotion_should_stop(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut PromotionSessionGuard<'_>,
     remaining: &mut RemainingSmDrainOutcomes<'_>,
 ) -> bool {
     match abandon_shutdown_session_if_claim_lost(registry, promotion_guard).await {
@@ -8548,8 +8556,8 @@ pub(crate) async fn run_graceful_shutdown_drain(
     let mut remaining_outcomes = RemainingSmDrainOutcomes {
         registry: &websocket_state.deps.protocol.sm_session_registry,
         fatal_fence: fatal_fence.clone(),
-        observed: std::collections::HashSet::new(),
-        accounted: std::collections::HashSet::new(),
+        observed: HashSet::new(),
+        accounted: HashSet::new(),
         recorded: false,
     };
     if fatal_fence.is_cancelled() {
@@ -8608,7 +8616,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
     // Bound failed passes per stream while still giving transient errors
     // and quota capacity a chance to recover during this shutdown.
     const MAX_FAILED_PROMOTION_PASSES: u32 = 3;
-    let mut failed_promotion_passes = std::collections::HashMap::<String, u32>::new();
+    let mut failed_promotion_passes = HashMap::<String, u32>::new();
     // Armed guards retain payloads and pending-promotion markers while
     // keeping restart-only work out of this drain's retry queues.
     let mut parked_sessions = Vec::new();
@@ -8673,10 +8681,8 @@ pub(crate) async fn run_graceful_shutdown_drain(
         let drained = drained.sessions;
         remaining_outcomes.observe_drained(&drained);
         let drained_count = drained.len();
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
-            &websocket_state.deps.protocol.sm_session_registry,
-            drained,
-        );
+        let mut promotion_batch =
+            PromotionBatchGuard::new(&websocket_state.deps.protocol.sm_session_registry, drained);
         let release_retry_budget =
             drain_deadline.saturating_duration_since(std::time::Instant::now());
         if tokio::select! {
@@ -8720,7 +8726,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // The session guard restores the already-popped session;
                 // `PromotionBatchGuard::Drop` restores the rest of the batch.
                 // Both keep promotion ownership and its claim intact.
-                let _promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let _promotion_guard = PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8728,7 +8734,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 continue 'drain;
             }
             let promotion_work = async {
-                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let mut promotion_guard = PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8858,7 +8864,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     .is_some();
                 let summary = crate::sm_promotion::promote_session_with_custody(
                     &session,
-                    crate::sm_promotion::TerminalOverflowPromotionDeps {
+                    TerminalOverflowPromotionDeps {
                         sm_registry: &websocket_state.deps.protocol.sm_session_registry,
                         registry: &websocket_state.deps.protocol.connection_registry,
                         user_registry: &websocket_state.deps.protocol.user_registry,
@@ -9185,7 +9191,7 @@ async fn sweep_expired_session_rows(state: &WebSocketState) {
         .auth_state
         .session_manager
         .actor_ref()
-        .ask(crate::db::actor::DbExecute {
+        .ask(DbExecute {
             sql: "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?".to_string(),
             params: vec![crate::db::Value::from(now)],
         })
@@ -9647,14 +9653,12 @@ async fn run_user_actor_reaper_sweep(state: &WebSocketState) {
 mod room_dormancy_tests {
     use super::{run_room_dormancy_sweep, sweep_dormant_rooms_once};
     use crate::server::routes::websocket::tests::create_test_websocket_state;
-    use waddle_xmpp::muc::{
-        room_actor::{
-            ChangeAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant, JoinWithAffiliation,
-            LeaveByRealJid,
-        },
-        room_registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount},
-        RoomConfig,
+    use waddle_xmpp::muc::room_actor::{
+        ChangeAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant, JoinWithAffiliation,
+        LeaveByRealJid,
     };
+    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount};
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp_core::{Affiliation, Role};
 
     fn full_jid(s: &str) -> jid::FullJid {
@@ -10471,10 +10475,8 @@ mod local_muc_departure_tests {
     use jid::{BareJid, FullJid};
     use std::collections::HashMap;
     use std::collections::HashSet;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
     use tokio::sync::mpsc;
     use waddle_sfu::SfuService;
@@ -13293,8 +13295,8 @@ async fn collect_remote_muc_reconcile_candidates(
                 &occupant,
                 u64::MAX,
                 live.map_or(
-                    crate::server::routes::websocket::MembershipGenerationFilter::Any,
-                    crate::server::routes::websocket::MembershipGenerationFilter::Except,
+                    MembershipGenerationFilter::Any,
+                    MembershipGenerationFilter::Except,
                 ),
             );
         if foreign_snapshots.is_empty() {
@@ -13302,7 +13304,7 @@ async fn collect_remote_muc_reconcile_candidates(
         }
         // Exempt only the matching occupancy generation. A detached
         // replacement does not own a predecessor's retained memberships.
-        let generations: std::collections::HashSet<_> = foreign_snapshots.into_values().collect();
+        let generations: HashSet<_> = foreign_snapshots.into_values().collect();
         for generation in generations {
             match state
                 .deps

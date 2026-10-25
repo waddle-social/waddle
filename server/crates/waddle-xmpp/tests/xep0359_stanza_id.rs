@@ -214,7 +214,8 @@ async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
 /// XEP's dedicated suite so it cannot drift from the canonical parser
 /// unnoticed (repo XEP custom test-suite hard rule).
 mod ingress_digest_boundary {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     use waddle_xmpp::ingress::{DigestContext, DigestInput, DigestInputError, NormalizedTarget};
     use waddle_xmpp_core::xep0359::NS_SID;
     use xmpp_parsers::message::Message;

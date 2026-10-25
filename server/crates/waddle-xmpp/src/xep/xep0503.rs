@@ -15,6 +15,7 @@
 //! - pubsub `<publish/>` and `<retract/>` on the canonical space node update
 //!   channel bookmark membership.
 
+use crate::muc::owner::FIELD_PIN_PERMISSION;
 use minidom::Element;
 
 use super::xep0004::{DataForm, Field, FieldType, FormType, ToElement};
@@ -199,10 +200,7 @@ pub fn build_room_metadata_form(channel_type: &str, pin_permission: &str) -> Ele
     DataForm::new(FormType::Result)
         .add_field(Field::form_type(NS_WADDLE_ROOM_METADATA))
         .add_field(Field::text_single("waddle#channel_type", channel_type))
-        .add_field(Field::text_single(
-            crate::muc::owner::FIELD_PIN_PERMISSION,
-            pin_permission,
-        ))
+        .add_field(Field::text_single(FIELD_PIN_PERMISSION, pin_permission))
         .to_element()
 }
 

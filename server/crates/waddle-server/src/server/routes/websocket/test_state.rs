@@ -3,23 +3,47 @@
 //! These helpers intentionally use `expect`: they construct fixed, local test
 //! fixtures and cannot report a useful runtime error to their callers.
 
-use super::*;
+use super::AuthState;
 use super::{ProtocolServices, WebSocketDeps, WebSocketState, XmppServiceDomains};
-use crate::{
-    auth::Session,
-    config::ServerConfig,
-    db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig},
-    server::AppState,
-};
+use crate::auth::Session;
+use crate::call_teardown_outbox::CallTeardownOutboxStore;
+use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
+use crate::clustering::ClusteringHandles;
+use crate::config::ServerConfig;
+use crate::db::DatabaseDriver;
+use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+use crate::dnd_projection::DndProjectionStore;
+use crate::dnd_reader::PepDndReader;
+use crate::inbox::DatabaseInboxStorage;
+use crate::ingress::IngressAuthority;
+use crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore;
+use crate::notification_activity::NotificationActivityStore;
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::pep_feed_bridge::PepFeedBridge;
+use crate::profile::AvatarLockMap;
+use crate::pubsub::DatabasePubSubStorage;
+use crate::push_registrations::DatabasePushRegistrationStore;
+use crate::push_service::DatabasePushServiceStore;
+use crate::room_effect_outbox::RoomEffectArmSupervisor;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
+use crate::server::caps_resolution::CapsResolver;
+use crate::server::extension_bot_avatar::BotAvatars;
+use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
+use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
+use crate::server::routes::websocket::DmPinStore;
+use crate::server::AppState;
+use crate::threads::storage::InboxBackedThreadsStorage;
 use kameo::actor::Spawn;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
-use waddle_xmpp::{
-    commands::CommandRegistry, mam::MamStorage, muc::room_registry_actor::RoomRegistryActor,
-    protocol::StanzaDispatcher, registry::ConnectionRegistry,
-    stream_management::InMemorySmSessionRegistry,
-};
+use waddle_xmpp::commands::CommandRegistry;
+use waddle_xmpp::mam::MamStorage;
+use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::protocol::StanzaDispatcher;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
 /// Optional fixture substitutions for one test websocket state; unset fields
 /// take the shared defaults.
@@ -27,14 +51,13 @@ use waddle_xmpp::{
 pub(crate) struct TestStateOverrides {
     pub(crate) db_pool: Option<Arc<DatabasePool>>,
     pub(crate) call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    pub(crate) clustering: Option<crate::clustering::ClusteringHandles>,
+    pub(crate) clustering: Option<ClusteringHandles>,
     pub(crate) sm_session_registry: Option<Arc<InMemorySmSessionRegistry>>,
     pub(crate) blocking_storage: Option<Arc<dyn waddle_xmpp::xep::xep0191::BlockingStorage>>,
     pub(crate) pending_delivery_storage:
         Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
-    pub(crate) ingress: Option<Arc<crate::ingress::IngressAuthority>>,
-    pub(crate) notification_settings_projection:
-        Option<Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>>,
+    pub(crate) ingress: Option<Arc<IngressAuthority>>,
+    pub(crate) notification_settings_projection: Option<Arc<NotificationSettingsProjectionStore>>,
     /// Wire `deps.protocol.room_registry` to the app-state registry, as
     /// production does, for tests that drive admin commands and janitors
     /// against the same rooms.
@@ -97,18 +120,16 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
             .expect("shared MAM schema"),
     });
     let test_inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> = Arc::new(
-        crate::inbox::DatabaseInboxStorage::from_database(db_pool.global().clone())
+        DatabaseInboxStorage::from_database(db_pool.global().clone())
             .await
             .expect("shared inbox schema"),
     );
 
     let runner = MigrationRunner::single();
     runner.run(db_pool.global()).await.expect("migrations");
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
-        db_pool.global().clone(),
-    )
-    .await
-    .expect("MUC destroy completion outbox");
+    MucDestroyCompletionOutboxStore::try_new(db_pool.global().clone())
+        .await
+        .expect("MUC destroy completion outbox");
 
     let server_config = ServerConfig::test_homeserver();
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
@@ -150,33 +171,25 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         );
     }
     let pubsub_storage = Arc::new(
-        crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+        DatabasePubSubStorage::open(Some("sqlite::memory:"))
             .await
             .expect("pubsub storage"),
     );
     let notification_settings_projection = notification_settings_projection_override
         .unwrap_or_else(|| {
-            Arc::new(
-                crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
-                    pubsub_storage.database(),
-                ),
-            )
+            Arc::new(NotificationSettingsProjectionStore::new(
+                pubsub_storage.database(),
+            ))
         });
-    let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
-        pubsub_storage.database(),
-    ));
-    let dnd_reader = Arc::new(crate::dnd_reader::PepDndReader::with_system_clock(
-        Arc::clone(&dnd_projection),
-    ));
+    let dnd_projection = Arc::new(DndProjectionStore::new(pubsub_storage.database()));
+    let dnd_reader = Arc::new(PepDndReader::with_system_clock(Arc::clone(&dnd_projection)));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::try_new(
-            app_state.db_pool.global().clone(),
-        )
-        .await
-        .expect("notification activity store"),
+        NotificationActivityStore::try_new(app_state.db_pool.global().clone())
+            .await
+            .expect("notification activity store"),
     );
     let push_service = Arc::new(
-        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             app_state.db_pool.global().clone(),
             test_push_service_secret(),
             "push.example.com".parse().expect("push service jid"),
@@ -186,11 +199,9 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         .expect("push service"),
     );
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::try_new(
-            app_state.db_pool.global().clone(),
-        )
-        .await
-        .expect("notification outbox"),
+        NotificationOutboxStore::try_new(app_state.db_pool.global().clone())
+            .await
+            .expect("notification outbox"),
     );
     push_service
         .adopt_notification_ancestry()
@@ -206,26 +217,23 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
             )
         });
     let call_teardown_outbox = Arc::new(
-        crate::call_teardown_outbox::CallTeardownOutboxStore::new_with_node_identity(
+        CallTeardownOutboxStore::new_with_node_identity(
             app_state.db_pool.global().clone(),
             call_teardown_node_identity,
         )
         .await
         .expect("call teardown outbox"),
     );
-    let call_teardown_persistence =
-        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor::new(
-            Arc::clone(&call_teardown_outbox),
-            tokio::runtime::Handle::current(),
-        );
-    let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::try_new(
-            app_state.db_pool.global().clone(),
-        )
-        .await
-        .expect("room effect outbox"),
+    let call_teardown_persistence = CallTeardownPersistenceSupervisor::new(
+        Arc::clone(&call_teardown_outbox),
+        tokio::runtime::Handle::current(),
     );
-    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+    let room_effect_outbox = Arc::new(
+        RoomEffectOutboxStore::try_new(app_state.db_pool.global().clone())
+            .await
+            .expect("room effect outbox"),
+    );
+    let room_effect_arm_supervisor = RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
     );
@@ -269,7 +277,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     mam_storage,
                     inbox_storage: Arc::clone(&test_inbox_storage),
                     threads_storage: Arc::new(
-                        crate::threads::storage::InboxBackedThreadsStorage::new(Arc::clone(
+                        InboxBackedThreadsStorage::new(Arc::clone(
                             &test_inbox_storage,
                         )),
                     ),
@@ -299,7 +307,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     },
                     extension_manager,
                     bot_avatars: Arc::new(
-                        crate::server::extension_bot_avatar::BotAvatars::loopback(),
+                        BotAvatars::loopback(),
                     ),
                     dispatcher: Arc::new(dispatcher),
                     muji_pre_dispatch_terminate_rate_limit: Arc::new(
@@ -310,7 +318,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     ),
                     pubsub_storage,
                     push_store: Arc::new(
-                        crate::push_registrations::DatabasePushRegistrationStore::try_new(
+                        DatabasePushRegistrationStore::try_new(
                             app_state.db_pool.global().clone(),
                         )
                         .await
@@ -334,16 +342,16 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     }),
                     ingress: match ingress_override {
                         Some(ingress) => ingress,
-                        None => Arc::new(crate::ingress::IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
+                        None => Arc::new(IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
                     },
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),
                     caps_resolver: Arc::new(
-                        crate::server::caps_resolution::CapsResolver::default(),
+                        CapsResolver::default(),
                     ),
-                    avatar_source_locks: Arc::new(crate::profile::AvatarLockMap::new()),
+                    avatar_source_locks: Arc::new(AvatarLockMap::new()),
                     profile_publish_tracker: tokio_util::task::TaskTracker::new(),
-                    pep_feed_bridge: Arc::new(crate::pep_feed_bridge::PepFeedBridge::new()),
+                    pep_feed_bridge: Arc::new(PepFeedBridge::new()),
                     call_threads: Arc::new(dashmap::DashMap::new()),
                     call_thread_end_locks: Arc::new(dashmap::DashMap::new()),
                     extension_bot_rooms: Default::default(),
@@ -355,7 +363,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                         super::ResolverAffiliationSyncScheduler::default(),
                     ),
                     dm_call_threads: Arc::new(dashmap::DashMap::new()),
-                    dm_pin_store: Arc::new(crate::server::routes::websocket::DmPinStore::default()),
+                    dm_pin_store: Arc::new(DmPinStore::default()),
                     dm_call_thread_projections: Arc::new(dashmap::DashSet::new()),
                     pending_dm_call_offers: Arc::new(dashmap::DashMap::new()),
                     sfu: call_sfu,
@@ -366,10 +374,10 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                 shutdown: waddle_ecdysis::GracefulShutdown::new(std::time::Duration::from_secs(1))
                     .handle(),
                 provider_ingress: Arc::new(
-                    crate::server::routes::extension_webhooks::ProviderIngressRegistry::default(),
+                    ProviderIngressRegistry::default(),
                 ),
                 provider_dispatch_tasks:
-                    crate::server::routes::extension_webhooks::ProviderDispatchTracker::new(),
+                    ProviderDispatchTracker::new(),
             },
         })
 }
@@ -383,12 +391,12 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
 pub async fn seed_local_account(state: &WebSocketState, localpart: &str) {
     use crate::db::actor::DbExecute;
     let sql = match state.deps.app_state.db_pool.global().driver() {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             "INSERT OR IGNORE INTO users \
              (jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             "INSERT INTO users \
              (jid, username, xmpp_localpart, localpart_key, display_name, avatar_url, primary_email, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"

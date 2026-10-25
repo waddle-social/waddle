@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    decode_message, encode_message, native, BareJid, ClientConfig, DefaultTransportFactory,
+    Element, StreamClose, StreamId, StreamOpen, TransportEvent, TransportMessage, TransportState,
+    WebSocketTransport, WebSocketTransportFactory,
+};
 use crate::bootstrap::NS_CLIENT;
 use crate::ClientError;
 use std::str::FromStr;

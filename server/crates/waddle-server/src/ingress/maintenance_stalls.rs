@@ -3,13 +3,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use tokio::time::Instant;
-use waddle_xmpp::{
-    ingress::{IngressEffectKind, MessageKey},
-    telemetry::{
-        attributes::IngressUnrecoverableReason,
-        reliability::increment_ingress_maintenance_unrecoverable_obligations,
-    },
-};
+use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
+use waddle_xmpp::telemetry::attributes::IngressUnrecoverableReason;
+use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
 
 use super::{AttemptClassification, MaintenanceBudget};
 use crate::ingress_substrate::RecoveryEvidence;

@@ -4,23 +4,22 @@
 use std::time::Duration;
 
 use kameo::actor::Spawn;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use waddle_server::ingress::effects::Effect;
+use waddle_server::ingress::execute::execute_effects;
 use waddle_server::ingress::{
-    commit::commit_submission,
-    effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        Effect,
-    },
-    execute::execute_effects,
     Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlanSuppressionPolicy, PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    registry::{ConnectionRegistry, DeliveryKind, RegisterUserResource, UserRegistryActor},
-    stream_management::{SmKeyedAppendOutcome, StreamManagementState},
-    Stanza,
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::registry::{
+    ConnectionRegistry, DeliveryKind, RegisterUserResource, UserRegistryActor,
 };
+use waddle_xmpp::stream_management::{SmKeyedAppendOutcome, StreamManagementState};
+use waddle_xmpp::Stanza;
 
-use crate::{detached_progress_support, ingress_support::IngressFixture};
+use crate::detached_progress_support;
+use crate::ingress_support::IngressFixture;
 
 pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: PeerDeliveryKind) {
     let connections = ConnectionRegistry::new();

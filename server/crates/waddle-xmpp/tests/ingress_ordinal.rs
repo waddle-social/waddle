@@ -1,4 +1,4 @@
-use proptest::prelude::*;
+use proptest::prelude::{prop_assert_eq, proptest};
 use waddle_xmpp::ingress::{
     ConnectionGeneration, EntityGeneration, IngressOrdinal, IngressTypeError, NormalizedTarget,
     ProtocolEpoch, RowRevision,

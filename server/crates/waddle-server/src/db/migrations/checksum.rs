@@ -11,7 +11,8 @@ pub fn migration_checksum(migration: &Migration, driver: DatabaseDriver) -> Stri
 #[cfg(test)]
 mod tests {
     use super::migration_checksum;
-    use crate::db::{migrations::Migration, DatabaseDriver};
+    use crate::db::migrations::Migration;
+    use crate::db::DatabaseDriver;
 
     fn test_migration(sql_sqlite: &'static str, sql_postgres: &'static str) -> Migration {
         Migration {

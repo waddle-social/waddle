@@ -3,7 +3,10 @@ use std::time::{Duration, SystemTime};
 
 static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
-use adw::prelude::*;
+use adw::prelude::{
+    BoxExt, CastNone, ObjectExt, PixbufAnimationExt, PixbufAnimationExtManual, PixbufLoaderExt,
+    WidgetExt,
+};
 use gtk::{gdk, gdk_pixbuf, glib};
 use url::Url;
 

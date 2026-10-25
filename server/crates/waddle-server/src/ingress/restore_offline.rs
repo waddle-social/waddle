@@ -1,19 +1,17 @@
 //! Rebuild ordinary offline work from the first committed message and obligations.
 use chrono::{DateTime, Utc};
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{PendingPayload, PendingRow, PendingRowId},
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
+    PendingDeliveryMutation,
 };
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 
-use crate::{
-    ingress_substrate::MessageEnvelope,
-    server::routes::interpret::effects::{
-        delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-        Effect, ExternalEffect, IngressPlan, PlannedEffect,
-    },
+use crate::ingress_substrate::MessageEnvelope;
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PreparedOfflineNotification,
+};
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlannedEffect,
 };
 
 /// A disconnect after acceptance cannot turn a frozen live audience into a new

@@ -12,7 +12,12 @@
 //! information that members-only rooms must not leak. Mirrors the
 //! affiliation-style check `muc_admin` performs.
 
-use super::*;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
+    internal_server_error_iq_error, iq_to_xml, item_not_found_iq_error, not_authorized_iq_error,
+    warn, WebSocketState,
+};
+use crate::server::routes::websocket::DmPairKey;
 use jid::FullJid;
 use std::str::FromStr;
 use waddle_xmpp::muc::room_actor::{GetPinList, GetRoomSnapshot};
@@ -189,7 +194,7 @@ fn handle_dm_pin_query_iq(
             forbidden_iq_error("DM pin list is visible only to local conversation participants."),
         )];
     }
-    let key = crate::server::routes::websocket::DmPairKey::new(sender.to_bare(), peer);
+    let key = DmPairKey::new(sender.to_bare(), peer);
     let entries = state.deps.protocol.dm_pin_store.list(&key);
     build_pin_query_result(iq, entries, response_from, response_to)
 }

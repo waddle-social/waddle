@@ -1,8 +1,20 @@
-use super::*;
+use super::{
+    assert_unverifiable_archive_rejected, build_interpret_deps, commit_submission, execute_effects,
+    execute_uow, local, plan_broadcast, receipt_key, receipts, recorded, stall,
+    terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput,
+    Duration, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ImmediateSink,
+    IngressEffectIntent, IngressFixture, Join, NormalizedTarget, RoomExecutionPath,
+};
+use crate::ingress::effects;
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::effects::{Effect, PlanEffectDependency};
 use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::tests as socket_tests;
+use crate::sm_persistence::DatabaseSmPersistence;
 use std::sync::Arc;
-use waddle_xmpp::{stream_management::InMemorySmSessionRegistry, Stanza};
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Lang, MessageType};
 
 #[derive(Clone, Copy)]
@@ -40,7 +52,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .await
         .expect("room");
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -160,7 +172,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .expect("new occupant");
     if matches!(case, ReplayCase::MissingProvenanceSubject) {
         let mut tx = fixture.uow.begin().await.expect("old subject row");
-        let legacy = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let legacy = CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load pre-fix fixture")
             .expect("pre-fix envelope");
@@ -168,10 +180,10 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             legacy.room_manifest().is_none(),
             "the pre-fix fixture must never replace a sealed canonical source"
         );
-        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+        CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+            &MessageEnvelope::new(message.clone()),
         )
         .await
         .expect("pre-fix source");

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use gtk::gdk;
 use gtk::gdk_pixbuf;
-use gtk::gdk_pixbuf::prelude::*;
+use gtk::gdk_pixbuf::prelude::{Cast, ObjectExt, PixbufLoaderExt};
 use gtk::glib;
 use thiserror::Error;
 

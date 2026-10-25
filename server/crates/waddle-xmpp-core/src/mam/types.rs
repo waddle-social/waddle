@@ -1,6 +1,8 @@
 //! Typed MAM queries, archive entries, and pagination results.
 
 use super::ArchiveOrdinal;
+use crate::types::Affiliation;
+use crate::types::Role;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -232,9 +234,9 @@ pub struct ArchivedMucSender {
     /// The sender's real JID (full JID for live occupants).
     pub jid: Jid,
     /// XEP-0045 affiliation at message time.
-    pub affiliation: crate::types::Affiliation,
+    pub affiliation: Affiliation,
     /// XEP-0045 role at message time.
-    pub role: crate::types::Role,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

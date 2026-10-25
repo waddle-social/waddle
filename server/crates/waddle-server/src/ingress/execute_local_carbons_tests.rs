@@ -1,20 +1,17 @@
 //! XEP-0280: each frozen carbon destination completes independently.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
-    IngressSubmission,
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, ExternalOutcome, ImmediateSink,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressEffectCapture, IngressSubmission};
+use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::interpret;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::server::routes::interpret::{
-    effects::{EffectSink, PlanSink},
-    interpret,
-};
 use kameo::actor::{ActorRef, Spawn};
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    protocol::{CarbonKind, OutboundEvent},
-    registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
+use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
 
 async fn plan_carbons(
     submission: &mut IngressSubmission,

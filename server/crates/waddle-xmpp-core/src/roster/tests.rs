@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    build_roster_get_iq, build_roster_set_iq, AskType, BareJid, CoreError, Element, RosterItem,
+    RosterVersion, RosterVersionRequest, Subscription, ROSTER_NS,
+};
 
 #[test]
 fn test_roster_item_from_element_happy_path() {

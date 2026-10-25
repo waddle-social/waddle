@@ -3,15 +3,13 @@ use std::sync::Arc;
 
 use jid::Jid;
 use waddle_extensions::{ReplyTarget, StanzaId, ThreadId};
-use waddle_xmpp::{
-    ingress::{DigestContext, NormalizedTarget, TransportGeneration},
-    protocol::{Blocklist, XmppStateMachine},
-};
+use waddle_xmpp::ingress::{DigestContext, NormalizedTarget, TransportGeneration};
+use waddle_xmpp::protocol::{Blocklist, XmppStateMachine};
 use xmpp_parsers::message::{Message, MessageType};
 
+use crate::ingress::nested::NestedContinuation;
+use crate::ingress::submission::{digest_authorities, digest_input};
 use crate::ingress::{
-    nested::NestedContinuation,
-    submission::{digest_authorities, digest_input},
     ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
 };
 

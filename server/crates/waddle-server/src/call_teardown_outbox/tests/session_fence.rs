@@ -3,7 +3,13 @@
 //! session is skipped when the live registration is bound to a
 //! different session, regardless of clocks.
 
-use super::*;
+use super::{
+    create_test_server_owner_session, drain_due, fixture_config, get_room_actor,
+    handle_muc_join_with_occupancy_session, occupant_generation, snapshot_room,
+    state_with_executor, Arc, BareJid, CallId, CallTeardownIntent, CallTeardownStatus, Creator,
+    FullJid, Identity, MediaKind, Muji, MujiContent, RecordingAdmin, SfuService, TeardownTarget,
+    UpsertMujiPresence,
+};
 
 #[tokio::test]
 async fn participant_intent_with_stale_session_binding_is_skipped() {

@@ -6,6 +6,9 @@
 //! Muji state and broadcast the XEP-0272 leave marker to remaining
 //! occupants. Centralising the logic keeps the wire shape identical.
 
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxError;
+use crate::call_teardown_outbox::TeardownTarget;
 use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_sfu::{ObservedCallSids, TeardownDisposition};
@@ -188,7 +191,7 @@ async fn enqueue_muji_presence_clear(
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
-) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+) -> Result<(), CallTeardownOutboxError> {
     let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -201,9 +204,9 @@ async fn enqueue_muji_presence_clear(
             return Ok(());
         }
     };
-    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+    let intent = CallTeardownIntent {
         call_id,
-        target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+        target: TeardownTarget::MujiPresenceClear {
             room_jid: room_jid.clone(),
             departed: full_jid.clone(),
             participant_sid: observed_sids.and_then(|sids| sids.participant_sid.clone()),

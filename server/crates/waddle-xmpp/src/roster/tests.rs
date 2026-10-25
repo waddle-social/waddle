@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_roster_push, build_roster_result, build_roster_result_empty, is_roster_get,
+    is_roster_set, parse_roster_get, parse_roster_set, AskType, BareJid, Element, FullJid, Iq,
+    RosterItem, RosterSetResult, RosterVersion, RosterVersionRequest, Subscription, XmppError,
+    ROSTER_NS,
+};
 
 #[test]
 fn test_roster_item_new() {

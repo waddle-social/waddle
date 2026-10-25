@@ -1,13 +1,14 @@
-use super::super::*;
-use crate::{
-    ingress::test_support::IngressFixture,
-    ingress_uow::{
-        CanonicalMessageRepository, ConfiguredPluginGrants, EffectIntentRepository,
-        EffectReceiptRepository, ExtensionGrantRepository,
-    },
-    notification_outbox::NotificationOutboxStore,
-    pending_delivery::DatabasePendingDeliveryStorage,
+use super::super::{
+    Arc, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation, HostMessageTarget,
+    HostSendMessage, InvocationKind, PluginId, Session, StanzaId,
 };
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{
+    CanonicalMessageRepository, ConfiguredPluginGrants, EffectIntentRepository,
+    EffectReceiptRepository, ExtensionGrantRepository,
+};
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use std::time::Duration;
 use waddle_xmpp::pending_delivery::QuotaPolicy;
 

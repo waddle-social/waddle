@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use super::*;
+use super::{
+    build_pubsub_storage, Affiliation, BareJid, DatabasePubSubStorage, Jid, NodeConfig, PubSubItem,
+    PubSubStorage, XmppError,
+};
 
 fn jid(value: &str) -> BareJid {
     value.parse().expect("valid JID")

@@ -1,7 +1,12 @@
 //! XEP-0045 §7.14: remote departures follow transferred UserActor authority
 //! without waiting for its release. Uses the parent suite's native cluster harness.
 
-use super::*;
+use super::{
+    cluster_e2e_serial_lock, free_tcp_port, generate_pool, join_fanout_room, open_control_db,
+    reset_and_enroll, reset_node_lease_tables, spawn_cluster_server, wait_for_readiness, Duration,
+    Entity, EntityType, PostgresClaimStore, WsXmppClient, CLUSTER_PEER_PASSWORD,
+    CLUSTER_PEER_USERNAME,
+};
 use waddle_xmpp::ownership::{ClaimStore, ExactReleaseOutcome};
 
 fn is_departure(frame: &str, occupant: &jid::FullJid) -> bool {

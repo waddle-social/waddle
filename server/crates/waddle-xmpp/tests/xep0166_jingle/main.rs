@@ -17,10 +17,8 @@
 //! [`SessionId`]) and [`minidom::Element::builder`] — no `format!`,
 //! no string concatenation (CLAUDE.md XML hard rule).
 
-use std::{
-    sync::{Arc, Barrier},
-    thread,
-};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use chrono::Duration;
 use jid::FullJid;
@@ -29,12 +27,11 @@ use waddle_sfu::{
     ApiKey, ApiSecret, Identity, LiveKitSfu, SfuConfig, SfuService, TurnHost, TurnSharedSecret,
     WebsocketUrl,
 };
-use waddle_xmpp::protocol::{
-    event::OutboundEvent,
-    handlers::{jingle::JingleHandler, session_initiate_rate_limit::DEFAULT_MAX_TERMINATES},
-    traits::IqHandler,
-    StanzaContext,
-};
+use waddle_xmpp::protocol::event::OutboundEvent;
+use waddle_xmpp::protocol::handlers::jingle::JingleHandler;
+use waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_TERMINATES;
+use waddle_xmpp::protocol::traits::IqHandler;
+use waddle_xmpp::protocol::StanzaContext;
 use waddle_xmpp::xep::xep0166::{
     reason_element, session_terminate, Action, Content, ContentId, Creator, Jingle, Reason,
     SessionId, Transport, NS_JINGLE,

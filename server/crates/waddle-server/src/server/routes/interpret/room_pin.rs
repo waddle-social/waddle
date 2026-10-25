@@ -18,7 +18,7 @@
 //! reason: "retracted" } }` through this same path so the unpin
 //! attribution and broadcast logic stays consistent.
 
-use super::*;
+use super::{debug, effects, warn, ApplyPin, Deps, GetRoom, IngressEffectIntent, RoomActor};
 use jid::BareJid;
 use waddle_xmpp::muc::pin::{
     PinChangeRequest, PinPreview, PinStateChange, PinnedEntry, MAX_PREVIEW_LEN,
@@ -491,6 +491,8 @@ fn plan_pin_mutation(
 
 #[cfg(test)]
 mod tests {
+    use waddle_xmpp::registry::ConnectionRegistry;
+
     use super::*;
     use crate::ingress::IngressEffectCapture;
     use crate::server::routes::interpret::Deps;

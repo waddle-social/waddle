@@ -1,16 +1,14 @@
 use super::decision::IngressDecisionClass;
-use crate::{
-    ingress_uow::IngressUowError,
-    server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan, PlanRejection,
-        PlannedEffect, PolicyDeniedReason, RoomExecutionPath,
-    },
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlanRejection, PlannedEffect, PolicyDeniedReason,
+    RoomExecutionPath,
 };
-use waddle_xmpp::{
-    ingress::{FrozenStanzaError, FrozenStanzaErrorType, IngressEffectIntent},
-    protocol::CarbonKind,
-    Stanza, StanzaErrorCondition,
-};
+use waddle_xmpp::ingress::{FrozenStanzaError, FrozenStanzaErrorType, IngressEffectIntent};
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::{Stanza, StanzaErrorCondition};
 
 pub(super) fn planned_rejection(
     plan: &IngressPlan,
@@ -118,7 +116,7 @@ pub(super) fn is_recorded_rejection(intents: &[IngressEffectIntent]) -> bool {
 /// or today's provisional message. A wire replay cannot turn a rejection into
 /// an accepted message or change the standard stanza error it already owns.
 pub(super) fn recorded_rejection_plan(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     intents: &[IngressEffectIntent],
 ) -> Result<IngressPlan, IngressUowError> {
     if !is_recorded_rejection(intents) {
@@ -193,11 +191,10 @@ mod tests {
     use super::*;
     use crate::server::routes::interpret::DeliveryExecutionContext;
     async fn malformed_reply_receipt(fixture: crate::ingress::test_support::IngressFixture) {
-        use crate::ingress::{
-            commit::commit_submission,
-            execute::{execute_effects, terminalize_if_complete},
-        };
-        use crate::server::routes::interpret::{effects::ImmediateSink, Deps};
+        use crate::ingress::commit::commit_submission;
+        use crate::ingress::execute::{execute_effects, terminalize_if_complete};
+        use crate::server::routes::interpret::effects::ImmediateSink;
+        use crate::server::routes::interpret::Deps;
         let mut submission = fixture.submission(Some("malformed-reply-receipt"), "bad correction");
         submission.plan = crate::server::routes::interpret::reject_malformed_message(
             submission.plan.sanitized_message.clone(),

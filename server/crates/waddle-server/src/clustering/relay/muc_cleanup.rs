@@ -1,7 +1,11 @@
 //! A retained departure needs no live socket registration, only its exact
 //! occupancy generation. The trusted cluster forwards it through the current
 //! UserActor claim owner, which still fences the ordinary ordered MUC relay.
-use super::*;
+use super::{
+    is_no_effect_stale_ref_relookup_error, relay_dispatch_span, send_error, spawn_in_dispatch_span,
+    Arc, ClaimEpoch, Context, Deserialize, Message, RelayActor, RelayAskError, RelayDispatchKind,
+    RelayHandle, RelayTraceContext, Reply, Serialize,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayMucCleanup {

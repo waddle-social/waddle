@@ -1,17 +1,22 @@
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
-    muc::room_registry_actor::GetRoom,
-    protocol::handlers::errors::message_error_reply,
-    Stanza,
-};
+use crate::ingress::IngressPlan;
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::PlanEffectDependency;
+use crate::server::routes::interpret::effects::ScopedInviteSink;
+use crate::server::routes::interpret::FullJidDeliveryOutcome;
+use crate::server::routes::websocket::muc_invites::OutstandingInvite;
+use waddle_xmpp::ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation};
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::protocol::handlers::errors::message_error_reply;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::ingress::IngressEffectCapture;
-use crate::server::routes::interpret::{
-    effects::{Effect, ExternalEffect, PlanFailure, PlannedEffect},
-    Deps,
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, PlanFailure, PlannedEffect,
 };
+use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::WebSocketState;
 use tracing::warn;
 
@@ -111,9 +116,8 @@ async fn handle_muc_private_message(
         return Some(Vec::new());
     };
     if deps.effects.is_planning() {
-        use crate::server::routes::interpret::effects::{
-            room::RoomFenceRequirement, RoomExecutionPath,
-        };
+        use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+        use crate::server::routes::interpret::effects::RoomExecutionPath;
         deps.effects.set_room_execution(RoomExecutionPath::Local {
             room: room_jid.clone(),
             fence: snapshot
@@ -379,28 +383,24 @@ struct PmDeliveryCapture {
     record_definitive_route: bool,
 }
 
-fn pm_delivery_capture(
-    outcome: crate::server::routes::interpret::FullJidDeliveryOutcome,
-) -> PmDeliveryCapture {
+fn pm_delivery_capture(outcome: FullJidDeliveryOutcome) -> PmDeliveryCapture {
     match outcome {
-        crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-        | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached => {
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
             PmDeliveryCapture {
                 any_session_handled: true,
                 record_definitive_route: true,
             }
         }
-        crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
+        FullJidDeliveryOutcome::MaybeCommitted => PmDeliveryCapture {
+            any_session_handled: true,
+            record_definitive_route: false,
+        },
+        FullJidDeliveryOutcome::Unavailable | FullJidDeliveryOutcome::Dropped => {
             PmDeliveryCapture {
-                any_session_handled: true,
+                any_session_handled: false,
                 record_definitive_route: false,
             }
         }
-        crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable
-        | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => PmDeliveryCapture {
-            any_session_handled: false,
-            record_definitive_route: false,
-        },
     }
 }
 
@@ -413,11 +413,11 @@ async fn deliver_pm_to_session(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
-) -> crate::server::routes::interpret::FullJidDeliveryOutcome {
-    use crate::server::routes::interpret::effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        EffectOutcome,
+) -> FullJidDeliveryOutcome {
+    use crate::server::routes::interpret::effects::delivery::{
+        ExternalDeliveryEffect, PeerDeliveryKind,
     };
+    use crate::server::routes::interpret::effects::EffectOutcome;
     let mut effect = PlannedEffect::new(Effect::External(ExternalEffect::Delivery(
         ExternalDeliveryEffect::RouteToPeer {
             route_identity: None,
@@ -431,11 +431,9 @@ async fn deliver_pm_to_session(
         effect.dependencies.extend(
             waddle_xmpp::xep::extract_stanza_ids(message)
                 .into_iter()
-                .map(|minted| {
-                    crate::server::routes::interpret::effects::PlanEffectDependency::AfterArchive {
-                        archive: minted.by.to_bare(),
-                        minted,
-                    }
+                .map(|minted| PlanEffectDependency::AfterArchive {
+                    archive: minted.by.to_bare(),
+                    minted,
                 }),
         );
     }
@@ -582,7 +580,7 @@ async fn handle_muc_mediated_decline(
         &invite.inviter,
         inbound_decline,
     );
-    let delivery_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
+    let delivery_sink = ScopedInviteSink {
         inner: deps.effects,
         invite: invite.clone(),
         failure: None,
@@ -633,17 +631,16 @@ async fn handle_muc_mediated_decline(
 
 /// Rebuild accepted decline obligations without consulting the consumed ledger.
 pub(crate) fn restore_recorded_muc_decline(
-    plan: &mut crate::ingress::IngressPlan,
+    plan: &mut IngressPlan,
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     received_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
-    use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
-    use waddle_xmpp::{
-        ingress::PendingDeliveryMutation,
-        pending_delivery::{PendingPayload, PendingRow},
-    };
+) -> Result<bool, IngressUowError> {
+    use crate::server::routes::interpret::effects::invite::MucUserRoute;
+    use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+    use waddle_xmpp::ingress::PendingDeliveryMutation;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
     let Some(mutation) = recorded.iter().find_map(|intent| match intent {
         IngressEffectIntent::MucInviteLedger { mutation }
             if mutation.action == MucInviteLedgerAction::Claimed =>
@@ -655,9 +652,8 @@ pub(crate) fn restore_recorded_muc_decline(
         return Ok(false);
     };
     let incoming = envelope.message();
-    let decline = mediated_decline(incoming)
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
-    let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
+    let decline = mediated_decline(incoming).ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    let invite = OutstandingInvite {
         room: mutation.room.clone(),
         invitee: mutation.invitee.clone(),
         inviter: mutation.inviter.clone(),
@@ -692,7 +688,7 @@ pub(crate) fn restore_recorded_muc_decline(
             } if recipient == &invite.inviter => Some(row_id.clone()),
             _ => None,
         }) else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
+            return Err(IngressUowError::EffectIntentMessageMissing);
         };
         // A completed fallback is reconciled into the route receipt before this hook.
         let message = mediated_decline_message(
@@ -724,9 +720,9 @@ pub(crate) fn restore_recorded_muc_decline(
         };
         let delivery = PlannedEffect::new(Effect::External(effect))
             .with_suppression(PlanSuppressionPolicy::Always)
-            .with_dependency(
-                crate::server::routes::interpret::effects::PlanEffectDependency::AfterInviteLedger { invite: invite.clone() },
-            );
+            .with_dependency(PlanEffectDependency::AfterInviteLedger {
+                invite: invite.clone(),
+            });
         plan.plan.push(delivery);
     }
     plan.intents = recorded.to_vec();
@@ -1188,9 +1184,9 @@ mod tests {
     }
     #[tokio::test]
     async fn plan_muc_private_message_archives_twice_without_delivering() {
-        use crate::server::routes::interpret::effects::{
-            delivery::ExternalDeliveryEffect, direct::DurableDirectEffect, DurableEffect, PlanSink,
-        };
+        use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+        use crate::server::routes::interpret::effects::direct::DurableDirectEffect;
+        use crate::server::routes::interpret::effects::{DurableEffect, PlanSink};
         let state = create_test_websocket_state().await;
         let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
         let actor = create_test_room(state.as_ref(), room).await;

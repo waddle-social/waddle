@@ -25,7 +25,8 @@
 //! - User Avatar (XEP-0084): avatar hash
 //! - Sticker packs, file metadata, etc.
 
-use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine as _};
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine as _;
 use minidom::Element;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};

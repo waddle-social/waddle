@@ -1,6 +1,6 @@
 //! Jev message badges and their inline probability breakdown.
 
-use adw::prelude::*;
+use adw::prelude::{BoxExt, WidgetExt};
 use waddle_client_session::judgments::SafetyCategory;
 use waddle_client_session::TimelineItem;
 

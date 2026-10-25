@@ -6,6 +6,9 @@
 //! the destination queue. Already accepted transport frames keep their drain
 //! behavior when optional deduplication authority cannot be recovered.
 
+use crate::db::Database;
+use crate::ingress_uow::ArchiveDispatchRepository;
+use crate::ingress_uow::CarbonReceiptRepository;
 use std::time::Duration;
 
 use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
@@ -113,7 +116,7 @@ impl std::fmt::Debug for AppendAuthority {
 /// [`AppendAuthority::Deferred`] for why a cancelled read can repeat.
 #[cfg(feature = "clustering")]
 pub(crate) struct DeferredAppendAuthority {
-    db: crate::db::Database,
+    db: Database,
     obligation: super::identity::IngressAppendObligationRef,
     result: tokio::sync::OnceCell<Result<(), AppendAuthorityRejection>>,
 }
@@ -121,7 +124,7 @@ pub(crate) struct DeferredAppendAuthority {
 #[cfg(feature = "clustering")]
 impl DeferredAppendAuthority {
     pub(crate) fn new(
-        db: crate::db::Database,
+        db: Database,
         obligation: super::identity::IngressAppendObligationRef,
     ) -> Self {
         Self {
@@ -254,7 +257,7 @@ pub(crate) fn check_resource_binding(
 /// Carbon envelopes additionally prove the frozen receipt, target and inner
 /// message; their outer sender is the carbon owner rather than the originator.
 pub(crate) async fn check_canonical_obligation(
-    db: &crate::db::Database,
+    db: &Database,
     stanza: &Stanza,
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
@@ -289,7 +292,7 @@ pub(crate) async fn check_canonical_obligation(
     }
     let positions = tokio::time::timeout(
         AUTHORIZATION_READ_TIMEOUT,
-        crate::ingress_uow::ArchiveDispatchRepository::positions_pooled(
+        ArchiveDispatchRepository::positions_pooled(
             db,
             obligation.message_key,
             &obligation.receipt,
@@ -305,14 +308,13 @@ pub(crate) async fn check_canonical_obligation(
 }
 
 async fn authorize_direct_sender(
-    db: &crate::db::Database,
+    db: &Database,
     stanza: &Stanza,
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
-    let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
-            .await
-            .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    let (envelope, intents) = CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        .await
+        .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     if let Some(intent) = intents.iter().find(|intent| {
         matches!(
             intent,
@@ -362,17 +364,16 @@ async fn authorize_direct_sender(
 }
 
 async fn authorize_room_route(
-    db: &crate::db::Database,
+    db: &Database,
     stanza: &Stanza,
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
     let Stanza::Message(message) = stanza else {
         return Err(AppendAuthorityRejection::NotMessage);
     };
-    let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
-            .await
-            .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    let (envelope, intents) = CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        .await
+        .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     let target = message
         .to
         .as_ref()
@@ -423,7 +424,7 @@ async fn authorize_room_route(
 
 /// The canonical ingress row must exist and name the claimed sender.
 pub(crate) async fn check_canonical_sender(
-    db: &crate::db::Database,
+    db: &Database,
     message_key: MessageKey,
     sender_bare: &jid::BareJid,
 ) -> Result<(), AppendAuthorityRejection> {

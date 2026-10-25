@@ -5,13 +5,11 @@
 //! countable stanza with an `<r/>`, and drains already-arrived inbound
 //! frames after each `<r/>` so `<a/>` acks shrink the queue mid-flood.
 
-use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
-use super::super::{
-    batch_write::{
-        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
-    },
-    state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
+use super::super::batch_write::{
+    write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
+use super::super::state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
+use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::create_test_websocket_state;
 use futures::{stream, Sink, Stream, StreamExt as _};
 use std::convert::Infallible;
@@ -1972,11 +1970,10 @@ async fn send_window_near_full_deferred_backlog_stays_paced_across_batches() {
 
 #[tokio::test]
 async fn live_peer_timestamp_reaches_actual_batch_sm_record_even_when_write_fails() {
-    use super::super::{
-        outbound::{handle_outbound_stanza, OutboundAuthority},
-        timers::TransportTimers,
-    };
-    use waddle_xmpp::{registry::OutboundStanza, Stanza};
+    use super::super::outbound::{handle_outbound_stanza, OutboundAuthority};
+    use super::super::timers::TransportTimers;
+    use waddle_xmpp::registry::OutboundStanza;
+    use waddle_xmpp::Stanza;
     let received_at =
         chrono::DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("receipt time");
     for fail_write in [false, true] {

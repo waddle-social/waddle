@@ -1,4 +1,10 @@
-use super::*;
+use super::Repo;
+use super::{
+    capture, configured_observer, initialize_room_observations, intent, message, payload,
+    record_message, revert_v1025, room, sender, subscription, ConfiguredRoomObserver,
+    IngressFixture, MessageKey, ObservationError, RoomObservationOutcome, RoomObservationResult,
+    RoomObservationScope, StanzaId, Utc,
+};
 use waddle_extensions::{ObservationFailure, ObservationSkip};
 
 async fn seed(fixture: &IngressFixture) -> (ConfiguredRoomObserver, i64) {

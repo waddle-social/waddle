@@ -1,6 +1,11 @@
 //! Deserialization and validation of JavaScript message and client options.
 
-use super::*;
+use super::{
+    encrypted_file_from_js, file_hashes_from_js, js_error, messaging, BareJid, FallbackRange, Jid,
+    JsValue, LinkPreviewToken, MarkupSpanData, MentionDirectory, MentionTarget, ReferenceData,
+    ReplyMarker, SendMessageOptions, SharedFileDisposition, StanzaId, ThreadRef,
+    WaddleMentionDirectory, WaddleSendOptions,
+};
 
 /// Build an optional `ThreadRef` from a pair of `Option<String>` wasm
 /// arguments. An empty/missing `thread_id` yields `None` so callers can
@@ -144,6 +149,7 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WaddleMentionTarget;
 
     #[test]
     fn mention_directory_drops_targets_without_a_bare_jid() {

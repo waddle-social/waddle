@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    ArchivedMessage, BareJid, CallbackId, HandlerOutcome, MamArchiveKind, MessageContext,
+    MessageHandler, MessageRef, OutboundEvent, RichTargetKind, RichTargetValidationHandler,
+    StanzaId,
+};
 use crate::protocol::id_gen::FixedIdGenerator;
 use crate::protocol::message_context::MessageContextEnv;
 use crate::protocol::session_state::{Blocklist, CarbonsState, MucOccupancy};

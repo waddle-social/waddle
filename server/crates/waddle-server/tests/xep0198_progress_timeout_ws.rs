@@ -1,14 +1,14 @@
 //! XEP-0198 §5: the runtime's no-progress reconnect preserves the server session.
 
 use minidom::Element;
-use std::{collections::VecDeque, time::Duration};
+use std::collections::VecDeque;
+use std::time::Duration;
 use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use waddle_xmpp::{
-    pending_delivery::SmSessionId, stream_management::persistence::SmPersistenceStorage,
-};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+use waddle_xmpp_client::stream_management::{SmState, SM_PROGRESS_TIMEOUT_MS};
 use waddle_xmpp_client::{
-    stream_management::{SmState, SM_PROGRESS_TIMEOUT_MS},
     AccessToken, ClientConfig, ClientEvent, ClientRequest, ClientResource, ConnectionConfig,
     ConnectionEvent, OAuthBearerConfig, SessionBinding, StreamManagementEvent, StreamOpen,
     TransportEvent, TransportMessage, TransportState, WebSocketConfig, XmppRuntime, NS_BIND,

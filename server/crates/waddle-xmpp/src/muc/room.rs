@@ -1,3 +1,4 @@
+use crate::types::Moderation;
 use std::collections::HashMap;
 
 use jid::{BareJid, FullJid};
@@ -284,8 +285,8 @@ impl MucRoom {
     /// [`crate::types::Role::voice`]. Every voice decision — text
     /// broadcast (§7.5) and SFU media grants alike — goes through
     /// that one predicate, so they cannot drift apart.
-    pub fn moderation(&self) -> crate::types::Moderation {
-        crate::types::Moderation::from_moderated_flag(self.config.moderated)
+    pub fn moderation(&self) -> Moderation {
+        Moderation::from_moderated_flag(self.config.moderated)
     }
 
     /// Create a new MUC room.

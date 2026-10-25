@@ -1,5 +1,9 @@
 use super::delivery::receiver::current_claim;
-use super::*;
+use super::{
+    Entity, FullJidDeliveryOutcome, OrderedRelayClaimRole, OrderedRelayDeliveryServices,
+    OrderedRelayDiversionReason, OrderedRelayNack, OrderedRelayNackReason, PublicKey,
+    RelayAskError, RelaySendEffect, RelaySendFailure, RemoteStanzaEnvelope, Stanza,
+};
 
 pub(super) async fn validate_claims(
     services: &OrderedRelayDeliveryServices,

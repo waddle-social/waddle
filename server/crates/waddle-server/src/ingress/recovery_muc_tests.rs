@@ -1,11 +1,23 @@
 //! Real room planning followed by maintenance, without client retransmission.
-use super::*;
-use crate::ingress::{execute::ExternalOutcome, receipt_key, IngressEffectCapture};
-use crate::ingress_uow::DeliveryProgressRepository;
-use waddle_xmpp::{
-    muc::{room_actor::Join, room_registry_actor::CreateRoom},
-    protocol::OutboundEvent,
+use super::{
+    append_count, build_interpret_deps, commit_submission, execute_effects,
+    immediate_recovery_budget, pass, persistent_sm, retarget, run_maintenance_pass_with_cursor,
+    state_for, store_detached, Arc, CanonicalMessageRepository, Duration, Effect,
+    EffectMessageIdentity, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect,
+    ImmediateSink, IngressEffectIntent, IngressFixture, IngressSubmission, MaintenanceBudget,
+    MaintenanceCursor, MaintenanceOutcome, NormalizedTarget, PlanSink, RecoveryEnvironment,
+    SmSessionRegistry, StateEnvironment, WebSocketState,
 };
+use super::{
+    AtomicBool, DeliveryExecutionContext, Deps, InMemorySmSessionRegistry, MessageKey, Ordering,
+    Stanza,
+};
+use crate::ingress::execute::ExternalOutcome;
+use crate::ingress::{receipt_key, IngressEffectCapture};
+use crate::ingress_uow::DeliveryProgressRepository;
+use waddle_xmpp::muc::room_actor::Join;
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::protocol::OutboundEvent;
 
 use crate::ingress::muc_occupant_progress_tests::stall as stalled_copy;
 
@@ -579,14 +591,11 @@ paired!(
 /// is classified: the only obligation left is the observer, now owned by the
 /// durable scheduler rather than synchronous recovery.
 async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
-    use crate::ingress::{
-        effects::{room::ExternalRoomEffect, PlanSuppressionPolicy},
-        PlannedEffect,
-    };
-    use waddle_extensions::{
-        observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
-        ExtensionManager, PluginId,
-    };
+    use crate::ingress::effects::room::ExternalRoomEffect;
+    use crate::ingress::effects::PlanSuppressionPolicy;
+    use crate::ingress::PlannedEffect;
+    use waddle_extensions::observer_test_support::{ObserverTestBehavior, ObserverTestPlugin};
+    use waddle_extensions::{ExtensionManager, PluginId};
 
     let sm = persistent_sm(&f).await;
     let occupant: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");

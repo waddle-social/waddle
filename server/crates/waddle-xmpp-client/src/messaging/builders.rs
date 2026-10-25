@@ -1,5 +1,6 @@
 //! Construction of message bodies, delivery markers, reactions, and moderation stanzas.
 
+use crate::xep::fallback::NS_FALLBACK;
 use minidom::Element;
 use uuid::Uuid;
 
@@ -10,9 +11,16 @@ use crate::xep::{reply as xep_reply, thread as xep_thread};
 use waddle_xmpp_core::CoreError;
 
 use super::mentions::resolve_typed_mentions;
-use super::namespaces::*;
+use super::namespaces::{
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_FILE_METADATA, NS_HINTS, NS_MARKUP,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUC, NS_MUC_USER, NS_ORIGIN_ID,
+    NS_REACTIONS, NS_REFERENCES, NS_SFS, NS_URL_DATA, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW,
+    NS_WADDLE_MARKUP, NS_WADDLE_PIN_V0,
+};
 use super::parsing::payloads::validate_chat_state;
-use super::types::*;
+use super::types::{
+    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, SendMessageOptions, SharedFile,
+};
 
 /// Build an XEP-0085 chat-state message with a generated stanza identifier and optional thread.
 ///
@@ -250,7 +258,7 @@ pub fn build_retraction_message(
         // <fallback for='urn:xmpp:message-retract:1'/> so supporting
         // receivers never render it as real content (#1267 item 1).
         .append(
-            Element::builder("fallback", crate::xep::fallback::NS_FALLBACK)
+            Element::builder("fallback", NS_FALLBACK)
                 .attr(
                     minidom::rxml::xml_ncname!("for").to_owned(),
                     NS_MESSAGE_RETRACT,

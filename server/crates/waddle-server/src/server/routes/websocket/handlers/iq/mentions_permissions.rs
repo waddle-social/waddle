@@ -64,7 +64,10 @@
 //! distinguish "exists" from "does not exist" any better than a
 //! client sending the same query twice with different JIDs.
 
-use super::*;
+use super::{
+    bad_request_iq_error, element_to_xml, forbidden_iq_error, iq_to_xml, not_authorized_iq_error,
+    WebSocketState,
+};
 use jid::FullJid;
 use std::str::FromStr;
 use waddle_xmpp::xep::{

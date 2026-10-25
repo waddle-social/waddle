@@ -36,14 +36,11 @@ use jid::FullJid;
 use tracing::{info, warn};
 use waddle_xmpp::pending_delivery::SmSessionId;
 
-use super::super::{
-    frame::{ResponseFrame, StreamErrorFrame},
-    transport_xml::websocket_stream_close_element,
-};
-use waddle_xmpp::{
-    stream_management::{SmFailed, SmResumed, StreamManagementState},
-    telemetry::{attributes::SmAckOutcome, reliability},
-};
+use super::super::frame::{ResponseFrame, StreamErrorFrame};
+use super::super::transport_xml::websocket_stream_close_element;
+use waddle_xmpp::stream_management::{SmFailed, SmResumed, StreamManagementState};
+use waddle_xmpp::telemetry::attributes::SmAckOutcome;
+use waddle_xmpp::telemetry::reliability;
 
 pub(super) use waddle_xmpp::telemetry::attributes::SmResumeOutcome;
 
@@ -445,10 +442,10 @@ mod tests {
 
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporterBuilder, SdkTracerProvider};
-    use tracing_subscriber::prelude::*;
-    use waddle_xmpp::telemetry::{
-        attributes::MessageKind, messages::record_delivered_message, test_support,
-    };
+    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+    use waddle_xmpp::telemetry::attributes::MessageKind;
+    use waddle_xmpp::telemetry::messages::record_delivered_message;
+    use waddle_xmpp::telemetry::test_support;
 
     #[derive(Clone, Default)]
     struct CaptureWriter(Arc<Mutex<Vec<u8>>>);

@@ -1,6 +1,6 @@
 //! Serializable JavaScript views of messages, presence, discovery, and protocol results.
 
-use super::*;
+use super::{Deserialize, Serialize};
 use serde::ser::SerializeStruct;
 use waddle_xmpp_client::xep::safety_scores::{SafetyScore, SafetyScoresFastening};
 

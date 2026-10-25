@@ -1,10 +1,8 @@
 use jid::{BareJid, Jid};
-use waddle_xmpp_client::{
-    avatar::AvatarExt,
-    discovery::DiscoveryExt,
-    mam::{ArchivedMessageId, MamExt},
-    messaging::MessagingExt,
-};
+use waddle_xmpp_client::avatar::AvatarExt;
+use waddle_xmpp_client::discovery::DiscoveryExt;
+use waddle_xmpp_client::mam::{ArchivedMessageId, MamExt};
+use waddle_xmpp_client::messaging::MessagingExt;
 use waddle_xmpp_core::mam::ThreadId;
 
 use crate::boundary_convert::{

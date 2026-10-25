@@ -2,14 +2,16 @@ use jid::BareJid;
 use tracing::warn;
 use waddle_xmpp::roster::{RosterItem, Subscription};
 
-use crate::{
-    db::blocking::DatabaseBlockingStorage,
-    permissions::{Object, ObjectType, Permission},
-};
+use crate::db::blocking::DatabaseBlockingStorage;
+use crate::permissions::{Object, ObjectType, Permission};
 
+use super::conversions::{
+    host_muc_affiliation, host_muc_role, host_presence_show, host_presence_show_str,
+    host_roster_item, occupant_jid,
+};
 use super::{
-    conversions::*, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
-    HostChannel, HostMucMember, HostPresence, HostPresenceShow, HostRosterItem, HostSpace,
+    ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation, HostChannel,
+    HostMucMember, HostPresence, HostPresenceShow, HostRosterItem, HostSpace,
 };
 
 impl ExtensionHostAdapter {

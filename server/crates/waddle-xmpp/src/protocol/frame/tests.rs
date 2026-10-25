@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    inject_client_ns_if_missing, parse_frame, parse_frame_with_metadata, peek_root_name, Element,
+    FromStr, InboundFrame, Lang, ParseError, Stanza, CLIENT_STANZA_NS, MAX_FRAME_SIZE,
+};
 
 #[test]
 fn parses_open_frame() {

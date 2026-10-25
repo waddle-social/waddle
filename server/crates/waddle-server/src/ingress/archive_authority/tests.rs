@@ -1,7 +1,9 @@
 use super::restore;
-use crate::ingress::{commit::classify_failure, decision::IngressDecisionClass};
+use crate::ingress::commit::classify_failure;
+use crate::ingress::decision::IngressDecisionClass;
 use crate::ingress_uow::IngressUowError;
-use waddle_xmpp::{ingress::IngressEffectIntent, mam::ArchiveOrdinal};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::mam::ArchiveOrdinal;
 
 fn authority(ordinal: Option<ArchiveOrdinal>) -> IngressEffectIntent {
     let archive: jid::BareJid = "alice@example.org".parse().unwrap();

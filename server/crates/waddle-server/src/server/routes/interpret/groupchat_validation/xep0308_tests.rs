@@ -1,8 +1,11 @@
-use super::*;
+use super::{
+    validate_groupchat_rich_targets, Arc, BareJid, Deps, Jid, MamStorage, Message, RoomActor,
+};
 use kameo::actor::Spawn;
 use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
 use waddle_xmpp::muc::{MucRoom, RoomConfig};
 use waddle_xmpp::registry::ConnectionRegistry;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 #[tokio::test]
 async fn correction_authority_is_the_validated_archive_row_with_nickname_continuity() {

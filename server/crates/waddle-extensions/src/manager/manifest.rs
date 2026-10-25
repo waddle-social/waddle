@@ -1,6 +1,9 @@
 //! Validation and assembly of loaded extension manifests and routes.
 
-use super::*;
+use super::{
+    bail, CommandNode, ExtensionCapability, ExtensionManifest, ExtensionModuleConfig, HashSet,
+    PayloadNamespace, Result, FRAMEWORK_NAMESPACE,
+};
 
 pub(super) fn validate_manifest_against_module(
     module: &ExtensionModuleConfig,

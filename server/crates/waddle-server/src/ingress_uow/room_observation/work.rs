@@ -1,10 +1,16 @@
+use crate::db::DatabaseDriver;
+use crate::ingress_uow::DbRetryClass;
+use crate::ingress_uow::DeliveryEffectRepository;
+use crate::ingress_uow::EffectDeliveryBinding;
+use crate::ingress_uow::EffectDescendantRepository;
 use jid::BareJid;
 use uuid::Uuid;
 use waddle_extensions::{
     ConfiguredRoomObserver, DisplayText, ObservationFailure, ObservationSkip, RoomMessageSource,
     RoomObservationOutcome, RoomObservationScope, RoomObservationSubscription,
 };
-use waddle_xmpp::{ingress::MessageKey, ownership::NodeIdentity};
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::db::Row;
 use crate::ingress_uow::IngressUowTransaction;
@@ -219,7 +225,7 @@ pub(super) async fn lock_canonical_keys(
     let mut keys = keys.to_vec();
     keys.sort_by_key(MessageKey::to_storage);
     keys.dedup();
-    let sql = if tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres {
+    let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
         "SELECT message_key FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE NOWAIT"
     } else {
         "SELECT message_key FROM ingress_messages WHERE message_key = ?"
@@ -233,9 +239,7 @@ pub(super) async fn lock_canonical_keys(
                 crate::db::DatabaseError::Internal(sqlx::Error::Database(database))
                     if database.code().as_deref() == Some("55P03") =>
                 {
-                    ObservationError::RetryableDatabase(
-                        crate::ingress_uow::DbRetryClass::CanonicalLockContention,
-                    )
+                    ObservationError::RetryableDatabase(DbRetryClass::CanonicalLockContention)
                 }
                 _ => ObservationError::from(error),
             })?;
@@ -374,14 +378,10 @@ pub(super) async fn validate_started(
     {
         return Ok(false);
     }
-    let key = crate::ingress_uow::DeliveryEffectRepository::bind_effect(
-        tx,
-        work.message_key,
-        &work.effect_key(),
-    )
-    .await
-    .map_err(ObservationError::from)?;
-    Ok(key == crate::ingress_uow::EffectDeliveryBinding::Bound(work.delivery_key()))
+    let key = DeliveryEffectRepository::bind_effect(tx, work.message_key, &work.effect_key())
+        .await
+        .map_err(ObservationError::from)?;
+    Ok(key == EffectDeliveryBinding::Bound(work.delivery_key()))
 }
 
 pub(super) async fn start(
@@ -395,13 +395,9 @@ pub(super) async fn start(
     {
         return Ok(false);
     }
-    crate::ingress_uow::DeliveryEffectRepository::bind_effect(
-        tx,
-        work.message_key,
-        &work.effect_key(),
-    )
-    .await
-    .map_err(ObservationError::from)?;
+    DeliveryEffectRepository::bind_effect(tx, work.message_key, &work.effect_key())
+        .await
+        .map_err(ObservationError::from)?;
     Ok(tx.transaction_mut().execute(
         "UPDATE extension_room_observation_work SET status = 'started' WHERE id = ? AND lease_id = ? AND status = 'leased' AND lease_until_ms > ?",
         crate::db_params![work.id.to_string(), work.lease.to_string(), now_ms],
@@ -445,7 +441,7 @@ pub(super) async fn finish(
                     .get(0)?;
                 drop(rows);
                 let publication_id = Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?;
-                crate::ingress_uow::EffectDescendantRepository::attach(
+                EffectDescendantRepository::attach(
                     tx,
                     work.message_key,
                     &work.effect_key(),

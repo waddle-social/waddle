@@ -1,23 +1,25 @@
-use super::*;
-use super::{
-    batch_write::{
-        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
-    },
-    frame::ordered_relay_origin_from_sm,
-    interpret_loop::build_interpret_deps,
-    replay::drive_interpret_loop,
-    send::{send_ws_message_with_authority, AuthoritySendOutcome},
-    state::WsConnState,
-    stream_management::is_countable_stanza,
-    timers::TransportTimers,
-    transport_xml::stanza_to_xml,
+use super::batch_write::{
+    write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
+use super::frame::ordered_relay_origin_from_sm;
+use super::interpret_loop::build_interpret_deps;
+use super::replay::drive_interpret_loop;
+use super::send::{send_ws_message_with_authority, AuthoritySendOutcome};
+use super::state::WsConnState;
+use super::stream_management::is_countable_stanza;
+use super::timers::TransportTimers;
+use super::transport_xml::stanza_to_xml;
+use super::{
+    debug, info, warn, Arc, DeliveryKind, InboundEvent, Message, OutboundStanza, Sink,
+    WebSocketState,
+};
+use crate::clustering::NodeAdmissionPermit;
 use waddle_xmpp::stream_management::SmRequest;
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 #[derive(Clone, Copy)]
 pub(super) struct OutboundAuthority<'a> {
-    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) permit: &'a NodeAdmissionPermit,
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
@@ -307,10 +309,8 @@ mod tests {
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use waddle_xmpp::{
-        registry::{OutboundStanza, OutboundWriteAcceptance},
-        Stanza,
-    };
+    use waddle_xmpp::registry::{OutboundStanza, OutboundWriteAcceptance};
+    use waddle_xmpp::Stanza;
 
     struct RecordingSink {
         sent: Vec<Message>,

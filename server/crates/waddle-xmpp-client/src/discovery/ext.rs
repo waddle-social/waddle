@@ -1,6 +1,7 @@
 //! Native client service-discovery and roster request operations.
 
 use jid::BareJid;
+use std::collections::HashSet;
 
 use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult, StanzaError, StanzaErrorType};
@@ -393,7 +394,7 @@ impl DiscoveryExt for ClientHandle {
         // "standalone" space so the UI's space-keyed channel list can
         // render every room a user might want to join without
         // requiring server-side bookmark administration first.
-        let bookmarked: std::collections::HashSet<BareJid> = channels
+        let bookmarked: HashSet<BareJid> = channels
             .iter()
             .map(|channel| channel.room_jid.clone())
             .collect();

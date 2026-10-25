@@ -1,4 +1,7 @@
-use super::*;
+use super::{mpsc, Arc, AtomicBool, Ordering, Stanza};
+use crate::pending_delivery::PendingRowId;
+use crate::pending_delivery::SmSessionId;
+use crate::stream_management::SmRelayedAppendObligation;
 
 /// How the destination connection should handle an inbound
 /// [`OutboundStanza`].
@@ -87,7 +90,7 @@ pub struct OutboundStanza {
     /// so a subsequent SM `<a h>` ack can range-delete only those
     /// rows whose flush stanza was actually acknowledged. `None` for
     /// every other outbound (the common case).
-    pub pending_row_id: Option<crate::pending_delivery::PendingRowId>,
+    pub pending_row_id: Option<PendingRowId>,
     /// Original receipt time for pending replay or a transient relayed copy.
     /// This timestamp carries no pending-row identity or ingress append authority.
     pub original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -97,7 +100,7 @@ pub struct OutboundStanza {
     /// The ingress obligation for a local or relayed frame, unverified (#1789, #1805).
     /// The live handler retains it on the unacknowledged SM entry; detach authorizes
     /// it before proving the XEP-0198 replay append. Live writes do not read canonical state.
-    pub ingress_append: Option<crate::stream_management::SmRelayedAppendObligation>,
+    pub ingress_append: Option<SmRelayedAppendObligation>,
 }
 
 impl OutboundStanza {
@@ -120,10 +123,7 @@ impl OutboundStanza {
     }
 
     /// Attach the delivery origin's ingress obligation.
-    pub fn with_ingress_append(
-        mut self,
-        obligation: crate::stream_management::SmRelayedAppendObligation,
-    ) -> Self {
+    pub fn with_ingress_append(mut self, obligation: SmRelayedAppendObligation) -> Self {
         self.ingress_append = Some(obligation);
         self
     }
@@ -156,7 +156,7 @@ impl OutboundStanza {
     /// XEP-0203 `<delay/>` time.
     pub fn for_pending_flush(
         stanza: Stanza,
-        row_id: crate::pending_delivery::PendingRowId,
+        row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         Self {
@@ -303,7 +303,7 @@ pub struct ConnectionEntry {
     /// boundary stays typed end-to-end (Qodo review on PR #358:
     /// previous `Option<String>` form violated the typed-payloads
     /// rule).
-    pub sm_stream_id: Arc<std::sync::Mutex<Option<crate::pending_delivery::SmSessionId>>>,
+    pub sm_stream_id: Arc<std::sync::Mutex<Option<SmSessionId>>>,
     /// The connection's MUC occupancy generation (#1703), published
     /// owner-gated at registration so FullJID-keyed reconcilers can tell a
     /// live connection's memberships from a displaced generation's.
@@ -515,7 +515,7 @@ impl ConnectionEntry {
         self.occupancy_session.lock().ok().and_then(|guard| *guard)
     }
 
-    pub fn set_sm_stream_id(&self, session_id: Option<crate::pending_delivery::SmSessionId>) {
+    pub fn set_sm_stream_id(&self, session_id: Option<SmSessionId>) {
         if let Ok(mut guard) = self.sm_stream_id.lock() {
             *guard = session_id;
         }
@@ -526,7 +526,7 @@ impl ConnectionEntry {
     /// `pending_delivery` row will be claimed under an SM session id
     /// in that case — the flush falls back to the delete-on-push
     /// path).
-    pub fn sm_stream_id(&self) -> Option<crate::pending_delivery::SmSessionId> {
+    pub fn sm_stream_id(&self) -> Option<SmSessionId> {
         self.sm_stream_id
             .lock()
             .ok()

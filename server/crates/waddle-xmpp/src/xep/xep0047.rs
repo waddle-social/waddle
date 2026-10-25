@@ -14,7 +14,8 @@
 //!
 //! Advertises `http://jabber.org/protocol/ibb` as a feature in disco#info.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
 

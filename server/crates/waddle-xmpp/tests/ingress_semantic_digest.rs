@@ -1,4 +1,5 @@
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use sha2::{Digest, Sha256};
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, DigestInputError, DigestVersion, NormalizedTarget, SemanticDigest,

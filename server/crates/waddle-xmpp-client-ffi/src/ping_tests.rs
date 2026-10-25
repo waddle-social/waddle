@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use minidom::Element;
 use waddle_xmpp_client::{ClientError, StanzaError, StanzaErrorType};
-use xmpp_parsers::{iq::Iq, ns};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::ns;
 
 use crate::error::client_error_to_waddle;
 use crate::ping::{build_ping_iq, send_ping};

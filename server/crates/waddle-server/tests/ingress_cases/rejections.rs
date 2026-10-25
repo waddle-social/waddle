@@ -1,10 +1,14 @@
-use super::*;
+use super::{
+    commit_submission, CanonicalMessageRepository, IngressDecisionClass, IngressEffectIntent,
+    IngressFixture, MessageEnvelope,
+};
 
 async fn semantic_rejections(fixture: IngressFixture) {
     use waddle_server::ingress::effects::{
         AuthorizationDeniedReason, PlanRejection, PolicyDeniedReason, SemanticMalformedReason,
     };
-    use waddle_xmpp::{ingress::FrozenStanzaError, Stanza};
+    use waddle_xmpp::ingress::FrozenStanzaError;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     for (index, condition, class) in [
         (

@@ -1,6 +1,6 @@
 //! JavaScript boundary conversion for encrypted-file payloads.
 
-use super::*;
+use super::{WaddleEncryptedFile, WaddleEncryptedFileHash};
 
 pub(crate) fn encrypted_file_to_js(
     enc: waddle_xmpp_client::xep::encrypted_file::EncryptedFile,

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ActorRef, CheckRequest, Object, ObjectType, PermissionChecker, PermissionSchema, Subject,
+    SubjectType, TupleStore,
+};
 use crate::db::actor::DbActor;
 use crate::db::{Database, MigrationRunner};
 use crate::permissions::tuple::{Relation, Tuple};

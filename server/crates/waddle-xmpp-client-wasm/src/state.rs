@@ -1,6 +1,10 @@
 //! Browser client configuration, shared connection state, and exported client ownership.
 
-use super::*;
+use super::{
+    element_to_xml_string, js_error, mpsc, oneshot, wasm_bindgen, ArchivedMessage, ClientError,
+    ClientEvent, Closure, Deserialize, Element, Function, HashMap, JsValue, MamResultCollector, Rc,
+    RefCell, Serialize, VecDeque, WasmWebSocket, XmppRuntime,
+};
 
 pub(crate) type DriverResult<T> = Result<T, ClientError>;
 

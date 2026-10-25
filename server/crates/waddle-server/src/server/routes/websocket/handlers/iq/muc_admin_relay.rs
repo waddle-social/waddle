@@ -9,6 +9,9 @@
 //! a local GET. The answer travels as typed data and the origin builds the
 //! response stanza itself, so it leaves with the local wire shape. Only GETs
 //! are forwarded; a forwarded GET is never forwarded again.
+use crate::clustering::relay::RelaySendEffect;
+use crate::clustering::relay::RelaySendFailure;
+use crate::clustering::NodeId;
 use std::time::Duration;
 
 use jid::FullJid;
@@ -18,7 +21,10 @@ use super::muc_admin::answer_admin_list_get;
 #[cfg(test)]
 pub(crate) use super::muc_admin::AdminRoleEntry;
 pub(crate) use super::muc_admin::{AdminListAnswer, AdminListDenial};
-use super::*;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, get_room_actor_result, item_not_found_iq_error,
+    WebSocketState,
+};
 use crate::clustering::relay::{
     RelayAskError, RelayHandle, RelayMucAdminQuery, RelayMucAdminQueryItem, RelayMucAdminQueryReply,
 };
@@ -173,7 +179,7 @@ async fn ask_owner(
         .as_ref()
     else {
         return Err(RelayAskError::NotFound {
-            node_id: crate::clustering::NodeId::new(owner.node_id.clone()),
+            node_id: NodeId::new(owner.node_id.clone()),
         });
     };
     let mut handle: RelayHandle = bridge.muc_admin_query_handle(owner);
@@ -182,8 +188,8 @@ async fn ask_owner(
         .await
         .unwrap_or_else(|_| {
             Err(RelayAskError::Send {
-                failure: crate::clustering::relay::RelaySendFailure::ReplyTimeout,
-                effect: crate::clustering::relay::RelaySendEffect::NoEffect,
+                failure: RelaySendFailure::ReplyTimeout,
+                effect: RelaySendEffect::NoEffect,
                 message: "the room owner did not answer in time".to_owned(),
             })
         })

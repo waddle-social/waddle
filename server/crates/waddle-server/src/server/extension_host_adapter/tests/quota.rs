@@ -1,10 +1,10 @@
 //! Host refusal follows the settled offline quota result, with no new transport frame.
 use super::super::ExtensionHostAdapterError;
 use super::direct_ingress::{adapter, invocation, plugin, request};
-use crate::{
-    ingress::test_support::IngressFixture, pending_delivery::DatabasePendingDeliveryStorage,
-};
-use std::{sync::Arc, time::Duration};
+use crate::ingress::test_support::IngressFixture;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use std::sync::Arc;
+use std::time::Duration;
 use waddle_xmpp::pending_delivery::QuotaPolicy;
 
 async fn quota_refusal(f: IngressFixture) {

@@ -1,8 +1,15 @@
-use super::*;
+use super::interpret_loop::build_interpret_deps;
+use super::state::WsConnState;
+use super::stream_management::is_countable_stanza;
+use super::transport_xml::stanza_to_xml;
 use super::{
-    interpret_loop::build_interpret_deps, state::WsConnState,
-    stream_management::is_countable_stanza, transport_xml::stanza_to_xml,
+    mpsc, warn, DeliveryKind, Element, InboundEvent, OutboundEvent, OutboundStanza, Stanza,
+    StreamManagementState, WebSocketState, XmppStateMachine,
 };
+use crate::auth::Session;
+use crate::server::routes::interpret::Deps;
+use crate::server::routes::interpret::TimerCommand;
+use crate::sm_promotion::TerminalOverflowPromotionDeps;
 use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
 /// How a detach drain handles an outbound item that already belongs to a
@@ -102,7 +109,7 @@ pub(super) async fn drain_outbound_into_replay(
     state: &WebSocketState,
     state_machine: Option<&mut XmppStateMachine>,
     sm_state: &mut StreamManagementState,
-    authenticated_session: Option<&crate::auth::Session>,
+    authenticated_session: Option<&Session>,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     mut sink: ReplayDrainSink<'_>,
 ) {
@@ -705,7 +712,7 @@ async fn record_drained_terminal_xml(
     let summary = crate::sm_promotion::promote_terminal_overflow_entry(
         terminal.session,
         entry.clone(),
-        crate::sm_promotion::TerminalOverflowPromotionDeps {
+        TerminalOverflowPromotionDeps {
             sm_registry: &state.deps.protocol.sm_session_registry,
             registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
@@ -780,7 +787,7 @@ pub(crate) struct DriveOutcome {
     /// (issue #1090).
     pub(super) keepalive_probes: u32,
     /// Timer effects for the connection-local timer wheel.
-    pub(super) timer_commands: Vec<crate::server::routes::interpret::TimerCommand>,
+    pub(super) timer_commands: Vec<TimerCommand>,
 }
 
 /// Drive the interpret-loop that resolves an initial batch of
@@ -796,7 +803,7 @@ pub(crate) struct DriveOutcome {
 pub(crate) async fn drive_interpret_loop(
     initial_events: Vec<OutboundEvent>,
     sm: &mut XmppStateMachine,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
 ) -> DriveOutcome {
     let mut drive = DriveOutcome::default();
     let mut events_to_run = initial_events;

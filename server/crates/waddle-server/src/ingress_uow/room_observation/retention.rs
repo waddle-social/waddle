@@ -18,6 +18,7 @@
 //! statement. PostgreSQL skips rows another writer holds; SQLite runs the
 //! batch under `BEGIN IMMEDIATE`.
 
+use crate::db::Value;
 use crate::db::{DatabaseDriver, DatabaseError, Transaction};
 
 use super::ObservationError;
@@ -279,9 +280,8 @@ pub(super) async fn collect_expired(
         drain_cap_reached = drained.len() as i64 >= REVISION_DRAIN_SOURCES;
         if !drained.is_empty() {
             let sql = revision_drain_sql(drained.len());
-            let mut params: Vec<crate::db::Value> =
-                drained.into_iter().map(crate::db::Value::from).collect();
-            params.push(crate::db::Value::from(i64::from(revision_budget)));
+            let mut params: Vec<Value> = drained.into_iter().map(Value::from).collect();
+            params.push(Value::from(i64::from(revision_budget)));
             batch.revisions = tx.execute(&sql, params).await.map_err(retention_error)?;
         }
     }
@@ -296,9 +296,8 @@ pub(super) async fn collect_expired(
         .await?;
         if !candidates.is_empty() {
             let sql = source_delete_sql(candidates.len());
-            let mut params: Vec<crate::db::Value> =
-                candidates.into_iter().map(crate::db::Value::from).collect();
-            params.push(crate::db::Value::from(cutoff_ms));
+            let mut params: Vec<Value> = candidates.into_iter().map(Value::from).collect();
+            params.push(Value::from(cutoff_ms));
             batch.sources = tx.execute(&sql, params).await.map_err(retention_error)?;
         }
     }

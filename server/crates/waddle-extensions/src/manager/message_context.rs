@@ -1,6 +1,10 @@
 //! Construction of typed extension context from XMPP message payloads.
 
-use super::*;
+use super::{
+    is_official_namespace, warn, DetectedLink, EffectiveModuleConfigError, ExtensionModuleConfig,
+    FullJidValue, HashSet, Message, Path, Regex, ReplyTarget, Result, StanzaId, ThreadId, Value,
+    MAX_DETECTED_LINKS, XEP_0359_STANZA_ID_NS,
+};
 
 pub(super) fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {
     msg.payloads

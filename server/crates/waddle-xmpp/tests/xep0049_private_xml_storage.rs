@@ -5,7 +5,8 @@
 //! payload elements, and storage serialization is parsed back into
 //! `minidom::Element` before result construction.
 
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use waddle_xmpp::xep::xep0049::{
     build_private_storage_result, parse_private_storage_get, parse_private_storage_set,
     parse_stored_private_storage_value, PrivateStorageError, PrivateStorageKey,

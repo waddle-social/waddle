@@ -1,6 +1,7 @@
 //! Durable policy resolution of remaining work, without claiming socket delivery.
 use super::{EffectReceiptRepository, IngressUowError, IngressUowTransaction};
-use crate::{db::DatabaseDriver, ingress::EffectReceiptKey};
+use crate::db::DatabaseDriver;
+use crate::ingress::EffectReceiptKey;
 use waddle_xmpp::ingress::MessageKey;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

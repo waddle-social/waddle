@@ -1,7 +1,12 @@
 //! XEP-0045 §7.14 and XEP-0198: terminal sessions leave a foreign RoomActor
 //! even while a sibling keeps their UserActor claim alive on the other node.
 
-use super::*;
+use super::{
+    cluster_e2e_serial_lock, frame_has_attr, free_tcp_port, generate_pool, join_fanout_room,
+    muc_join_presence, open_control_db, reset_and_enroll, reset_node_lease_tables,
+    spawn_cluster_server, stanza_xml, wait_for_readiness, Duration, Entity, EntityType,
+    PostgresClaimStore, Stanza, WsXmppClient, CLUSTER_PEER_PASSWORD, CLUSTER_PEER_USERNAME,
+};
 use minidom::rxml::xml_ncname;
 use waddle_xmpp::ownership::ClaimStore;
 use waddle_xmpp::stream_management::SM_NS;

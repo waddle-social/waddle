@@ -4,6 +4,9 @@
 //! the contract; an in-memory fake here serves handler tests; the real
 //! libSQL/Postgres implementation lives in `waddle-server`.
 
+use crate::stream_management::persistence::PersistedIngressAppend;
+use crate::stream_management::persistence::SmClaimFence;
+use crate::tombstone::TombstoneTarget;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
@@ -288,7 +291,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
         row: PendingRow,
         origin_stream_id: &str,
         sequence: u32,
-        expected_fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> Result<InsertOutcome, PendingStorageError> {
         let _ = expected_fence;
         self.insert_fenced_and_prune_unacked(row, origin_stream_id, sequence)
@@ -330,7 +333,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
     async fn insert_ingress_custody(
         &self,
         row: PendingRow,
-        append: &crate::stream_management::persistence::PersistedIngressAppend,
+        append: &PersistedIngressAppend,
     ) -> Result<CustodyInsertOutcome, PendingStorageError> {
         let _ = (row, append);
         Err(PendingStorageError::Other(
@@ -777,13 +780,13 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ///   message the recipient never saw.
     async fn scrub_for_tombstone(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<u64, PendingStorageError>;
 
     /// Read exact replay obligations without modifying the queues.
     async fn snapshot_for_tombstone(
         &self,
-        _target: &crate::tombstone::TombstoneTarget,
+        _target: &TombstoneTarget,
     ) -> Result<Vec<PendingRowId>, PendingStorageError> {
         Err(PendingStorageError::TombstoneSnapshotUnsupported)
     }
@@ -795,7 +798,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// delegating to the existing count-only method and returning no ids.
     async fn scrub_for_tombstone_with_row_ids(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<TombstoneScrubbedPendingRows, PendingStorageError> {
         Ok(TombstoneScrubbedPendingRows::count_only(
             self.scrub_for_tombstone(target).await?,
@@ -816,10 +819,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
 /// implementations that hold typed [`PendingRow`]s (the in-memory
 /// backend here; SQL backends match on their column representation
 /// with the same semantics).
-pub fn pending_row_matches_tombstone(
-    row: &PendingRow,
-    target: &crate::tombstone::TombstoneTarget,
-) -> bool {
+pub fn pending_row_matches_tombstone(row: &PendingRow, target: &TombstoneTarget) -> bool {
     match &row.payload {
         super::PendingPayload::Transient(message) => {
             let element: xmpp_parsers::minidom::Element = (**message).clone().into();
@@ -1656,7 +1656,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         // O(rows) lookup via a HashSet of `&SmSessionId` references —
         // avoids the O(rows × live_sessions) `Vec::contains` scan.
         // (Copilot review on PR #360.)
-        let live: std::collections::HashSet<&SmSessionId> = live_sessions.iter().collect();
+        let live: HashSet<&SmSessionId> = live_sessions.iter().collect();
         let guard = self
             .inner
             .lock()
@@ -1753,7 +1753,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
 
     async fn scrub_for_tombstone(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<u64, PendingStorageError> {
         Ok(self
             .scrub_for_tombstone_with_row_ids(target)
@@ -1763,7 +1763,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
 
     async fn snapshot_for_tombstone(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<Vec<PendingRowId>, PendingStorageError> {
         let guard = self
             .inner
@@ -1780,7 +1780,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
 
     async fn scrub_for_tombstone_with_row_ids(
         &self,
-        target: &crate::tombstone::TombstoneTarget,
+        target: &TombstoneTarget,
     ) -> Result<TombstoneScrubbedPendingRows, PendingStorageError> {
         let mut guard = self
             .inner

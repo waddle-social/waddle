@@ -1,10 +1,17 @@
-use super::*;
+use super::{
+    build_carbon_envelope, debug, warn, Arc, BareJid, CarbonKind, ConnectionRegistry, Deps,
+    FullJid, FullJidDeliveryOutcome, InMemorySmSessionRegistry, Message, Stanza, WebSocketState,
+};
+use crate::clustering::route_bridge::RemoteCarbonFanout;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::IngressEffectCapture;
+use crate::ingress_uow::CarbonReceiptRepository;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(crate) struct CarbonRegistryDeps<'a> {
     /// Preserve the execution-owned authority for keyed owner fanout.
     pub ingress_delivery: Option<&'a Deps<'a>>,
-    pub ingress_effect_capture: Option<&'a crate::ingress::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<&'a IngressEffectCapture>,
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
     pub web_socket_state: Option<&'a WebSocketState>,
 }
@@ -152,11 +159,7 @@ pub(super) async fn relay_carbons_only(
                     let Some(sender) = message.from.as_ref().map(jid::Jid::to_bare) else {
                         return Some(super::effects::EffectOutcome::Unavailable);
                     };
-                    Some(
-                        crate::ingress::identity::IngressAppendObligationRef::from_context(
-                            context, sender,
-                        ),
-                    )
+                    Some(IngressAppendObligationRef::from_context(context, sender))
                 }
                 None => None,
             };
@@ -184,7 +187,7 @@ pub(super) async fn relay_carbons_only(
 
 #[cfg(feature = "clustering")]
 pub(crate) fn remote_carbon_delivery(
-    outcome: crate::clustering::route_bridge::RemoteCarbonFanout,
+    outcome: RemoteCarbonFanout,
     deps: &Deps<'_>,
     owner: &BareJid,
     exclude: &[FullJid],
@@ -201,9 +204,7 @@ pub(crate) fn remote_carbon_delivery(
             warn!(%owner, %reason, "remote carbon fanout incomplete");
             (FullJidDeliveryOutcome::Unavailable, carbon_recipients)
         }
-        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
-            (FullJidDeliveryOutcome::MaybeCommitted, Vec::new())
-        }
+        RemoteCarbonFanout::MaybeCommitted => (FullJidDeliveryOutcome::MaybeCommitted, Vec::new()),
     };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         if let Some(excluded_source) = exclude.iter().find(|source| &source.to_bare() == owner) {
@@ -316,7 +317,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         if let (Some(database), Some(context)) =
             (database, delivery.ingress_append_context.as_ref())
         {
-            match crate::ingress_uow::CarbonReceiptRepository::attempted_resources(
+            match CarbonReceiptRepository::attempted_resources(
                 database,
                 context.message_key,
                 &context.receipt,

@@ -4,6 +4,7 @@
 //! module stores only the server-side indexed view used by notification policy
 //! reads.
 
+use crate::db::Row;
 use jid::BareJid;
 use minidom::Element;
 use thiserror::Error;
@@ -376,7 +377,7 @@ impl PushDispatchDecision {
 }
 
 fn decode_projection(
-    row: crate::db::Row,
+    row: Row,
 ) -> Result<NotificationSettingsProjection, NotificationSettingsProjectionError> {
     let owner_raw: String = row.get(0)?;
     let conversation_raw: String = row.get(1)?;

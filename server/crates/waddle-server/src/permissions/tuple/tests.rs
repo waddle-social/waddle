@@ -3,7 +3,7 @@ use std::sync::Arc;
 use kameo::actor::Spawn;
 use uuid::Uuid;
 
-use super::*;
+use super::{Object, ObjectType, Relation, Subject, SubjectType, Tuple, TupleStore};
 use crate::db::Database;
 
 #[test]

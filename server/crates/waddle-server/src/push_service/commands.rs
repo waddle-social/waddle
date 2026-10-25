@@ -61,6 +61,7 @@
 //! owner-binds-to-node invariant via SQL — a caller cannot register a
 //! device against another user's node nor disable foreign devices.
 
+use crate::push_service::PushDevicePlatform;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -644,7 +645,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Web,
+            PushDevicePlatform::Web,
             environment.as_wire_str(),
         )
         .with_provider_endpoint(Some(endpoint.clone()))
@@ -657,7 +658,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Apns,
+            PushDevicePlatform::Apns,
             environment.as_wire_str(),
         )
         .with_provider_token(Some(device_token.as_str().to_owned())),
@@ -669,7 +670,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Fcm,
+            PushDevicePlatform::Fcm,
             environment.as_wire_str(),
         )
         .with_provider_token(Some(registration_token.as_str().to_owned()))

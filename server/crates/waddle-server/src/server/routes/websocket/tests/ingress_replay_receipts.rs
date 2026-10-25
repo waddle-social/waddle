@@ -2,12 +2,18 @@
 //! receipt obligations on the retained XEP-0198 replay entry, and discharges
 //! them only once the replay reaches the wire (RFC 0018 §3: receipts follow
 //! confirmed effects, and a canonical row terminalizes when they are complete).
-use super::*;
+use super::{
+    apply_sm_ack, complete_replayed_ingress_receipts, write_ingress_response_batch_with_admission,
+    write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome, Message,
+    ResponseFrame, SmEvictionPath, WebSocketState, WsConnState,
+};
 use crate::server::routes::websocket::tests::{
     create_test_session, create_test_websocket_state, create_test_websocket_state_with_db_pool,
 };
 use std::sync::Arc;
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::protocol::ConnectionPhase;
+use waddle_xmpp::Stanza;
 
 async fn connection(state: &WebSocketState) -> WsConnState {
     let mut conn = WsConnState::new();

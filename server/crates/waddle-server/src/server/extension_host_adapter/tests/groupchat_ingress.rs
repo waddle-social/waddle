@@ -1,19 +1,20 @@
 //! Real host dispatch with a persistent local room and durable recipients.
-use super::super::*;
-use super::{super::groupchat::BOT_LINGER, direct_ingress};
+use super::super::groupchat::BOT_LINGER;
+use super::super::{
+    interpret, ActorRef, Arc, BareJid, ExtensionHostAdapter, ExtensionHostAdapterError,
+    ExtensionInvocation, FullJid, GetRoom, GetSnapshot, HostMessageTarget, HostSendMessage,
+    InvocationKind, RoomActor, StanzaId,
+};
+use super::direct_ingress;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
-        RoomConfig,
-    },
-    registry::OutboundStanza,
-    Affiliation, Role, Stanza,
-};
+use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::RoomConfig;
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::{Affiliation, Role, Stanza};
 
 pub(super) struct GroupchatFixture {
     pub adapter: ExtensionHostAdapter,

@@ -1,24 +1,18 @@
 //! RFC 0018 §2 and XEP-0198 §4: unavailable ownership cannot accept responsibility.
-use super::super::{
-    effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        Effect, ExternalEffect, PlanFailure,
-    },
-    Deps, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
-};
+use super::super::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use super::super::effects::{Effect, ExternalEffect, PlanFailure};
+use super::super::{Deps, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
 use super::plan_message_dispatch;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressStreamIdentity,
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressDecisionClass, IngressStreamIdentity};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use waddle_xmpp::ownership::{
+    ClaimEpoch, ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, NodeIdentity,
+    ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use waddle_xmpp::{
-    ownership::*,
-    protocol::{StanzaDispatcher, XmppStateMachine},
-};
+use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
 
 pub(crate) struct PlanningClaims {
     owner: std::sync::Mutex<NodeIdentity>,
@@ -95,8 +89,10 @@ impl ClaimStore for PlanningClaims {
 }
 
 async fn ownership_failure(fixture: IngressFixture) {
-    use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, ClusteringHandles};
-    use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
+    use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+    use crate::clustering::ClusteringHandles;
+    use waddle_xmpp::ingress::WireHandledCount;
+    use waddle_xmpp::pending_delivery::SmSessionId;
     let claims = Arc::new(PlanningClaims::new(NodeIdentity::new("local", "epoch")));
     let state =
         crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
@@ -263,7 +259,8 @@ async fn ingress_ownership_lookup_failure_retry_postgres() {
 
 /// RFC 0018 §3: clustered planning requires authoritative recipient inventory.
 async fn full_jid_inventory_plan(remote_unavailable: bool) {
-    use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, ClusteringHandles};
+    use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+    use crate::clustering::ClusteringHandles;
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
     let owner = if remote_unavailable {
         "unavailable-recipient-owner"

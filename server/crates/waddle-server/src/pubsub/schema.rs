@@ -1,3 +1,4 @@
+use crate::db::DatabaseDriver;
 use tracing::{error, info, warn};
 use waddle_xmpp::XmppError;
 
@@ -142,7 +143,7 @@ impl DatabasePubSubStorage {
         // Bug 1 fix: use BIGINT for *_at_ms columns on Postgres (32-bit INTEGER
         // would overflow Unix-millis i64 timestamps ~1.7 trillion). Sqlite uses INTEGER.
         let nodes_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_nodes (
                     owner_jid TEXT NOT NULL,
@@ -161,7 +162,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_nodes (
                     owner_jid TEXT NOT NULL,
@@ -183,7 +184,7 @@ impl DatabasePubSubStorage {
         };
         self.execute(nodes_ddl, ()).await?;
         let notification_settings_projection_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection (
                     owner_bare_jid TEXT NOT NULL,
@@ -199,7 +200,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection (
                     owner_bare_jid TEXT NOT NULL,
@@ -219,7 +220,7 @@ impl DatabasePubSubStorage {
         self.execute(notification_settings_projection_ddl, ())
             .await?;
         let notification_settings_projection_source_version_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection_source_version (
                     id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -227,7 +228,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection_source_version (
                     id BIGINT NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -262,7 +263,7 @@ impl DatabasePubSubStorage {
         // the same migration — the table grows by one row per user
         // and would otherwise force a full scan on every janitor tick.
         let dnd_projection_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection (
                     owner_bare_jid TEXT NOT NULL PRIMARY KEY,
@@ -272,7 +273,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection (
                     owner_bare_jid TEXT NOT NULL PRIMARY KEY,
@@ -297,7 +298,7 @@ impl DatabasePubSubStorage {
         // `pubsub_items` still gets updated, leaving the two stores
         // disagreed. Round-7 Copilot review on PR #759.
         let dnd_projection_source_version_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
                     id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -305,7 +306,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
                     id BIGINT NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -317,7 +318,7 @@ impl DatabasePubSubStorage {
         self.execute(dnd_projection_source_version_ddl, ()).await?;
 
         let items_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_items (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,7 +335,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_items (
                     seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -366,7 +367,7 @@ impl DatabasePubSubStorage {
         .await?;
 
         let subs_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_subscriptions (
                     owner_jid TEXT NOT NULL,
@@ -382,7 +383,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_subscriptions (
                     owner_jid TEXT NOT NULL,
@@ -407,7 +408,7 @@ impl DatabasePubSubStorage {
         .await?;
 
         let affs_ddl = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_affiliations (
                     owner_jid TEXT NOT NULL,
@@ -422,7 +423,7 @@ impl DatabasePubSubStorage {
                 )
                 "#
             }
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_affiliations (
                     owner_jid TEXT NOT NULL,

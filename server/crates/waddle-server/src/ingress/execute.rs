@@ -1,25 +1,34 @@
 //! Bounded post-commit execution. Failures never revise ingress authority.
 
+use crate::clustering::relay::RelayAskError;
+use crate::clustering::relay::RelayHandle;
+use crate::clustering::relay::RelayReplyReceiptToken;
+use crate::clustering::route_bridge::RelayFrameCompletion;
+use crate::clustering::NodeId;
+use crate::ingress_substrate::EffectReceiptKind;
+use crate::ingress_substrate::TerminalizeOutcome;
+use crate::ingress_uow::DispatchReadiness;
+use crate::server::routes::interpret::effects::PlanEffectDependency;
+use crate::server::routes::interpret::effects::SettledRefusal;
+use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError;
 use std::time::Duration;
 
-use waddle_xmpp::{
-    ingress::MessageKey, telemetry::attributes::IngressEffectExecutionPhase, Stanza,
-};
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::telemetry::attributes::IngressEffectExecutionPhase;
+use waddle_xmpp::Stanza;
 
-use crate::{
-    db::Database,
-    ingress_uow::{
-        CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-        IngressUowTransaction,
-    },
-    server::routes::interpret::{
-        effects::{
-            delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, EffectOutcome,
-            ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion, SettledOutcome,
-        },
-        Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
-    },
+use crate::db::Database;
+use crate::ingress_uow::{
+    CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
+    IngressUowTransaction,
 };
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, EffectOutcome, ExternalEffect, ImmediateSink, PlannedEffect, SettledCompletion,
+    SettledOutcome,
+};
+use crate::server::routes::interpret::{Deps, FullJidDeliveryOutcome, SmIngressAppendContext};
 
 use super::decision::{EffectReceiptKey, IngressDecision};
 use crate::ingress::append_authority::AppendAuthority;
@@ -29,7 +38,7 @@ mod dependencies;
 
 pub(super) fn supplies_dependency(
     effect: &ExternalEffect,
-    dependency: &crate::server::routes::interpret::effects::PlanEffectDependency,
+    dependency: &PlanEffectDependency,
 ) -> bool {
     dependencies::produces(effect, dependency)
 }
@@ -62,7 +71,7 @@ pub enum ExecutionPersistenceFailure {
     Storage(#[from] IngressUowError),
     #[cfg(feature = "clustering")]
     #[error("relay frame receipt confirmation failed: {0}")]
-    RelayConfirmation(#[from] crate::clustering::relay::RelayAskError),
+    RelayConfirmation(#[from] RelayAskError),
     #[cfg(feature = "clustering")]
     #[error("relay owner could not persist reply receipts")]
     RelayConfirmationDeclined,
@@ -80,10 +89,10 @@ pub struct RelayFrameReceiptCompletion {
 
 #[cfg(feature = "clustering")]
 enum RelayFrameReceiptTarget {
-    Local(crate::clustering::route_bridge::RelayFrameCompletion),
+    Local(RelayFrameCompletion),
     Remote {
-        owner: crate::clustering::NodeId,
-        token: crate::clustering::relay::RelayReplyReceiptToken,
+        owner: NodeId,
+        token: RelayReplyReceiptToken,
         stop_token: tokio_util::sync::CancellationToken,
     },
 }
@@ -99,7 +108,7 @@ impl std::fmt::Debug for RelayFrameReceiptCompletion {
 
 #[cfg(feature = "clustering")]
 impl RelayFrameReceiptCompletion {
-    pub(crate) fn new(completion: crate::clustering::route_bridge::RelayFrameCompletion) -> Self {
+    pub(crate) fn new(completion: RelayFrameCompletion) -> Self {
         Self {
             receipts: completion.report.frame_receipts(),
             inner: std::sync::Arc::new(tokio::sync::Mutex::new(RelayFrameReceiptTarget::Local(
@@ -109,8 +118,8 @@ impl RelayFrameReceiptCompletion {
     }
 
     pub(crate) fn remote(
-        owner: crate::clustering::NodeId,
-        token: crate::clustering::relay::RelayReplyReceiptToken,
+        owner: NodeId,
+        token: RelayReplyReceiptToken,
         receipts: Vec<waddle_xmpp::stream_management::SmIngressFrameReceipt>,
         stop_token: tokio_util::sync::CancellationToken,
     ) -> Self {
@@ -142,8 +151,7 @@ impl RelayFrameReceiptCompletion {
                 token,
                 stop_token,
             } => {
-                let mut handle =
-                    crate::clustering::relay::RelayHandle::new(owner.clone(), stop_token.clone());
+                let mut handle = RelayHandle::new(owner.clone(), stop_token.clone());
                 if handle.confirm_reply_receipt(*token).await? {
                     Ok(true)
                 } else {
@@ -165,7 +173,7 @@ pub struct FrameObligation {
 #[derive(Debug)]
 pub struct ExecutionReport {
     phase: IngressEffectExecutionPhase,
-    pub refusal: Option<crate::server::routes::interpret::effects::SettledRefusal>,
+    pub refusal: Option<SettledRefusal>,
     pub outcomes: Vec<(ExternalEffect, ExternalOutcome)>,
     pub frame_obligations: Vec<FrameObligation>,
     #[cfg(feature = "clustering")]
@@ -242,9 +250,7 @@ impl ExecutionReport {
         let mut reports: Vec<Self> = Vec::new();
         for receipt in receipts {
             let key = EffectReceiptKey {
-                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
-                    receipt.kind.to_storage(),
-                ),
+                kind: EffectReceiptKind::from_storage(receipt.kind.to_storage()),
                 semantic_identity_hash: receipt.semantic_identity_hash,
             };
             match reports
@@ -565,12 +571,12 @@ pub async fn execute_effects(
                         return outcome;
                     }
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
-                        Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
+                        Ok((DispatchReadiness::Ready, stream)) => stream,
                         Ok((crate::ingress_uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {
                             refusal: None, persisted: Vec::new(), detached: None,
                             completion: if predecessors.is_empty() { SettledCompletion::DeferredPending } else { SettledCompletion::Deferred },
                         }),
-                        Ok((crate::ingress_uow::DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
+                        Ok((DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
                             refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Complete,
                         }),
                         Err(error) => {
@@ -1083,9 +1089,8 @@ fn classify_outcome(
             }
         }
         EffectOutcome::InviteLedger(Ok(outcome)) => {
-            use crate::server::routes::websocket::{
-                handlers::message::muc_invite::InviteLedgerOutcome, muc_invites::RecordOutcome,
-            };
+             use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome;
+             use crate::server::routes::websocket::muc_invites::RecordOutcome;
             match outcome {
                 InviteLedgerOutcome::Recorded(
                     RecordOutcome::New { .. } | RecordOutcome::AlreadyOutstanding,
@@ -1100,7 +1105,7 @@ fn classify_outcome(
             crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError::Storage(_),
         ))
         | EffectOutcome::InviteLedger(Err(
-            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError::Storage,
+            InviteLedgerError::Storage,
         )) => ExternalOutcome::Uncertain,
         EffectOutcome::PlannedInbox(_) | EffectOutcome::MucUserDelivery(Err(_)) => {
             ExternalOutcome::Failed
@@ -1133,9 +1138,8 @@ fn classify_outcome(
 }
 
 fn invite_ledger_noop(outcome: &EffectOutcome) -> bool {
-    use crate::server::routes::websocket::{
-        handlers::message::muc_invite::InviteLedgerOutcome, muc_invites::RecordOutcome,
-    };
+    use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome;
+    use crate::server::routes::websocket::muc_invites::RecordOutcome;
     matches!(
         outcome,
         EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Recorded(
@@ -1206,7 +1210,7 @@ pub(crate) async fn terminalize_if_complete_outcome(
     uow: &IngressUnitOfWork,
     message_key: MessageKey,
     phase: IngressEffectExecutionPhase,
-) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
+) -> Result<Option<TerminalizeOutcome>, IngressUowError> {
     #[cfg(test)]
     if test_hooks::take_terminalization_timeout(message_key) {
         return Err(IngressUowError::Timeout);
@@ -1240,11 +1244,9 @@ async fn terminalize_if_complete_outcome_in_transaction(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
     phase: IngressEffectExecutionPhase,
-) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
+) -> Result<Option<TerminalizeOutcome>, IngressUowError> {
     if !CanonicalMessageRepository::lock(transaction, message_key).await? {
-        return Ok(Some(
-            crate::ingress_substrate::TerminalizeOutcome::MessageVanished,
-        ));
+        return Ok(Some(TerminalizeOutcome::MessageVanished));
     }
     if !EffectReceiptRepository::receipts_complete(transaction, message_key).await? {
         waddle_xmpp::telemetry::reliability::increment_ingress_effect_unresolved(

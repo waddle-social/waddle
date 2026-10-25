@@ -1,4 +1,30 @@
-use super::*;
+use super::{
+    ask_error_proves_remote_resource_ref_stale, deliver_local_full_jid_after_target_refresh_at,
+    deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, owner_remote_entry_if_current,
+    rebind_stanza_sender, remote_resource_route_reply, route_local_bare_jid_with_timeout,
+    stanza_message_id, user_entity, Arc, AtomicBool, BroadcastOutcome, DeliveryKind,
+    FullJidDeliveryOutcome, OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind,
+    OrderedRelayMucProxyOutcome, OrderedRelayNackReason, OrderedRelayRouteOrigin,
+    OrderedRelayRouteOriginKind, OutboundStanza, OutboundWriteAcceptance,
+    RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame, RelayHandle,
+    RelayRemoteResourceFrameReply, RelayRemoteResourceFrameStatus, RelayRemoteResourceUpdateStatus,
+    RelayRemoteResourceWriteAcceptedReply, RelayRemoteResourceWriteAcceptedStatus,
+    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
+    RemoteOwnerRegistration, RemoteResourceOriginSnapshot, RemoteResourceOutboundFrame,
+    RemoteResourceRegistrationId, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
+    RemoteResourceWriteAcceptedOutboundFrame, RemoteStanza, Stanza,
+    ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+};
+#[cfg(test)]
+use crate::clustering::relay::RelayAskError;
+#[cfg(test)]
+use crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES;
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::ingress::DispatchProbeBudget;
+use crate::ingress_uow::DispatchReadiness;
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegisteredRemoteWriteAcceptedDelivery {
@@ -31,7 +57,7 @@ impl OrderedRelayDeliveryBridge {
         target: &jid::FullJid,
         stanza: &Stanza,
         kind: DeliveryKind,
-        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<&SmIngressAppendContext>,
     ) -> Option<FullJidDeliveryOutcome> {
         self.try_deliver_registered_remote_resource_at(
             target,
@@ -48,7 +74,7 @@ impl OrderedRelayDeliveryBridge {
         target: &jid::FullJid,
         stanza: &Stanza,
         kind: DeliveryKind,
-        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<&SmIngressAppendContext>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<FullJidDeliveryOutcome> {
         let registration = {
@@ -69,7 +95,7 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn route_remote_resource_stanza_on_owner(
         self: &Arc<Self>,
         msg: RelayRouteRemoteResourceStanza,
-        completion: &mut Option<crate::ingress::execute::RelayFrameReceiptCompletion>,
+        completion: &mut Option<RelayFrameReceiptCompletion>,
     ) -> RelayRouteRemoteResourceStanzaReply {
         let Some(services) = self.services.get().cloned() else {
             return remote_resource_route_reply(RemoteResourceRouteOutcome::Dropped);
@@ -264,11 +290,8 @@ impl OrderedRelayDeliveryBridge {
                 origin: muc_origin,
                 stanza,
             } => {
-                let admission = crate::ingress::identity::IngressRelayAdmission::from_parts(
-                    canonical,
-                    principal,
-                    stanza_lang,
-                );
+                let admission =
+                    IngressRelayAdmission::from_parts(canonical, principal, stanza_lang);
                 // This path can execute the payload locally WITHOUT the
                 // envelope validation (`envelope_is_consistent` /
                 // `validate_claims`) that the ordered-relay receiver
@@ -311,8 +334,7 @@ impl OrderedRelayDeliveryBridge {
                         .await,
                     )
                 };
-                *completion =
-                    local_completion.map(crate::ingress::execute::RelayFrameReceiptCompletion::new);
+                *completion = local_completion.map(RelayFrameReceiptCompletion::new);
                 match outcome {
                     OrderedRelayMucProxyOutcome::PendingFrames {
                         frames,
@@ -485,7 +507,7 @@ impl OrderedRelayDeliveryBridge {
             }
             if !context.archive_positions.is_empty() {
                 // Retain the captured socket owner across bounded predecessor probes.
-                let probe_budget = crate::ingress::DispatchProbeBudget::default();
+                let probe_budget = DispatchProbeBudget::default();
                 match state
                     .deps
                     .protocol
@@ -498,12 +520,12 @@ impl OrderedRelayDeliveryBridge {
                     )
                     .await
                 {
-                    Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+                    Ok(DispatchReadiness::Completed) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Delivered,
                         };
                     }
-                    Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+                    Ok(DispatchReadiness::Ready) => {}
                     Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Backpressure,
@@ -616,7 +638,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &Stanza,
         kind: DeliveryKind,
         registration: &RemoteOwnerRegistration,
-        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<&SmIngressAppendContext>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<FullJidDeliveryOutcome> {
         // Resolve a relayed claim before it leaves this node (#1790). The
@@ -646,8 +668,8 @@ impl OrderedRelayDeliveryBridge {
         let result = handle.deliver_remote_resource_frame(message).await;
         #[cfg(test)]
         if matches!(&result, Err(RelayAskError::Cancelled)) {
-            let _ = crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES
-                .try_with(|frames| frames.borrow_mut().push(offered));
+            let _ =
+                TEST_CANCELLED_REMOTE_FRAMES.try_with(|frames| frames.borrow_mut().push(offered));
         }
         match result {
             Ok(RelayRemoteResourceFrameReply {
@@ -834,7 +856,7 @@ pub(in super::super) fn remote_resource_frame_at(
     registration_id: RemoteResourceRegistrationId,
     stanza: &Stanza,
     kind: DeliveryKind,
-    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    ingress_append_context: Option<&SmIngressAppendContext>,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> RemoteResourceOutboundFrame {
     RemoteResourceOutboundFrame {
@@ -842,7 +864,7 @@ pub(in super::super) fn remote_resource_frame_at(
         registration_id,
         stanza: RemoteStanza(stanza.clone()),
         kind,
-        ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_remote_message(
+        ingress_append: IngressAppendObligationRef::for_remote_message(
             ingress_append_context,
             stanza,
         ),

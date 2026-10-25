@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    debug, info, Arc, AtomicBool, BareJid, ConnectionRegistry, FullJid, LastActivityState,
+    Ordering, PresenceState,
+};
 use chrono::Utc;
 
 impl ConnectionRegistry {

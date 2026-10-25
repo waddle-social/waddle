@@ -1,6 +1,9 @@
 //! XEP-0357 notification payload building and the Waddle push context.
 
-use super::*;
+use super::{
+    BareJid, Element, Jid, NotificationCandidate, NotificationOutboxError,
+    NotificationOutboxTarget, PushServiceNodeName, NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS,
+};
 
 pub const WADDLE_PUSH_CONTEXT_NS: &str = "urn:waddle:push:context:0";
 pub const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";

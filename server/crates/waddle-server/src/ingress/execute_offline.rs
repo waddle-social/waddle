@@ -1,28 +1,23 @@
 //! Atomic ordinary pending delivery and frozen notification settlement.
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{InsertOutcome, PendingPayload, PendingRow, QuotaPolicy},
+use crate::server::routes::interpret::effects::SettledRefusal;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
+    PendingDeliveryMutation,
 };
+use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, QuotaPolicy};
 
 use crate::ingress::decision::{EffectReceiptKey, IngressDecision};
-use crate::{
-    ingress_uow::{
-        run_with_retry, settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
-        PendingReceiptRepository, RecoveryReceiptRepository,
-    },
-    notification_outbox::NotificationCandidateInsertOutcome,
-    server::routes::interpret::{
-        effects::{
-            delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-            EffectOutcome, SettledCompletion, SettledOutcome,
-        },
-        Deps,
-    },
+use crate::ingress_uow::{
+    run_with_retry, settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
+    EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
+    PendingReceiptRepository, RecoveryReceiptRepository,
 };
+use crate::notification_outbox::NotificationCandidateInsertOutcome;
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PreparedOfflineNotification,
+};
+use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
+use crate::server::routes::interpret::Deps;
 
 #[derive(Debug, thiserror::Error)]
 enum StoreError {
@@ -103,9 +98,7 @@ pub(super) async fn execute(
     match result {
         Ok(StoreOutcome::Settled(settled)) => EffectOutcome::Settled(settled),
         Ok(StoreOutcome::QuotaExceeded(mut settled)) => {
-            settled.refusal = Some(
-                crate::server::routes::interpret::effects::SettledRefusal::OfflineQuotaExceeded,
-            );
+            settled.refusal = Some(SettledRefusal::OfflineQuotaExceeded);
             // The host consumes the typed refusal; its synthetic sender can
             // share a full JID with an unrelated registered client.
             if deps.host_sender.is_none() {

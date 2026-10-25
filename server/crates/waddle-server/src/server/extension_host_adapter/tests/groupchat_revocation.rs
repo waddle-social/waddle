@@ -1,18 +1,14 @@
 //! A refused send still leaves the bot occupancy it used.
-use super::{
-    direct_ingress,
-    groupchat_ingress::{seen, GroupchatFixture, Seen},
-};
-use crate::{
-    ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
-    server::extension_host_adapter::{ExtensionHostAdapter, ExtensionHostAdapterError},
-};
-use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{
-    muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
-    Stanza,
-};
+use super::direct_ingress;
+use super::groupchat_ingress::{seen, GroupchatFixture, Seen};
+use crate::ingress::commit::commit_race_gate::Registration;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use crate::server::extension_host_adapter::{ExtensionHostAdapter, ExtensionHostAdapterError};
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::xep0359::OriginId;
 use xmpp_parsers::presence::Type;
 

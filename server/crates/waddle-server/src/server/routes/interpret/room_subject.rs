@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_message_error_reply, debug, effects, resource_constraint_error, warn, ActorRef, BareJid,
+    Deps, FullJid, GetRoom, GetRoomSnapshot, Message, RoomActor, RoomRegistryActor, SetSubject,
+    Stanza,
+};
 use kameo::error::SendError;
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 use waddle_xmpp::muc::room_actor::SetSubjectError;
@@ -343,6 +347,8 @@ fn retryable_subject_bounce(
 
 #[cfg(test)]
 mod plan_tests {
+    use jid::Jid;
+
     use super::super::effects::room::{ExternalRoomEffect, RoomActorMutation};
     use super::super::effects::{Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy};
     use super::*;

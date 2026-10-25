@@ -10,10 +10,8 @@ use waddle_xmpp::mam::RichMessageId;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
-use crate::db::{
-    actor::{DbActor, DbExecute, DbQuery},
-    row_value, Value, ValueExt,
-};
+use crate::db::actor::{DbActor, DbExecute, DbQuery};
+use crate::db::{row_value, Value, ValueExt};
 use crate::server::routes::websocket::link_preview_telemetry::{
     record_link_preview_event, LinkPreviewTelemetryEvent,
 };
@@ -260,10 +258,8 @@ fn is_cached_preview_filename(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{
-        actor::{DbExecute, DbQueryOne},
-        DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig, ValueExt,
-    };
+    use crate::db::actor::{DbExecute, DbQueryOne};
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig, ValueExt};
     use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
 
     async fn db_pool() -> DatabasePool {

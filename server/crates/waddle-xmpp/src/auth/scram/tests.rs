@@ -1,5 +1,9 @@
-use super::*;
-use parser::decode_sasl_name;
+use super::parser::decode_sasl_name;
+use super::{
+    encode_sasl_name, generate_nonce, generate_salt, generate_scram_keys, hi, hmac_sha256,
+    parse_client_final, parse_client_first, sha256, Engine, ScramServer, ScramState,
+};
+use base64::prelude::BASE64_STANDARD;
 
 fn test_secret() -> String {
     format!("{:x}{:x}", rand::random::<u64>(), rand::random::<u64>())

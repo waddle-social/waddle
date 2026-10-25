@@ -1,23 +1,20 @@
 //! Real extension groupchat sends preserve notification work across Phase C failures.
 use super::groupchat_ingress::GroupchatFixture;
 use super::groupchat_receipts::{intents, key};
-use crate::{
-    db::DatabaseDriver,
-    ingress::{test_support::IngressFixture, RecoverySweepOutcome},
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-    notification_settings_projection::{
-        ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
-    },
-    server::routes::interpret::reconcile_groupchat_notification_recovery,
+use crate::db::DatabaseDriver;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::RecoverySweepOutcome;
+use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+use crate::notification_settings_projection::{
+    ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
 };
-use waddle_xmpp::{
-    inbox::storage::GroupchatNotificationRecovery,
-    ingress::{
-        GroupchatNotificationRecoveryAction, IngressEffectIntent, NotificationActivityMutation,
-        NotificationCandidateOutcome,
-    },
-    xep::NotificationLevel,
+use crate::server::routes::interpret::reconcile_groupchat_notification_recovery;
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecovery;
+use waddle_xmpp::ingress::{
+    GroupchatNotificationRecoveryAction, IngressEffectIntent, NotificationActivityMutation,
+    NotificationCandidateOutcome,
 };
+use waddle_xmpp::xep::NotificationLevel;
 
 async fn policy(fixture: &GroupchatFixture, mode: NotificationLevel) {
     let recipient = "juliet@example.com".parse().expect("recipient");

@@ -14,6 +14,7 @@
 //! so a Waddle client never destroys settings another client wrote
 //! (XEP-0492 §3 first paragraph).
 
+use crate::pep::NS_BOOKMARKS;
 use minidom::Element;
 
 /// XEP-0492 namespace.
@@ -250,14 +251,14 @@ pub fn merge_notify_into_extensions(
     mode: NotifyMode,
     rich_payload_opt_in: bool,
 ) -> Element {
-    let mut builder = Element::builder("extensions", crate::pep::NS_BOOKMARKS);
+    let mut builder = Element::builder("extensions", NS_BOOKMARKS);
     let mut notify_setting_children: Vec<Element> = Vec::new();
 
     if let Some(existing) = extensions {
         for child in existing.children() {
             if child.is("notify", NS_NOTIFICATION_SETTINGS) {
                 gather_notify_settings(child, &mut notify_setting_children);
-            } else if child.ns() == crate::pep::NS_BOOKMARKS {
+            } else if child.ns() == NS_BOOKMARKS {
                 // XEP-0402 XSD `<extensions/>` content is
                 // `<xs:any namespace='##other'>` — drop any
                 // malformed same-namespace child so the republish

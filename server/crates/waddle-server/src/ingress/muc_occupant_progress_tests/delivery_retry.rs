@@ -1,6 +1,18 @@
 //! Live delivery retries preserve ordering and avoid repeated socket writes.
-use super::*;
+use super::{
+    build_interpret_deps, commit_submission, execute, execute_effects, execute_uow, plan_broadcast,
+    recorded, Arc, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput, Duration,
+    EffectReceiptRepository, ExternalOutcome, ImmediateSink, IngressFixture, IngressSubmission,
+    Join, NormalizedTarget,
+};
+use super::{effects, ExternalEffect, IngressEffectIntent};
+use crate::db::DatabaseConfig;
+use crate::db::DatabasePool;
+use crate::db::PoolConfig;
+use crate::ingress::DispatchProbeBudget;
 use crate::server::routes::interpret::effects::Effect;
+use crate::server::routes::websocket::tests as socket_tests;
+use crate::server::routes::websocket::WebSocketState;
 use waddle_xmpp::Stanza;
 
 fn groupchat_submission(
@@ -36,12 +48,10 @@ fn body(outbound: waddle_xmpp::registry::OutboundStanza) -> String {
     message.bodies.values().next().expect("body").clone()
 }
 
-async fn shared_state(
-    fixture: &IngressFixture,
-) -> std::sync::Arc<crate::server::routes::websocket::WebSocketState> {
-    let pool = crate::db::DatabasePool::try_new(
-        crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
-        crate::db::PoolConfig,
+async fn shared_state(fixture: &IngressFixture) -> std::sync::Arc<WebSocketState> {
+    let pool = DatabasePool::try_new(
+        DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
+        PoolConfig,
     )
     .await
     .expect("shared database");
@@ -55,10 +65,8 @@ async fn shared_state(
 #[tokio::test]
 async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_delivery() {
     use crate::ingress::execute_uow::CONTEND_DELIVERY_PROGRESS_ONCE;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     let fixture = IngressFixture::sqlite().await;
     let state = shared_state(&fixture).await;
@@ -424,7 +432,7 @@ async fn sqlite_xep0045_blocked_fanout_shares_probe_budget_and_reaches_ready_new
     let newer = commit_submission(&fixture.uow, &newer, 1)
         .await
         .expect("commit successor");
-    let budget = crate::ingress::DispatchProbeBudget::default();
+    let budget = DispatchProbeBudget::default();
     deps.dispatch_probe_budget = Some(budget.clone());
     let report = execute_effects(
         &fixture.uow,

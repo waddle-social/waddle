@@ -2,7 +2,10 @@
 //! this module and by the top-level `tests/protocol_state_machine.rs`
 //! integration test file.
 
-use super::*;
+use super::{
+    Arc, Blocklist, CarbonsState, ConnectionPhase, HashMap, IdGenerator, KeepaliveConfig,
+    KeepalivePolicy, MucOccupancy, StanzaDispatcher, UuidV4Generator, XmppStateMachine,
+};
 use jid::FullJid;
 /// Construct a machine already in the `Ready` phase, for unit tests that
 /// want to exercise stanza dispatch without going through the full auth

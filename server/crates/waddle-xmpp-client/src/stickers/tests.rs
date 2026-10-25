@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_pack_element, build_pack_publish_iq, build_pack_retract_iq, build_sticker_marker_element,
+    build_sticker_pack_items_iq, build_sticker_packs_items_iq, compute_pack_hash, compute_pack_id,
+    parse_pack_element, parse_sticker_packs_result, BareJid, Element, HashAlgo, PackId, PackRef,
+    PackSticker, StickerDimensions, StickerHash, StickerMarker, StickerPackDoc, StickerText,
+    NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS, NS_URL_DATA, STICKERS_NODE,
+};
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 

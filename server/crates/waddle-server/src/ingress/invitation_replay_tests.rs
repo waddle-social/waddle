@@ -1,26 +1,22 @@
 //! Execute the actual XEP-0045 invitation plan across the ingress boundary.
-use crate::ingress::{
-    commit::commit_submission,
-    effects::{Effect, ExternalEffect, PlanSink},
-    execute::execute_effects,
-    test_support::IngressFixture,
-    ImmediateSink, IngressPlan, IngressStreamIdentity,
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::{Effect, ExternalEffect, PlanSink};
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{ImmediateSink, IngressPlan, IngressStreamIdentity};
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::tests::{
+    create_test_session, create_test_websocket_state, register_test_connection,
 };
-use crate::server::routes::websocket::{
-    interpret_loop::build_interpret_deps,
-    tests::{create_test_session, create_test_websocket_state, register_test_connection},
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, IngressEffectIntent, NormalizedTarget, WireHandledCount,
 };
-use waddle_xmpp::{
-    ingress::{
-        DigestContext, DigestInput, IngressEffectIntent, NormalizedTarget, WireHandledCount,
-    },
-    muc::{
-        room_actor::{ChangeAffiliation, GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
-        room_registry_actor::CreateRoom,
-        RoomConfig,
-    },
-    pending_delivery::SmSessionId,
+use waddle_xmpp::muc::room_actor::{
+    ChangeAffiliation, GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation,
 };
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::RoomConfig;
+use waddle_xmpp::pending_delivery::SmSessionId;
 
 async fn invitation_plan_commit_execute(fixture: IngressFixture) {
     let state =

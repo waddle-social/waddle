@@ -46,3 +46,6 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "time", "sync", "macr
 [profile.release]
 lto = "thin"
 strip = true
+
+[lints.clippy]
+wildcard_imports = "warn"

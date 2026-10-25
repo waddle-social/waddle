@@ -3,6 +3,7 @@
 //! This is scheduling/coalescing state. The canonical first-party XEP-0357
 //! payload still becomes a XEP-0060 PubSub item on the Push Service boundary.
 
+use crate::db::Rows;
 use jid::{BareJid, Jid};
 use minidom::Element;
 use thiserror::Error;
@@ -63,14 +64,16 @@ pub use types::{
     NotificationReason, NotificationThreadId, PushServiceNodeName,
 };
 
-// Internal wiring: children reference sibling items through `use super::*`,
-// which resolves via these module-private glob imports.
-use candidate::*;
-use codec::*;
-use gate::*;
-use payload::*;
-use publish::*;
-use types::*;
+// Internal wiring: children import shared sibling items through this facade.
+use candidate::{
+    require_full_sender_jid, require_full_sender_jid_set, require_sender_matches_conversation,
+    require_sender_set_contains_scalar, require_sender_set_matches_conversation,
+};
+use codec::{decode_candidate, decode_outbox_job, decode_sender_jids, encode_sender_jids};
+use gate::{xep0191_blocks_notification_candidate, xep0191_blocks_notification_job};
+use payload::build_waddle_context;
+use publish::{lock_outbox_ancestry_tx, policy_retry_delay_ms, settle_outbox_if_unowned_tx};
+use types::{STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED};
 
 #[derive(Clone)]
 pub struct NotificationOutboxStore {
@@ -97,7 +100,7 @@ impl NotificationOutboxStore {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, NotificationOutboxError> {
+    ) -> Result<Rows, NotificationOutboxError> {
         let conn = self.db.guard().await?;
         Ok(conn.query(sql, params).await?)
     }

@@ -1,9 +1,22 @@
 //! A supplied ingress key is mandatory authority: rejected claims never deliver.
-use super::*;
-use crate::ingress::{
-    append_authority::canonical_reads, commit::commit_submission,
-    identity::IngressAppendObligationRef, test_support::IngressFixture,
+use super::{
+    envelope_for_services, mpsc, origin_identity, payload_for_recipient, receiver_identity,
+    sender_full, services_with_claims, sign_envelope, target_bare, target_entity, target_full,
+    user_entity, Arc, CancellationToken, ClaimStore, ClusteringMessagingConfig, ConnectionEntry,
+    Entity, EntityType, Keypair, Message, NodeId, NodeIdentity, OrderedRelayClaim,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNackReason,
+    OrderedRelayOrigin, OrderedRelayPayload, OrderedRelayRecipient, OutboundStanza,
+    RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
+    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
+    RemoteDeliverySeed, RemoteOwnerRegistration, RemoteResourceOutboundFrame,
+    RemoteResourceRegistrationId, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
+    RemoteResourceSocketGeneration, RemoteStanza, Stanza, WebSocketState, TEST_CANCELLED_ENVELOPES,
+    TEST_CANCELLED_REMOTE_FRAMES,
 };
+use crate::ingress::append_authority::canonical_reads;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,

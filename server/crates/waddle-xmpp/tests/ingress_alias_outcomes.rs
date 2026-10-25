@@ -1,4 +1,4 @@
-use proptest::prelude::*;
+use proptest::prelude::{any, prop_assert_eq, proptest};
 use uuid::Uuid;
 use waddle_xmpp::ingress::{
     resolve_alias, AliasConflict, AliasOutcome, AliasResolution, MessageKey, SemanticDigest,

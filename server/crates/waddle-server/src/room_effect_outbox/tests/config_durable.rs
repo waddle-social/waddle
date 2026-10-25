@@ -20,7 +20,10 @@ use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp::{Affiliation, Role, Voice};
 
-use super::*;
+use super::{
+    full_jid, initial_revision, lifecycle, origin, producing_node, room_jid, store, BareJid,
+    OccupantVoiceChange, RoomEffectKey, RoomEffectOutboxStore, RoomLifecycleId,
+};
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};
 use crate::server::routes::websocket::tests::{

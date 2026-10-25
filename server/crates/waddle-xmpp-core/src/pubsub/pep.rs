@@ -1,5 +1,6 @@
 //! Shared Personal Eventing Protocol helpers.
 
+use crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
 use jid::BareJid;
 use xmpp_parsers::iq::Iq;
 
@@ -119,7 +120,7 @@ impl PepHandler {
             || node == PEP_NODE_VCARD4
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
-            || node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
+            || node == PEP_NODE_WADDLE_STATUS_PREFERENCE
             || node == "http://jabber.org/protocol/nick"
             || node == "http://jabber.org/protocol/mood"
             || node == "http://jabber.org/protocol/activity"
@@ -135,7 +136,7 @@ impl PepHandler {
             || node == PEP_NODE_MDS_DISPLAYED
             || node == PEP_NODE_WADDLE_DND
             || node == PEP_NODE_WADDLE_DM_BOOKMARKS
-            || node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE
+            || node == PEP_NODE_WADDLE_STATUS_PREFERENCE
         {
             return AccessModel::Whitelist;
         }

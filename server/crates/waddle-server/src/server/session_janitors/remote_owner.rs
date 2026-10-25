@@ -1,6 +1,7 @@
 //! Prompt mirror retirement is independent of the five-minute empty-actor reaper.
 use super::{janitor_sweep_span, Janitor, WebSocketState};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::Instrument;
 
 const REMOTE_OWNER_MIRROR_INTERVAL: Duration = Duration::from_secs(1);

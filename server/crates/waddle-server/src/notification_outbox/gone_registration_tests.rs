@@ -1,10 +1,14 @@
 //! XEP-0357 publish errors retire a gone target without consuming retry budget.
 
-use super::*;
+use super::{
+    BareJid, EffectDescendantRepository, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStore, PushSubscriptionStore, STATUS_FAILED,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{
     candidate, enqueue_jobs_for_test, inbox_with_unread, target_named,
 };
+use crate::notification_outbox::NotificationCandidate;
 use crate::push_registrations::DatabasePushRegistrationStore;
 use crate::push_service::test_support::{fcm_registration, FCM_TEST_APP_ID};
 use crate::push_service::DatabasePushServiceStore;

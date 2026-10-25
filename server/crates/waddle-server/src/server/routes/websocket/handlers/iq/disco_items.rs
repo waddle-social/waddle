@@ -1,5 +1,16 @@
-use super::*;
+use super::{
+    bad_request_iq_error, build_command_items, build_disco_items_response,
+    build_iq_error_xml_typed, command_refs_by_boundary, debug, extension_route_disco_node,
+    get_managed_channel_for_room, get_room_actor, internal_server_error_iq_error, iq_to_xml,
+    item_not_found_iq_error, list_xmpp_channels, muc_occupant_disco, parse_disco_items_query,
+    resolve_muc_room_archive_access, space_details_from_node, spaces_service_bare_jid, warn,
+    Affiliation, BareJid, CheckPermission, CommandBoundary, ConnectionPhase, DbQuery, DbQueryOne,
+    DiscoItem, FullJid, GetSnapshot, IqHandlerContext, Jid, Object, ObjectType, Permission,
+    Relation, RoomArchiveAccess, RsmRequest, RsmResponse, Subject, SubjectType, WebSocketState,
+    XmppChannelRecord, NODE_COMMANDS, PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA,
+};
 use crate::permissions::ListSubjects;
+use std::collections::HashSet;
 use waddle_xmpp::xep::xep0059::{build_rsm_response_element, extract_rsm_request};
 use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
 
@@ -852,7 +863,7 @@ async fn canonical_channel_disco_items(
 /// The catalog-backed room JIDs known to this request, plus whether the
 /// fetch hit its bound (in which case the set may be incomplete).
 struct ChannelBackedRooms {
-    jids: std::collections::HashSet<BareJid>,
+    jids: HashSet<BareJid>,
     truncated: bool,
 }
 
@@ -894,7 +905,7 @@ impl ChannelBackedRooms {
                     .collect(),
             })
             .await;
-        let known: std::collections::HashSet<String> = match rows {
+        let known: HashSet<String> = match rows {
             Ok(rows) => rows
                 .into_iter()
                 .filter_map(|row| match row.into_iter().next() {
@@ -910,7 +921,7 @@ impl ChannelBackedRooms {
                 return;
             }
         };
-        let backed: std::collections::HashSet<&BareJid> = channel_ids
+        let backed: HashSet<&BareJid> = channel_ids
             .iter()
             .filter(|(_, channel_id)| known.contains(channel_id))
             .map(|(room_jid, _)| room_jid)

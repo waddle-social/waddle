@@ -256,7 +256,8 @@ fn recovery_envelope_preserves_push_body_and_hints() {
     use waddle_server::notification_outbox::{
         candidate_from_envelope, GroupchatCandidateIdentity, NotificationThreadId,
     };
-    use waddle_xmpp::xep::{xep0334, xep0421::OccupantIdSecret};
+    use waddle_xmpp::xep::xep0334;
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     let owner = "juliet@example.com".parse().expect("owner");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");

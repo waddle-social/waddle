@@ -1,6 +1,22 @@
 //! Conversion between Rust protocol values and JavaScript-facing result models.
 
-use super::*;
+use super::{
+    discovery, encrypted_file_to_js, messaging, ArchivedMessage, InCallSignal, InboundCallEvent,
+    InboundMessage, InboundPresence, MarkupSpanType, MdsCatchupEntry, MucAffiliation, MucRole,
+    PinEntry, PinEvent, PinEventAction, PinPreview, WaddleArchivedMessage, WaddleCallEvent,
+    WaddleCallMedia, WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonMarker,
+    WaddleEncryptedFileHash, WaddleExtensionEnrichment, WaddleExtensionEnvelope,
+    WaddleExtensionLaunch, WaddleExtensionLaunchContext, WaddleExtensionPayloadAttribute,
+    WaddleExtensionPayloadElement, WaddleExtensionSource, WaddleInCallSignal,
+    WaddleInboxConversation, WaddleInboxResult, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMamPage,
+    WaddleMarkupSpan, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMujiPresence, WaddlePinEntry,
+    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddlePubsubEvent,
+    WaddlePubsubEventItem, WaddlePubsubEventPayload, WaddlePubsubReactionSummary, WaddleReference,
+    WaddleSafetyScoresFastening, WaddleSharedFile, WaddleStanzaId, WaddleUploadHeader,
+    WaddleUploadSlot,
+};
+use crate::state::InboxPage;
 
 pub(crate) fn upload_slot_to_js(slot: discovery::UploadSlot) -> WaddleUploadSlot {
     WaddleUploadSlot {
@@ -559,7 +575,7 @@ pub(crate) fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage
     }
 }
 
-pub(crate) fn inbox_page_to_js(page: crate::state::InboxPage) -> WaddleInboxResult {
+pub(crate) fn inbox_page_to_js(page: InboxPage) -> WaddleInboxResult {
     let conversations = page.entries.into_iter().map(inbox_entry_to_js).collect();
     WaddleInboxResult {
         // `all-unread` is the XEP-0430 server-wide unread sum; mirror it

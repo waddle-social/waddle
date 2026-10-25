@@ -1,4 +1,8 @@
 pub use super::extension_grants::ExtensionGrantRepository;
+use crate::db::Transaction;
+use crate::inbox::InboxTxError;
+use crate::ingress::EffectReceiptKey;
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use jid::BareJid;
@@ -16,14 +20,12 @@ use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, MamTxStoreOutcome};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::xep0359::OriginId;
 
-use crate::{
-    db::{Database, DatabaseDriver},
-    ingress_substrate::{
-        self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
-    },
-    ingress_uow::{IngressUowError, IngressUowTransaction},
-    server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery,
+use crate::db::{Database, DatabaseDriver};
+use crate::ingress_substrate::{
+    self, EffectReceiptKind, MessageEnvelope, MessageWriteOutcome, TerminalizeOutcome,
 };
+use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
+use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
 
 /// Repository for MAM archive rows written inside the ingress transaction.
 #[derive(Debug, Default, Clone, Copy)]
@@ -148,7 +150,7 @@ impl InboxRepository {
             .filter(|thread| !thread.is_empty())
             .map(|thread| {
                 waddle_xmpp_core::mam::ThreadId::try_new(thread.clone())
-                    .ok_or(crate::inbox::InboxTxError::InvalidProjectionThread)
+                    .ok_or(InboxTxError::InvalidProjectionThread)
             })
             .transpose()?;
         let apply = Self::record_projection(
@@ -194,7 +196,7 @@ impl InboxRepository {
                 MessageWriteOutcome::Recorded => true,
                 MessageWriteOutcome::AlreadyRecorded => false,
                 MessageWriteOutcome::MessageVanished => {
-                    return Err(crate::inbox::InboxTxError::ProjectionMessageMissing.into());
+                    return Err(InboxTxError::ProjectionMessageMissing.into());
                 }
             }
         })
@@ -866,7 +868,7 @@ impl EffectReceiptRepository {
     }
 
     pub(crate) async fn receipts_complete_on_transaction(
-        transaction: &mut crate::db::Transaction<'_>,
+        transaction: &mut Transaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, ingress_substrate::IngressSubstrateError> {
         ingress_substrate::receipts_complete(transaction, message_key).await
@@ -878,7 +880,7 @@ impl EffectReceiptRepository {
     pub async fn keys(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
-    ) -> Result<Vec<crate::ingress::EffectReceiptKey>, IngressUowError> {
+    ) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
         let sql = dialect_sql(
             transaction,
             "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid",
@@ -895,7 +897,7 @@ impl EffectReceiptRepository {
             let semantic_identity_hash: [u8; 32] = hash
                 .try_into()
                 .map_err(|_| IngressUowError::InvalidStoredReceiptHash)?;
-            keys.push(crate::ingress::EffectReceiptKey {
+            keys.push(EffectReceiptKey {
                 kind: EffectReceiptKind::from_storage(
                     i32::try_from(kind).map_err(|_| IngressUowError::InvalidStoredReceiptHash)?,
                 ),
@@ -961,7 +963,7 @@ impl EffectIntentRepository {
                 kinds: omissions
                     .iter()
                     .map(|intent| intent.kind())
-                    .collect::<std::collections::BTreeSet<_>>()
+                    .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
             },
@@ -1016,7 +1018,7 @@ impl EffectIntentRepository {
     }
 
     pub(super) async fn reconcile_on_transaction(
-        transaction: &mut crate::db::Transaction<'_>,
+        transaction: &mut Transaction<'_>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
         existing_authority: bool,
@@ -1114,7 +1116,7 @@ fn canonical_effects(
 }
 
 async fn load_effects(
-    transaction: &mut crate::db::Transaction<'_>,
+    transaction: &mut Transaction<'_>,
     message_key: MessageKey,
     postgres: bool,
 ) -> Result<Vec<RecordedEffect>, IngressUowError> {
@@ -1157,7 +1159,7 @@ fn compare_effects<'a>(
     existing_authority: bool,
 ) -> (ReconcileVerdict, Vec<&'a IngressEffectIntent>) {
     let mut omissions = Vec::new();
-    let mut divergent = std::collections::BTreeSet::new();
+    let mut divergent = BTreeSet::new();
     for intent in planned {
         let authority = intent.authority_key();
         let matches = recorded
@@ -1375,7 +1377,7 @@ fn inbox_omission_is_recorded_audience(
 }
 
 async fn insert_effect(
-    transaction: &mut crate::db::Transaction<'_>,
+    transaction: &mut Transaction<'_>,
     message_key: MessageKey,
     ordinal: u64,
     intent: &IngressEffectIntent,

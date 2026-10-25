@@ -1,3 +1,5 @@
+use crate::xep::xep0357::NS_PUSH;
+use crate::XmppError;
 use jid::BareJid;
 
 use crate::pubsub::node::NodeConfig;
@@ -180,18 +182,18 @@ pub enum PublicationError {
     #[error("versioned push publication integrity conflict")]
     IntegrityConflict,
     #[error("versioned push publication storage failure: {0}")]
-    Storage(#[from] crate::XmppError),
+    Storage(#[from] XmppError),
 }
 
 impl PublicationError {
-    pub fn into_xmpp_error(self) -> crate::XmppError {
+    pub fn into_xmpp_error(self) -> XmppError {
         match self {
             Self::Storage(error) => error,
             Self::InvalidPublication => {
-                crate::XmppError::bad_request(Some("invalid versioned push publication".to_owned()))
+                XmppError::bad_request(Some("invalid versioned push publication".to_owned()))
             }
             Self::IntegrityConflict => {
-                crate::XmppError::internal("versioned push publication integrity conflict")
+                XmppError::internal("versioned push publication integrity conflict")
             }
         }
     }
@@ -206,10 +208,7 @@ pub(super) fn validate_push_publication(item: &PubSubItem) -> Result<(), Publica
     let Some(payload) = item.payload.as_ref() else {
         return Err(PublicationError::InvalidPublication);
     };
-    if id.trim().is_empty()
-        || payload.name() != "notification"
-        || payload.ns() != crate::xep::xep0357::NS_PUSH
-    {
+    if id.trim().is_empty() || payload.name() != "notification" || payload.ns() != NS_PUSH {
         return Err(PublicationError::InvalidPublication);
     }
     Ok(())

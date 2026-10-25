@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    invoke_after_commit, subscription, BareJid, ConfiguredRoomObserver, RoomObservationRepository,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,

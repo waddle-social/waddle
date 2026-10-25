@@ -1,14 +1,11 @@
 //! Ordinary offline delivery requires the ingress transaction arm.
-use super::super::*;
-use crate::{
-    notification_outbox::{direct_candidate_from_envelope, NotificationOutboxStore},
-    pending_delivery::DatabasePendingDeliveryStorage,
-    server::routes::websocket::tests as socket_tests,
-};
+use super::super::{execute, Deps, EffectOutcome, ExternalDeliveryEffect};
+use crate::notification_outbox::{direct_candidate_from_envelope, NotificationOutboxStore};
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use crate::server::routes::websocket::tests as socket_tests;
 use std::sync::Arc;
-use waddle_xmpp::pending_delivery::{
-    storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-};
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 
 fn offline_row() -> (PendingRow, xmpp_parsers::message::Message) {
     let recipient: jid::BareJid = format!("immediate-{}@example.com", uuid::Uuid::new_v4())

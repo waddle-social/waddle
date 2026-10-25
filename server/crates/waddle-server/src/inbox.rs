@@ -1,5 +1,10 @@
 //! Database-backed storage for Waddle inbox projections.
 
+use crate::db::DatabaseError;
+use crate::db::Row;
+use crate::db::Rows;
+use crate::db::Transaction;
+use crate::db::Value;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -42,7 +47,7 @@ pub struct DatabaseInboxStorage {
 #[derive(Debug, thiserror::Error)]
 pub enum InboxDecodeError {
     #[error(transparent)]
-    Database(#[from] crate::db::DatabaseError),
+    Database(#[from] DatabaseError),
     #[error("invalid partner JID: {source}")]
     PartnerJid {
         #[source]
@@ -59,7 +64,7 @@ pub enum InboxDecodeError {
 #[derive(Debug, thiserror::Error)]
 pub enum InboxTxError {
     #[error(transparent)]
-    Database(#[from] crate::db::DatabaseError),
+    Database(#[from] DatabaseError),
     #[error(transparent)]
     Decode(#[from] InboxDecodeError),
     #[error("RETURNING produced no row")]
@@ -108,11 +113,7 @@ impl DatabaseInboxStorage {
         Ok(storage)
     }
 
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, InboxStorageError> {
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, InboxStorageError> {
         let conn = self
             .db
             .guard()
@@ -198,12 +199,7 @@ fn upsert_sql() -> String {
 /// Binds the inbox upsert parameters in `upsert_sql` placeholder order.
 /// The four `call_*` Values come from the codec encode helper so typed
 /// metadata serializes to TEXT/INTEGER only here at the SQL boundary.
-fn upsert_params(
-    user: &BareJid,
-    entry: &InboxEntry,
-    increment: i64,
-    is_thread: i64,
-) -> Vec<crate::db::Value> {
+fn upsert_params(user: &BareJid, entry: &InboxEntry, increment: i64, is_thread: i64) -> Vec<Value> {
     let thread_id = entry.thread_id.as_deref().unwrap_or("");
     let [call_thread_kind, call_thread_media, call_ended_at, call_duration] =
         encode_call_thread_columns(entry);
@@ -255,9 +251,7 @@ fn insert_groupchat_notification_recovery_sql() -> &'static str {
     "#
 }
 
-fn groupchat_notification_recovery_params(
-    recovery: &GroupchatNotificationRecovery,
-) -> Vec<crate::db::Value> {
+fn groupchat_notification_recovery_params(recovery: &GroupchatNotificationRecovery) -> Vec<Value> {
     crate::db_params![
         recovery.message_key.to_storage().to_string(),
         recovery.key.recipient.to_string(),
@@ -276,7 +270,7 @@ fn groupchat_notification_recovery_params(
 /// Upsert an inbox entry using the caller's transaction and return the
 /// post-upsert state.
 pub(crate) async fn upsert_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     user: &BareJid,
     entry: InboxEntry,
     increment_unread: bool,
@@ -298,7 +292,7 @@ pub(crate) async fn upsert_in_transaction(
 
 /// Mark a projection read and return its committed push payload.
 pub(crate) async fn mark_read_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
     channel: &BareJid,
     thread: Option<&waddle_xmpp_core::mam::ThreadId>,
@@ -315,7 +309,7 @@ pub(crate) async fn mark_read_in_transaction(
 
 /// Read a projection by its typed identity without changing unread state.
 pub(crate) async fn find_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
     channel: &BareJid,
     thread: Option<&waddle_xmpp_core::mam::ThreadId>,
@@ -332,7 +326,7 @@ pub(crate) async fn find_in_transaction(
 
 /// Read the current projection without replaying unread or reply increments.
 pub(crate) async fn get_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     user: &BareJid,
     entry: &InboxEntry,
 ) -> Result<InboxEntry, InboxTxError> {
@@ -350,7 +344,7 @@ pub(crate) async fn get_in_transaction(
 /// Insert a groupchat notification recovery item using the caller's
 /// transaction.
 pub(crate) async fn insert_groupchat_notification_recovery_in_transaction(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     recovery: GroupchatNotificationRecovery,
 ) -> Result<(), InboxTxError> {
     tx.execute(
@@ -362,7 +356,7 @@ pub(crate) async fn insert_groupchat_notification_recovery_in_transaction(
 }
 
 fn decode_groupchat_notification_recovery(
-    row: &crate::db::Row,
+    row: &Row,
 ) -> Result<GroupchatNotificationRecovery, InboxStorageError> {
     let message_key: String = row
         .get(0)
@@ -592,22 +586,20 @@ impl InboxStorage for DatabaseInboxStorage {
         // Match the version-one typed recovery payload before limiting the page.
         // Codec tag 21 is GroupchatNotificationRecovery (effect_intent.rs).
         let mutation = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 "convert_from(i.payload, 'UTF8')::jsonb -> 'intent' -> 'mutation'"
             }
-            crate::db::DatabaseDriver::Sqlite => {
-                "json_extract(CAST(i.payload AS TEXT), '$.intent.mutation')"
-            }
+            DatabaseDriver::Sqlite => "json_extract(CAST(i.payload AS TEXT), '$.intent.mutation')",
         };
         let field = |name: &str| match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => format!("({mutation}) ->> '{name}'"),
-            crate::db::DatabaseDriver::Sqlite => format!("json_extract({mutation}, '$.{name}')"),
+            DatabaseDriver::Postgres => format!("({mutation}) ->> '{name}'"),
+            DatabaseDriver::Sqlite => format!("json_extract({mutation}, '$.{name}')"),
         };
         let archive = |name: &str| match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 format!("({mutation}) -> 'archive_stanza_id' ->> '{name}'")
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 format!("json_extract({mutation}, '$.archive_stanza_id.{name}')")
             }
         };

@@ -7,6 +7,7 @@
 //! spawn time, then wire the narrow services it needs once
 //! `create_websocket_state` has built the live registries.
 
+use crate::db::Database;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -64,7 +65,8 @@ use crate::config::{
 use crate::server::routes::interpret::{
     FullJidDeliveryOutcome, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
 };
-use crate::server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState};
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::WebSocketState;
 const ORDERED_DELIVERY_MAILBOX_TIMEOUT: Duration = ORDERED_RELAY_MAILBOX_TIMEOUT;
 const ORDERED_DELIVERY_REPLY_TIMEOUT: Duration = ORDERED_RELAY_REPLY_TIMEOUT;
 const ORDERED_RECEIVER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(6);
@@ -94,8 +96,17 @@ pub use reassert::LocalMediaGrantReassertion;
 #[cfg(test)]
 pub(crate) use registration::retry_remote_resource_register_test;
 pub(crate) use registration::RemoteCarbonFanout;
-use registration::*;
-use types::*;
+use registration::{
+    apply_remote_resource_presence_to_registry, apply_remote_resource_state,
+    owner_remote_entry_if_current,
+};
+use types::{
+    caller_delivery_outcome, log_remote_resource_route_outcome, route_outcome_log,
+    route_target_stanza_is_iq, stanza_message_id, PendingRemoteSocketUnregister,
+    PendingRemoteSocketUnregisterKey, PreparedRemoteDelivery, RelayOriginSigner,
+    RemoteDeliveryFuture, RemoteDeliveryOutcome, RemoteDeliverySeed, RemoteOwnerRegistration,
+    RemoteOwnerResources, RemoteResourceOriginRefresh, RemoteSocketRegistration,
+};
 pub use types::{
     RemoteCarbonKind, RemotePresenceShow, RemotePresenceStateSnapshot,
     RemoteResourceOriginSnapshot, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
@@ -184,7 +195,13 @@ pub(crate) async fn track_remote_socket_for_test(
     registration_id
 }
 pub(crate) use types::{RemoteResourceRegisterOutcome, RemoteResourceUnregisterOutcome};
-use validation::*;
+use validation::{
+    ask_error_allows_target_refresh, ask_error_definitively_proves_remote_resource_ref_stale,
+    ask_error_is_owner_lookup_miss, ask_error_is_unseen, ask_error_maybe_committed,
+    ask_error_proves_remote_resource_ref_stale, channel_diversion_for_ask_error,
+    definite_no_effect_outcome, outcome_for_ask_error, outcome_for_nack,
+    replies_for_origin_handoff, validate_claims, NackChannelAction,
+};
 
 #[cfg(test)]
 #[derive(Default)]
@@ -194,7 +211,7 @@ pub(super) struct RemoteOwnerRetirementTestGate {
 }
 
 pub struct OrderedRelayDeliveryServices {
-    pub occupancy_database: crate::db::Database,
+    pub occupancy_database: Database,
     pub claim_store: Arc<dyn ClaimStore>,
     pub allowlist_store: Arc<dyn AllowlistStore>,
     pub node_lease: Arc<dyn NodeLeaseStore>,
@@ -233,7 +250,7 @@ pub struct OrderedRelayDeliveryBridge {
     /// consumes as another repair round before releasing the key — a
     /// failure landing after the final convergence recheck is therefore
     /// never dropped.
-    remote_state_resyncs_in_flight: Mutex<std::collections::HashMap<(jid::FullJid, usize), bool>>,
+    remote_state_resyncs_in_flight: Mutex<HashMap<(jid::FullJid, usize), bool>>,
     #[cfg(test)]
     remote_owner_retirement_test_gate: OnceLock<Arc<RemoteOwnerRetirementTestGate>>,
     stop_token: CancellationToken,
@@ -255,7 +272,7 @@ impl OrderedRelayDeliveryBridge {
             remote_owner_sweep_lock: Mutex::new(()),
             pending_remote_owner_retirements: Mutex::new(HashMap::new()),
             remote_owner_registration_locks: Mutex::new(HashMap::new()),
-            remote_state_resyncs_in_flight: Mutex::new(std::collections::HashMap::new()),
+            remote_state_resyncs_in_flight: Mutex::new(HashMap::new()),
             #[cfg(test)]
             remote_owner_retirement_test_gate: OnceLock::new(),
             stop_token,

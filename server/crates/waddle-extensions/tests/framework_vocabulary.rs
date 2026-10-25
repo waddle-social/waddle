@@ -1,5 +1,14 @@
 use minidom::Element;
-use waddle_extensions::types::*;
+use waddle_extensions::types::{
+    message_has_framework_envelope, ActionBlock, ActionId, ArtifactReference, BodyRange,
+    CommandDescriptor, CommandNode, CommandScope, DisplayText, EnrichmentId, ExtensionCapability,
+    ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionPayload, FrameworkTypeError,
+    LaunchContext, LaunchDescriptor, LaunchId, MediaType, MessageEnrichment, MessageSource,
+    PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
+    PubSubNode, PubSubPublish, StanzaId, TextBlock, TextStyle, Timestamp, UiBlock, UiView,
+    UiViewId, WaddleId, XmlAttribute, XmlElement, XmlNode, FRAMEWORK_NAMESPACE,
+    INVOKE_COMMAND_NODE,
+};
 use xmpp_parsers::message::Message;
 
 const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -1,6 +1,12 @@
 //! Browser discovery of extension routes and retrieval of their PubSub-backed items.
 
-use super::*;
+use super::{
+    build_disco_info_iq, build_disco_items_iq, build_extension_route_items_iq,
+    discover_extension_command_service, discovery, future_to_promise, jid_domain, js_error,
+    parse_extension_route_items_result, parse_extension_routes_from_info, send_iq_command,
+    to_js_value, wasm_bindgen, Jid, JsValue, Promise, WaddleClient, WaddleExtensionRoute,
+    EXTENSION_ROUTE_ITEM_LIMIT,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {

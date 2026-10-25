@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    chat_msg, interpret, jid, Arc, ConnectionRegistry, Deps, ExtensionManager, InboundEvent,
+    OutboundEvent,
+};
 
 #[tokio::test]
 async fn enrichment_request_without_extension_manager_fails_open_with_original_message() {

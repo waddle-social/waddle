@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, DurableEffect, Effect, IngressDecisionClass,
+    IngressEffectIntent, IngressFixture, PlannedEffect, StanzaId,
+};
 use waddle_server::ingress::effects::direct::DurableDirectEffect;
 use waddle_xmpp::ingress::RetractionTombstoneMutation;
 use waddle_xmpp_core::mam::ArchivedTombstone;
@@ -84,10 +87,8 @@ async fn ingress_retraction_tombstone_postgres() {
 async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     use waddle_server::ingress::effects::PlanEffectDependency;
     use waddle_server::ingress_uow::MamArchiveRepository;
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-    };
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
     let archive = fixture.principal.bare_jid().clone();
     let mut retry = archive_plan(
         &fixture,

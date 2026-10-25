@@ -1,4 +1,5 @@
 //! Frozen local projection mutations inside canonical ingress settlement.
+use crate::notification_activity::NotificationActivityStore;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 use super::{IngressUowError, IngressUowTransaction};
@@ -15,10 +16,8 @@ impl ProjectionRepository {
     ) -> Result<(), IngressUowError> {
         let query = match intent {
             IngressEffectIntent::NotificationActivityPreview { owner, mutation } => {
-                crate::notification_activity::NotificationActivityStore::mutation_write(
-                    owner, mutation,
-                )
-                .ok_or(IngressUowError::EffectIntentConflict)?
+                NotificationActivityStore::mutation_write(owner, mutation)
+                    .ok_or(IngressUowError::EffectIntentConflict)?
             }
             IngressEffectIntent::LinkPreviewMediaRef { mutation } => {
                 crate::server::routes::interpret::preview_plan::mutation_write(

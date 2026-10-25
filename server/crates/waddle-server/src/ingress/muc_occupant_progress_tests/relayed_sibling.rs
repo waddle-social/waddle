@@ -1,9 +1,24 @@
-use super::*;
+use super::{
+    build_interpret_deps, commit_submission, execute_effects, execute_uow, local, receipt_key,
+    receipts, recorded, room_canonical, stall, terminalize_if_complete, CancellationToken,
+    CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput, DurableEffect, Duration,
+    EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ImmediateSink,
+    IngressCanonicalRef, IngressEffectIntent, IngressFixture, IngressPlan, IngressStreamIdentity,
+    Join, NormalizedTarget, RoomExecutionPath,
+};
+use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+use crate::clustering::ClusteringHandles;
+use crate::config::ClusteringMessagingConfig;
+use crate::ingress::effects;
+use crate::ingress_uow::CanonicalMessageRepository;
+use crate::server::routes::interpret::effects::Effect;
+use crate::server::routes::interpret::plan_muc_for_relay;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::server::routes::interpret::{effects::Effect, plan_muc_for_relay};
 use crate::server::routes::interpret::{
     ControlledMucRelay, FullJidDeliveryOutcome, OrderedRelayRouteOrigin, CONTROLLED_MUC_RELAY,
 };
+use crate::server::routes::websocket::tests as socket_tests;
+use crate::sm_persistence::DatabaseSmPersistence;
 use std::sync::{Arc, Mutex};
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
@@ -42,23 +57,23 @@ fn guard_plan(plan: &mut effects::IngressPlan, fence: &waddle_xmpp::muc::RoomCla
 
 async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destination) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let claims = Arc::new(InProcessClaimStore::new());
     let state = socket_tests::create_test_websocket_state_with_clustering(
-        crate::clustering::ClusteringHandles {
+        ClusteringHandles {
             claim_store: (destination == Destination::Remote)
                 .then(|| claims.clone() as Arc<dyn ClaimStore>),
             node_identity: (destination == Destination::Remote).then(|| {
                 SharedNodeIdentity::new(NodeIdentity::new("ingress-owner", "ingress-incarnation"))
             }),
             ordered_relay_delivery_bridge: (destination == Destination::Remote).then(|| {
-                crate::clustering::route_bridge::OrderedRelayDeliveryBridge::new(
+                OrderedRelayDeliveryBridge::new(
                     tokio_util::sync::CancellationToken::new(),
-                    &crate::config::ClusteringMessagingConfig::default(),
+                    &ClusteringMessagingConfig::default(),
                 )
             }),
             ..Default::default()
@@ -240,7 +255,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     )
     .await
     .expect("lost dispatch receipt"));
-    let frozen = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let frozen = CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("source")
         .expect("envelope");

@@ -3,24 +3,29 @@ use chrono::{TimeZone, Utc};
 #[cfg(feature = "clustering")]
 use sqlx::Connection;
 use uuid::Uuid;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ingress::{AliasOutcome, AliasResolution, NormalizedTarget};
 use waddle_xmpp::ingress::{
     DeliveryKey, IngressOrdinal, MessageKey, ProtocolEpoch, SemanticDigest, SmIngressId,
     WireHandledCount,
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::{InboxProjectionMutation, IngressEffectIntent};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::mam::{ArchivedMessage, MamTxStoreOutcome};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ownership::{
+    ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity,
+};
 use waddle_xmpp::pending_delivery::SmSessionId;
-#[cfg(feature = "clustering")]
-use waddle_xmpp::{
-    auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{AliasOutcome, AliasResolution, NormalizedTarget},
-    ownership::{ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity},
-};
-#[cfg(feature = "clustering")]
-use waddle_xmpp::{
-    inbox::{storage::GroupchatNotificationRecoveryKey, ConversationKind, InboxEntry},
-    mam::{ArchivedMessage, MamTxStoreOutcome},
-};
 #[cfg(feature = "clustering")]
 use waddle_xmpp_core::xep0359::OriginId;
 #[cfg(feature = "clustering")]
@@ -39,11 +44,9 @@ use super::{
     ClaimRepository, EffectIntentRepository, InboxRepository, IngressUowTransaction,
     MamArchiveRepository, PrincipalAssertion, PrincipalRepository,
 };
+use crate::config::LineageConfig;
+use crate::db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner};
 use crate::ingress_substrate::MessageEnvelope;
-use crate::{
-    config::LineageConfig,
-    db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner},
-};
 
 #[tokio::test]
 async fn sqlite_open_verifies_lineage_and_protocol_epoch() {
@@ -2283,7 +2286,8 @@ async fn recorded_archive_ordinal_conflict_postgres() {
 
 async fn assert_recorded_archive_ordinal_conflict(tx: &mut super::IngressUowTransaction<'_>) {
     use super::{EffectIntentRepository, ReconcileVerdict};
-    use waddle_xmpp::{ingress::IngressEffectIntent, mam::ArchiveOrdinal};
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    use waddle_xmpp::mam::ArchiveOrdinal;
     let key = MessageKey::new();
     CanonicalMessageRepository::record_message(tx, key, &digest(13), None)
         .await

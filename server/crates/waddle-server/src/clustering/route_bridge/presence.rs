@@ -16,7 +16,7 @@
 //! cannot read its own state is not proof of absence, and an eviction is not
 //! reversible.
 
-use super::*;
+use super::OrderedRelayDeliveryBridge;
 
 /// Owner-side answer to a #1803 cross-node resource-presence probe, executed
 /// against THIS node's locally hosted connections and SM store. The relay

@@ -5,30 +5,26 @@
 //! channel discovery, XEP-0503 Spaces-on-PubSub, XEP-0045 room actors,
 //! RFC 6121 roster/presence, XEP-0313 MAM, and the typed message pipeline.
 
+use crate::server::routes::interpret::effects::ImmediateSink;
+use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::ResolvedPrincipal;
 use std::sync::Arc;
 
 use jid::{BareJid, FullJid, Jid};
 use kameo::actor::ActorRef;
-use waddle_extensions::{host_tools::InvocationKind, DisplayText, PluginId, RoomJid, StanzaId};
-use waddle_xmpp::{
-    muc::{
-        room_actor::{GetSnapshot, RoomActor},
-        room_registry_actor::GetRoom,
-    },
-    roster::{RosterItem, Subscription},
-};
+use waddle_extensions::host_tools::InvocationKind;
+use waddle_extensions::{DisplayText, PluginId, RoomJid, StanzaId};
+use waddle_xmpp::muc::room_actor::{GetSnapshot, RoomActor};
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::roster::{RosterItem, Subscription};
 
-use crate::{
-    auth::Session,
-    db::roster::DatabaseRosterStorage,
-    permissions::{CheckPermission, Object, ObjectType, Permission, Subject},
-    server::bootstrap_membership::DEPLOYMENT_SERVER_ID,
-};
+use crate::auth::Session;
+use crate::db::roster::DatabaseRosterStorage;
+use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
+use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 
-use super::routes::{
-    interpret::{self, Deps},
-    websocket::WebSocketState,
-};
+use super::routes::interpret::{self, Deps};
+use super::routes::websocket::WebSocketState;
 
 mod conversions;
 mod direct;
@@ -40,7 +36,7 @@ mod remote_room;
 mod settlement;
 mod types;
 
-use conversions::*;
+use conversions::{envelope_has_cross_room_launch, envelope_has_roomless_launch};
 pub use groupchat::BotRoomLocks;
 #[cfg(feature = "clustering")]
 pub(crate) use remote_room::{
@@ -149,9 +145,8 @@ impl ExtensionHostAdapter {
             dispatch_probe_budget: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
-            delivery_execution_context:
-                crate::server::routes::interpret::DeliveryExecutionContext::Live,
-            effects: &crate::server::routes::interpret::effects::ImmediateSink,
+            delivery_execution_context: DeliveryExecutionContext::Live,
+            effects: &ImmediateSink,
             connection_registry: &self.state.deps.protocol.connection_registry,
             user_registry: Some(&self.state.deps.protocol.user_registry),
             sm_session_registry: Some(&self.state.deps.protocol.sm_session_registry),
@@ -160,9 +155,7 @@ impl ExtensionHostAdapter {
             extension_manager: Some(&self.state.deps.protocol.extension_manager),
             room_registry: Some(&self.state.deps.protocol.room_registry),
             web_socket_state: Some(&self.state),
-            authenticated_principal: session.map(
-                crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
-            ),
+            authenticated_principal: session.map(ResolvedPrincipal::from_authenticated_session),
             local_domain: self.state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&self.state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),

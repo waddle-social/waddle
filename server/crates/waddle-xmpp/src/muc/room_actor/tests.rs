@@ -1,4 +1,40 @@
-use super::*;
+use super::{
+    authorize_ephemeral_projection, mint_room_mutation_commit, AckDepartureOutcome,
+    AckDepartureReceipt, AdminApplyError, Affiliation, AffiliationEntry, AffiliationMutationError,
+    ApplyAdminItems, ApplyAffiliationChange, ApplyPin, BTreeSet, BareJid, BuildGroupchatBroadcast,
+    ChangeAffiliation, ChannelId, ClearMujiPresence, ClearMujiPresenceOutcome, ConfigEffectPlan,
+    Context, DepartureProvenance, DepartureReceipt, DepartureReceiptOutcome, Destroy,
+    DestroyAttemptId, DurableRestoreReadiness, EnforceMembersOnly, EnforceMembersOnlyAffiliations,
+    FullJid, GetActiveMujiSessions, GetAffiliation, GetConfig, GetDurableRestoreReadiness, GetInfo,
+    GetOccupantByJid, GetOccupantByNick, GetOccupantSessionGeneration, GetPinList,
+    GetReplayOccupantSessionGeneration, GetRoomJid, GetRoomSealState, GetRoomSnapshot, GetSnapshot,
+    HashMap, HealthCheck, HydrateDurableRecipients, InCallPresenceState, Infallible, IsDormant,
+    IsOwner, Join, JoinAffiliationGrant, JoinDenialReason, JoinOutcome, JoinWithAffiliation,
+    LeaveAttemptId, LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveOutcome,
+    LeaveSessionSelector, ListAffiliations, ListOccupants, MucOccupantNick, MucRoom, Muji,
+    OccupancyOrder, OccupancyReplayGuardOutcome, OccupancySessionGeneration, OccupancyWatermark,
+    OccupantCount, OccupantVoiceChange, PinStateChange, PingSelfCheck, PinnedEntry,
+    PresenceUpdateData, ProjectionGate, ProjectionProbe, ProjectionRefusal,
+    ReconcileChannelBackedRoom, ResolverAffiliationSyncOutcome, RestoreDurableRoomState,
+    RestoreLiveRoster, Role, RoomActor, RoomActorError, RoomChildRetirementReason, RoomCommitError,
+    RoomConfig, RoomDurableMutation, RoomMutationError, RoomProjection, RoomProjectionKind,
+    RoomSealState, RoomSnapshot, RoomSubjectTexts, RunOccupancyReplayGuarded,
+    RunOccupancyReplayGuardedAsync, RunRoomChildRetirementGuardedAsync,
+    RunSupersededOccupancyGuardedAsync, SealForDestroy, SealGuard, SealIfInactive,
+    SealIfInactiveOutcome, SetSubject, SetSubjectError, SyncResolverAffiliation, UnsealDestroy,
+    UnsealInactive, UpdateConfig, UpdateGroupDmConfigByMember, UpdateGroupDmConfigByMemberError,
+    UpsertInCallState, UpsertMujiPresence, Utc, Voice, WaddleId, MAX_MEMBER_ADMISSION_REVISIONS,
+};
+use super::{
+    AbortMediatedInviteGrantRollback, AcknowledgeAdminProjection,
+    AcknowledgeMediatedInviteOperation, AdminMutationResolution, AuthorizeMediatedInvite,
+    CommitMediatedInviteGrantRollback, DurablePersistError, DurableRestoreState, DurableRoomOrigin,
+    FinalizeMediatedInviteGrant, InviteMembershipGrant, LiveRosterRestoreError,
+    MediatedInviteGrantError, MediatedInviteGrantFinalization,
+    MediatedInviteOperationAcknowledgement, MediatedInviteOperationId, MediatedInviteRollbackAbort,
+    MediatedInviteRollbackCommit, MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
+    PendingAdminProjection, PrepareMediatedInviteGrantRollback,
+};
 
 use crate::muc::admin::AdminItem;
 use crate::xep::xep0421::OccupantIdSecret;
@@ -11030,10 +11066,8 @@ async fn detached_replay_acceptance_serializes_with_rejoin() {
 
 #[tokio::test]
 async fn superseded_replay_guard_requires_strictly_newer_occupancy() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");
@@ -11162,10 +11196,8 @@ async fn superseded_replay_guard_refuses_non_serving_ownership() {
 
 #[tokio::test]
 async fn superseded_replay_settlement_serializes_with_queued_join() {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     let actor = spawn_room_actor().await;
     let alice = test_full_jid("alice");

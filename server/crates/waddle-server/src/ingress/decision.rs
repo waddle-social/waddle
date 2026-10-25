@@ -1,10 +1,9 @@
 //! Committed responsibility and the bounded post-commit work it authorizes.
-use crate::{
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::ReconcileVerdict,
-    server::routes::interpret::effects::{
-        AppliedDurableEffects, ExternalEffect, PlanEffectDependency,
-    },
+use crate::ingress_substrate::EffectReceiptKind;
+use crate::ingress_uow::IngressUowError;
+use crate::ingress_uow::ReconcileVerdict;
+use crate::server::routes::interpret::effects::{
+    AppliedDurableEffects, ExternalEffect, PlanEffectDependency,
 };
 use jid::BareJid;
 use waddle_xmpp::ingress::{IngressOrdinal, MessageKey};
@@ -59,8 +58,7 @@ pub(super) fn assemble_receipts(
     external: &[ExternalEffect],
     intents: &[waddle_xmpp::ingress::IngressEffectIntent],
     route_progress: &[super::recorded::RouteProgress],
-) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress_uow::IngressUowError>
-{
+) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), IngressUowError> {
     let mut external_receipts = super::durable::external_receipts(external, intents)?;
     // A progress-aware arm can own a strict subset of the frozen fanout.
     // Generic receipt mapping deliberately requires full coverage; add only

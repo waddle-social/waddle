@@ -1,28 +1,25 @@
+use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use tracing::warn;
-use waddle_xmpp::{
-    parser::stanza_to_string,
-    protocol::handlers::errors::bad_request_reply,
-    protocol::{frame::InboundFrame, InboundEvent, XmppStateMachine},
-    telemetry::attributes::CallSignalEvent,
-    xep::xep0353::NS_JINGLE_MESSAGE,
-    xep::{has_hint, Hint, NS_DELAY, NS_INBOX, NS_WADDLE_INBOX},
-    Stanza,
-};
+use waddle_xmpp::parser::stanza_to_string;
+use waddle_xmpp::protocol::frame::InboundFrame;
+use waddle_xmpp::protocol::handlers::errors::bad_request_reply;
+use waddle_xmpp::protocol::{InboundEvent, XmppStateMachine};
+use waddle_xmpp::telemetry::attributes::CallSignalEvent;
+use waddle_xmpp::xep::xep0353::NS_JINGLE_MESSAGE;
+use waddle_xmpp::xep::{has_hint, Hint, NS_DELAY, NS_INBOX, NS_WADDLE_INBOX};
+use waddle_xmpp::Stanza;
 
-use super::super::{
-    call_signaling_telemetry::{record_call_signal, CallSignalTarget},
-    interpret_loop::build_interpret_deps,
-    replay::drive_interpret_loop,
-    WebSocketState,
-};
+use super::super::call_signaling_telemetry::{record_call_signal, CallSignalTarget};
+use super::super::interpret_loop::build_interpret_deps;
+use super::super::replay::drive_interpret_loop;
+use super::super::WebSocketState;
 use crate::auth::Session;
-use crate::server::routes::interpret::{
-    effects::{
-        AuthorizationDeniedReason, Effect, ExternalEffect, PlanRejection, PlannedEffect,
-        PolicyDeniedReason, SemanticMalformedReason,
-    },
-    Deps,
+use crate::server::routes::interpret::effects::{
+    AuthorizationDeniedReason, Effect, ExternalEffect, PlanRejection, PlannedEffect,
+    PolicyDeniedReason, SemanticMalformedReason,
 };
+use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::protocol::ConnectionPhase;
 
@@ -72,8 +69,8 @@ pub async fn handle_message(
     phase: &ConnectionPhase,
     state_machine: Option<&mut XmppStateMachine>,
     authenticated_session: Option<&Session>,
-    ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-    ingress_effect_capture: Option<crate::ingress::IngressEffectCapture>,
+    ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
+    ingress_effect_capture: Option<IngressEffectCapture>,
 ) -> Vec<String> {
     let Some(bound_jid) = phase.bound_jid().cloned() else {
         warn!("Message received without authenticated session");

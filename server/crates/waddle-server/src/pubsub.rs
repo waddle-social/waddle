@@ -1,5 +1,6 @@
 //! Database-backed storage for XEP-0060 PubSub and XEP-0163 PEP data.
 
+use crate::db::Row;
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use waddle_xmpp::pubsub::{
@@ -530,14 +531,11 @@ impl PubSubStorage for DatabasePubSubStorage {
     }
 }
 
-fn decode_subscription(row: &crate::db::Row) -> Result<Subscription, XmppError> {
+fn decode_subscription(row: &Row) -> Result<Subscription, XmppError> {
     decode_subscription_offset(row, 0)
 }
 
-fn decode_subscription_offset(
-    row: &crate::db::Row,
-    offset: usize,
-) -> Result<Subscription, XmppError> {
+fn decode_subscription_offset(row: &Row, offset: usize) -> Result<Subscription, XmppError> {
     let subid_raw: String = row
         .get(offset)
         .map_err(|e| XmppError::internal(e.to_string()))?;

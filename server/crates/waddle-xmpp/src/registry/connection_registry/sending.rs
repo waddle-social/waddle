@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    debug, instrument, mpsc, Arc, AtomicBool, BroadcastOutcome, ConnectionEntry,
+    ConnectionRegistry, DashMap, FullJid, OutboundStanza, OutboundWriteAcceptance, PresenceState,
+    SendResult, Stanza,
+};
+use crate::pending_delivery::PendingRowId;
+use crate::pending_delivery::SmSessionId;
 
 /// Capacity reserved for one pending-delivery frame on an exact connection.
 /// Dropping this value returns the capacity without publishing a frame.
@@ -255,7 +261,7 @@ impl ConnectionRegistry {
         &self,
         jid: &FullJid,
         stanza: Stanza,
-        row_id: crate::pending_delivery::PendingRowId,
+        row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
         let sender = match self.connections.get(jid) {
@@ -296,7 +302,7 @@ impl ConnectionRegistry {
         jid: &FullJid,
         owner: &Arc<AtomicBool>,
         stanza: Stanza,
-        row_id: crate::pending_delivery::PendingRowId,
+        row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
         let sender = match self.connections.get(jid) {
@@ -551,7 +557,7 @@ impl ConnectionRegistry {
     fn remove_closed_owner_entry(
         connections: &DashMap<FullJid, ConnectionEntry>,
         presence_states: &DashMap<FullJid, PresenceState>,
-        sm_stream_owners: &DashMap<crate::pending_delivery::SmSessionId, FullJid>,
+        sm_stream_owners: &DashMap<SmSessionId, FullJid>,
         jid: &FullJid,
         sender: &mpsc::Sender<OutboundStanza>,
     ) {

@@ -93,9 +93,9 @@ pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
 pub use types::*;
 
 use convert::{dispatch_event, ends_session};
+use waddle_xmpp_client::messaging::SessionId;
 use waddle_xmpp_client::{
-    messaging::SessionId, AccessToken, ClientConfig, ClientHandle, ConnectionConfig,
-    OAuthBearerConfig, WebSocketConfig,
+    AccessToken, ClientConfig, ClientHandle, ConnectionConfig, OAuthBearerConfig, WebSocketConfig,
 };
 use waddle_xmpp_client::{ClientResource, XmppClient};
 

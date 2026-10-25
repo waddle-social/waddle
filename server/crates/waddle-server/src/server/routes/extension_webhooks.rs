@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::{
-    body::Bytes,
-    extract::{Extension, Path},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
+use axum::body::Bytes;
+use axum::extract::{Extension, Path};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::{Json, Router};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,7 +17,8 @@ use waddle_extensions::{
     ProviderPayload, ProviderWebhook, WaddleId,
 };
 
-use crate::{db::actor::DbExecute, db_params};
+use crate::db::actor::DbExecute;
+use crate::db_params;
 
 use super::super::extension_commands::pubsub::publish_extension_pubsub;
 use super::websocket::WebSocketState;

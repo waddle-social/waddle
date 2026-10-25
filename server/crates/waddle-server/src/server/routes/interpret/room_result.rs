@@ -1,10 +1,13 @@
 //! Saved extension output is admitted as a room-authored XMPP message.
 use super::effects::{EffectSink, PlanSink};
-use super::*;
-use crate::{
-    ingress::{IngressPrincipal, IngressStreamIdentity, IngressSubmission},
-    ingress_uow::RoomPublication,
+use super::{
+    Deps, Element, HostOwnedResources, IngressEffectIntent, Message, OrderedRelayRouteOrigin,
+    XmppMessageType,
 };
+use crate::ingress::IngressEffectCapture;
+use crate::ingress::{IngressPrincipal, IngressStreamIdentity, IngressSubmission};
+use crate::ingress_uow::RoomPublication;
+use crate::room_observation::ObservationRuntimeError;
 use minidom::rxml::{xml_ncname, Namespace};
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, TransportGeneration};
 use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
@@ -12,7 +15,7 @@ use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
 pub(crate) async fn plan_room_result(
     deps: &Deps<'_>,
     publication: RoomPublication,
-) -> Result<IngressSubmission, crate::room_observation::ObservationRuntimeError> {
+) -> Result<IngressSubmission, ObservationRuntimeError> {
     use crate::room_observation::ObservationRuntimeError;
     let room = publication.source.room.clone();
     let sender = room
@@ -70,7 +73,7 @@ pub(crate) async fn plan_room_result(
     )
     .map_err(|_| ObservationRuntimeError::InvalidResult)?;
     let sink = PlanSink::new();
-    let capture = crate::ingress::IngressEffectCapture::new();
+    let capture = IngressEffectCapture::new();
     sink.observe_sender(&sender);
     sink.observe_message(&message);
     let mut planned = super::message_plan::build_plan_deps(deps, &sink)

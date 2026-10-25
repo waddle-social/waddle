@@ -1,14 +1,12 @@
 //! Apply typed direct effects against the production handles.
 use super::super::Deps;
-use super::{
-    direct::{DurableDirectEffect, ExternalDirectEffect},
-    EffectOutcome,
-};
+use super::direct::{DurableDirectEffect, ExternalDirectEffect};
+use super::EffectOutcome;
+use crate::notification_activity::NotificationChatState;
+use crate::server::routes::websocket::ActiveCallThread;
 use tracing::warn;
-use waddle_xmpp::{
-    inbox::{ConversationKind, InboxEntry},
-    ingress::{InboxProjectionMutation, NotificationActivityMutation},
-};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::{InboxProjectionMutation, NotificationActivityMutation};
 
 pub(super) async fn execute_durable(effect: DurableDirectEffect, deps: &Deps<'_>) -> EffectOutcome {
     match effect {
@@ -187,7 +185,7 @@ pub(super) async fn execute_external(
                 Some(active) => {
                     protocol.dm_call_threads.insert(
                         state.key.clone(),
-                        crate::server::routes::websocket::ActiveCallThread {
+                        ActiveCallThread {
                             anchor_origin_id: active
                                 .anchor
                                 .map(|anchor| anchor.id)
@@ -242,7 +240,7 @@ async fn notification_activity(
                 .record_chat_state(
                     owner,
                     &conversation,
-                    crate::notification_activity::NotificationChatState::from_xep0085(state),
+                    NotificationChatState::from_xep0085(state),
                     committed_at_ms,
                 )
                 .await

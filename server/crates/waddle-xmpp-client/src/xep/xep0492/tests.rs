@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_dm_bookmark_element, build_fetch_dm_bookmarks_iq, build_publish_dm_bookmark_iq,
+    build_retract_dm_bookmark_iq, dm_notify_is_default, merge_notify, merge_notify_into_extensions,
+    read_dm_bookmark_notify, read_fallback_mode, read_rich_payload_opt_in, surface_bookmark_notify,
+    surface_dm_notify, ConversationKind, NotifyMode, DM_BOOKMARK_MAX_ITEMS,
+    NS_NOTIFICATION_SETTINGS, NS_PUSH_RICH_PAYLOAD, NS_WADDLE_DM_BOOKMARKS,
+};
 use crate::pep::NS_PUBSUB;
 use jid::BareJid;
 use minidom::Element;

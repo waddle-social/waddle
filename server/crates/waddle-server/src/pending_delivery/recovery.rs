@@ -7,7 +7,10 @@
 //! already marked offered remain excluded even without an SM sequence: the
 //! crash window between offer reservation and SM custody requires stronger
 //! recovery evidence and is intentionally not resolved by this scanner.
-use super::*;
+use super::{
+    warn, Arc, BareJid, ConnectionRegistry, FlushContext, FlushOutcome, FullJid,
+    MamArchiveResolver, PendingRowId, SmSessionId,
+};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 
@@ -242,6 +245,9 @@ impl PendingRecovery {
 
 #[cfg(test)]
 mod tests {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
+
     use super::*;
     use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
     use waddle_xmpp::registry::OutboundStanza;

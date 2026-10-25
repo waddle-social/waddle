@@ -1,7 +1,22 @@
 //! T1 candidate drain: gate evaluation per candidate, coalescing insert
 //! and merge of outbox jobs, and typed suppression audit writes.
 
-use super::*;
+use super::{
+    active_mention_ttl_ms_from_env, build_waddle_context, decode_candidate, decode_sender_jids,
+    encode_sender_jids, evaluate_push_gate_at_dispatch, lock_outbox_ancestry_tx,
+    policy_retry_delay_ms, require_full_sender_jid, require_full_sender_jid_set,
+    require_sender_matches_conversation, require_sender_set_contains_scalar,
+    require_sender_set_matches_conversation, settle_outbox_if_unowned_tx, target_from_subscription,
+    xep0191_blocks_notification_candidate, BareJid, BlockingStorage, DndState, Element,
+    NotificationActivity, NotificationCandidate, NotificationDrainDeps, NotificationOutboxError,
+    NotificationOutboxJobId, NotificationOutboxStore, NotificationOutboxTarget, PushEvalCaches,
+    PushEvalDeps, PushEvalStage, PushSubscriptionStore, RichSummary, RoomPolicyCacheEntry, Row,
+    SuppressedReason, T1PushDispatchOutcome, STATUS_FAILED, STATUS_QUEUED,
+};
+use crate::db::Transaction;
+use crate::ingress_uow::EffectDescendantRepository;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use std::collections::BTreeMap;
 
 /// Maximum T1 policy-deferral attempts before a candidate is
 /// terminally suppressed. The bound is deliberately generous:
@@ -16,7 +31,7 @@ impl NotificationOutboxStore {
         &self,
         push_store: &dyn PushSubscriptionStore,
         blocking_storage: &dyn BlockingStorage,
-        settings_projection: &crate::notification_settings_projection::NotificationSettingsProjectionStore,
+        settings_projection: &NotificationSettingsProjectionStore,
         deps: NotificationDrainDeps<'_>,
         first_party_service_jid: &BareJid,
         batch_size: usize,
@@ -27,13 +42,11 @@ impl NotificationOutboxStore {
             activity_reader,
         } = deps;
         let candidates = self.pending_candidates(batch_size).await?;
-        let mut target_cache =
-            std::collections::BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
-        let mut room_policy_cache =
-            std::collections::BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
-        let mut dnd_cache = std::collections::BTreeMap::<BareJid, DndState>::new();
+        let mut target_cache = BTreeMap::<BareJid, Vec<NotificationOutboxTarget>>::new();
+        let mut room_policy_cache = BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
+        let mut dnd_cache = BTreeMap::<BareJid, DndState>::new();
         let mut activity_cache =
-            std::collections::BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
+            BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
         let active_mention_ttl_ms = active_mention_ttl_ms_from_env();
         let mut processed = 0usize;
         for candidate in candidates {
@@ -403,8 +416,7 @@ impl NotificationOutboxStore {
             .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
         let mut tx = self.db.begin_immediate().await?;
         if let Some(id) = id {
-            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id)
-                .await?;
+            EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id).await?;
         }
         let changed = tx
             .execute(
@@ -433,12 +445,7 @@ impl NotificationOutboxStore {
             .await?;
         if changed > 0 {
             if let Some(id) = id {
-                crate::ingress_uow::EffectDescendantRepository::settle_all_raw(
-                    &mut tx,
-                    id,
-                    chrono::Utc::now(),
-                )
-                .await?;
+                EffectDescendantRepository::settle_all_raw(&mut tx, id, chrono::Utc::now()).await?;
             }
         }
         tx.commit().await?;
@@ -447,7 +454,7 @@ impl NotificationOutboxStore {
 }
 
 pub(super) async fn enqueue_outbox_job_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context: &Element,
@@ -475,7 +482,7 @@ pub(super) async fn enqueue_outbox_job_tx(
 }
 
 pub(super) async fn insert_outbox_job_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
@@ -548,7 +555,7 @@ pub(super) enum OutboxMergeOutcome {
 }
 
 pub(super) async fn merge_outbox_job_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     target: &NotificationOutboxTarget,
     context_xml: &str,
@@ -677,7 +684,7 @@ pub(super) async fn merge_outbox_job_tx(
 }
 
 pub(super) async fn mark_malformed_outbox_job_failed_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
     error: &str,
     now_ms: i64,
@@ -713,7 +720,7 @@ pub(super) async fn mark_malformed_outbox_job_failed_tx(
 }
 
 pub(super) async fn mark_candidate_outboxed_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     now_ms: i64,
 ) -> Result<u64, NotificationOutboxError> {
@@ -752,7 +759,7 @@ pub(super) async fn mark_candidate_outboxed_tx(
 /// `suppressed_reason` column persists for the row's lifetime in the
 /// outboxed-prune retention window.
 pub(super) async fn record_candidate_suppressed_reason_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     reason: SuppressedReason,
 ) -> Result<u64, NotificationOutboxError> {
@@ -831,7 +838,7 @@ pub(super) async fn resolve_first_party_targets(
 }
 
 async fn candidate_delivery_id_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
 ) -> Result<Option<uuid::Uuid>, NotificationOutboxError> {
     match candidate.delivery_id {
@@ -843,24 +850,24 @@ async fn candidate_delivery_id_tx(
 }
 
 async fn lock_candidate_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
 ) -> Result<(), NotificationOutboxError> {
     if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {
-        crate::ingress_uow::EffectDescendantRepository::lock_all_raw(tx, id).await?;
+        EffectDescendantRepository::lock_all_raw(tx, id).await?;
     }
     Ok(())
 }
 
 async fn copy_candidate_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     if let Some(source) = candidate_delivery_id_tx(tx, candidate).await? {
         let target = uuid::Uuid::parse_str(job_id)
             .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
-        crate::ingress_uow::EffectDescendantRepository::copy_raw(tx, source, target).await?;
+        EffectDescendantRepository::copy_raw(tx, source, target).await?;
         tx.execute("INSERT INTO notification_outbox_lineage (candidate_delivery_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
             crate::db_params![source.to_string(), target.to_string()]).await?;
     }
@@ -868,12 +875,11 @@ async fn copy_candidate_ancestry_tx(
 }
 
 async fn settle_candidate_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     candidate: &NotificationCandidate,
 ) -> Result<(), NotificationOutboxError> {
     if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {
-        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
-            .await?;
+        EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
     }
     Ok(())
 }

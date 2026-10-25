@@ -1,6 +1,9 @@
 //! Construction of real fixture actors with deterministic observation controls.
 
-use super::*;
+use super::{
+    Arc, ExtensionCapability, ExtensionManager, HashSet, LoadedExtension, Path, WasmExtensionActor,
+    WasmRuntime,
+};
 use crate::observer_test_support::ObserverTestPlugin;
 
 impl ExtensionManager {
@@ -40,6 +43,8 @@ impl ExtensionManager {
 mod tests {
     use super::*;
     use crate::observer_test_support::ObserverTestBehavior;
+    use crate::types::{ExtensionEffect, PluginId, WaddleId};
+    use xmpp_parsers::message::Message;
 
     fn message() -> Message {
         let mut message = Message::new(Some("room@muc.example.com".parse().expect("room")));

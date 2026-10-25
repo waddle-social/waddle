@@ -10,7 +10,8 @@
 //!
 //! [TURN REST credential]: https://datatracker.ietf.org/doc/html/draft-uberti-behave-turn-rest-00
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;

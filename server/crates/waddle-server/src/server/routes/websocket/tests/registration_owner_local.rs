@@ -1,18 +1,21 @@
-use super::super::super::{
-    connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority},
-    outbound::{handle_outbound_stanza, OutboundAuthority},
-    send::InterruptibleSink,
-    timers::TransportTimers,
+use super::super::super::connection::{
+    finish_connection, ConnectionShutdownChannels, FrameAuthority,
 };
-use super::*;
-use crate::clustering::{
-    relay::RelayRemoteResourceRegistrationStatus,
-    route_bridge::{
-        remote_registration_request, remote_registration_request_from_entry, wire_for_test,
-        OrderedRelayDeliveryBridge,
-    },
-    NodeId,
+use super::super::super::outbound::{handle_outbound_stanza, OutboundAuthority};
+use super::super::super::send::InterruptibleSink;
+use super::super::super::timers::TransportTimers;
+use super::{
+    bind_fresh_test_connection, create_test_session, create_test_websocket_state, element_to_xml,
+    finish_test_socket_cleanup, handle_xmpp_frame, mpsc, publish_stream_id_and_presence, Arc,
+    ConnectionPhase, Element, FullJid, OutboundStanza, RegistrationAfterFrame, Stanza, WsConnState,
+    SM_NS,
 };
+use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
+use crate::clustering::route_bridge::{
+    remote_registration_request, remote_registration_request_from_entry, wire_for_test,
+    OrderedRelayDeliveryBridge,
+};
+use crate::clustering::NodeId;
 use tokio::time::{timeout, Duration};
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,

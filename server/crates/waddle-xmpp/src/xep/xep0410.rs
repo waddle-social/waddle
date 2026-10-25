@@ -40,7 +40,8 @@
 //! `http://jabber.org/protocol/muc#self-ping-optimization` in disco#info
 //! to indicate support for the optimized self-ping flow.
 
-use xmpp_parsers::{iq::Iq, stanza_error::DefinedCondition};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 /// Feature string for XEP-0410 MUC Self-Ping optimization.
 pub const FEATURE_MUC_SELFPING: &str = "http://jabber.org/protocol/muc#self-ping-optimization";

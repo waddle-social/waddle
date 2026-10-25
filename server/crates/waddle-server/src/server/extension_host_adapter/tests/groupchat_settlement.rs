@@ -1,5 +1,6 @@
 //! Committed conflicts retain acceptance while host frame settlement is pending.
-use super::{groupchat_ingress::GroupchatFixture, host_boundary};
+use super::groupchat_ingress::GroupchatFixture;
+use super::host_boundary;
 use crate::ingress::test_support::IngressFixture;
 use std::time::Duration;
 

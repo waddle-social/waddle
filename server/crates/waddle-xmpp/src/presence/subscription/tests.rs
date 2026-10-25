@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_available_presence, build_subscription_presence, parse_subscription_presence, AskType,
+    BareJid, PendingSubscription, Presence, PresenceAction, RosterItem, Subscription,
+    SubscriptionStateMachine, SubscriptionType,
+};
 use jid::Jid;
 use xmpp_parsers::presence::Type as PresenceType;
 

@@ -4,8 +4,15 @@
 //! both drains and the session store are the real ones.
 
 use super::super::cleanup::{cleanup_connection_shutdown, ConnectionShutdownOutcome};
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    create_test_session, create_test_websocket_state_with_extension_manager,
+    empty_extension_manager, mpsc, replay, stanza_to_xml, Arc, Blocklist, ConnectionPhase,
+    DatabaseConfig, DatabasePool, FullJid, InMemorySmSessionRegistry, OutboundStanza, PoolConfig,
+    Stanza, TestStateOverrides, WebSocketState, WsConnState,
+};
+use super::{outbound, timers, Message, StreamManagementState};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey};
 use waddle_xmpp::stream_management::{
     SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, SmRelayedAppendObligation,

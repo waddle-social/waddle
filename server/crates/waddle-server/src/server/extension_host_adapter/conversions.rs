@@ -1,13 +1,13 @@
 use jid::{BareJid, Jid};
 use tracing::warn;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
-use waddle_xmpp::{
-    mam::ArchivedMessage as MamArchivedMessage,
-    roster::{AskType, RosterItem, Subscription},
-};
-use xmpp_parsers::{presence::Show, stanza_error::ErrorType};
+use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
+use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
+use xmpp_parsers::presence::Show;
+use xmpp_parsers::stanza_error::ErrorType;
 
-use crate::ingress::{nested::NestedRefusal, IngressDecisionClass};
+use crate::ingress::nested::NestedRefusal;
+use crate::ingress::IngressDecisionClass;
 
 use super::{
     ExtensionHostAdapterError, HostMucAffiliation, HostMucRole, HostPresenceShow, HostRosterAsk,

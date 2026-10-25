@@ -1,7 +1,6 @@
 //! The original room reflection owns delivery authority independent of occupant fanout.
-use crate::server::routes::interpret::effects::{
-    delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
-};
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{Effect, ExternalEffect, IngressPlan};
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 /// Freeze the original reflection before reconciliation. A sibling retransmission
@@ -120,10 +119,8 @@ pub(super) fn bind(plan: &mut IngressPlan) {
 mod tests {
     use super::*;
     use crate::server::routes::interpret::effects::{PlannedEffect, RoomExecutionPath};
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, EntityGeneration},
-        Stanza,
-    };
+    use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration};
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::message::{Message, MessageType};
 
     fn room_intent(reflection: &str) -> IngressEffectIntent {

@@ -10,10 +10,8 @@ use jid::BareJid;
 use kameo::actor::ActorRef;
 use std::sync::Arc;
 use tracing::{info, warn};
-use waddle_xmpp::muc::{
-    room_registry_actor::{GetOrCreateRoom, RoomRegistryActor},
-    RoomConfig,
-};
+use waddle_xmpp::muc::room_registry_actor::{GetOrCreateRoom, RoomRegistryActor};
+use waddle_xmpp::muc::RoomConfig;
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
 
 struct ManagedChannelSeed {

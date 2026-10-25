@@ -1,16 +1,15 @@
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-    IngressStreamIdentity,
-};
+use super::{plan_message_dispatch, Deps, XmppStateMachine};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::IngressStreamIdentity;
 use crate::ingress_uow::SmIngressStreamRepository;
-use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{
-    ingress::WireHandledCount,
-    mam::{MamStorage, SqlxMamStorage},
-    pending_delivery::SmSessionId,
-    registry::ConnectionRegistry,
-};
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::ingress::WireHandledCount;
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn foreign_error_survives_exact_replay(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();

@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::ObjectExt;
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::glib;
 
 use super::WaddleWindow;

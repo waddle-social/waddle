@@ -1,7 +1,16 @@
-use super::*;
+use super::{
+    close_call_setup_from_outcome, debug, deliver_peer_to_live_only, interpret_with_depth, routing,
+    run_fanout_recipient_pass, run_headless_recipient_pass, warn, BareJid, DefinedCondition, Deps,
+    ErrorType, FanoutPassResult, FullJid, FullJidDeliveryOutcome, Jid, OutboundEvent, Stanza,
+    StanzaError, XmppMessageType, MAX_RECIPIENT_PASS_DEPTH,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress_uow::DispatchReadiness;
+use std::collections::HashSet;
 #[path = "route_to_connection_plan.rs"]
 pub(super) mod plan;
-use std::{future::Future, pin::Pin};
+use std::future::Future;
+use std::pin::Pin;
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
 use xmpp_parsers::iq::Iq;
@@ -86,7 +95,7 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
     if all_connected.is_empty() {
         return all_connected;
     }
-    let negative: std::collections::HashSet<jid::FullJid> =
+    let negative: HashSet<jid::FullJid> =
         waddle_xmpp::registry::available_resources_for_user(user_registry, bare)
             .await
             .into_iter()
@@ -617,7 +626,7 @@ async fn route_dm_to_full_jid(
                     let outcomes = queue_processed_for_detached(
                         deps,
                         vec![full.clone()],
-                        &std::collections::HashSet::new(),
+                        &HashSet::new(),
                         &processed,
                     )
                     .await;
@@ -663,7 +672,7 @@ async fn route_dm_to_full_jid(
                 let outcomes = queue_processed_for_detached(
                     deps,
                     vec![full],
-                    &std::collections::HashSet::new(),
+                    &HashSet::new(),
                     stanza.as_ref(),
                 )
                 .await;
@@ -787,8 +796,7 @@ async fn route_to_bare_jid(
             // list — avoids re-querying the registry
             // per detached resource (Copilot review on
             // PR #276).
-            let live_set: std::collections::HashSet<jid::FullJid> =
-                live_targets.iter().cloned().collect();
+            let live_set: HashSet<jid::FullJid> = live_targets.iter().cloned().collect();
 
             // XEP-0191 fail-closed marker for the legacy raw detached
             // queueing below: set when the shared pass was skipped
@@ -1413,11 +1421,9 @@ pub(crate) async fn deliver_direct_to_full_locally(
         return FullJidDeliveryOutcome::Unavailable;
     }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
-    outbound.ingress_append = crate::ingress::identity::IngressAppendObligationRef::for_message(
-        deps.ingress_append_context.as_ref(),
-        stanza,
-    )
-    .map(|obligation| obligation.into_relayed_for(target.clone()));
+    outbound.ingress_append =
+        IngressAppendObligationRef::for_message(deps.ingress_append_context.as_ref(), stanza)
+            .map(|obligation| obligation.into_relayed_for(target.clone()));
     match deps
         .connection_registry
         .try_send_outbound_to_locally_hosted(target, outbound)
@@ -1505,20 +1511,19 @@ pub(crate) async fn deliver_ordered_local_copy(
             (None, None) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
         };
         match readiness {
-            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            Ok(DispatchReadiness::Completed) => {
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
             Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                 return Some(FullJidDeliveryOutcome::MaybeCommitted);
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+            Ok(DispatchReadiness::Ready) => {}
         }
     }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
     outbound.kind = kind;
-    outbound.ingress_append =
-        crate::ingress::identity::IngressAppendObligationRef::for_message(Some(context), stanza)
-            .map(|obligation| obligation.into_relayed_for(target.clone()));
+    outbound.ingress_append = IngressAppendObligationRef::for_message(Some(context), stanza)
+        .map(|obligation| obligation.into_relayed_for(target.clone()));
     let socket_enqueue = deps.connection_registry.capture_owned_enqueue_if_owner(
         target.clone(),
         entry.carbons_enabled.clone(),
@@ -1831,7 +1836,7 @@ fn partition_detached_outcomes(
 pub(crate) async fn queue_processed_for_detached(
     deps: &Deps<'_>,
     detached_targets: Vec<jid::FullJid>,
-    live_set: &std::collections::HashSet<jid::FullJid>,
+    live_set: &HashSet<jid::FullJid>,
     stanza: &Stanza,
 ) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
     queue_processed_for_detached_at(deps, detached_targets, live_set, stanza, None).await
@@ -1840,7 +1845,7 @@ pub(crate) async fn queue_processed_for_detached(
 pub(crate) async fn queue_processed_for_detached_at(
     deps: &Deps<'_>,
     detached_targets: Vec<jid::FullJid>,
-    live_set: &std::collections::HashSet<jid::FullJid>,
+    live_set: &HashSet<jid::FullJid>,
     stanza: &Stanza,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {

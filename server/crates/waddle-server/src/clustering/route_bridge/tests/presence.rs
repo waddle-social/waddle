@@ -1,5 +1,11 @@
 //! #1803 receiver side: every node answers for its OWN sockets and sessions.
-use super::*;
+use super::{
+    mpsc, origin_identity, reassert, receiver_identity, remote_registration_request,
+    services_with_claims, target_full, test_peer_id, Arc, CancellationToken,
+    ClusteringMessagingConfig, Duration, InMemorySmSessionRegistry, LocalResourcePresence, NodeId,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OutboundStanza,
+    RelayRemoteResourceRegistrationStatus,
+};
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
 
 /// Install `jid` in BOTH the connection registry and the actor tree, exactly

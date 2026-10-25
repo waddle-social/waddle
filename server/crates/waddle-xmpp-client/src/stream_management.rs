@@ -1,10 +1,13 @@
 //! XEP-0198 counters, acknowledgements, resumable sessions, and outbound replay.
 
+use crate::messaging::MessageRejection;
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use minidom::Element;
-use xmpp_parsers::{iq::Iq, message::Message, presence::Presence};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::presence::Presence;
 
 use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
@@ -696,11 +699,7 @@ impl SmState {
     /// Keep a rejected stanza's SM ordinal until it is acknowledged, but do
     /// not resend it on a fresh stream or report subsequent acknowledgement
     /// as delivery. Only a matching outbound recipient can set this flag.
-    pub(crate) fn reject_message(
-        &mut self,
-        rejection: &crate::messaging::MessageRejection,
-        account: &jid::BareJid,
-    ) {
+    pub(crate) fn reject_message(&mut self, rejection: &MessageRejection, account: &jid::BareJid) {
         for queued in &mut self.outbound_queue {
             if rejection.matches_outbound(&queued.stanza.element, account) {
                 queued.rejected = true;

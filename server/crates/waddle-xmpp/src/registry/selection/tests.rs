@@ -1,7 +1,10 @@
 use kameo::actor::{ActorRef, Spawn};
 use tokio::sync::mpsc;
 
-use super::*;
+use super::{
+    get_resources_for_user, select_routable_resources_for_user, BareJid, FullJid, GetUser,
+    UserRegistryActor,
+};
 use crate::registry::connection_registry::ConnectionEntry;
 use crate::registry::user_actor::UpdatePresence;
 use crate::registry::user_registry::RegisterUserResource;

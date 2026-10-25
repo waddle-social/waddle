@@ -1,5 +1,6 @@
 //! Read-only keyset scans for non-terminal ingress messages.
 
+use crate::db::Value;
 use chrono::{DateTime, SecondsFormat, Utc};
 use waddle_xmpp::ingress::MessageKey;
 
@@ -170,7 +171,7 @@ async fn page_nonterminal_rows<T>(
         params.extend(
             kinds
                 .iter()
-                .map(|kind| crate::db::Value::from(i64::from(kind.to_storage()))),
+                .map(|kind| Value::from(i64::from(kind.to_storage()))),
         );
     }
     params.extend(crate::db_params![
@@ -179,7 +180,7 @@ async fn page_nonterminal_rows<T>(
         after_time,
         after_key
     ]);
-    params.push(crate::db::Value::from(i64::from(limit)));
+    params.push(Value::from(i64::from(limit)));
     let mut rows = tx
         .query(&sql, params)
         .await

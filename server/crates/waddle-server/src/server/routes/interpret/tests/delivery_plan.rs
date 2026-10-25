@@ -2,7 +2,10 @@ use super::super::effects::delivery::ExternalDeliveryEffect;
 use super::super::effects::{
     Effect, EffectOutcome, EffectSink, ExternalEffect, ImmediateSink, PlanSink, PlannedEffect,
 };
-use super::*;
+use super::{
+    chat_msg, detached_dm_session, interpret, jid, test_registry, Arc, Deps, Element, FullJid,
+    FullJidDeliveryOutcome, InMemorySmSessionRegistry, Iq, OutboundEvent, Stanza, XmppMessageType,
+};
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 fn reflection(target: &jid::FullJid) -> Stanza {

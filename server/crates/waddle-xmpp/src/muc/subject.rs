@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// XEP-0045 §8.1: a room subject change contains a subject and neither
 /// a body nor a thread. Callers supply the shape of their typed message.
@@ -47,7 +48,7 @@ pub fn is_groupchat_subject_change_message(message: &xmpp_parsers::message::Mess
 /// `xmpp_parsers::message::Message::subjects`'s own
 /// `BTreeMap<Lang, Subject>` shape (where `Lang = String`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomSubjectTexts(std::collections::BTreeMap<String, String>);
+pub struct RoomSubjectTexts(BTreeMap<String, String>);
 
 impl RoomSubjectTexts {
     /// Empty map (no subject elements).
@@ -58,9 +59,7 @@ impl RoomSubjectTexts {
     /// Capture a `Message`'s typed `subjects` field by cloning every
     /// language-tagged subject text and pairing it with its
     /// `xml:lang` key.
-    pub fn from_message_subjects(
-        subjects: &std::collections::BTreeMap<xmpp_parsers::message::Lang, String>,
-    ) -> Self {
+    pub fn from_message_subjects(subjects: &BTreeMap<xmpp_parsers::message::Lang, String>) -> Self {
         Self(
             subjects
                 .iter()
@@ -95,8 +94,8 @@ impl RoomSubjectTexts {
     }
 }
 
-impl From<std::collections::BTreeMap<String, String>> for RoomSubjectTexts {
-    fn from(map: std::collections::BTreeMap<String, String>) -> Self {
+impl From<BTreeMap<String, String>> for RoomSubjectTexts {
+    fn from(map: BTreeMap<String, String>) -> Self {
         Self(map)
     }
 }

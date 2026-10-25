@@ -1,6 +1,16 @@
 //! Browser event loop coordinating commands, WebSocket frames, and runtime events.
 
-use super::*;
+use super::{
+    client_driver_event, emit_stream_management_callback, is_muc_join_presence, mam,
+    message_delivery_stanza_id, mpsc, oneshot, parse_stanza_error, pin_mut, select,
+    ArchivedMessage, ClientConfig, ClientError, ClientEvent, ClientRequest, Closure,
+    ConnectionEvent, DeferredWasmCommand, DriverEvent, DriverResult, Element, FutureExt, HashMap,
+    InboxPage, JsCast, MessageDeliveryEvent, PagehideCommandCompletion, PendingInboxQuery,
+    PendingMamQuery, Rc, RefCell, Serialize, SinkExt, StanzaId, StreamClose, StreamExt,
+    StreamManagementEvent, TransportEvent, TransportMessage, TransportState, VecDeque,
+    WaddleClientInner, WasmCommand, WasmCommandLane, WasmDriverCore, WasmDriverTask,
+    WasmTransportEvent, WasmWebSocket, XmppRuntime,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
@@ -1370,6 +1380,7 @@ fn resolve_pending_mam_query(pending: PendingMamQuery, element: &Element) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{build_client_config, BareJid, PagehideAckRequest, StoredConfig, NS_CLIENT};
     use futures::executor::block_on;
     use waddle_xmpp_client::discovery::DISCO_INFO_NS;
 

@@ -1,9 +1,16 @@
-use super::*;
+use super::{
+    migrate_coalescing_index_tx, notification_outbox_table_sql, NotificationOutboxStore,
+    NOTIFICATION_OUTBOX_CLASS_CHECK_SQL, OUTBOX_SCHEMA_GATE, OUTBOX_SCHEMA_GATE_WAIT,
+};
+use crate::db::Database;
 use crate::db::{DatabaseConfig, DatabaseDriver};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
 };
+use crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS;
+use jid::BareJid;
+use minidom::Element;
 use std::sync::Arc;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, IngressEffectIntent, MessageKey, SemanticDigest,

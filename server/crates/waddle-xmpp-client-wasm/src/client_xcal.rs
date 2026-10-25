@@ -19,7 +19,7 @@ use waddle_xmpp_core::xcal::{
     CalendarDateValue, CalendarItem, Freq, PartStat, Rrule, RruleEnd, VEvent, Weekday, NS_XCAL,
     PUBSUB_NODE_EVENTS,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 

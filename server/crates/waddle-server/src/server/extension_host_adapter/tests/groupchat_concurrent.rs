@@ -1,18 +1,15 @@
-use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
-use crate::{
-    ingress::{
-        nested::{TestGate, TEST_BEFORE_SETTLEMENT},
-        test_support::IngressFixture,
-    },
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
-    server::routes::interpret,
-};
-use std::{
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use super::direct_ingress;
+use super::groupchat_ingress::GroupchatFixture;
+use crate::ingress::nested::{TestGate, TEST_BEFORE_SETTLEMENT};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use crate::server::routes::interpret;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 use waddle_extensions::PluginId;
-use waddle_xmpp::{muc::room_actor::GetSnapshot, Stanza};
+use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::Stanza;
 
 async fn two_bots(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;
@@ -121,7 +118,8 @@ async fn concurrent(f: IngressFixture) {
         .room
         .find_occupant_by_real_jid(&fixture.invocation().actor_jid)
         .is_none());
-    use xmpp_parsers::{message::MessageType, presence::Type};
+    use xmpp_parsers::message::MessageType;
+    use xmpp_parsers::presence::Type;
     let wire: Vec<_> = fixture
         .drain()
         .into_iter()

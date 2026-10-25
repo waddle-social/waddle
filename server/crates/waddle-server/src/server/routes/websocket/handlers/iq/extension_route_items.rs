@@ -1,5 +1,8 @@
 use super::permissions::permission_allowed;
-use super::*;
+use super::{
+    build_pubsub_error, build_pubsub_items_result, iq_to_xml, managed_channel_permission_allowed,
+    warn, BareJid, Object, ObjectType, Permission, PubSubError, WebSocketState,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 fn extension_route_room_for_node(state: &WebSocketState, node: &str) -> Option<BareJid> {

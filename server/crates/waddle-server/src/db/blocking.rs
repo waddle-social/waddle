@@ -4,6 +4,7 @@
 //! persistent storage.
 
 use crate::db::IntoParams;
+use crate::db::Rows;
 use jid::{BareJid, Jid};
 use tracing::{debug, instrument};
 
@@ -219,7 +220,7 @@ impl DatabaseBlockingStorage {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, BlockingStorageError> {
+    ) -> Result<Rows, BlockingStorageError> {
         let conn = self
             .db
             .guard()

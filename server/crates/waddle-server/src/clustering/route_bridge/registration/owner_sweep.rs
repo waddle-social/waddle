@@ -1,5 +1,8 @@
 //! Reconcile routing mirrors using committed expiry or exact-resource absence.
-use super::super::*;
+use super::super::{
+    Arc, Duration, HashMap, LocalResourcePresence, NodeId, NodeIdentity,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, RemoteOwnerRegistration,
+};
 use super::owner::remote_owner_registration_matches;
 use crate::clustering::resource_presence::{peer_resource_reachability, PeerResourceReachability};
 use waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure;

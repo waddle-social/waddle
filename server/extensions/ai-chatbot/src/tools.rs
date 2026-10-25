@@ -4,11 +4,12 @@ use crate::bindings::waddle::extension::types;
 use crate::constants::{
     MAX_CONTEXT_BYTES, MAX_CONTEXT_ITEMS_PER_SOURCE, MAX_CONTEXT_LIMIT, MAX_CONTEXT_LINE_BYTES,
 };
+use crate::model::ExecutionContext;
 use crate::model::{HostTool, HostToolRequest, NonEmptyString, ProviderRequest, ResponseTarget};
 use crate::text::truncate_context_line;
 
 pub(crate) fn select_host_tools(
-    context: &crate::model::ExecutionContext,
+    context: &ExecutionContext,
     context_limit: u32,
 ) -> Vec<HostToolRequest> {
     let mut tools = Vec::new();

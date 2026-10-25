@@ -1,7 +1,7 @@
 //! Thread navigation keeps the XMPP destination separate from UI cache keys.
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{BoxExt, WidgetExt};
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use waddle_client_session::{IncomingMessage, Timeline, TimelineItem};
 
 use super::WaddleWindow;
@@ -228,6 +228,7 @@ impl WaddleWindow {
 mod tests {
     use super::*;
     use crate::session::Kind;
+    use adw::prelude::{ApplicationExt, ButtonExt, CastNone, GtkWindowExt, ListModelExt};
     use gtk::gio;
     use waddle_client_session::judgments::{
         Probability, SafetyCategory, SafetyScore, SafetyScores, SafetyScoresFastening,

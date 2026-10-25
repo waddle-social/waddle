@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_retract_element, build_retracted_element, build_retraction_message,
+    build_tombstone_message, extract_retraction_from_message, extract_retracts_id,
+    is_retract_element, is_retracted_element, is_retraction_message, is_tombstone_message,
+    set_retraction, strip_retraction, Element, Retracted, Retraction, RetractionCarrier,
+    RetractionKind, NS_MESSAGE_RETRACT,
+};
 
 use xmpp_parsers::message::{Message, MessageType};
 

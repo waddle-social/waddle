@@ -19,6 +19,9 @@
 //! [`waddle_sfu::verify_webhook_signature`]; this module composes
 //! that with the MUC dispatch + SFU registry teardown.
 
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxError;
+use crate::call_teardown_outbox::TeardownTarget;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -411,7 +414,7 @@ async fn enqueue_muji_room_sweep(
     state: &WebSocketState,
     room_jid: &BareJid,
     room_sid: &RoomSid,
-) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
+) -> Result<(), CallTeardownOutboxError> {
     let call_id = match CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
@@ -423,9 +426,9 @@ async fn enqueue_muji_room_sweep(
             return Ok(());
         }
     };
-    let intent = crate::call_teardown_outbox::CallTeardownIntent {
+    let intent = CallTeardownIntent {
         call_id,
-        target: crate::call_teardown_outbox::TeardownTarget::MujiRoomSweep {
+        target: TeardownTarget::MujiRoomSweep {
             room_jid: room_jid.clone(),
         },
         generation: None,

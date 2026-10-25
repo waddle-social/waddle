@@ -1,15 +1,12 @@
 //! Correlate completion with exact recorded obligations, never vector position.
 use waddle_xmpp::ingress::IngressEffectIntent;
 
-use super::{decision::EffectReceiptKey, durable::receipt_key};
-use crate::{
-    ingress_uow::IngressUowError,
-    server::routes::interpret::effects::{
-        direct::ExternalDirectEffect,
-        room::{ExternalRoomEffect, RoomActorMutation},
-        ExternalEffect,
-    },
-};
+use super::decision::EffectReceiptKey;
+use super::durable::receipt_key;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
+use crate::server::routes::interpret::effects::room::{ExternalRoomEffect, RoomActorMutation};
+use crate::server::routes::interpret::effects::ExternalEffect;
 
 #[path = "receipts_routing.rs"]
 pub(super) mod routing;
@@ -48,7 +45,8 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                 target: recorded, ..
             },
         ) => {
-            use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+            use waddle_xmpp::ingress::TombstoneReplayTarget;
+            use waddle_xmpp::tombstone::TombstoneTarget;
             match (target, recorded) {
                 (
                     TombstoneTarget::Groupchat { stanza_id, room },
@@ -150,7 +148,8 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
                 mutation,
             },
         ) => {
-            use waddle_xmpp::{ingress::RoomPinMutation, muc::pin::PinStateChange};
+            use waddle_xmpp::ingress::RoomPinMutation;
+            use waddle_xmpp::muc::pin::PinStateChange;
             room == recorded_room
                 && match (change, mutation) {
                     (PinStateChange::Pin(entry), RoomPinMutation::Pin { entry: recorded }) => {
@@ -202,10 +201,8 @@ fn exact_mutation(effect: &ExternalEffect, intent: &IngressEffectIntent) -> bool
 mod tests {
     use super::*;
     use jid::{BareJid, FullJid};
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, FrozenStanzaError, FrozenStanzaErrorType},
-        Stanza, StanzaErrorCondition,
-    };
+    use waddle_xmpp::ingress::{EffectMessageIdentity, FrozenStanzaError, FrozenStanzaErrorType};
+    use waddle_xmpp::{Stanza, StanzaErrorCondition};
     use xmpp_parsers::message::{Message, MessageType};
 
     fn delivery(recipient: &FullJid) -> ExternalEffect {
@@ -281,9 +278,9 @@ mod tests {
     #[test]
     fn notification_recovery_receipt_requires_exact_completed_action() {
         use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
-        use waddle_xmpp::{
-            inbox::storage::GroupchatNotificationRecoveryKey,
-            ingress::{GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation},
+        use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
+        use waddle_xmpp::ingress::{
+            GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
         };
         let recipient: BareJid = "recipient@example.com".parse().expect("recipient");
         let room: BareJid = "room@example.com".parse().expect("room");

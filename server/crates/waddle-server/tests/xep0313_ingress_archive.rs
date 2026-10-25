@@ -10,21 +10,20 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use ingress_support::IngressFixture;
 use jid::BareJid;
-use waddle_server::{
-    ingress::{
-        commit::commit_submission,
-        effects::{direct::DurableDirectEffect, Effect},
-        DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
-    },
-    ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION},
-    ingress_uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict},
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::direct::DurableDirectEffect;
+use waddle_server::ingress::effects::Effect;
+use waddle_server::ingress::{
+    DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    mam::{
-        build_result_messages, ArchiveExpectation, ArchiveOrdinal, ArchivedMessage,
-        ArchivedTombstone, MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
-    },
+use waddle_server::ingress_substrate::{
+    gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION,
+};
+use waddle_server::ingress_uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::mam::{
+    build_result_messages, ArchiveExpectation, ArchiveOrdinal, ArchivedMessage, ArchivedTombstone,
+    MamArchiveKind, MamQuery, MamStorage, SqlxMamStorage, MAM_NS,
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -481,11 +480,11 @@ async fn reconciliation(fixture: IngressFixture) {
 
 /// XEP-0313 §6.3: durable archive identity outlives incomplete delivery and canonical retention.
 async fn receipts_retention(fixture: IngressFixture) {
-    use waddle_server::ingress::{
-        execute::{execute_effects, terminalize_if_complete},
-        Deps, ExternalEffect, ImmediateSink,
-    };
-    use waddle_xmpp::{ingress::FrozenStanzaError, registry::ConnectionRegistry, Stanza};
+    use waddle_server::ingress::execute::{execute_effects, terminalize_if_complete};
+    use waddle_server::ingress::{Deps, ExternalEffect, ImmediateSink};
+    use waddle_xmpp::ingress::FrozenStanzaError;
+    use waddle_xmpp::registry::ConnectionRegistry;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let mut submission = plan(
         &fixture,
@@ -646,14 +645,11 @@ backend_tests!(
 
 /// XEP-0313 §3.2 archive order: replaying A after B cannot rewind the inbox's archive reference.
 async fn monotonic_inbox(fixture: IngressFixture) {
-    use waddle_server::ingress::{
-        effects::{direct::ExternalDirectEffect, ProjectionRef},
-        ExternalEffect,
-    };
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-    };
+    use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+    use waddle_server::ingress::effects::ProjectionRef;
+    use waddle_server::ingress::ExternalEffect;
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
     let stamp = Utc::now() - chrono::Duration::minutes(1);
     let projection = ProjectionRef(1);
     let make = |origin, id, stamp: DateTime<Utc>| {
@@ -749,12 +745,11 @@ async fn assert_inbox_wire(
     decision: &waddle_server::ingress::IngressDecision,
 ) {
     use kameo::actor::Spawn;
-    use waddle_server::ingress::{execute::execute_effects, Deps, ImmediateSink};
-    use waddle_xmpp::{
-        registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-        xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX},
-        Stanza,
-    };
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{Deps, ImmediateSink};
+    use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
+    use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
+    use waddle_xmpp::Stanza;
     let registry = ConnectionRegistry::new();
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let resource = fixture
@@ -828,11 +823,9 @@ backend_tests!(
 /// without replaying the already-applied unread mutation.
 async fn projection_conflict_receipts(fixture: IngressFixture) {
     use waddle_server::ingress_uow::IngressUowError;
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-        mam::MamTxStoreError,
-    };
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
+    use waddle_xmpp::mam::MamTxStoreError;
     let stamp = Utc::now();
     let mut submission = plan(
         &fixture,

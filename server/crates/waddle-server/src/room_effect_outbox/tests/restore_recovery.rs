@@ -1,5 +1,11 @@
 //! XEP-0045 removal delivery when another owner never observed the live roster.
-use super::*;
+use super::{
+    create_test_websocket_state_with_sfu, drain_due_effects, drain_room_jid, full_jid,
+    initial_revision, insert_lifecycle_row, lifecycle, mpsc, muc_status_codes, origin,
+    producing_node, recv_outbound, register_test_connection, stanza_to_xml, Arc, BareJid,
+    ClaimStore, Element, HashSet, InProcessClaimStore, NodeIdentity, RoomConfig, RoomEffectEnqueue,
+    RoomEffectOutboxStore, RoomLifecycleState, RoomMutationEffects,
+};
 use kameo::actor::Spawn;
 use waddle_xmpp::muc::durable::{
     AdminMutationId, AdminMutationReceipt, DurableRoomState, MucDurableFuture, MucDurableStore,

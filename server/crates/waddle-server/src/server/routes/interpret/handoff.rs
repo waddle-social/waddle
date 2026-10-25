@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 #[cfg(feature = "clustering")]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "clustering")]
+use std::sync::Arc;
 
 #[cfg(feature = "clustering")]
 use tokio::sync::mpsc;
-use waddle_xmpp::{stream_management::StreamManagementState, Stanza};
+use waddle_xmpp::stream_management::StreamManagementState;
+use waddle_xmpp::Stanza;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderedRelayInboundSequence(pub u32);

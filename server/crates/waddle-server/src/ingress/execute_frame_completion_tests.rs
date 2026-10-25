@@ -1,6 +1,9 @@
 //! Frame obligations are resolved once their receipts are durable, even
 //! when the follow-up terminalization cannot acquire the canonical row.
-use super::*;
+use super::{
+    terminalize_if_complete, Duration, ExecutionReport, ExternalEffect, ExternalOutcome,
+    FrameObligation, Stanza,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;

@@ -4,10 +4,12 @@
 //! sender includes after an XMPP-native composer lookup. The server consumes
 //! it before fanout/archive and stamps conformant XEP-0511 metadata instead.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use jid::BareJid;
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;

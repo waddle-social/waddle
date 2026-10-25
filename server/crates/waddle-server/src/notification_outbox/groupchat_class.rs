@@ -1,9 +1,10 @@
 //! Pure message-frozen groupchat notification classification.
+use crate::notification_outbox::NotificationClass;
 use jid::{BareJid, Jid};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GroupchatNotificationClassDecision {
-    Deliver(crate::notification_outbox::NotificationClass),
+    Deliver(NotificationClass),
 }
 
 /// Outcome of `groupchat_notification_class`. Carries the typed
@@ -97,9 +98,7 @@ pub(crate) fn groupchat_notification_class(
     );
     if mentions_overflowed {
         return GroupchatNotificationClassOutcome {
-            decision: GroupchatNotificationClassDecision::Deliver(
-                crate::notification_outbox::NotificationClass::NotifyAll,
-            ),
+            decision: GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll),
             mentions_overflowed,
         };
     }
@@ -135,26 +134,20 @@ pub(crate) fn groupchat_notification_class_from_message(
     is_live_occupant: bool,
 ) -> GroupchatNotificationClassDecision {
     if personal_mention {
-        return GroupchatNotificationClassDecision::Deliver(
-            crate::notification_outbox::NotificationClass::PersonalMention,
-        );
+        return GroupchatNotificationClassDecision::Deliver(NotificationClass::PersonalMention);
     }
     match channel_mention {
         Some(GroupchatChannelMentionScope::Active) if is_live_occupant => {
             return GroupchatNotificationClassDecision::Deliver(
-                crate::notification_outbox::NotificationClass::ActiveChannelMention,
+                NotificationClass::ActiveChannelMention,
             );
         }
         Some(GroupchatChannelMentionScope::All) => {
-            return GroupchatNotificationClassDecision::Deliver(
-                crate::notification_outbox::NotificationClass::ChannelMention,
-            );
+            return GroupchatNotificationClassDecision::Deliver(NotificationClass::ChannelMention);
         }
         _ => {}
     }
-    GroupchatNotificationClassDecision::Deliver(
-        crate::notification_outbox::NotificationClass::NotifyAll,
-    )
+    GroupchatNotificationClassDecision::Deliver(NotificationClass::NotifyAll)
 }
 
 /// Returns `true` when any XEP-0513 explicit mention naming `owner`

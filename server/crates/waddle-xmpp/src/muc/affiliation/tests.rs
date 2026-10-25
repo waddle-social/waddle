@@ -1,4 +1,4 @@
-use super::*;
+use super::{AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
 
 use crate::types::Affiliation;
 

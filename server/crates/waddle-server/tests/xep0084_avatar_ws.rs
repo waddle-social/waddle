@@ -1303,7 +1303,8 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
     // wire XEP-0084. The publish-time hook in pubsub_dispatch will
     // flip `users.avatar_source = 'user'`.
     let png = tiny_png();
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
     let png_b64 = BASE64.encode(&png);
     let user_set = iq_set_to(
         &mut admin,
@@ -1374,7 +1375,8 @@ async fn user_self_published_avatar_is_protected_from_oidc_removal() {
 // invisible to everyone but its owner.
 
 async fn wire_publish_avatar(client: &mut WsXmppClient, owner_bare: &str, item_id: &str) {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
     let png = tiny_png();
     let png_b64 = BASE64.encode(&png);
     let data = iq_set_to(

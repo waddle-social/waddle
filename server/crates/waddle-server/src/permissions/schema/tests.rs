@@ -1,4 +1,4 @@
-use super::*;
+use super::{ComputedPermission, ObjectType, PermissionSchema, SPICEDB_SCHEMA};
 
 #[test]
 fn test_space_schema() {

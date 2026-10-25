@@ -1,4 +1,5 @@
-use super::{groupchat_ingress::GroupchatFixture, groupchat_receipts};
+use super::groupchat_ingress::GroupchatFixture;
+use super::groupchat_receipts;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::sync::Arc;

@@ -17,7 +17,8 @@
 //! [`build_publish_avatar_metadata_iq`] — the §3.2 data-before-metadata order
 //! is enforced by the calling boundary (FFI/wasm), which owns the IQ acks.
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use jid::BareJid;
 use minidom::Element;
 use sha1::{Digest, Sha1};

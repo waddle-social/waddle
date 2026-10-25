@@ -2,7 +2,12 @@ use super::permissions::{
     delete_channel_parent_tuple, write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
-use super::*;
+use super::{
+    build_pubsub_error, build_pubsub_publish_result, chrono, get_xmpp_channel, iq_to_xml,
+    spaces_node_mutation_allowed, spaces_service_bare_jid, warn, BareJid, PubSubError, PubSubItem,
+    WebSocketState,
+};
+use crate::channel_space_links::ChannelSpaceLink;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
@@ -148,7 +153,7 @@ pub(super) async fn handle_spaces_publish(
                     .deps
                     .app_state
                     .channel_space_link_store
-                    .set(&crate::channel_space_links::ChannelSpaceLink {
+                    .set(&ChannelSpaceLink {
                         channel_jid: bookmark.jid.clone(),
                         space_jid: space_jid.clone(),
                         space_node: space_node.clone(),
@@ -362,7 +367,7 @@ pub(super) async fn handle_spaces_publish(
 async fn restore_channel_space_link_projection(
     state: &WebSocketState,
     channel_jid: &BareJid,
-    previous_link: Option<&crate::channel_space_links::ChannelSpaceLink>,
+    previous_link: Option<&ChannelSpaceLink>,
 ) -> Result<(), String> {
     if let Some(link) = previous_link {
         state
@@ -391,7 +396,7 @@ struct SpacesPublishRollback<'a> {
     previous_item: Option<&'a PubSubItem>,
     channel_id: &'a str,
     channel_jid: &'a BareJid,
-    previous_link: Option<&'a crate::channel_space_links::ChannelSpaceLink>,
+    previous_link: Option<&'a ChannelSpaceLink>,
     parent_tuple_created: bool,
 }
 

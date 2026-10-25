@@ -1,6 +1,10 @@
 //! Portable promotion keeps its transfer receipt independently of pending delivery.
 
-use super::*;
+use super::{
+    bare, create_postgres_test_schema, drop_postgres_test_schema, full, transient_row, Arc,
+    Database, DatabaseConfig, DatabaseDriver, DatabasePendingDeliveryStorage, InsertOutcome,
+    PendingDeliveryStorage, QuotaPolicy, SmSessionId, Utc,
+};
 
 async fn portable_promotion_retry_survives_restart_and_delivery(database_url: &str) {
     let storage = DatabasePendingDeliveryStorage::open(

@@ -1,5 +1,14 @@
 //! Transport-independent authentication, session, request, and stream-management coordination.
 
+use crate::bootstrap::NS_STREAMS;
+use crate::event::SmAckRequestReason;
+use crate::request::RequestId;
+use crate::request::RequestKind;
+use crate::stream_management::NS_SM;
+use crate::OAuthBearerConfig;
+use crate::ResourceBindingResult;
+use crate::SaslFailure;
+use crate::StreamFeatures;
 use std::collections::VecDeque;
 
 use crate::bootstrap::{
@@ -200,11 +209,11 @@ impl XmppRuntime {
         let mut events = vec![ClientEvent::RequestQueued(pending.clone())];
 
         match pending.kind() {
-            crate::request::RequestKind::Connect => {
+            RequestKind::Connect => {
                 self.bootstrap = BootstrapState::AwaitingTransport;
                 self.set_phase(SessionPhase::Connecting)?;
             }
-            crate::request::RequestKind::Disconnect => {
+            RequestKind::Disconnect => {
                 self.bootstrap = BootstrapState::Idle;
                 self.set_phase(SessionPhase::Disconnecting)?;
                 events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
@@ -237,10 +246,7 @@ impl XmppRuntime {
     /// # Errors
     ///
     /// Returns `ClientError::UnknownRequest` when the request is not pending.
-    pub fn resolve_request(
-        &mut self,
-        request_id: crate::request::RequestId,
-    ) -> ClientResult<ClientEvent> {
+    pub fn resolve_request(&mut self, request_id: RequestId) -> ClientResult<ClientEvent> {
         let pending = self.requests.resolve(request_id)?;
         self.snapshot.pending_requests = self.requests.pending_len();
         Ok(self.resolved_event(pending))
@@ -432,7 +438,7 @@ impl XmppRuntime {
     }
 
     fn handle_sent_element(&mut self, element: &Element, events: &mut Vec<ClientEvent>) {
-        if element.ns() == crate::stream_management::NS_SM && element.name() == "enable" {
+        if element.ns() == NS_SM && element.name() == "enable" {
             if matches!(self.bootstrap, BootstrapState::Ready)
                 && self.snapshot.binding.is_some()
                 && matches!(self.sm_negotiation, SmNegotiationState::Inactive)
@@ -452,7 +458,7 @@ impl XmppRuntime {
             )));
             events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                 StreamManagementEvent::AckRequested {
-                    reason: crate::event::SmAckRequestReason::OutboundStanza,
+                    reason: SmAckRequestReason::OutboundStanza,
                 },
             )));
         }
@@ -484,7 +490,7 @@ impl XmppRuntime {
             return Ok(());
         }
 
-        if element.name() == "error" && element.ns() == crate::bootstrap::NS_STREAMS {
+        if element.name() == "error" && element.ns() == NS_STREAMS {
             self.handle_stream_error_element(&element, events);
             return Ok(());
         }
@@ -524,7 +530,7 @@ impl XmppRuntime {
 
     fn handle_stream_features(
         &mut self,
-        features: crate::StreamFeatures,
+        features: StreamFeatures,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         events.push(ClientEvent::Connection(
@@ -638,7 +644,7 @@ impl XmppRuntime {
 
     fn handle_auth_failure(
         &mut self,
-        failure: crate::SaslFailure,
+        failure: SaslFailure,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         if matches!(
@@ -657,7 +663,7 @@ impl XmppRuntime {
 
     fn handle_bind_result(
         &mut self,
-        result: crate::ResourceBindingResult,
+        result: ResourceBindingResult,
         events: &mut Vec<ClientEvent>,
     ) -> ClientResult<()> {
         let expected = match &self.bootstrap {
@@ -787,7 +793,7 @@ impl XmppRuntime {
         }
     }
 
-    fn oauth_config(&self) -> &crate::OAuthBearerConfig {
+    fn oauth_config(&self) -> &OAuthBearerConfig {
         match &self.config.auth {
             AuthenticationConfig::OAuthBearer(config) => config,
         }

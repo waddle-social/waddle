@@ -1,4 +1,4 @@
-use super::*;
+use super::Stanza;
 
 /// Flagship delivered-message accounting for the direct remote-resource
 /// path: it bypasses the counted owner-node delivery channels AND the

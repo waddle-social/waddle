@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    DatabaseDriver, NotificationOutboxError, NotificationOutboxPruneOutcome,
+    NotificationOutboxStore, Transaction,
+};
+use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{
     gc_expired_aliases, AliasGcBudget, MessageEnvelope, ALIAS_RETENTION,
@@ -8,6 +12,7 @@ use crate::ingress_uow::{
     EffectReceiptRepository, SmIngressRepository, SmIngressStreamRepository,
 };
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target};
+use crate::notification_outbox::NotificationCandidate;
 use waddle_xmpp::ingress::{
     IngressEffectIntent, IngressOrdinal, MessageKey, NotificationActivityMutation,
     NotificationCandidateOutcome, SemanticDigest, WireHandledCount,

@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_iq_error_xml_typed, internal_server_error_iq_error, not_authorized_iq_error,
+    service_unavailable_iq_error, warn, DatabaseBlockingStorage, FullJid, Jid, Stanza,
+    WebSocketState,
+};
+use crate::server::routes::interpret::FullJidDeliveryOutcome;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
 pub(super) async fn route_full_jid_iq(
     mut iq: xmpp_parsers::iq::Iq,
@@ -6,7 +12,7 @@ pub(super) async fn route_full_jid_iq(
     sender_jid: Option<&FullJid>,
     target: FullJid,
     response_from: Option<&str>,
-    ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 ) -> Vec<String> {
     let Some(sender_jid) = sender_jid else {
         return vec![build_iq_error_xml_typed(
@@ -58,16 +64,12 @@ pub(super) async fn route_full_jid_iq(
             .await
         {
             return match outcome {
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                FullJidDeliveryOutcome::Delivered
+                | FullJidDeliveryOutcome::QueuedDetached
+                | FullJidDeliveryOutcome::Dropped => Vec::new(),
                 #[cfg(feature = "clustering")]
-                crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
-                    Vec::new()
-                }
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
-                    fallback_iq_frames(&iq, state)
-                }
+                FullJidDeliveryOutcome::MaybeCommitted => Vec::new(),
+                FullJidDeliveryOutcome::Unavailable => fallback_iq_frames(&iq, state),
             };
         }
         if let Some(outcome) = bridge
@@ -80,16 +82,12 @@ pub(super) async fn route_full_jid_iq(
             .await
         {
             return match outcome {
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Delivered
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::QueuedDetached
-                | crate::server::routes::interpret::FullJidDeliveryOutcome::Dropped => Vec::new(),
+                FullJidDeliveryOutcome::Delivered
+                | FullJidDeliveryOutcome::QueuedDetached
+                | FullJidDeliveryOutcome::Dropped => Vec::new(),
                 #[cfg(feature = "clustering")]
-                crate::server::routes::interpret::FullJidDeliveryOutcome::MaybeCommitted => {
-                    Vec::new()
-                }
-                crate::server::routes::interpret::FullJidDeliveryOutcome::Unavailable => {
-                    fallback_iq_frames(&iq, state)
-                }
+                FullJidDeliveryOutcome::MaybeCommitted => Vec::new(),
+                FullJidDeliveryOutcome::Unavailable => fallback_iq_frames(&iq, state),
             };
         }
     }

@@ -1,5 +1,6 @@
 //! SpiceDB-backed permission system for Waddle.
 
+use crate::db::DatabaseError;
 pub mod actor;
 mod check;
 mod schema;
@@ -62,8 +63,8 @@ pub enum PermissionError {
     UnsupportedOperation(&'static str),
 }
 
-impl From<crate::db::DatabaseError> for PermissionError {
-    fn from(err: crate::db::DatabaseError) -> Self {
+impl From<DatabaseError> for PermissionError {
+    fn from(err: DatabaseError) -> Self {
         PermissionError::DatabaseError(err.to_string())
     }
 }

@@ -1,8 +1,7 @@
 //! Local progress must not depend on an unrelated remote occupant responding.
 use super::{dependencies, IngressDecision};
-use crate::server::routes::interpret::effects::{
-    delivery::ExternalDeliveryEffect, ExternalEffect, PlannedEffect,
-};
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{ExternalEffect, PlannedEffect};
 
 /// Keep the original decision indices and dependency graph. Only independent
 /// local copies belonging to this remote copy's MUC receipt may pass it.

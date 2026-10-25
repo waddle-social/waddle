@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use minidom::Element;
-use xmpp_parsers::{iq::Iq, message::Message, presence::Presence};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::Message;
+use xmpp_parsers::presence::Presence;
 
 use crate::error::{ClientError, ClientResult};
 

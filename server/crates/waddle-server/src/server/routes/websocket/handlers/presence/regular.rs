@@ -2,8 +2,15 @@ use super::subscription::{
     recipient_blocks_sender, record_stanza_for_detached_available_resources_excluding,
     roster_storage,
 };
-use super::*;
+use super::{debug, info, warn, FullJid, Jid, WebSocketState};
+use crate::clustering::codec::RemoteElement;
+use crate::clustering::route_bridge::RemotePresenceShow;
+use crate::clustering::route_bridge::RemotePresenceStateSnapshot;
+use crate::clustering::route_bridge::RemoteResourceStateUpdate;
+use crate::pending_delivery::FlushContext;
+use crate::pending_delivery::MamArchiveResolver;
 use crate::server::caps_resolution::{build_caps_disco_info_query, extract_caps_payload};
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 use tracing::Instrument as _;
 use waddle_xmpp::Stanza;
 
@@ -23,7 +30,7 @@ pub(super) async fn handle_regular_presence_update(
     sender_jid: &FullJid,
     owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     presence: xmpp_parsers::presence::Presence,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     // Defense in depth behind `parse_subscription_presence`: only the normal
     // available/unavailable forms may update state and be relayed. The
@@ -178,7 +185,7 @@ async fn mirror_remote_presence_update(
     owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     available: bool,
     priority: i8,
-    presence_state: Option<crate::clustering::route_bridge::RemotePresenceStateSnapshot>,
+    presence_state: Option<RemotePresenceStateSnapshot>,
 ) {
     if let Some(bridge) = state
         .deps
@@ -191,7 +198,7 @@ async fn mirror_remote_presence_update(
             .update_remote_user_resource_if_owner(
                 jid,
                 owner,
-                crate::clustering::route_bridge::RemoteResourceStateUpdate::Presence {
+                RemoteResourceStateUpdate::Presence {
                     available,
                     priority,
                     state: presence_state,
@@ -216,19 +223,16 @@ async fn mirror_remote_presence_update(
 fn remote_presence_state_from_presence(
     presence: &xmpp_parsers::presence::Presence,
     priority: i8,
-) -> crate::clustering::route_bridge::RemotePresenceStateSnapshot {
-    crate::clustering::route_bridge::RemotePresenceStateSnapshot {
-        show: presence
-            .show
-            .clone()
-            .map(crate::clustering::route_bridge::RemotePresenceShow::from),
+) -> RemotePresenceStateSnapshot {
+    RemotePresenceStateSnapshot {
+        show: presence.show.clone().map(RemotePresenceShow::from),
         status: presence.statuses.values().next().cloned(),
         priority,
         payloads: presence
             .payloads
             .iter()
             .cloned()
-            .map(crate::clustering::codec::RemoteElement)
+            .map(RemoteElement)
             .collect(),
     }
 }
@@ -337,13 +341,13 @@ fn spawn_session_recovery_delivery(
             }
             let still_owner = registry.entry_if_owner(&resource, &owner).is_some();
             if let Some(plan) = flush_plan.filter(|_| still_owner) {
-                let resolver = crate::pending_delivery::MamArchiveResolver { mam_storage };
+                let resolver = MamArchiveResolver { mam_storage };
                 let outcome = crate::pending_delivery::flush_for_resource_with_retry(
                     &storage,
                     &registry,
                     &recipient,
                     &resource,
-                    crate::pending_delivery::FlushContext {
+                    FlushContext {
                         server_domain: &server_domain,
                         sm_session: plan.sm_session.as_ref(),
                         // XEP-0191 §2 step 4 flush-time block re-evaluation
@@ -403,7 +407,7 @@ async fn broadcast_presence_to_subscribers(
     state: &WebSocketState,
     sender_jid: &FullJid,
     presence: &xmpp_parsers::presence::Presence,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     let Some(storage) = roster_storage(state).await else {
         return;

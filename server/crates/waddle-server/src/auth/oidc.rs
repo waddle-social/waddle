@@ -1,6 +1,7 @@
 use crate::auth::oauth2::{
     claims_from_userinfo, exchange_code, fetch_userinfo, OAuthTokenResponse,
 };
+use crate::auth::providers::AuthProviderTokenEndpointAuthMethod;
 use crate::auth::{AuthError, AuthProviderConfig, IdentityClaims};
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
@@ -112,10 +113,8 @@ pub async fn register_dynamic_client(
     })?;
 
     let requested_auth_method = match provider.token_endpoint_auth_method {
-        crate::auth::providers::AuthProviderTokenEndpointAuthMethod::ClientSecretPost => {
-            "client_secret_post"
-        }
-        crate::auth::providers::AuthProviderTokenEndpointAuthMethod::NoAuthentication => "none",
+        AuthProviderTokenEndpointAuthMethod::ClientSecretPost => "client_secret_post",
+        AuthProviderTokenEndpointAuthMethod::NoAuthentication => "none",
     };
 
     let req = DynamicRegistrationRequest {

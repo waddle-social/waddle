@@ -1,4 +1,4 @@
-use base64::prelude::*;
+use base64::prelude::{Engine, BASE64_STANDARD};
 use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngExt;

@@ -28,6 +28,7 @@
 //! XEP-0513 `<active/>` filter resolves against the recipient's own
 //! recent activity.
 
+use crate::notification_activity::NotificationActivityStore;
 use jid::BareJid;
 use tracing::{debug, warn};
 use xmpp_parsers::message::Message;
@@ -47,7 +48,7 @@ use super::Deps;
 fn account_activity_store<'a>(
     state: &'a WebSocketState,
     owner: &BareJid,
-) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
+) -> Option<&'a NotificationActivityStore> {
     state
         .deps
         .service_domains
@@ -61,7 +62,7 @@ fn account_activity_store<'a>(
 fn activity_store<'a>(
     deps: &'a Deps<'_>,
     owner: &BareJid,
-) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
+) -> Option<&'a NotificationActivityStore> {
     deps.web_socket_state
         .and_then(|state| account_activity_store(state, owner))
 }

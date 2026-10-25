@@ -1,10 +1,13 @@
 //! Recover only the notification of an already committed invitation grant.
-use super::*;
-use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
-use waddle_xmpp::{
-    ingress::MucInviteLedgerAction,
-    pending_delivery::{PendingPayload, PendingRow},
+use super::{
+    decision, Effect, ExternalEffect, IngressEffectIntent, IngressPlan, IngressUowError,
+    PendingDeliveryMutation, PlannedEffect, RecoveryInput, Utc,
 };
+use crate::server::routes::interpret::effects::invite::MucUserRoute;
+use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::websocket::muc_invites::INVITE_TTL;
+use waddle_xmpp::ingress::MucInviteLedgerAction;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
 
 pub(super) fn restore(
     plan: &mut IngressPlan,
@@ -72,9 +75,7 @@ pub(super) fn restore(
             if !input.unreceipted.contains(pending) {
                 continue;
             }
-            if input.blocked_recipients.contains(recipient)
-                || Utc::now() - recorded_at
-                    > crate::server::routes::websocket::muc_invites::INVITE_TTL
+            if input.blocked_recipients.contains(recipient) || Utc::now() - recorded_at > INVITE_TTL
             {
                 // This is policy resolution, not evidence of socket delivery.
                 // Resolve the paired fallback too, without changing membership.

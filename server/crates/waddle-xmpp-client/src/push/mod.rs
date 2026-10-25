@@ -18,6 +18,7 @@
 //! `waddle-server`) is unchanged by the XEP-0050 cutover — only the
 //! wire shape changes.
 
+use crate::client::ClientHandle;
 use std::str::FromStr;
 
 use jid::BareJid;
@@ -348,9 +349,9 @@ pub trait CommandDriver {
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-impl CommandDriver for crate::client::ClientHandle {
+impl CommandDriver for ClientHandle {
     async fn send_iq(&self, iq: Element) -> ClientResult<Element> {
-        crate::client::ClientHandle::send_iq(self, iq).await
+        ClientHandle::send_iq(self, iq).await
     }
 }
 

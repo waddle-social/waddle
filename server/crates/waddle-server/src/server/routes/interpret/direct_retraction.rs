@@ -1,5 +1,5 @@
 use super::groupchat_archive::scrub_unacked_for_tombstone;
-use super::*;
+use super::{debug, warn, Deps, Message};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) async fn apply_retraction_tombstone(
@@ -86,7 +86,8 @@ pub(super) async fn apply_retraction_tombstone(
         sender_scope: None,
     };
     if effects.is_planning() {
-        use super::effects::{direct::DurableDirectEffect, DurableEffect, Effect, PlannedEffect};
+        use super::effects::direct::DurableDirectEffect;
+        use super::effects::{DurableEffect, Effect, PlannedEffect};
         let target = StanzaId::new(original.id, jid::Jid::from(archive.clone()));
         effects.record(PlannedEffect::new(Effect::Durable(DurableEffect::Direct(
             DurableDirectEffect::RetractionTombstone {

@@ -2,10 +2,17 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate_for_sender_jid, drain_deps_with_noop_activity, enqueue_jobs_for_test,
+    groupchat_candidate_for, inbox_with_unread, noop_activity_reader, register_push_target,
+    settings_projection, store, target, FailingBlockingStorage, StubRoomPolicy,
+};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NoopDndReader, NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxTarget, PushServiceNodeName,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
 

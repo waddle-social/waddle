@@ -1,6 +1,31 @@
 //! JavaScript client methods for roster, profiles, avatars, and account discovery.
 
-use super::*;
+use super::{
+    bare_jid, build_disco_info_iq, build_disco_items_iq, build_fetch_bookmarks_iq,
+    build_fetch_dm_bookmarks_iq, build_fetch_threads_iq, build_fetch_vcard4_iq,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_pep_items_iq,
+    build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
+    build_publish_vcard4_iq, build_retract_activity_iq, build_retract_mood_iq,
+    build_retract_tune_iq, build_roster_get_iq, build_waddle_inbox_mark_read_iq, discovery,
+    future_to_promise, inbox_page_to_js, jid_domain, js_error, muc_affiliation_to_string,
+    parse_bookmarks_response, parse_disco_info_result, parse_muc_admin_affiliation_query,
+    parse_muc_affiliation, parse_pep_activity, parse_pep_mood, parse_pep_tune, parse_pep_vcard4,
+    parse_push_vapid_from_disco_info, parse_roster_result, parse_threads_response,
+    read_dm_bookmark_notify, send_inbox_query_command, send_iq_command,
+    send_iq_command_stanza_aware, send_stanza_command, to_js_value, wasm_bindgen, BareJid,
+    BookmarkItem, ClientError, Element, FetchThreadsQuery, JsValue, MucAdminAffiliationItem,
+    Promise, PushVapidDiscoParseError, Rc, RefCell, RegisterPushDeviceOptions, Serialize,
+    SetDmNotificationModeOptions, SetRoomNotificationModeOptions, ThreadSort, ThreadStatusFilter,
+    VCard4, WaddleActivityOpts, WaddleActivityResult, WaddleBookmarkItem, WaddleClient,
+    WaddleClientInner, WaddleDmBookmarkItem, WaddleFetchInboxOptions, WaddleFetchThreadsOptions,
+    WaddleInboxMarkRead, WaddleMoodOpts, WaddleMoodResult, WaddlePepProfile,
+    WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomMember, WaddleRosterContact,
+    WaddleServerVersion, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
+    WaddleThreadCallAnchor, WaddleThreadCallEnded, WaddleThreadEntry, WaddleThreadSort,
+    WaddleThreadStatusFilter, WaddleThreadsPage, WaddleTuneOpts, WaddleTuneResult, WaddleVCard4,
+    WaddleVapidAdvertisement, NS_CLIENT, NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
+};
+use crate::state::InboxPage;
 
 #[wasm_bindgen]
 impl WaddleClient {
@@ -528,7 +553,7 @@ impl WaddleClient {
             );
             let page = match send_inbox_query_command(inner, iq, request_id).await {
                 Ok(page) => page,
-                Err(_) => crate::state::InboxPage {
+                Err(_) => InboxPage {
                     entries: Vec::new(),
                     fin: waddle_xmpp_client::inbox::InboxFin::default(),
                 },

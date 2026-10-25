@@ -1,10 +1,20 @@
 //! Server configuration.
 
 use crate::auth::providers::AuthProviderConfig;
+use crate::auth::redirect::TrustedWebOrigins;
+use crate::auth::ProviderRegistry;
+use crate::db::lineage::DeploymentUuid;
+use crate::db::lineage::LineageAction;
 use crate::db::DatabaseDriver;
+use crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE;
+use crate::db::DEFAULT_POOL_SIZE;
+use crate::push_service::ApnsConfig;
+use crate::push_service::FcmConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
-use std::{fmt, str::FromStr};
 use tracing::info;
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::xep::xep0421::{OccupantIdSecret, OCCUPANT_ID_SECRET_MIN_BYTES};
@@ -69,7 +79,7 @@ impl AuthConfig {
         };
 
         // Validation is strict and fails startup.
-        let registry = crate::auth::ProviderRegistry::try_new(providers.clone())
+        let registry = ProviderRegistry::try_new(providers.clone())
             .map_err(|e| format!("invalid provider config: {}", e))?;
 
         if registry.is_empty() {
@@ -563,7 +573,7 @@ impl ClusteringConfig {
         let vars = vars
             .into_iter()
             .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
 
         let defaults = Self::default();
         let enabled = parse_bool_var(&vars, "WADDLE_CLUSTERING_ENABLED", false)?;
@@ -779,7 +789,7 @@ impl ClusteringConfig {
                 // share a PeerId — exactly what the slot lease exists to
                 // prevent. The entries are secrets, so the error names slot
                 // positions, never values.
-                let mut seen = std::collections::HashMap::new();
+                let mut seen = HashMap::new();
                 for (index, entry) in entries.iter().enumerate() {
                     if let Some(first) = seen.insert(entry.as_str(), index) {
                         return Err(format!(
@@ -1123,14 +1133,14 @@ pub struct ServerConfig {
     /// APNs provider configuration from `WADDLE_APNS_*` (#529). `None`
     /// when unset: the Push Service then records `apns-not-configured`
     /// for Apple devices instead of sending.
-    pub apns: Option<crate::push_service::ApnsConfig>,
+    pub apns: Option<ApnsConfig>,
     /// FCM provider configuration from `WADDLE_FCM_*` (#530). `None`
     /// when unset: the Push Service then records `fcm-not-configured`
     /// for Android devices instead of sending.
-    pub fcm: Option<crate::push_service::FcmConfig>,
+    pub fcm: Option<FcmConfig>,
     /// Origins a browser sign-in may return to: the origin of `base_url`
     /// plus every origin in `WADDLE_CORS_ORIGINS`.
-    pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
+    pub trusted_web_origins: TrustedWebOrigins,
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1255,7 +1265,7 @@ impl LinkPreviewConfig {
         let vars = vars
             .into_iter()
             .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let fetch_timeout = Duration::from_millis(parse_u64_var(
             &vars,
             "WADDLE_LINK_PREVIEW_FETCH_TIMEOUT_MS",
@@ -1382,7 +1392,7 @@ fn parse_session_key(raw: Option<&str>) -> Result<String, String> {
 }
 
 fn parse_bool_var(
-    vars: &std::collections::HashMap<String, String>,
+    vars: &HashMap<String, String>,
     key: &str,
     default: bool,
 ) -> Result<bool, String> {
@@ -1399,7 +1409,7 @@ fn parse_bool_var(
 }
 
 fn parse_usize_var(
-    vars: &std::collections::HashMap<String, String>,
+    vars: &HashMap<String, String>,
     key: &str,
     default: usize,
 ) -> Result<usize, String> {
@@ -1414,11 +1424,7 @@ fn parse_usize_var(
         .unwrap_or(Ok(default))
 }
 
-fn parse_u64_var(
-    vars: &std::collections::HashMap<String, String>,
-    key: &str,
-    default: u64,
-) -> Result<u64, String> {
+fn parse_u64_var(vars: &HashMap<String, String>, key: &str, default: u64) -> Result<u64, String> {
     vars.get(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -1476,7 +1482,7 @@ pub enum WsKeepaliveConfigError {
 /// Read a `WADDLE_WS_KEEPALIVE_*` var as `u64`, treating unset/blank
 /// as the default. Sibling of [`parse_u64_var`] with a typed error.
 fn ws_keepalive_u64_var(
-    vars: &std::collections::HashMap<String, String>,
+    vars: &HashMap<String, String>,
     key: &'static str,
     default: u64,
 ) -> Result<u64, WsKeepaliveConfigError> {
@@ -1516,7 +1522,7 @@ where
     let vars = vars
         .into_iter()
         .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
     let interval_secs = ws_keepalive_u64_var(&vars, "WADDLE_WS_KEEPALIVE_INTERVAL_SECS", 45)?;
     if !(1..=WS_KEEPALIVE_MAX_INTERVAL_SECS).contains(&interval_secs) {
         return Err(WsKeepaliveConfigError::IntervalOutOfRange {
@@ -1545,7 +1551,7 @@ pub fn ws_keepalive_from_env(
 }
 
 fn parse_host_patterns_var(
-    vars: &std::collections::HashMap<String, String>,
+    vars: &HashMap<String, String>,
     key: &str,
 ) -> Result<Vec<LinkPreviewHostPattern>, String> {
     let Some(raw) = vars
@@ -1635,10 +1641,9 @@ impl ServerConfig {
         let ingress = IngressConfig::from_env().map_err(|error| error.to_string())?;
 
         let clustering = ClusteringConfig::from_env()?;
-        let apns =
-            crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
-        let fcm = crate::push_service::FcmConfig::from_env().map_err(|error| error.to_string())?;
-        let trusted_web_origins = crate::auth::redirect::TrustedWebOrigins::try_new(
+        let apns = ApnsConfig::from_env().map_err(|error| error.to_string())?;
+        let fcm = FcmConfig::from_env().map_err(|error| error.to_string())?;
+        let trusted_web_origins = TrustedWebOrigins::try_new(
             &base_url,
             std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),
         )
@@ -2576,8 +2581,8 @@ pub enum LineageConfigError {
 /// the engine refuses enrollment or adoption without one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LineageConfig {
-    pub deployment_uuid: Option<crate::db::lineage::DeploymentUuid>,
-    pub action: Option<crate::db::lineage::LineageAction>,
+    pub deployment_uuid: Option<DeploymentUuid>,
+    pub action: Option<LineageAction>,
 }
 
 impl LineageConfig {
@@ -2594,7 +2599,7 @@ impl LineageConfig {
         let vars = vars
             .into_iter()
             .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
 
         let deployment_uuid = match vars.get("WADDLE_DEPLOYMENT_UUID") {
             None => None,
@@ -2612,7 +2617,7 @@ impl LineageConfig {
             Some(value) => {
                 let value = nonempty_lineage_var("WADDLE_DB_LINEAGE_ACTION", value)?;
                 match value {
-                    "enroll" => Some(crate::db::lineage::LineageAction::Enroll),
+                    "enroll" => Some(LineageAction::Enroll),
                     _ => {
                         let Some(expected) = value.strip_prefix("adopt=") else {
                             return Err(LineageConfigError::InvalidAction);
@@ -2633,7 +2638,7 @@ impl LineageConfig {
                                 })
                             })
                             .collect::<Result<Vec<_>, _>>()?;
-                        Some(crate::db::lineage::LineageAction::Adopt(expected))
+                        Some(LineageAction::Adopt(expected))
                     }
                 }
             }
@@ -2774,8 +2779,8 @@ impl Default for DatabaseRuntimeConfig {
         Self {
             driver: DatabaseDriver::Sqlite,
             database_url: "sqlite::memory:".to_string(),
-            pool_size: crate::db::DEFAULT_POOL_SIZE,
-            control_plane_pool_size: crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
+            pool_size: DEFAULT_POOL_SIZE,
+            control_plane_pool_size: DEFAULT_CONTROL_PLANE_POOL_SIZE,
         }
     }
 }
@@ -2794,7 +2799,7 @@ impl DatabaseRuntimeConfig {
         let vars = vars
             .into_iter()
             .map(|(key, value)| (key.as_ref().to_string(), value.as_ref().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
 
         // Unset falls back to the sqlite default; set-but-blank (empty or
         // whitespace-only after trimming) is a typed error, never a silent
@@ -2833,12 +2838,11 @@ impl DatabaseRuntimeConfig {
             }
         };
 
-        let pool_size =
-            db_pool_size_var(&vars, "WADDLE_DB_POOL_SIZE", crate::db::DEFAULT_POOL_SIZE)?;
+        let pool_size = db_pool_size_var(&vars, "WADDLE_DB_POOL_SIZE", DEFAULT_POOL_SIZE)?;
         let control_plane_pool_size = db_pool_size_var(
             &vars,
             "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
-            crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE,
+            DEFAULT_CONTROL_PLANE_POOL_SIZE,
         )?;
 
         Ok(Self {
@@ -2854,7 +2858,7 @@ impl DatabaseRuntimeConfig {
 /// default and rejecting zero (a zero-sized pool can never serve a
 /// connection).
 fn db_pool_size_var(
-    vars: &std::collections::HashMap<String, String>,
+    vars: &HashMap<String, String>,
     key: &'static str,
     default: u32,
 ) -> Result<u32, DatabaseRuntimeConfigError> {

@@ -1,16 +1,14 @@
 //! A carbon wrapper cannot borrow another message's durable append identity.
 use super::AppendAuthorityRejection;
-use crate::{ingress::identity::IngressAppendObligationRef, ingress_uow::CarbonReceiptRepository};
+use crate::db::Database;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress_uow::CarbonReceiptRepository;
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, IngressEffectKind},
-    protocol::CarbonKind,
-    Stanza,
-};
-use xmpp_parsers::{
-    carbons::{Received, Sent},
-    message::Message,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKind};
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::Stanza;
+use xmpp_parsers::carbons::{Received, Sent};
+use xmpp_parsers::message::Message;
 
 pub(super) fn is_carbon_kind(tag: i32) -> bool {
     [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
@@ -85,7 +83,7 @@ pub(super) fn parse(message: &Message) -> Result<CarbonEnvelope, AppendAuthority
 }
 
 pub(super) async fn authorize(
-    db: &crate::db::Database,
+    db: &Database,
     stanza: &Stanza,
     obligation: &IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {

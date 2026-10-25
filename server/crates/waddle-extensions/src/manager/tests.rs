@@ -6,10 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use xmpp_parsers::message::{Lang, Message};
 
+use super::message_context::effective_module_config_with_reader;
 use super::{
-    detect_links, effective_module_config_json, effective_module_config_with_reader,
-    message_hook_effect_launches_match_room, runtime_grants_for_module, sign_launch_token,
-    EffectiveModuleConfigError, ExtensionManager, LaunchValidationRequest, MAX_DETECTED_LINKS,
+    detect_links, effective_module_config_json, message_hook_effect_launches_match_room,
+    runtime_grants_for_module, sign_launch_token, EffectiveModuleConfigError, ExtensionManager,
+    LaunchValidationRequest, MAX_DETECTED_LINKS,
 };
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::types::{

@@ -16,10 +16,8 @@ use std::time::Duration;
 
 use jid::FullJid;
 use waddle_xmpp::stream_management::ResumableSessionProbe;
-use waddle_xmpp::telemetry::{
-    attributes::IngressReachabilityBlockReason as BlockReason,
-    reliability::increment_ingress_recovery_reachability_blocked,
-};
+use waddle_xmpp::telemetry::attributes::IngressReachabilityBlockReason as BlockReason;
+use waddle_xmpp::telemetry::reliability::increment_ingress_recovery_reachability_blocked;
 
 use crate::server::routes::interpret::Deps;
 

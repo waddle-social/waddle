@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    authorize_invite_grant, invite_operation_id, joined_members_only_invite_actor,
+    spawn_room_actor_with_config, test_claim_fence, test_full_jid, test_room, AckDepartureOutcome,
+    AckDepartureReceipt, AcknowledgeMediatedInviteOperation, Affiliation, AffiliationMutationError,
+    AuthorizeMediatedInvite, BareJid, ChangeAffiliation, CommitMediatedInviteGrantRollback,
+    DurablePersistError, FailNthAffiliationSaveStore, FakeDurableStore, FlakyThenRecoveringStore,
+    GetAffiliation, IsDormant, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin,
+    LeaveSessionSelector, MediatedInviteGrantError, MediatedInviteOperationAcknowledgement,
+    MediatedInviteRollbackCommit, MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
+    OccupancySessionGeneration, PrepareMediatedInviteGrantRollback, RestoreDurableRoomState, Role,
+    RoomConfig, SealGuard, SealIfInactive, SealIfInactiveOutcome, SendError,
+};
 
 #[tokio::test]
 async fn unacknowledged_rollback_blocks_dormancy_and_both_seal_guards() {

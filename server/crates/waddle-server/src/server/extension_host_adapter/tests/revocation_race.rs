@@ -1,15 +1,12 @@
 //! A grant resolved before planning must still be valid at durable admission.
 use super::super::ExtensionHostAdapterError;
 use super::direct_ingress::{adapter, invocation, request};
-use crate::{ingress::test_support::IngressFixture, ingress_uow::ExtensionGrantRepository};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::ExtensionGrantRepository;
 use jid::{BareJid, Jid};
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
 
