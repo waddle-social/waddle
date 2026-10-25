@@ -1,8 +1,7 @@
 use super::{
-    async_trait, BareJid, InMemoryPendingDeliveryStorage, InsertOutcome, PendingDeliveryStorage,
-    PendingNotificationCustodyMode, PendingNotificationRecoveryOrdinal,
-    PendingNotificationRecoveryRow, PendingRow, PendingRowId, PendingStorageError, QuotaPolicy,
-    SmSessionId, TombstoneTarget,
+    BareJid, InMemoryPendingDeliveryStorage, InsertOutcome, PendingDeliveryStorage,
+    PendingNotificationRecoveryOrdinal, PendingRow, PendingRowId, PendingStorageError, QuotaPolicy,
+    SmSessionId,
 };
 use crate::pending_delivery::PendingPayload;
 use chrono::Utc;

@@ -71,7 +71,7 @@ use waddle_xmpp_client::{
     OAuthBearerConfig, StanzaId, StreamErrorCondition, StreamErrorDetail, StreamManagementEvent,
     WasmTransportEvent, WasmWebSocket, WebSocketConfig, XmppRuntime,
 };
-use wasm_bindgen::prelude::{wasm_bindgen, Closure, JsCast, JsValue, UnwrapThrowExt, Upcast};
+use wasm_bindgen::prelude::{wasm_bindgen, Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 mod client_account;

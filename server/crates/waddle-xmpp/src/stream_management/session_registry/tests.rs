@@ -8,10 +8,9 @@ mod startup_poison;
 
 use super::core::PendingClaimAcquisitionDisposition;
 use super::{
-    claims, persistence_codec, tombstones, DetachedSession, DetachedUnackedStanza,
-    InMemorySmSessionRegistry, PendingPromotionRetryRetention, PromotionCaptureCustody,
-    ReclaimedHydrationOutcome, ResumableSessionProbe, SmClaimCompletion, SmRegistryError,
-    SmSessionRegistry, TombstoneScrubbedSmEntry,
+    tombstones, DetachedSession, DetachedUnackedStanza, InMemorySmSessionRegistry,
+    PromotionCaptureCustody, ReclaimedHydrationOutcome, ResumableSessionProbe, SmClaimCompletion,
+    SmRegistryError, SmSessionRegistry, TombstoneScrubbedSmEntry,
 };
 use std::time::{Duration, Instant};
 

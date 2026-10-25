@@ -2,9 +2,9 @@ use super::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };
 use super::{
-    health_check_or_wedge_kill, Arc, BareJid, ClearPresenceState, ConflictCloseAllResources,
-    Context, DrainPendingSubscriptions, FullJid, GetAvailableResources, GetOtherResources,
-    GetPresenceState, GetResources, HealthCheck, IsCarbonsEnabled, IsConnected, PresenceState,
+    health_check_or_wedge_kill, BareJid, ClearPresenceState, ConflictCloseAllResources, Context,
+    DrainPendingSubscriptions, FullJid, GetAvailableResources, GetOtherResources, GetPresenceState,
+    GetResources, HealthCheck, IsCarbonsEnabled, IsConnected, PresenceState,
     QueuePendingSubscription, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
     SetCarbonsEnabled, Stanza, UnregisterConnection, UnregisterConnectionAndReportEmpty,
     UnregisterConnectionOutcome, UpdatePresence, UpdatePresenceState, UserActor,

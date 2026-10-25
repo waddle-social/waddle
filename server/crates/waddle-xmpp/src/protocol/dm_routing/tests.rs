@@ -1,6 +1,6 @@
 use super::{
     classify_dm_intake, ArchiveDecision, Blocklist, CarbonsDecision, DmRouting, FullJid,
-    InboxDecision, LiveDecision, Message, OnlineResources, PendingDecision, CARBONS_NS,
+    InboxDecision, LiveDecision, Message, OnlineResources, PendingDecision,
 };
 use crate::xep::xep0085::{build_chat_state_element, ChatState};
 use crate::xep::xep0334::{add_hint, Hint};

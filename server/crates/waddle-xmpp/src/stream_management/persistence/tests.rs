@@ -1,7 +1,7 @@
 use super::{
-    ClaimEpoch, Duration, FullJid, InMemorySmPersistence, IngressCustodyDisposition, NodeIdentity,
-    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, SmAckWindow, SmClaimFence,
-    SmIngressAppendKey, SmPersistenceStorage, SmSessionId, Stanza,
+    Duration, FullJid, InMemorySmPersistence, IngressCustodyDisposition, PersistedIngressAppend,
+    PersistedSession, PersistedUnackedStanza, SmAckWindow, SmClaimFence, SmPersistenceStorage,
+    SmSessionId, Stanza,
 };
 use chrono::Utc;
 

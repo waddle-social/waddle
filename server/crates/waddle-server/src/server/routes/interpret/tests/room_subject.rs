@@ -2,12 +2,15 @@
 use super::OrderedRelayRouteOriginKind;
 use super::{dispatch_to_room, OrderedRelayRouteOrigin, Stanza};
 
+#[cfg(feature = "clustering")]
+use super::DemoteRoomIfExactActor;
 use super::{
     interpret, register_into_both_tiers, ActorRef, Arc, ConnectionRegistry,
-    DeliveryExecutionContext, DemoteRoomIfExactActor, Deps, Element, FullJid, GetRoom,
-    GetRoomSnapshot, InMemorySmSessionRegistry, IngressEffectIntent, Jid, MamStorage, Message,
-    OutboundEvent, RoomRegistryActor,
+    DeliveryExecutionContext, Deps, Element, FullJid, GetRoom, GetRoomSnapshot,
+    InMemorySmSessionRegistry, IngressEffectIntent, Jid, MamStorage, Message, OutboundEvent,
+    RoomRegistryActor,
 };
+
 use chrono::TimeZone;
 use kameo::actor::Spawn;
 use xmpp_parsers::message::MessageType as XmppMessageType;

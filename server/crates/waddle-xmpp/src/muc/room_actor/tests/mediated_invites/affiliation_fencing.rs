@@ -7,8 +7,8 @@ use super::{
     EnforceMembersOnlyAffiliations, GetAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant,
     JoinWithAffiliation, MediatedInviteGrantError, MediatedInviteOperationAcknowledgement,
     MediatedInviteRollbackAbort, MediatedInviteRollbackCommit, MediatedInviteRollbackPreparation,
-    OccupancySessionGeneration, PrepareMediatedInviteGrantRollback, ResolverAffiliationSyncOutcome,
-    Role, RoomActorError, SendError, SyncResolverAffiliation,
+    PrepareMediatedInviteGrantRollback, ResolverAffiliationSyncOutcome, Role, RoomActorError,
+    SendError, SyncResolverAffiliation,
 };
 
 #[tokio::test]

@@ -1,19 +1,11 @@
 //! Implementation behind the parent module facade.
 
 use super::bindings;
-#[cfg(test)]
-use super::current_config;
-#[cfg(test)]
-use super::current_timestamp_value;
 use super::exports;
 #[cfg(not(test))]
 use super::host_tools;
-#[cfg(test)]
-use super::load_routes;
 #[cfg(not(test))]
 use super::runtime;
-#[cfg(test)]
-use super::send_message_request;
 use super::types;
 use super::Deserialize;
 

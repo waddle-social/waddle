@@ -5,7 +5,7 @@ use super::{
     ChangeAffiliation, DurableRestoreState, DurableRoomOrigin, GetSnapshot, HashMap,
     LeaveAttemptId, LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
     LiveRosterRestoreError, MucRoom, OccupancyWatermark, PendingAdminProjection, RestoreLiveRoster,
-    Role, RoomActor, RoomCommitError, RoomDurableMutation, SendError,
+    Role, RoomActor, SendError,
 };
 use crate::muc::durable::{
     AdminMutationId, AdminMutationReceipt, MucDurableFuture, MucDurableStore,

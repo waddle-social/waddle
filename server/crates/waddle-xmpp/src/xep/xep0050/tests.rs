@@ -1,8 +1,7 @@
 use super::{
     build_command_items, build_command_result, is_command_node_disco_info, is_command_request,
-    is_commands_disco_info, is_commands_disco_items, parse_command_from_iq, Action,
-    AdHocCommandCondition, AllowedActions, Command, CommandError, Note, NoteType, Status,
-    NODE_COMMANDS, NS_COMMANDS,
+    is_commands_disco_info, is_commands_disco_items, parse_command_from_iq, Action, AllowedActions,
+    Command, CommandError, Note, NoteType, Status, NODE_COMMANDS, NS_COMMANDS,
 };
 use crate::xep::xep0004::{DataForm, Field, FormType, FromElement, ToElement};
 use minidom::Element;

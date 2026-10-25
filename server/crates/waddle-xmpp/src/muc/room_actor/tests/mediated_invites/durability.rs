@@ -4,11 +4,11 @@ use super::{
     AckDepartureReceipt, AcknowledgeMediatedInviteOperation, Affiliation, AffiliationMutationError,
     AuthorizeMediatedInvite, BareJid, ChangeAffiliation, CommitMediatedInviteGrantRollback,
     DurablePersistError, FailNthAffiliationSaveStore, FakeDurableStore, FlakyThenRecoveringStore,
-    GetAffiliation, IsDormant, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin,
-    LeaveSessionSelector, MediatedInviteGrantError, MediatedInviteOperationAcknowledgement,
-    MediatedInviteRollbackCommit, MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
-    OccupancySessionGeneration, PrepareMediatedInviteGrantRollback, RestoreDurableRoomState, Role,
-    RoomConfig, SealGuard, SealIfInactive, SealIfInactiveOutcome, SendError,
+    GetAffiliation, IsDormant, Join, LeaveAttemptId, LeaveByRealJid, LeaveSessionSelector,
+    MediatedInviteGrantError, MediatedInviteOperationAcknowledgement, MediatedInviteRollbackCommit,
+    MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
+    PrepareMediatedInviteGrantRollback, RestoreDurableRoomState, Role, RoomConfig, SealGuard,
+    SealIfInactive, SealIfInactiveOutcome, SendError,
 };
 
 #[tokio::test]

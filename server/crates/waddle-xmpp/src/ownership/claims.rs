@@ -1,13 +1,8 @@
 //! Implementation behind the parent module facade.
 
 use super::async_trait;
-use super::in_process;
-use super::observe;
-use super::resume;
 use super::Duration;
-use super::InProcessClaimStore;
-use super::{observed_claim_store, ObservedClaimStore};
-use super::{verify_resume_identity, ResumeIdentityProof};
+use super::ResumeIdentityProof;
 
 /// Closed set of claimable entity kinds (element 4). Serialized to `TEXT`
 /// only at the SQL boundary (`entity_type` column) — never compared or
@@ -108,7 +103,7 @@ impl<'de> serde::Deserialize<'de> for Entity {
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = RawEntity::deserialize(deserializer)?;
+        let raw = super::RawEntity::deserialize(deserializer)?;
         if raw.id.len() > ENTITY_ID_MAX_LEN {
             return Err(serde::de::Error::custom(EntityIdTooLong {
                 len: raw.id.len(),
@@ -150,8 +145,8 @@ impl std::fmt::Display for Entity {
 /// between "the owner is still alive, just unreachable over the swarm right
 /// now" (XEP-0198's `resource-constraint`) and "the owner's own lease has
 /// since expired" (XEP-0198's `item-not-found` — the session is known
-/// gone). [`InProcessClaimStore`] has no node-liveness table at all (module
-/// doc: "no `clustering_nodes`-equivalent liveness table here"), so it
+/// gone). [`InProcessClaimStore`](super::InProcessClaimStore) has no node-liveness
+/// table at all (module doc: "no `clustering_nodes`-equivalent liveness table here"), so it
 /// always reports `true` — the single-node case has no notion of a stale
 /// peer to distinguish.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +176,7 @@ pub struct ClaimEpoch(pub i64);
 pub struct NodeIdentity {
     pub node_id: String,
     pub node_epoch: String,
-    pub(in crate::ownership) authority: NodeAuthority,
+    pub(in crate::ownership) authority: super::NodeAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -200,8 +195,8 @@ impl NodeIdentity {
     }
 
     /// A fixed local identity for single-node/no-clustering deployments,
-    /// where [`InProcessClaimStore`] is the only `ClaimStore` in play and
-    /// node identity is not a meaningful concept (there is only one node).
+    /// where [`InProcessClaimStore`](super::InProcessClaimStore) is the only
+    /// `ClaimStore` in play and node identity is not a meaningful concept (there is only one node).
     pub fn local() -> Self {
         Self::new("local", "local")
     }
@@ -540,8 +535,8 @@ pub trait ClaimStore: Send + Sync {
     /// Steal `entity` via the consent/epoch-only CAS (element 4's third CAS
     /// variant), authorized exclusively by an identity-checked resume
     /// (element 8). Requires a [`ResumeIdentityProof`], which only
-    /// [`resume::verify_resume_identity`] can mint — so no caller outside
-    /// the resume path can even name this method meaningfully.
+    /// [`resume::verify_resume_identity`](super::resume::verify_resume_identity)
+    /// can mint — so no caller outside the resume path can even name this method meaningfully.
     async fn steal_for_resume(
         &self,
         entity: &Entity,

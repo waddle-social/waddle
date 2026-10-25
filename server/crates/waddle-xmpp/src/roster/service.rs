@@ -5,8 +5,8 @@ use super::Element;
 use super::HashSet;
 use super::Iq;
 use super::XmppError;
-use super::{AskType, RosterItem, RosterVersion, RosterVersionRequest, Subscription, ROSTER_NS};
 use super::{BareJid, FullJid, Jid};
+use super::{RosterItem, RosterVersion, RosterVersionRequest, Subscription, ROSTER_NS};
 
 /// Parsed roster query.
 #[derive(Debug, Clone)]
@@ -130,7 +130,7 @@ pub fn parse_roster_set(iq: &Iq) -> Result<RosterQuery, XmppError> {
     let items: Result<Vec<RosterItem>, XmppError> = query_elem
         .children()
         .filter(|c| c.name() == "item" && c.ns() == ROSTER_NS)
-        .map(parse_roster_set_item)
+        .map(super::parse_roster_set_item)
         .collect();
 
     let items = items?;

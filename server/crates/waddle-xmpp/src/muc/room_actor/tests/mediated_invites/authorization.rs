@@ -4,9 +4,8 @@ use super::{
     AcknowledgeMediatedInviteOperation, Affiliation, AuthorizeMediatedInvite, ChangeAffiliation,
     ConfigEffectPlan, FinalizeMediatedInviteGrant, GetAffiliation, GetConfig, GetSnapshot, Join,
     JoinAffiliationGrant, JoinDenialReason, JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid,
-    LeaveOrigin, LeaveSessionSelector, MediatedInviteGrantError, MucRoom,
-    OccupancySessionGeneration, Role, RoomActor, RoomActorError, RoomConfig, SendError,
-    UpdateConfig, UpdateGroupDmConfigByMember,
+    LeaveSessionSelector, MediatedInviteGrantError, MucRoom, Role, RoomActor, RoomActorError,
+    RoomConfig, SendError, UpdateConfig, UpdateGroupDmConfigByMember,
 };
 use kameo::actor::Spawn;
 

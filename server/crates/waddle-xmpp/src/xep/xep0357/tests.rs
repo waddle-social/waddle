@@ -1,6 +1,6 @@
 use super::{
     build_push_disable_result, build_push_enable_result, is_push_disable, is_push_enable,
-    parse_data_form_options, parse_push_disable, parse_push_enable, BareJid, Element, Iq,
+    parse_data_form_options, parse_push_disable, parse_push_enable, Element, Iq,
     PublishOptionsParse, PushDisable, PushEnable, NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS,
     NS_PUSH,
 };

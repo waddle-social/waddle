@@ -3,8 +3,7 @@ use super::{
     this_identity, wire_recording_store, wire_recording_store_with_claims, Arc, BareJid,
     ClaimStore, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome, DestroyRoomReason,
     DurableRoomState, Entity, EntityType, GetOrRestoreDurableRoom, GetRoom, GetSnapshot, Ordering,
-    RecordingDurableStore, RoomCount, RoomDurableMutation, RoomRegistryError, SealGuard, SendError,
-    SharedNodeIdentity,
+    RecordingDurableStore, RoomCount, RoomRegistryError, SealGuard, SendError, SharedNodeIdentity,
 };
 
 fn recover(room_jid: BareJid) -> GetOrRestoreDurableRoom {

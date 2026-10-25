@@ -3,11 +3,11 @@ use super::{
     test_full_jid_resource, test_room, test_secret, AbortMediatedInviteGrantRollback,
     AckDepartureOutcome, AckDepartureReceipt, AcknowledgeMediatedInviteOperation, AdminApplyError,
     AdminItem, AffiliationMutationError, ApplyAdminItems, ApplyAffiliationChange,
-    CommitMediatedInviteGrantRollback, ConfigEffectPlan, DestroyAttemptId, DurablePersistError,
+    CommitMediatedInviteGrantRollback, ConfigEffectPlan, DurablePersistError,
     EnforceMembersOnlyAffiliations, FailNthAffiliationSaveStore, FakeDurableStore,
     FinalizeMediatedInviteGrant, FlakyThenRecoveringStore, GetAffiliation, GetConfig,
     GetOccupantByJid, GetSnapshot, IsDormant, JoinAffiliationGrant, JoinDenialReason,
-    JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
+    JoinWithAffiliation, LeaveAttemptId, LeaveByRealJid, LeaveSessionSelector,
     MediatedInviteGrantError, MediatedInviteGrantFinalization,
     MediatedInviteOperationAcknowledgement, MediatedInviteRollbackAbort,
     MediatedInviteRollbackCommit, MediatedInviteRollbackError, MediatedInviteRollbackPreparation,
@@ -19,7 +19,7 @@ use super::{
 use super::{
     spawn_room_actor_with_config, test_full_jid, ActorRef, Affiliation, AuthorizeMediatedInvite,
     BareJid, ChangeAffiliation, Context, FullJid, InviteMembershipGrant, Join,
-    MediatedInviteOperationId, OccupancySessionGeneration, Role, RoomActor, RoomConfig,
+    MediatedInviteOperationId, Role, RoomActor, RoomConfig,
 };
 use crate::muc::room_actor::mediated_invites::MAX_RETAINED_MEDIATED_INVITE_OPERATIONS;
 

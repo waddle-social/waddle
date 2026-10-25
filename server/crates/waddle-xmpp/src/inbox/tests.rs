@@ -1,7 +1,4 @@
-use super::{
-    BareJid, CallThreadDuration, CallThreadKind, CallThreadMedia, ConversationKind, DateTime,
-    InboxEntry, InboxKey, InboxView, Utc,
-};
+use super::{BareJid, ConversationKind, InboxEntry, InboxKey, InboxView};
 
 fn jid(s: &str) -> BareJid {
     s.parse().unwrap()

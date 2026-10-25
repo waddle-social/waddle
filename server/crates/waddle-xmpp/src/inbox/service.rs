@@ -1,7 +1,5 @@
 //! Implementation behind the parent module facade.
 
-use super::runtime;
-use super::storage;
 use super::BareJid;
 use super::Element;
 use super::HashMap;

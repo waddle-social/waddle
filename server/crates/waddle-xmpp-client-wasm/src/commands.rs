@@ -3,8 +3,8 @@
 use super::{
     apply_pagehide_message_sent, js_error, oneshot, publish_resume_state_snapshot, wasm_bindgen,
     AvatarRequestFailure, ClientError, ClientEvent, ConnectionEvent, DeferredWasmCommand,
-    DriverResult, Element, JsCast, JsValue, PagehideAckRequest, PagehideCommandCompletion, Rc,
-    RefCell, SmState, StreamClose, TransportMessage, WaddleClientInner, WaddleSendMessageOutcome,
+    DriverResult, Element, JsValue, PagehideAckRequest, PagehideCommandCompletion, Rc, RefCell,
+    SmState, StreamClose, TransportMessage, WaddleClientInner, WaddleSendMessageOutcome,
     WasmCommand, WasmDriverCore,
 };
 use crate::state::InboxPage;

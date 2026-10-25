@@ -1,7 +1,7 @@
 use super::{
-    mpsc, Arc, AtomicBool, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry,
-    DeliveryKind, FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance,
-    PendingFlushReserveError, SendResult, SmSessionId, Stanza,
+    mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
+    FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance, PendingFlushReserveError,
+    SendResult, Stanza,
 };
 use jid::Jid;
 use std::time::Duration;

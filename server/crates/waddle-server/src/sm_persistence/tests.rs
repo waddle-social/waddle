@@ -1,10 +1,13 @@
+#[cfg(feature = "clustering")]
+use super::PostgresFencedSmPersistence;
 use super::{
     open_for_cluster_mode_with_lineage, schema, Arc, Database, DatabaseSmPersistence, DateTime,
     FullJid, IngressCustodyDisposition, PersistedIngressAppend, PersistedSession,
     PersistedUnackedStanza, PromotionAppendOutcome, Show, SmAckWindow, SmPersistenceError,
     SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };
-use super::{DatabaseConfig, DatabaseDriver, KeyedSnapshotOutcome, PostgresFencedSmPersistence};
+use super::{DatabaseConfig, DatabaseDriver, KeyedSnapshotOutcome};
+
 use chrono::TimeZone;
 use std::time::Duration;
 use waddle_xmpp::auth::{
