@@ -2,7 +2,7 @@
 
 use adw::prelude::{BoxExt, WidgetExt};
 use adw::subclass::prelude::ObjectSubclassIsExt;
-use waddle_client_session::{HistoryPage, IncomingMessage, Timeline, TimelineItem};
+use waddle_client_session::{IncomingMessage, Timeline, TimelineItem};
 
 use super::WaddleWindow;
 use crate::session::Conversation;
@@ -228,6 +228,7 @@ impl WaddleWindow {
 mod tests {
     use super::*;
     use crate::session::Kind;
+    use waddle_client_session::HistoryPage;
     use adw::prelude::{ApplicationExt, ButtonExt, CastNone, GtkWindowExt, ListModelExt};
     use gtk::gio;
     use waddle_client_session::judgments::{
