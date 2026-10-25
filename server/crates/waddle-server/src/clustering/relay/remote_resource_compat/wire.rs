@@ -1,6 +1,15 @@
 //! Frozen wire DTOs. Do not replace these fields with domain target/frame types.
 //! Exhaustive adapters deliberately make domain evolution a compile-time review.
-use super::*;
+use super::{
+    DeliveryKind, Deserialize, IngressAppendObligationRef, MucProxyOrigin,
+    OrderedRelayMucProxyKind, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameReply,
+    RelayRemoteResourceFrameStatus, RelayReplyReceiptToken, RelayRouteRemoteResourceStanza,
+    RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteResourceOutboundFrame,
+    RemoteResourceRegistrationId, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
+    RemoteResourceSocketGeneration, RemoteStanza, Reply, Serialize,
+};
+use crate::ingress::EffectReceiptKey;
+use crate::ingress::IngressCanonicalRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RouteV8 {
@@ -29,7 +38,7 @@ enum RouteTargetV8 {
         stanza: RemoteStanza,
     },
     MucProxy {
-        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        canonical: Option<IngressCanonicalRef>,
         principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
         #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
         stanza_lang: Option<xmpp_parsers::message::Lang>,
@@ -44,7 +53,7 @@ enum RouteTargetV8 {
 struct AppendV8 {
     message_key: waddle_xmpp::ingress::MessageKey,
     sender_bare: jid::BareJid,
-    receipt: crate::ingress::EffectReceiptKey,
+    receipt: EffectReceiptKey,
     received_at: Option<chrono::DateTime<chrono::Utc>>,
     archive_positions: Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>,
     dispatch_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
@@ -300,7 +309,7 @@ enum LiveTarget {
         stanza: RemoteStanza,
     },
     MucProxy {
-        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        canonical: Option<IngressCanonicalRef>,
         principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
         #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
         stanza_lang: Option<xmpp_parsers::message::Lang>,

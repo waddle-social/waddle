@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    effects, extract_correction_from_message, extract_retraction_from_message, warn, ActorRef, Arc,
+    BareJid, DefinedCondition, Deps, Element, ErrorType, FullJid, GetNicknameGeneration, Jid,
+    MamArchivedMessage, MamStorage, Message, RetractionKind, RoomActor, StanzaError,
+    XmppMessageType, NS_EXPLICIT_MENTIONS, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
+    NS_REFERENCE, NS_REPLY,
+};
 
 pub(super) async fn validate_groupchat_rich_targets(
     deps: &Deps<'_>,

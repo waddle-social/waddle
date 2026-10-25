@@ -25,7 +25,7 @@ minidom = { workspace = true }
 rxml = { workspace = true }
 
 # Concurrent Data Structures
-dashmap = { workspace = true }
+dashmap = { workspace = true, features = ["raw-api"] }
 lru = { workspace = true }
 
 # TLS
@@ -118,3 +118,6 @@ test-utils = [
   "dep:tracing-opentelemetry",
   "dep:tracing-subscriber",
 ]
+
+[lints]
+workspace = true

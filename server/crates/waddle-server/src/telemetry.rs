@@ -5,577 +5,39 @@
 //!
 //! See [ADR-0014](../../../docs/adrs/0014-opentelemetry.md) for design decisions.
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{
-    logs::SdkLoggerProvider,
-    metrics::{PeriodicReader, SdkMeterProvider},
-    trace::SdkTracerProvider,
-    Resource,
-};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 mod span_hygiene;
 mod span_noise;
-
-/// The global tracer provider, stored for shutdown.
-static TRACER_PROVIDER: std::sync::OnceLock<SdkTracerProvider> = std::sync::OnceLock::new();
-
-/// The global meter provider, stored for shutdown.
-static METER_PROVIDER: std::sync::OnceLock<SdkMeterProvider> = std::sync::OnceLock::new();
-
-/// The global logger provider, stored for shutdown.
-static LOGGER_PROVIDER: std::sync::OnceLock<SdkLoggerProvider> = std::sync::OnceLock::new();
-
-const METRICS_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Build the OpenTelemetry resource with service information.
-fn build_resource() -> Resource {
-    let service_name =
-        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "waddle-server".to_string());
-    let service_version = std::env::var("OTEL_SERVICE_VERSION")
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let service_instance_id = resolve_service_instance_id(
-        std::env::var("OTEL_SERVICE_INSTANCE_ID").ok(),
-        std::env::var("HOSTNAME").ok(),
-        std::process::id(),
-        uuid::Uuid::new_v4().simple().to_string().as_str(),
-    );
-
-    // `Resource::builder()` includes the SDK's `EnvResourceDetector`,
-    // so standard `OTEL_RESOURCE_ATTRIBUTES` entries (helm sets
-    // `deployment.environment` there) merge in without bespoke code.
-    Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", service_name),
-            KeyValue::new("service.version", service_version),
-            KeyValue::new("service.instance.id", service_instance_id),
-        ])
-        .build()
-}
-
-/// Parsed trace-sampler configuration. Mirrors the OTel spec's
-/// `OTEL_TRACES_SAMPLER` values; a typed intermediate so selection is
-/// unit-testable (`Sampler::ParentBased` boxes a `dyn ShouldSample`
-/// and cannot be inspected after construction).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SamplerChoice {
-    AlwaysOn,
-    AlwaysOff,
-    TraceIdRatio(f64),
-    ParentBasedAlwaysOn,
-    ParentBasedAlwaysOff,
-    ParentBasedTraceIdRatio(f64),
-}
-
-/// Resolve the trace sampler from `OTEL_TRACES_SAMPLER` /
-/// `OTEL_TRACES_SAMPLER_ARG` (helm `telemetry.tracesSampler*`).
-/// Unset or unrecognized values fall back to the spec default,
-/// `parentbased_traceidratio` with ratio 1.0, so trace volume has a
-/// dial before it has a bill without changing today's behavior.
-fn sampler_choice(name: Option<String>, arg: Option<String>) -> SamplerChoice {
-    let ratio = nonblank(arg)
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .filter(|ratio| (0.0..=1.0).contains(ratio))
-        .unwrap_or(1.0);
-
-    // Sampler names are matched case-insensitively per the OTel
-    // env-var spec. The ratio argument applies only when a ratio
-    // sampler is explicitly selected; unset or unrecognized names get
-    // the documented default with ratio 1.0 so a stray
-    // OTEL_TRACES_SAMPLER_ARG can never silently shed traces.
-    match nonblank(name).map(|n| n.to_ascii_lowercase()).as_deref() {
-        Some("always_on") => SamplerChoice::AlwaysOn,
-        Some("always_off") => SamplerChoice::AlwaysOff,
-        Some("traceidratio") => SamplerChoice::TraceIdRatio(ratio),
-        Some("parentbased_always_on") => SamplerChoice::ParentBasedAlwaysOn,
-        Some("parentbased_always_off") => SamplerChoice::ParentBasedAlwaysOff,
-        Some("parentbased_traceidratio") => SamplerChoice::ParentBasedTraceIdRatio(ratio),
-        _ => SamplerChoice::ParentBasedTraceIdRatio(1.0),
-    }
-}
-
-impl SamplerChoice {
-    fn build(self) -> opentelemetry_sdk::trace::Sampler {
-        use opentelemetry_sdk::trace::Sampler;
-        match self {
-            Self::AlwaysOn => Sampler::AlwaysOn,
-            Self::AlwaysOff => Sampler::AlwaysOff,
-            Self::TraceIdRatio(ratio) => Sampler::TraceIdRatioBased(ratio),
-            Self::ParentBasedAlwaysOn => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
-            Self::ParentBasedAlwaysOff => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
-            Self::ParentBasedTraceIdRatio(ratio) => {
-                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
-            }
-        }
-    }
-}
-
-/// The `OTEL_TRACES_SAMPLER` names `sampler_choice` maps to a
-/// dedicated variant (everything else falls back to the default).
-fn is_known_sampler(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "always_on"
-            | "always_off"
-            | "traceidratio"
-            | "parentbased_always_on"
-            | "parentbased_always_off"
-            | "parentbased_traceidratio"
-    )
-}
-
-fn sampler_from_env() -> opentelemetry_sdk::trace::Sampler {
-    sampler_choice(
-        std::env::var("OTEL_TRACES_SAMPLER").ok(),
-        std::env::var("OTEL_TRACES_SAMPLER_ARG").ok(),
-    )
-    .build()
-}
-
-/// Resolve the `service.instance.id` resource attribute.
-///
-/// With multiple replicas, OTLP-pushed metrics that share an identical
-/// resource collapse into one clobbered series downstream, so every
-/// process needs a distinct, stable-for-its-lifetime identity.
-/// Precedence: explicit `OTEL_SERVICE_INSTANCE_ID` override, then
-/// `HOSTNAME` verbatim (the kubelet sets it to the pod name in every
-/// pod), then a pid+entropy fallback: pids alone repeat across PID
-/// namespaces, so hostname-less hosts need the per-process entropy to
-/// avoid colliding. Blank values are skipped.
-///
-/// The hostname is used **verbatim, with no pid suffix** (#1434). The
-/// Prometheus scrape path labels the same pod `instance=<pod name>`,
-/// so a suffixed OTLP identity made every pod appear as two phantom
-/// entities in Grafana Cloud (`target_info` doubled, and joins such as
-/// `up * on(instance) group_right waddle_connected_users` matched
-/// nothing). Matching the scrape label exactly is worth more than
-/// distinguishing several waddle-server processes on one host, which
-/// only happens outside containers and is served by setting
-/// `OTEL_SERVICE_INSTANCE_ID` explicitly.
-///
-/// This does not weaken restart detection (#1435): the recommended
-/// query `time() - waddle_process_start_time_seconds < threshold`
-/// reads the value, not the series identity. Deploys still mint new
-/// series because the pod name changes; in-place container restarts
-/// already reused one series (hostname plus PID 1) before this change.
-fn resolve_service_instance_id(
-    explicit: Option<String>,
-    hostname: Option<String>,
-    pid: u32,
-    fallback_entropy: &str,
-) -> String {
-    if let Some(id) = nonblank(explicit) {
-        return id;
-    }
-    if let Some(host) = nonblank(hostname) {
-        return host;
-    }
-    format!("waddle-server-{pid}-{fallback_entropy}")
-}
-
-fn nonblank(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn default_filter() -> EnvFilter {
-    // Keep historical defaults to avoid changing verbosity unexpectedly.
-    EnvFilter::new("info,waddle_server=debug,waddle_xmpp=debug")
-}
-
-/// Filter for the OTLP log bridge.
-///
-/// The exporter itself uses `tonic` / `hyper` / `h2` / `reqwest`, and
-/// those crates emit `tracing` events internally. Without this filter
-/// the bridge would feed their output right back into the exporter,
-/// which would emit more events — a feedback loop that blows up the
-/// pipeline. Silencing those targets at the bridge layer keeps them
-/// visible on stdout (through the `fmt` layer) but out of OTLP.
-///
-/// Built on top of `default_filter()` so the base verbosity stays in
-/// lockstep with the primary subscriber filter.
-fn log_bridge_filter() -> EnvFilter {
-    // Every crate in the OTLP export path. If any of these starts
-    // emitting `tracing` events that land back in the exporter, the
-    // pipeline loops. Keep this list exhaustive.
-    const OFF_TARGETS: &[&str] = &[
-        "hyper",
-        "hyper_util",
-        "tonic",
-        "h2",
-        "reqwest",
-        "tower",
-        "opentelemetry",
-        "opentelemetry_sdk",
-        "opentelemetry_otlp",
-        "opentelemetry_http",
-        "opentelemetry_proto",
-        "opentelemetry_appender_tracing",
-    ];
-
-    OFF_TARGETS.iter().fold(default_filter(), |filter, target| {
-        let directive = format!("{target}=off")
-            .parse()
-            .expect("static `<target>=off` directive must be valid");
-        filter.add_directive(directive)
-    })
-}
-
-fn build_log_filter() -> EnvFilter {
-    if let Ok(filter) = std::env::var("RUST_LOG") {
-        return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
-    }
-
-    if let Ok(level_or_filter) = std::env::var("WADDLE_LOG_LEVEL") {
-        let level_or_filter = level_or_filter.trim();
-        if !level_or_filter.is_empty() {
-            let filter = if level_or_filter.contains('=') || level_or_filter.contains(',') {
-                level_or_filter.to_string()
-            } else {
-                format!(
-                    "{level},waddle_server={level},waddle_xmpp={level}",
-                    level = level_or_filter
-                )
-            };
-            return EnvFilter::try_new(filter).unwrap_or_else(|_| default_filter());
-        }
-    }
-
-    default_filter()
-}
-
-/// Initialize OpenTelemetry tracing with OTLP export.
-///
-/// This sets up:
-/// - OTLP exporter for traces (to Jaeger, Grafana Tempo, etc.)
-/// - OTLP exporter for metrics
-/// - OTLP exporter for logs (bridged from `tracing` events)
-/// - tracing-subscriber with OpenTelemetry integration
-/// - Console output for local development
-///
-/// # Configuration
-///
-/// Environment variables:
-/// - `OTEL_EXPORTER_OTLP_ENDPOINT`: OTLP endpoint (default: http://localhost:4317)
-/// - `OTEL_SERVICE_NAME`: Service name (default: waddle-server)
-/// - `OTEL_SERVICE_VERSION`: Service version (default: crate version)
-/// - `OTEL_SERVICE_INSTANCE_ID`: Per-replica instance id (default:
-///   `HOSTNAME` verbatim — the pod name in Kubernetes, matching the
-///   scrape path's `instance` label — then a pid+entropy fallback when
-///   no hostname is available)
-/// - `OTEL_RESOURCE_ATTRIBUTES`: Standard comma-separated resource
-///   attributes (helm sets `deployment.environment=<env>` here),
-///   merged by the SDK's env detector
-/// - `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`: Trace sampler
-///   (default: `parentbased_traceidratio` with ratio 1.0)
-/// - `RUST_LOG`: Log filter (default: info)
-///
-/// # Example
-///
-/// ```ignore
-/// use waddle_server::telemetry;
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     telemetry::init()?;
-///
-///     // Your application code here, ending in a graceful drain that
-///     // reports its pre-exit metrics flush outcome...
-///     let metrics_flush = telemetry::flush_metrics_before_exit().await;
-///
-///     telemetry::shutdown(metrics_flush);
-///     Ok(())
-/// }
-/// ```
-pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Register the W3C Trace Context propagator globally so inbound
-    // `traceparent` / `tracestate` headers from the browser (injected by
-    // the chat frontend's Faro `TracingInstrumentation`) join their
-    // spans into the trace we're about to start. The tower-http
-    // `TraceLayer` in `server/mod.rs` reads this propagator in its
-    // `make_span_with` closure.
-    opentelemetry::global::set_text_map_propagator(
-        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-    );
-
-    // Get configuration from environment
-    let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
-
-    let resource = build_resource();
-
-    // Build OTLP trace exporter, wrapped in the attribute-hygiene
-    // scrubber that strips kameo's per-instance `actor.id`, empty-string
-    // attribute values, and build-sandbox `code.file.path` prefixes on
-    // the way to the wire (#1439).
-    let trace_exporter = span_hygiene::HygienicSpanExporter::new(
-        opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&otlp_endpoint)
-            .build()?,
-    );
-
-    // Build tracer provider with batch processor. The sampler comes
-    // from OTEL_TRACES_SAMPLER / OTEL_TRACES_SAMPLER_ARG (default
-    // parentbased_traceidratio 1.0 — today's sample-everything
-    // behavior, but now operator-tunable from helm values), wrapped in
-    // the span-noise filter that drops root kameo actor spans, root
-    // health-check spans, and whole-life actor.lifecycle spans (#1438).
-    let sampler = span_noise::SpanNoiseFilter::new(sampler_from_env());
-    let tracer_provider = SdkTracerProvider::builder()
-        .with_batch_exporter(trace_exporter)
-        .with_sampler(sampler)
-        .with_resource(resource.clone())
-        .build();
-
-    // Store the provider for shutdown
-    let _ = TRACER_PROVIDER.set(tracer_provider.clone());
-
-    // Get a tracer from the provider
-    let tracer = tracer_provider.tracer("waddle-server");
-
-    // Build OTLP metrics exporter
-    let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .with_endpoint(&otlp_endpoint)
-        .build()?;
-
-    // Build meter provider
-    let meter_provider = SdkMeterProvider::builder()
-        .with_reader(PeriodicReader::builder(metrics_exporter).build())
-        .with_resource(resource.clone())
-        .build();
-
-    // Store the meter provider for shutdown
-    let _ = METER_PROVIDER.set(meter_provider.clone());
-
-    // Set global meter provider
-    opentelemetry::global::set_meter_provider(meter_provider);
-
-    // Register the pod-wide observable gauges eagerly so a churn-free
-    // pod exports 0 instead of no series (the waddle_connected_users
-    // alias reads absent otherwise — Qodo review on PR #1426).
-    waddle_xmpp::metrics::init_pod_gauges();
-
-    // Register the process start-time/CPU/FD instruments eagerly so a
-    // fresh pod exports its restart signal on the first OTLP push
-    // (#1435).
-    crate::server::process_metrics::init_process_instruments();
-
-    // `add(0)` the alert-worthy reliability counters so a fresh healthy
-    // pod exports them at zero: create-at-increment instruments would
-    // otherwise be absent until something goes wrong, and with several
-    // deploys a day the `increase(...) > 0` alerts evaluate to no-data
-    // instead of 0 (#1436).
-    waddle_xmpp::telemetry::reliability::register_reliability_counters();
-
-    // Same rationale for the LiveKit webhook family, whose emitting
-    // helper lives with the webhook route in this crate (#1436, #1452).
-    crate::server::routes::livekit_webhook::register_webhook_counters();
-
-    #[cfg(feature = "clustering")]
-    crate::clustering::metrics::register_clustering_counters();
-
-    // Build OTLP logs exporter + provider. The tracing bridge below
-    // feeds every `tracing::{info,warn,error,debug,trace}!` event into
-    // this provider as an OTLP log record, in addition to stdout.
-    let log_exporter = opentelemetry_otlp::LogExporter::builder()
-        .with_tonic()
-        .with_endpoint(&otlp_endpoint)
-        .build()?;
-
-    let logger_provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(log_exporter)
-        .with_resource(resource)
-        .build();
-
-    let _ = LOGGER_PROVIDER.set(logger_provider.clone());
-
-    let filter = build_log_filter();
-
-    // Structured JSON logs for production and local observability pipelines.
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_current_span(true)
-        .with_span_list(true)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_file(true)
-        .with_line_number(true);
-
-    // Build the OpenTelemetry tracing layer
-    let telemetry_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer)
-        .with_error_events_to_status(true)
-        .with_error_records_to_exceptions(true);
-
-    // Bridge `tracing` events into the OTLP log pipeline. Scope its
-    // own filter so the HTTP/gRPC transports used by the OTLP exporter
-    // can't feed their logs back into themselves and loop.
-    let otel_log_layer =
-        OpenTelemetryTracingBridge::new(&logger_provider).with_filter(log_bridge_filter());
-
-    // Combine layers and set as global subscriber
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .with(telemetry_layer)
-        .with(otel_log_layer)
-        .init();
-
-    tracing::info!(
-        endpoint = %otlp_endpoint,
-        "OpenTelemetry initialized with OTLP export"
-    );
-
-    // The sampler was resolved before the subscriber existed, so an
-    // unrecognized name could only fall back silently; surface it now.
-    if let Some(name) = nonblank(std::env::var("OTEL_TRACES_SAMPLER").ok()) {
-        if !is_known_sampler(&name) {
-            tracing::warn!(
-                sampler = %name,
-                "Unrecognized OTEL_TRACES_SAMPLER; using parentbased_traceidratio 1.0"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Initialize telemetry for local development (without OTLP export).
-///
-/// This is useful for development when you don't have an OTLP collector running.
-/// It provides console output with colored logs.
-pub fn init_local() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let filter = build_log_filter();
-
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_current_span(true)
-        .with_span_list(true)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_file(true)
-        .with_line_number(true);
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .init();
-
-    tracing::info!("Local telemetry initialized with JSON logging (no OTLP export)");
-
-    Ok(())
-}
-
-/// Mark the current tracing span as failed so it matches Tempo
-/// `status=error` queries (#1428).
-///
-/// The single home for the server-side idiom: every warn-level failure site
-/// marks its span through this helper. The protocol crate records the reserved
-/// `otel.status_code` tracing field instead, avoiding a dependency on the
-/// production OpenTelemetry tracing layer.
-pub(crate) fn mark_span_error(description: &'static str) {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-    tracing::Span::current().set_status(opentelemetry::trace::Status::error(description));
-}
-
-/// Outcome of [`flush_metrics_before_exit`], threaded explicitly from
-/// the drain path back through `main` into [`shutdown`] so the
-/// "skip the stalled meter provider" decision travels as a value
-/// instead of hiding in shared mutable state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use = "pass this to telemetry::shutdown so it can skip a stalled meter provider"]
-pub enum MetricsFlush {
-    /// The pre-exit flush succeeded, or there was no meter provider to
-    /// flush (local telemetry).
-    Completed,
-    /// The pre-exit flush failed or timed out; the exporter may still
-    /// be stalled (the abandoned flush thread can also still hold the
-    /// reader's worker).
-    Failed,
-}
-
-/// Flush metrics recorded during graceful drain before control returns to `main`.
-///
-/// Local telemetry has no meter provider, so this reports
-/// [`MetricsFlush::Completed`] without flushing when [`init_local`] was used.
-pub async fn flush_metrics_before_exit() -> MetricsFlush {
-    let Some(provider) = METER_PROVIDER.get() else {
-        return MetricsFlush::Completed;
-    };
-
-    if waddle_xmpp::telemetry::force_flush_bounded(provider, METRICS_FLUSH_TIMEOUT).await {
-        MetricsFlush::Completed
-    } else {
-        MetricsFlush::Failed
-    }
-}
-
-/// Shutdown telemetry, flushing any pending spans and metrics.
-///
-/// Call this before application exit to ensure all telemetry data is
-/// sent, passing the [`flush_metrics_before_exit`] outcome from the
-/// drain path.
-pub fn shutdown(metrics_flush: MetricsFlush) {
-    tracing::info!("Shutting down telemetry...");
-
-    // Shutdown tracer provider
-    if let Some(provider) = TRACER_PROVIDER.get() {
-        if let Err(e) = provider.shutdown() {
-            tracing::error!(error = %e, "Error shutting down tracer provider");
-        }
-    }
-
-    // Shutdown meter provider — unless the pre-exit flush already
-    // failed against a stalled exporter, in which case another export
-    // attempt can only delay exit (the SDK bounds it at ~5s) without
-    // ever succeeding.
-    if metrics_flush == MetricsFlush::Failed {
-        tracing::warn!("Skipping meter provider shutdown: pre-exit flush already failed");
-    } else if let Some(provider) = METER_PROVIDER.get() {
-        if let Err(e) = provider.shutdown() {
-            tracing::error!(error = %e, "Error shutting down meter provider");
-        }
-    }
-
-    // Shutdown logger provider (flushes any buffered OTLP log records).
-    if let Some(provider) = LOGGER_PROVIDER.get() {
-        if let Err(e) = provider.shutdown() {
-            tracing::error!(error = %e, "Error shutting down logger provider");
-        }
-    }
-
-    tracing::info!("Telemetry shutdown complete");
-}
 #[cfg(test)]
 mod tests {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::Key;
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-    use opentelemetry_sdk::{
-        logs::{BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider},
-        metrics::{
-            data::ResourceMetrics, exporter::PushMetricExporter, PeriodicReader, SdkMeterProvider,
-            Temporality,
-        },
-        trace::{
-            BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
-            SpanExporter,
-        },
+    use opentelemetry_sdk::logs::{
+        BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
     };
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::{Duration, Instant},
+    use opentelemetry_sdk::metrics::data::ResourceMetrics;
+    use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+    use opentelemetry_sdk::trace::{
+        BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
+        SpanExporter,
     };
-    use tracing_subscriber::{layer::SubscriberExt, Layer as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer as _;
 
     #[derive(Debug)]
     struct FailingSpanExporter {
@@ -980,3 +442,23 @@ mod tests {
         );
     }
 }
+
+mod implementation;
+#[cfg(test)]
+use implementation::build_resource;
+pub use implementation::flush_metrics_before_exit;
+pub use implementation::init;
+pub use implementation::init_local;
+#[cfg(test)]
+use implementation::is_known_sampler;
+#[cfg(test)]
+use implementation::log_bridge_filter;
+pub(crate) use implementation::mark_span_error;
+#[cfg(test)]
+use implementation::resolve_service_instance_id;
+#[cfg(test)]
+use implementation::sampler_choice;
+pub use implementation::shutdown;
+pub use implementation::MetricsFlush;
+#[cfg(test)]
+use implementation::SamplerChoice;

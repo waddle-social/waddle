@@ -143,9 +143,9 @@ impl TryFrom<&Element> for WaddleLiveKitTransport {
             (Some(url), Some(room), Some(identity), Some(token)) => {
                 let parsed_url = Url::parse(url)
                     .map_err(|_| TransportParseError::InvalidUrl(url.to_string()))?;
-                let ws_url = WebsocketUrl::new(parsed_url)
+                let ws_url = WebsocketUrl::try_new(parsed_url)
                     .map_err(|e| TransportParseError::InvalidUrl(e.to_string()))?;
-                let call_id = CallId::new(room).map_err(TransportParseError::InvalidCallId)?;
+                let call_id = CallId::try_new(room).map_err(TransportParseError::InvalidCallId)?;
                 let jid: jid::FullJid = identity
                     .parse()
                     .map_err(|_| TransportParseError::InvalidIdentity(identity.to_string()))?;
@@ -186,8 +186,8 @@ mod tests {
 
     #[test]
     fn issued_form_round_trips() {
-        let url = WebsocketUrl::new("wss://livekit.waddle.social".parse().unwrap()).unwrap();
-        let room = CallId::new("c1").unwrap();
+        let url = WebsocketUrl::try_new("wss://livekit.waddle.social".parse().unwrap()).unwrap();
+        let room = CallId::try_new("c1").unwrap();
         let jid: jid::FullJid = "alice@waddle.social/desktop".parse().unwrap();
         let identity = Identity::from_jid(jid);
         let token = Jwt::from_wire("eyJhbGciOi...".to_string());

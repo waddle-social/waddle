@@ -1,13 +1,12 @@
 //! Resume ACK commits remain authoritative when completion and settlement fail.
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
-use crate::pending_delivery::{
-    storage::{InMemoryPendingDeliveryStorage, PendingDeliveryStorage},
-    PendingPayload, PendingRow, PendingRowId, SmSessionId,
-};
+use crate::pending_delivery::storage::{InMemoryPendingDeliveryStorage, PendingDeliveryStorage};
+use crate::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
 use crate::stream_management::persistence::{SmAckWindow, SmPersistenceStorage};
 
 use super::{

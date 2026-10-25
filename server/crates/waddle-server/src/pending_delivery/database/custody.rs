@@ -1,10 +1,16 @@
 //! Transfer independent ingress custody into pending delivery in one transaction.
 
-use super::*;
+use super::{
+    assert_insert_fence, claim_error_to_pending_storage_error, insert_in_transaction,
+    DatabasePendingDeliveryStorage, Entity, EntityType, InsertOutcome, PendingInsertFence,
+    PendingRow, PendingStorageError, QuotaPolicy, SmClaimFence,
+};
+use crate::db::DatabaseError;
+use crate::db::Transaction;
 use waddle_xmpp::pending_delivery::storage::CustodyInsertOutcome;
 use waddle_xmpp::stream_management::persistence::PersistedIngressAppend;
 
-fn storage_error(error: crate::db::DatabaseError) -> PendingStorageError {
+fn storage_error(error: DatabaseError) -> PendingStorageError {
     PendingStorageError::Other(error.to_string())
 }
 
@@ -64,7 +70,7 @@ pub(super) async fn insert(
 }
 
 async fn transfer(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     row: &PendingRow,
     append: &PersistedIngressAppend,
     quota: QuotaPolicy,

@@ -1,7 +1,6 @@
 //! Bind execution-time grant ownership to dependent compensation.
-use super::{
-    invite::InviteDeliveryFailure, Effect, ExternalEffect, MembershipOutcome, PlannedEffect,
-};
+use super::invite::InviteDeliveryFailure;
+use super::{Effect, ExternalEffect, MembershipOutcome, PlannedEffect};
 use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
 use jid::BareJid;
 
@@ -89,15 +88,13 @@ fn owns_membership(failure: &InviteDeliveryFailure, room: &BareJid, member: &Bar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::routes::websocket::{
-        handlers::message::muc_invite::MucMembershipMutation, muc_invites::OutstandingInvite,
-    };
+    use crate::server::routes::websocket::handlers::message::muc_invite::MucMembershipMutation;
+    use crate::server::routes::websocket::muc_invites::OutstandingInvite;
     use kameo::actor::Spawn;
-    use waddle_xmpp::{
-        muc::{room_actor::RoomActor, MucRoom, RoomConfig},
-        pending_delivery::{PendingPayload, PendingRow, PendingRowId},
-        xep::xep0421::OccupantIdSecret,
-    };
+    use waddle_xmpp::muc::room_actor::RoomActor;
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     #[tokio::test]
     async fn preserved_membership_removes_only_its_own_compensation() {
@@ -113,7 +110,7 @@ mod tests {
                 "room".into(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(vec![b't'; 32]).expect("secret"),
+            OccupantIdSecret::try_new(vec![b't'; 32]).expect("secret"),
         ));
         let grant = Box::new(MucMembershipMutation {
             room: invite.room.clone(),

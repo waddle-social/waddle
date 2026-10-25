@@ -42,7 +42,7 @@ impl ExtensionHostTools for MockHostTools {
         Ok(host_domain::ListChannelsResponse {
             channels: vec![host_domain::ChannelSummary {
                 room: "room@muc.example.com".parse().expect("room jid"),
-                name: Some(DisplayText::new("Room").expect("display text")),
+                name: Some(DisplayText::try_new("Room").expect("display text")),
                 description: None,
             }],
         })
@@ -119,7 +119,7 @@ impl ExtensionHostTools for MockHostTools {
             ]
         );
         Ok(host_domain::SendMessageResponse {
-            stanza_id: StanzaId::new("extension-stanza").expect("stanza id"),
+            stanza_id: StanzaId::try_new("extension-stanza").expect("stanza id"),
         })
     }
 
@@ -368,7 +368,7 @@ async fn runtime_http_denies_unconfigured_origin_before_network() {
             body: None,
         },
         &[],
-        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &super::http::HttpRuntime::try_new().expect("HTTP runtime"),
         &crate::config::RuntimeLimits::default(),
     )
     .await
@@ -389,7 +389,7 @@ async fn runtime_http_caps_request_body_before_network() {
             body: Some("x".repeat(256 * 1024 + 1)),
         },
         &["https://api.example.test".to_string()],
-        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &super::http::HttpRuntime::try_new().expect("HTTP runtime"),
         &crate::config::RuntimeLimits::default(),
     )
     .await
@@ -413,7 +413,7 @@ async fn runtime_http_rejects_accept_encoding_before_network() {
             body: None,
         },
         &["https://api.example.test".to_string()],
-        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &super::http::HttpRuntime::try_new().expect("HTTP runtime"),
         &crate::config::RuntimeLimits::default(),
     )
     .await
@@ -478,8 +478,8 @@ fn host_state_with_kind(
     HostState::new(
         tools,
         InvocationContext {
-            waddle_id: WaddleId::new("test").expect("waddle id"),
-            plugin_id: PluginId::new("test-extension").expect("plugin id"),
+            waddle_id: WaddleId::try_new("test").expect("waddle id"),
+            plugin_id: PluginId::try_new("test-extension").expect("plugin id"),
             requester: Some("alice@example.com".parse().expect("requester jid")),
             source_room: Some("room@muc.example.com".parse().expect("room jid")),
             kind,
@@ -489,14 +489,14 @@ fn host_state_with_kind(
         grants,
         Vec::new(),
         crate::config::RuntimeLimits::default(),
-        super::http::HttpRuntime::new().expect("HTTP runtime"),
+        super::http::HttpRuntime::try_new().expect("HTTP runtime"),
     )
 }
 
 fn unsupported() -> HostToolError {
     HostToolError {
         code: HostToolErrorCode::Unsupported,
-        message: DisplayText::new("unsupported").expect("display text"),
+        message: DisplayText::try_new("unsupported").expect("display text"),
     }
 }
 
@@ -548,7 +548,7 @@ async fn runtime_http_uses_the_configured_body_limit_before_network() {
             body: Some("12345".into()),
         },
         &["https://api.example.test".into()],
-        &super::http::HttpRuntime::new().expect("HTTP runtime"),
+        &super::http::HttpRuntime::try_new().expect("HTTP runtime"),
         &limits,
     )
     .await
@@ -575,23 +575,25 @@ impl host_domain::ExtensionDeliveryCapability for ScopedDelivery {
             Ok(())
         } else {
             Err(HostToolError::denied(
-                DisplayText::new("stale or foreign delivery").expect("text"),
+                DisplayText::try_new("stale or foreign delivery").expect("text"),
             ))
         }
     }
 }
 
 fn delivery_source() -> crate::types::RoomMessageSource {
-    use crate::types::*;
+    use crate::types::{
+        MessageRevision, OriginId, RoomMessageSource, Sha256Digest, StanzaId, Timestamp,
+    };
     RoomMessageSource {
         room: "room@muc.example.com".parse().expect("room"),
-        stanza_id: StanzaId::new("source").expect("id"),
-        revision_stanza_id: StanzaId::new("revision").expect("id"),
-        origin_id: Some(OriginId::new("origin").expect("id")),
+        stanza_id: StanzaId::try_new("source").expect("id"),
+        revision_stanza_id: StanzaId::try_new("revision").expect("id"),
+        origin_id: Some(OriginId::try_new("origin").expect("id")),
         sender: "alice@example.com".parse().expect("sender"),
         revision: MessageRevision::new(0),
-        body_digest: Sha256Digest::new("a".repeat(64)).expect("digest"),
-        observed_at: Timestamp::new("2026-10-09T00:00:00Z").expect("time"),
+        body_digest: Sha256Digest::try_new("a".repeat(64)).expect("digest"),
+        observed_at: Timestamp::try_new("2026-10-09T00:00:00Z").expect("time"),
     }
 }
 
@@ -662,7 +664,7 @@ async fn wasm_delivery_resource_is_issued_borrowed_and_cannot_be_forged_or_retai
     use super::DeliveryKey;
     use wasmtime::component::{Component, HasSelf, Linker, Resource};
     use wasmtime::Store;
-    let runtime = super::WasmRuntime::new().expect("runtime");
+    let runtime = super::WasmRuntime::try_new().expect("runtime");
     let component = Component::new(
         runtime.engine(),
         include_bytes!("../../tests/fixtures/delivery_resource.wat"),
@@ -733,7 +735,7 @@ async fn wasm_delivery_resource_is_issued_borrowed_and_cannot_be_forged_or_retai
 
 #[tokio::test]
 async fn wasm_observer_receives_delivery_without_claiming_provider_acceptance() {
-    let runtime = super::WasmRuntime::new().expect("runtime");
+    let runtime = super::WasmRuntime::try_new().expect("runtime");
     let extension = super::LoadedExtension::load(
         &runtime,
         std::path::Path::new(concat!(
@@ -746,13 +748,13 @@ async fn wasm_observer_receives_delivery_without_claiming_provider_acceptance() 
         .call_handle_event_typed_with_delivery(
             crate::types::ExtensionEvent::RoomMessageObserve(crate::types::RoomMessageObserve {
                 source: delivery_source(),
-                body: DisplayText::new("hello").expect("body"),
+                body: DisplayText::try_new("hello").expect("body"),
             }),
             Arc::new(MockHostTools::default()),
             host_domain::DeliveryInvocation {
                 context: InvocationContext {
-                    waddle_id: WaddleId::new("test").expect("waddle"),
-                    plugin_id: PluginId::new("test-extension").expect("plugin"),
+                    waddle_id: WaddleId::try_new("test").expect("waddle"),
+                    plugin_id: PluginId::try_new("test-extension").expect("plugin"),
                     requester: None,
                     source_room: Some(delivery_source().room),
                     kind: InvocationKind::RoomMessageObserve,

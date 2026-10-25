@@ -1,9 +1,20 @@
 //! A supplied ingress key is mandatory authority: rejected claims never deliver.
-use super::*;
-use crate::ingress::{
-    append_authority::canonical_reads, commit::commit_submission,
-    identity::IngressAppendObligationRef, test_support::IngressFixture,
+use super::{
+    envelope_for_services, mpsc, origin_identity, payload_for_recipient, receiver_identity,
+    sender_full, services_with_claims, sign_envelope, target_bare, target_entity, target_full,
+    user_entity, Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, Entity,
+    EntityType, Keypair, Message, NodeId, NodeIdentity, OrderedRelayClaim,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNackReason,
+    OrderedRelayPayload, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
+    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
+    RemoteDeliverySeed, RemoteOwnerRegistration, RemoteResourceOutboundFrame,
+    RemoteResourceRegistrationId, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
+    RemoteResourceSocketGeneration, RemoteStanza, Stanza, TEST_CANCELLED_ENVELOPES,
 };
+use crate::ingress::append_authority::canonical_reads;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
@@ -50,7 +61,7 @@ async fn ingress_append_authority(
             .expect("SM persistence"),
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -504,7 +515,7 @@ async fn ingress_append_authority(
 // obligation unchanged and never reads canonical state: the next receiver
 // authorizes it at its own append decision (#1790).
 async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture) {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -852,7 +863,7 @@ struct RegisteredRemoteOwner {
 
 impl RegisteredRemoteOwner {
     async fn new(fixture: IngressFixture) -> Self {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )

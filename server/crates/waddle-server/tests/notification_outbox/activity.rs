@@ -2,27 +2,22 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    activity_store, bare, groupchat_candidate_for, register_push_target, seed_inbox_witness,
+    settings_projection, store, target, StubRoomPolicy,
+};
 use jid::{BareJid, Jid};
+use std::process::Command;
 use waddle_server::notification_activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    active_mention_ttl_ms_from_env, NoopDndReader, NotificationCandidate, NotificationClass,
+    NotificationDrainDeps, NotificationThreadId, DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+    MAX_ACTIVE_MENTION_TTL_SECONDS, MIN_ACTIVE_MENTION_TTL_SECONDS,
+    WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV,
+};
 use waddle_xmpp_core::xep0359::StanzaId;
-
-/// Process-global mutex used to serialize tests that mutate
-/// environment variables. Mirrors the `env_lock` pattern in
-/// `waddle_server::server::tests`. `std::env::set_var` is process-global
-/// and `cargo test` runs tests on multiple threads by default, so
-/// any test that reads or writes an env var MUST hold this guard
-/// to avoid races with parallel tests.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    ENV_MUTEX
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 // ─────────────────────────────────────────────────────────────
 // Slice 2b — `notification_activity` projection + XEP-0513
@@ -509,42 +504,49 @@ async fn t1_active_channel_mention_cache_collapses_same_recipient_lookups() {
     );
 }
 
-/// Operator-tunable TTL: env-driven helper clamps to the
-/// [`MIN_ACTIVE_MENTION_TTL_SECONDS`,
-/// `MAX_ACTIVE_MENTION_TTL_SECONDS`] window and falls back to
-/// the default on unparseable input. Tests via direct env
-/// manipulation; serialized against other env-mutating tests in
-/// this module via [`env_lock`] (Codex review on PR #731).
+/// Operator-tunable TTL: the env-driven helper clamps to the allowed window
+/// and uses the default when unset. Each case configures a child environment
+/// before it starts, without mutating the test process's global environment.
 #[test]
 fn active_mention_ttl_env_var_clamps_to_window() {
-    // SAFETY: `env_lock` serializes against every other
-    // env-mutating test in this module; `std::env::set_var` is
-    // process-global but no other thread will read this var while
-    // the guard is held.
-    let _guard = env_lock();
-    // Save and restore the operator-set value (if any) so the
-    // test is a no-op for the parent environment.
-    let previous = std::env::var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV).ok();
-    unsafe { std::env::remove_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV) };
-    assert_eq!(
-        active_mention_ttl_ms_from_env(),
-        (DEFAULT_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
-    );
+    const TEST_CASE: &str = "WADDLE_ACTIVE_MENTION_TTL_TEST_CASE";
+    if let Ok(case) = std::env::var(TEST_CASE) {
+        let expected_seconds = match case.as_str() {
+            "default" => DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+            "minimum" => MIN_ACTIVE_MENTION_TTL_SECONDS,
+            "maximum" => MAX_ACTIVE_MENTION_TTL_SECONDS,
+            _ => panic!("unexpected TTL test case: {case}"),
+        };
+        assert_eq!(
+            active_mention_ttl_ms_from_env(),
+            (expected_seconds as i64) * 1_000,
+        );
+        return;
+    }
 
-    unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, "0") };
-    assert_eq!(
-        active_mention_ttl_ms_from_env(),
-        (MIN_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
-    );
-
-    unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, "999999999") };
-    assert_eq!(
-        active_mention_ttl_ms_from_env(),
-        (MAX_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
-    );
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, value) },
-        None => unsafe { std::env::remove_var(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV) },
+    for (case, value) in [
+        ("default", None),
+        ("minimum", Some("0")),
+        ("maximum", Some("999999999")),
+    ] {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "activity::active_mention_ttl_env_var_clamps_to_window",
+                "--nocapture",
+            ])
+            .env(TEST_CASE, case)
+            .env_remove(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV);
+        if let Some(value) = value {
+            command.env(WADDLE_PUSH_ACTIVE_MENTION_TTL_ENV, value);
+        }
+        let output = command.output().expect("run TTL test subprocess");
+        assert!(
+            output.status.success(),
+            "TTL case {case} failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 }

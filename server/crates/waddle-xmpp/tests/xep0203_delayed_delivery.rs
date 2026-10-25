@@ -214,7 +214,8 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
 /// (retry-added delay must be digest-neutral), while OTHER element names
 /// in the delay namespace remain digest-sensitive extensions.
 mod ingress_digest_boundary {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     use waddle_xmpp::ingress::digest::v1;
     use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
     use xmpp_parsers::message::Message;

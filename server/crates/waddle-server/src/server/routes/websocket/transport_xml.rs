@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    BytesEnd, BytesStart, BytesText, ConnectionPhase, Element, Event, Stanza, Writer, SM_NS,
+};
 
 /// Convert a Stanza to XML string for WebSocket transmission
 /// Serialize a stanza to XML by converting it to a `minidom::Element` via

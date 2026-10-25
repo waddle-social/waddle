@@ -23,8 +23,8 @@ use crate::pubsub_event::{PubsubEvent, PubsubEventPayload};
 
 const NS_CLIENT: &str = "jabber:client";
 const STATUS_PREFERENCE_ELEMENT: &str = "status-preference";
-
 /// XEP-0060 §6.5.7 request for the single stored item.
+#[must_use]
 pub fn build_status_preference_fetch_iq(iq_id: &str) -> Element {
     let items = Element::builder("items", NS_PUBSUB)
         .attr(
@@ -44,6 +44,7 @@ pub fn build_status_preference_fetch_iq(iq_id: &str) -> Element {
 /// Whether a fetch result may be trusted: an absent `from` is the
 /// account's own PEP service; anything but the account's bare JID is
 /// treated as spoofed (XEP-0223 §Security Considerations).
+#[must_use]
 pub fn fetch_result_from_matches_account(result_from: Option<&Jid>, account: &BareJid) -> bool {
     result_from.is_none_or(|from| is_own_bare(from, account))
 }
@@ -51,6 +52,7 @@ pub fn fetch_result_from_matches_account(result_from: Option<&Jid>, account: &Ba
 /// The stored preference from a fetch result. `None` when nothing is
 /// stored or the payload is malformed, which means Automatic: absence
 /// must never pin a status.
+#[must_use]
 pub fn parse_status_preference_fetch_result(iq: &Element) -> Option<StatusPreference> {
     let items = iq
         .get_child("pubsub", NS_PUBSUB)?
@@ -65,10 +67,11 @@ pub fn parse_status_preference_fetch_result(iq: &Element) -> Option<StatusPrefer
         })
 }
 
-/// A live pick from another resource of [`account`], from a PEP
+/// A live pick from another resource of `account`, from a PEP
 /// notification on the status-preference node. A retraction of the
 /// `current` item means Automatic. Notifications from anyone else, and
 /// malformed payloads, yield `None`.
+#[must_use]
 pub fn parse_status_preference_event(
     event: &PubsubEvent,
     account: &BareJid,

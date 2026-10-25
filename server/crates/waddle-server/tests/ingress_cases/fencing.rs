@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, ArchiveExpectation, CanonicalMessageRepository,
+    DurableDirectEffect, DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent,
+    IngressFixture, MessageEnvelope, PlannedEffect, StanzaId,
+};
 
 async fn principal_missing_rolls_back(fixture: IngressFixture) {
     let submission = archive_plan(
@@ -64,10 +68,8 @@ async fn ingress_lineage_loss_postgres() {
 }
 
 async fn relayed_owner_acceptance(mut fixture: IngressFixture) {
-    use waddle_server::ingress::{
-        effects::room::{DurableRoomEffect, RoomFenceRequirement},
-        IngressCanonicalRef, IngressStreamIdentity,
-    };
+    use waddle_server::ingress::effects::room::{DurableRoomEffect, RoomFenceRequirement};
+    use waddle_server::ingress::{IngressCanonicalRef, IngressStreamIdentity};
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     #[cfg(feature = "clustering")]
     let room_fence = fixture.room_fence(&room).await;
@@ -276,7 +278,8 @@ async fn ingress_epoch_unsupported_postgres() {
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn ingress_room_generation_stale_postgres() {
-    use waddle_server::ingress::{effects::room::RoomFenceRequirement, RoomExecutionPath};
+    use waddle_server::ingress::effects::room::RoomFenceRequirement;
+    use waddle_server::ingress::RoomExecutionPath;
     let Some(mut fixture) = IngressFixture::postgres("room_generation_stale").await else {
         return;
     };
@@ -318,7 +321,8 @@ async fn local_room_commit(
     fixture: IngressFixture,
     fence: waddle_server::ingress::effects::room::RoomFenceRequirement,
 ) {
-    use waddle_server::ingress::{effects::room::DurableRoomEffect, RoomExecutionPath};
+    use waddle_server::ingress::effects::room::DurableRoomEffect;
+    use waddle_server::ingress::RoomExecutionPath;
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     let mut submission = archive_plan(
         &fixture,

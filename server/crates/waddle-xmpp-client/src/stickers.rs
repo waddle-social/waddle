@@ -49,17 +49,23 @@ pub const NS_HASHES: &str = "urn:xmpp:hashes:2";
 /// only algorithm Waddle publishes; unknown wire values are dropped at
 /// the parse boundary rather than smuggled through as strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HashAlgo {
+    /// SHA-256 content hashing.
     Sha256,
 }
 
 impl HashAlgo {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             HashAlgo::Sha256 => "sha-256",
         }
     }
 
+    /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
+    #[must_use]
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "sha-256" => Some(HashAlgo::Sha256),
@@ -71,6 +77,7 @@ impl HashAlgo {
 /// One XEP-0300 `<hash xmlns='urn:xmpp:hashes:2'/>` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerHash {
+    /// Hash algorithm token advertised with the digest.
     pub algo: HashAlgo,
     /// Base64 text content of the `<hash/>` element.
     pub value_b64: String,
@@ -81,11 +88,15 @@ pub struct StickerHash {
 /// carries no language tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerText {
+    /// Language tag for the advertised name.
     pub lang: Option<String>,
+    /// Human-readable text associated with this value.
     pub text: String,
 }
 
 impl StickerText {
+    /// Create sticker text with no language tag.
+    #[must_use]
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             lang: None,
@@ -100,7 +111,9 @@ impl StickerText {
 /// is accepted on parse and normalized into this pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StickerDimensions {
+    /// Media width in pixels.
     pub width: u32,
+    /// Media height in pixels.
     pub height: u32,
 }
 
@@ -110,13 +123,17 @@ pub struct StickerDimensions {
 pub struct PackSticker {
     /// Mandatory lang-less textual fallback (usually emoji).
     pub desc: String,
+    /// MIME media type of the referenced content.
     pub media_type: Option<String>,
+    /// Content size in bytes.
     pub size: Option<u64>,
+    /// Pixel dimensions advertised for the media.
     pub dimensions: Option<StickerDimensions>,
     /// ≥1 per XEP-0449; all stickers in a pack MUST share one algorithm.
     pub hashes: Vec<StickerHash>,
     /// XEP-0447 `<url-data target='…'/>` source URLs.
     pub sources: Vec<String>,
+    /// Suggested response or presentation metadata supplied by the provider.
     pub suggests: Vec<StickerText>,
 }
 
@@ -127,7 +144,9 @@ pub struct PackSticker {
 pub struct PackId(String);
 
 impl PackId {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Create `PackId` from non-blank text, returning `None` for empty or whitespace-only input.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         if value.trim().is_empty() {
             return None;
@@ -135,6 +154,8 @@ impl PackId {
         Some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -150,6 +171,7 @@ impl std::fmt::Display for PackId {
 /// whose id is the pack id and whose payload is the `<pack/>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerPackDoc {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: PackId,
     /// `<name/>` entries; multiple entries differ by `xml:lang`.
     pub name: Vec<StickerText>,
@@ -157,6 +179,7 @@ pub struct StickerPackDoc {
     pub summary: Vec<StickerText>,
     /// `<restricted/>` marker: the pack may not be imported by others.
     pub restricted: bool,
+    /// Stickers contained in this pack or attached to the message.
     pub stickers: Vec<PackSticker>,
     /// Trailing pack-level `<hash/>` as seen on the wire. `None` only
     /// for locally assembled docs that have not been serialized yet;
@@ -242,6 +265,7 @@ fn pack_hash_input(
 
 /// Compute the pack-level `<hash/>` value (full Base64 SHA-256 digest)
 /// over the pack's significant content.
+#[must_use]
 pub fn compute_pack_hash(
     name: &[StickerText],
     summary: &[StickerText],
@@ -256,6 +280,7 @@ pub fn compute_pack_hash(
 
 /// Derive the pack id: the first 144 bits of the pack hash, Base64 —
 /// equivalently the first 24 characters of the full hash's Base64.
+#[must_use]
 pub fn compute_pack_id(
     name: &[StickerText],
     summary: &[StickerText],
@@ -264,10 +289,10 @@ pub fn compute_pack_id(
     let full = compute_pack_hash(name, summary, stickers);
     PackId(full.value_b64.chars().take(24).collect())
 }
-
 // ── Pack element build / parse ───────────────────────────────────────────────
 
 /// Build one XEP-0300 `<hash xmlns='urn:xmpp:hashes:2'/>` element.
+#[must_use]
 pub fn build_hash_element(hash: &StickerHash) -> Element {
     Element::builder("hash", NS_HASHES)
         .attr(
@@ -372,6 +397,7 @@ fn build_pack_sticker_element(sticker: &PackSticker) -> Element {
 /// trailing pack-level `<hash/>` is always recomputed from the pack's
 /// significant content so a published pack can never carry a hash that
 /// disagrees with its own items.
+#[must_use]
 pub fn build_pack_element(doc: &StickerPackDoc) -> Element {
     let builder = Element::builder("pack", NS_STICKERS);
     let builder = append_localized(builder, "name", &doc.name);
@@ -474,6 +500,7 @@ fn parse_pack_sticker(item: &Element) -> Option<PackSticker> {
 /// given pubsub item id. Malformed stickers (no lang-less desc, no
 /// hash, no source) are dropped; a pack with zero remaining stickers
 /// is rejected outright (XEP-0449: "one or more" items).
+#[must_use]
 pub fn parse_pack_element(id: PackId, pack: &Element) -> Option<StickerPackDoc> {
     if !pack.is("pack", NS_STICKERS) {
         return None;
@@ -500,17 +527,19 @@ pub fn parse_pack_element(id: PackId, pack: &Element) -> Option<StickerPackDoc> 
 }
 
 /// Parse one pubsub `<item id='…'/>` (in `ns`) into a pack document.
+#[must_use]
 pub fn parse_pack_item(item: &Element, ns: &str) -> Option<StickerPackDoc> {
     if !item.is("item", ns) {
         return None;
     }
-    let id = PackId::new(item.attr("id")?)?;
+    let id = PackId::try_new(item.attr("id")?)?;
     let pack = item.get_child("pack", NS_STICKERS)?;
     parse_pack_element(id, pack)
 }
 
 /// Parse an `<iq type='result'/>` for a sticker-node items query into
 /// pack documents. `node` guards against a mismatched reply payload.
+#[must_use]
 pub fn parse_sticker_packs_result(iq: &Element, node: &str) -> Vec<StickerPackDoc> {
     let Some(items) = iq
         .get_child("pubsub", NS_PUBSUB)
@@ -545,6 +574,7 @@ fn build_items_iq(iq_id: &str, target: Option<&BareJid>, items: Element) -> Elem
 /// XEP-0060 §6.5.2 items GET for the `urn:xmpp:stickers:0` node.
 /// `target: None` routes to the user's own PEP service (XEP-0163);
 /// `Some(owner)` fetches another user's published packs.
+#[must_use]
 pub fn build_sticker_packs_items_iq(iq_id: &str, target: Option<&BareJid>) -> Element {
     let items = Element::builder("items", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), STICKERS_NODE)
@@ -556,6 +586,7 @@ pub fn build_sticker_packs_items_iq(iq_id: &str, target: Option<&BareJid>) -> El
 /// child). `node` allows packs hosted on a generic pubsub node other
 /// than the PEP `urn:xmpp:stickers:0` default (XEP-0449 §send-from-pack
 /// `jid`/`node` sticker attributes).
+#[must_use]
 pub fn build_sticker_pack_items_iq(
     iq_id: &str,
     target: &BareJid,
@@ -581,6 +612,7 @@ pub fn build_sticker_pack_items_iq(
 /// single-slot `current` idiom — and is recomputed here so the id can
 /// never disagree with the published payload. Returns the id actually
 /// used alongside the stanza.
+#[must_use]
 pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Element) {
     let id = compute_pack_id(&doc.name, &doc.summary, &doc.stickers);
     let canonical = StickerPackDoc {
@@ -609,6 +641,7 @@ pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Elem
 
 /// XEP-0060 §7.2 retract IQ removing one pack from the user's own PEP
 /// sticker node.
+#[must_use]
 pub fn build_pack_retract_iq(iq_id: &str, pack_id: &PackId) -> Element {
     let retract = Element::builder("retract", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), STICKERS_NODE)
@@ -639,8 +672,11 @@ pub fn build_pack_retract_iq(iq_id: &str, pack_id: &PackId) -> Element {
 /// sender's own PEP `urn:xmpp:stickers:0` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRef {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: PackId,
+    /// XMPP address identifying the referenced entity.
     pub jid: Option<BareJid>,
+    /// PubSub node hosting the referenced sticker pack, when specified.
     pub node: Option<String>,
 }
 
@@ -649,10 +685,12 @@ pub struct PackRef {
 /// (XEP-0449 §send: the `pack` attribute is a MAY).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerMarker {
+    /// Sticker pack containing this sticker.
     pub pack: Option<PackRef>,
 }
 
 /// Build the message-level `<sticker/>` marker element.
+#[must_use]
 pub fn build_sticker_marker_element(marker: &StickerMarker) -> Element {
     let mut builder = Element::builder("sticker", NS_STICKERS);
     if let Some(pack) = marker.pack.as_ref() {

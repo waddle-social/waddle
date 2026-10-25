@@ -1,6 +1,13 @@
 use super::permissions::write_tuple_if_absent;
-use super::*;
+use super::{
+    chrono, get_room_actor, get_xmpp_channel, response_batch_from_inline_room_effect_frames, warn,
+    BareJid, DbExecute, Element, EnforceMembersOnly, EnforceMembersOnlyAffiliations, FullJid,
+    GetSnapshot, Object, ObjectType, Relation, ResponseBatch, Session, Stanza, Subject, Tuple,
+    UpdateConfig, WebSocketState, DATA_FORMS_NS,
+};
 use crate::admin::channels::{acquire_room_config_lock, explicit_channel_affiliations_for_jids};
+use crate::room_effect_outbox::RoomEffectArmSupervisor;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
 
 fn data_form_value(form: &Element, var: &str) -> Option<String> {
     form.children()
@@ -53,6 +60,7 @@ pub(super) fn project_channel_type_to_config(
             config.forum = false;
             config.members_only = true;
         }
+        _ => {}
     }
 }
 
@@ -119,7 +127,7 @@ const OWNER_CONFIG_RECOVERY_ASK_TIMEOUT: std::time::Duration = std::time::Durati
 #[derive(Clone)]
 enum CancelledOwnerConfigAskRecoveryAction {
     ArmReservation {
-        arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+        arm_supervisor: RoomEffectArmSupervisor,
     },
     DeferMembersOnly(PendingMembersOnlyEnforcementSeed),
 }
@@ -130,7 +138,7 @@ struct PendingMembersOnlyEnforcementSeed {
     room_jid: BareJid,
     connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
     sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: RoomEffectArmSupervisor,
 }
 
 impl PendingMembersOnlyEnforcementSeed {
@@ -159,7 +167,7 @@ struct CancelledOwnerConfigAskRecoveryGuard {
     intended_config: waddle_xmpp::muc::RoomConfig,
     previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
     registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    outbox: std::sync::Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    outbox: std::sync::Arc<RoomEffectOutboxStore>,
     action: CancelledOwnerConfigAskRecoveryAction,
     disarmed: bool,
 }
@@ -371,7 +379,7 @@ struct PendingMembersOnlyEnforcement {
     room_jid: BareJid,
     connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
     sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: RoomEffectArmSupervisor,
 }
 
 #[derive(Clone)]
@@ -745,7 +753,7 @@ pub(super) async fn apply_muc_owner_config(
                     room_with_reconciled_config.set_affiliation(jid.clone(), *affiliation);
                 }
             } else {
-                for affiliation in recovered_snapshot.room.get_all_affiliations() {
+                for affiliation in recovered_snapshot.room.all_affiliations() {
                     room_with_reconciled_config
                         .set_affiliation(affiliation.jid, affiliation.affiliation);
                 }
@@ -1049,7 +1057,7 @@ async fn drain_or_broadcast_config_change(
     }
 
     for occupant in room.occupants.values() {
-        for recipient_jid in room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in room.occupant_sessions(&occupant.nick) {
             let message = waddle_xmpp::muc::build_config_change_message(
                 room_jid,
                 &recipient_jid,
@@ -1140,10 +1148,8 @@ mod channel_type_projection_tests {
 mod tests {
     use std::collections::HashMap;
     use std::str::FromStr;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex,
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use jid::{BareJid, FullJid};
@@ -1151,16 +1157,16 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
+    use waddle_xmpp::muc::durable::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
+        RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
+    };
+    use waddle_xmpp::muc::room_actor::{
+        ChangeAffiliation, ConfigEffectPlan, GetSnapshot, JoinAffiliationGrant,
+        JoinWithAffiliation, UpdateConfig,
+    };
+    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
     use waddle_xmpp::muc::{
-        durable::{
-            DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
-            RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
-        },
-        room_actor::{
-            ChangeAffiliation, ConfigEffectPlan, GetSnapshot, JoinAffiliationGrant,
-            JoinWithAffiliation, UpdateConfig,
-        },
-        room_registry_actor::WireClusteringClaims,
         MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomMutationEffects,
         RoomRevision,
     };
@@ -1176,15 +1182,12 @@ mod tests {
     use crate::room_effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
     };
-    use crate::server::routes::websocket::{
-        cleanup::get_or_create_room_actor,
-        stanza_to_xml,
-        tests::{
-            create_test_websocket_state, create_test_websocket_state_with_sfu,
-            register_test_connection, snapshot_room, RecordingSfu,
-        },
-        WebSocketState,
+    use crate::server::routes::websocket::cleanup::get_or_create_room_actor;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state, create_test_websocket_state_with_sfu,
+        register_test_connection, snapshot_room, RecordingSfu,
     };
+    use crate::server::routes::websocket::{stanza_to_xml, WebSocketState};
 
     fn room_jid() -> BareJid {
         BareJid::from_str("cancellation-room@conference.example.test").expect("room JID")
@@ -1203,7 +1206,7 @@ mod tests {
     }
 
     fn origin() -> RoomEffectOriginInstanceId {
-        RoomEffectOriginInstanceId::new("config-guard-origin".to_owned()).expect("origin")
+        RoomEffectOriginInstanceId::try_new("config-guard-origin".to_owned()).expect("origin")
     }
 
     fn producing_node() -> RoomEffectProducingNode {
@@ -2688,7 +2691,7 @@ mod tests {
                 if snapshot_room(state.as_ref(), &room)
                     .await
                     .room
-                    .get_occupant("alice")
+                    .occupant("alice")
                     .is_none()
                 {
                     return;
@@ -2702,7 +2705,7 @@ mod tests {
         assert_eq!(
             sfu.snapshot(),
             vec![(
-                waddle_sfu::CallId::new(room.to_string()).expect("valid call id"),
+                waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id"),
                 waddle_sfu::Identity::from_jid(alice),
             )],
             "detached unmanaged enforcement must still revoke the removed occupant from the SFU"
@@ -2812,7 +2815,7 @@ mod tests {
             "rollback must restore the original room config"
         );
         assert!(
-            snapshot.room.get_occupant("alice").is_some(),
+            snapshot.room.occupant("alice").is_some(),
             "rollback must leave the restored occupant seated"
         );
         assert!(

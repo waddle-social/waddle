@@ -22,14 +22,19 @@ pub struct OccupancySessionGeneration(Uuid);
 
 impl OccupancySessionGeneration {
     /// Mint a globally unique generation for a new connection.
+    #[must_use]
     pub fn mint() -> Self {
         Self(Uuid::new_v4())
     }
 
+    /// Wrap an existing UUID as an occupancy-session generation.
+    #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
+    /// Return the UUID identifying this occupancy generation.
+    #[must_use]
     pub const fn as_uuid(self) -> Uuid {
         self.0
     }

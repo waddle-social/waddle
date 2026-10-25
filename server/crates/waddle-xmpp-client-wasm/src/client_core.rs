@@ -1,7 +1,17 @@
-use super::*;
+//! JavaScript client lifecycle, transport, and event-subscription methods.
+
+use super::{
+    build_client_config, disconnect_client, driver_loop, event_dispatch_loop, future_to_promise,
+    js_error, mpsc, request_stream_management_ack_command, spawn_local, to_js_value,
+    try_request_stream_management_ack_for_pagehide, wasm_bindgen, Function, JsResumeState, JsValue,
+    PagehideSmAckEnqueueOutcome, Promise, Rc, RefCell, StoredConfig, WaddleClient,
+    WaddleClientInner, WaddleConfig, WaddleResumeState, WasmCommandLane, WasmWebSocket,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Create a disconnected client owning a copy of the supplied configuration.
+    /// Register callbacks before calling `connect` to observe session readiness.
     #[wasm_bindgen(constructor)]
     pub fn new(config: WaddleConfig) -> WaddleClient {
         WaddleClient {
@@ -28,7 +38,11 @@ impl WaddleClient {
         }
     }
 
-    pub fn get_resume_state(&self) -> JsValue {
+    /// Return a persistence-ready resume snapshot, or `null` when unavailable or not serializable.
+    /// The camelCase object includes counters, resumption eligibility, the server's
+    /// optional maximum interval, and timestamped unhandled outbound entries.
+    /// Persist snapshots promptly, especially after the synchronous pagehide handoff.
+    pub fn resume_state(&self) -> JsValue {
         match self.inner.borrow().resume_state.as_ref() {
             Some(state) => {
                 to_js_value(&JsResumeState::from(state.clone())).unwrap_or(JsValue::NULL)
@@ -37,7 +51,9 @@ impl WaddleClient {
         }
     }
 
-    pub fn get_resume_state_handle(&self) -> Option<WaddleResumeState> {
+    /// Clone the current resume snapshot into an opaque handle, or return no handle when
+    /// unavailable.
+    pub fn resume_state_handle(&self) -> Option<WaddleResumeState> {
         self.inner
             .borrow()
             .resume_state
@@ -45,34 +61,43 @@ impl WaddleClient {
             .map(|inner| WaddleResumeState { inner })
     }
 
+    /// Replace the callback receiving live messages and inbox pushes as `WaddleMessage` objects.
     pub fn set_on_message(&mut self, cb: Function) {
         self.inner.borrow_mut().on_message = Some(cb);
     }
 
+    /// Replace the callback receiving each parsed `WaddlePresence` object.
     pub fn set_on_presence(&mut self, cb: Function) {
         self.inner.borrow_mut().on_presence = Some(cb);
     }
 
+    /// Replace the zero-argument callback fired when a fresh authenticated session becomes ready.
     pub fn set_on_connected(&mut self, cb: Function) {
         self.inner.borrow_mut().on_connected = Some(cb);
     }
 
+    /// Replace the callback receiving `fresh` for a new session or `resumed` after stream
+    /// resumption.
     pub fn set_on_session_lifecycle(&mut self, cb: Function) {
         self.inner.borrow_mut().on_session_lifecycle = Some(cb);
     }
 
+    /// Replace the zero-argument callback fired when the active connection closes.
     pub fn set_on_disconnected(&mut self, cb: Function) {
         self.inner.borrow_mut().on_disconnected = Some(cb);
     }
 
+    /// Replace the callback receiving human-readable connection and stream error descriptions.
     pub fn set_on_error(&mut self, cb: Function) {
         self.inner.borrow_mut().on_error = Some(cb);
     }
 
+    /// Replace the callback receiving outbound message IDs acknowledged by stream management.
     pub fn set_on_message_delivery_acked(&mut self, cb: Function) {
         self.inner.borrow_mut().on_message_delivery_acked = Some(cb);
     }
 
+    /// Replace the callback receiving message IDs that stream management could not deliver.
     pub fn set_on_message_delivery_failed(&mut self, cb: Function) {
         self.inner.borrow_mut().on_message_delivery_failed = Some(cb);
     }
@@ -106,7 +131,7 @@ impl WaddleClient {
     /// Register a callback for inbound XMPP-native call events
     /// (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
     /// carrying a `urn:waddle:transports:livekit:0` transport).
-    /// The callback receives a [`WaddleCallEvent`]-shaped object
+    /// The callback receives a [`crate::WaddleCallEvent`]-shaped object
     /// with a `kind` discriminator and optional `media` / `join` /
     /// `reason` fields. See `messaging::call::parse_call_event` on
     /// the Rust side for the typed input.
@@ -138,6 +163,11 @@ impl WaddleClient {
         try_request_stream_management_ack_for_pagehide(&self.inner)
     }
 
+    /// Open the configured WebSocket and start the connection driver; rejects invalid
+    /// configuration or an already active client.
+    ///
+    /// The Promise resolves after startup. Session readiness is reported by the lifecycle
+    /// callbacks.
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -169,6 +199,8 @@ impl WaddleClient {
         })
     }
 
+    /// Close the active connection through the driver; the Promise resolves after the
+    /// disconnect command completes.
     pub fn disconnect(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

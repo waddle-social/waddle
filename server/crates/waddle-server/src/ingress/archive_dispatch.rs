@@ -1,26 +1,23 @@
 //! Tie dispatch to the archive position committed with its frozen obligations.
 
-use std::{
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use crate::server::routes::interpret::Deps;
+use crate::server::routes::interpret::SmIngressAppendContext;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey, PendingDeliveryMutation},
-    mam::{ArchiveOrdinal, ArchivedMessage},
+use waddle_xmpp::ingress::{
+    EffectMessageIdentity, IngressEffectIntent, MessageKey, PendingDeliveryMutation,
 };
+use waddle_xmpp::mam::{ArchiveOrdinal, ArchivedMessage};
 
-use crate::{
-    ingress_uow::{
-        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
-        IngressUnitOfWork, IngressUowError, IngressUowTransaction,
-    },
-    server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, ExternalEffect},
+use crate::ingress_uow::{
+    ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
+    IngressUnitOfWork, IngressUowError, IngressUowTransaction,
 };
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::ExternalEffect;
 
 use super::{EffectReceiptKey, IngressDecision};
 
@@ -51,7 +48,7 @@ impl super::IngressAuthority {
     /// the exact connection owner across this read and the queue acceptance.
     pub(crate) async fn socket_delivery_readiness(
         &self,
-        context: &crate::server::routes::interpret::SmIngressAppendContext,
+        context: &SmIngressAppendContext,
         resource: &FullJid,
         stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
         budget: Option<&DispatchProbeBudget>,
@@ -62,7 +59,7 @@ impl super::IngressAuthority {
 
 pub(crate) async fn socket_delivery_readiness(
     uow: &IngressUnitOfWork,
-    context: &crate::server::routes::interpret::SmIngressAppendContext,
+    context: &SmIngressAppendContext,
     resource: &FullJid,
     stream: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
     budget: Option<&DispatchProbeBudget>,
@@ -259,7 +256,7 @@ pub(super) async fn effect_ready(
     decision: &IngressDecision,
     index: usize,
     effect: &ExternalEffect,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
 ) -> Result<
     (
         DispatchReadiness,

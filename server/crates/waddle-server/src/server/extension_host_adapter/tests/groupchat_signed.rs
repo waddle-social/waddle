@@ -1,4 +1,5 @@
-use super::{groupchat_ingress::GroupchatFixture, groupchat_receipts};
+use super::groupchat_ingress::GroupchatFixture;
+use super::groupchat_receipts;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::sync::Arc;
@@ -52,7 +53,7 @@ async fn signed_replay(f: IngressFixture) {
         .deps
         .protocol
         .extension_manager = signed_manager().await;
-    let plugin = PluginId::new("message-hook-fixture").expect("fixture plugin");
+    let plugin = PluginId::try_new("message-hook-fixture").expect("fixture plugin");
     let mut invocation = fixture.invocation();
     invocation.plugin_id = plugin.clone();
     invocation.actor_jid = fixture
@@ -75,7 +76,7 @@ async fn signed_replay(f: IngressFixture) {
     let mut envelope = super::envelope_with_launch_room(Some(fixture.room.to_string().as_str()));
     envelope.enrichments[0].plugin = plugin.clone();
     envelope.enrichments[0].payload_namespace =
-        waddle_extensions::types::PayloadNamespace::new("urn:test:message-hook")
+        waddle_extensions::types::PayloadNamespace::try_new("urn:test:message-hook")
             .expect("namespace");
     envelope.enrichments[0].launches[0].plugin = plugin;
     assert!(fixture

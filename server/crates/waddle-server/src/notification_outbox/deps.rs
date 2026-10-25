@@ -1,7 +1,7 @@
 //! Injected gate dependencies for the T1 drain: room policy, DND, and
 //! the XEP-0513 active-mention TTL window.
 
-use super::*;
+use super::{BareJid, NotificationActivityReader, NotificationOutboxError};
 
 /// T1 lookup of XEP-0045 room policy state needed to project a
 /// candidate's conversation kind for the XEP-0492 evaluator.

@@ -1,7 +1,9 @@
 //! XEP-0513: Explicit Mentions.
 
+use crate::xep::xep0004::Field;
 use jid::BareJid;
 use minidom::Element;
+use std::collections::BTreeSet;
 use xmpp_parsers::message::Message;
 
 use super::xep0372::{extract_references_from_message, Reference};
@@ -182,7 +184,7 @@ pub fn reference_mention_names_jid(reference: &Reference, owner: &BareJid) -> bo
 pub fn personal_mention_targets(
     explicit_mentions: &[ExplicitMention],
     references: &[Reference],
-) -> std::collections::BTreeSet<BareJid> {
+) -> BTreeSet<BareJid> {
     let xep0513 = explicit_mentions.iter().filter_map(|mention| {
         mention
             .jid
@@ -587,11 +589,7 @@ pub fn build_mentions_permissions_query(permissions: &MentionsPermissions) -> El
 /// helper keeps the option set and ordering in lockstep across every
 /// permissions field; if a future XEP-0513 revision adds a fourth
 /// policy value, only one constructor changes.
-fn policy_field(
-    var: &'static str,
-    label: &'static str,
-    value: MentionsPermission,
-) -> crate::xep::xep0004::Field {
+fn policy_field(var: &'static str, label: &'static str, value: MentionsPermission) -> Field {
     use crate::xep::xep0004::{Field, FieldOption, FieldType};
 
     [

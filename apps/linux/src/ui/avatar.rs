@@ -1,7 +1,7 @@
 //! Initials avatars tinted as on the web and phones: DJB2 over the display
 //! name picks one of four brand tints (see `data/style.css`).
 
-use adw::prelude::*;
+use adw::prelude::WidgetExt;
 
 const TINTS: u32 = 4;
 

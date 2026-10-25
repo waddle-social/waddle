@@ -36,7 +36,9 @@ pub fn sequence_lte(a: u32, b: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
+    use proptest::prelude::{
+        any, prop_assert, prop_assert_eq, prop_assert_ne, prop_assume, proptest,
+    };
 
     use super::{max_in_window, sequence_gt, sequence_lte};
 

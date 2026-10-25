@@ -1,31 +1,32 @@
 //! Supervised installation actors. Room mailboxes carry bounded wake hints;
 //! committed database work, not notification delivery, determines progress.
+use crate::ingress_uow::IngressUowError;
+use crate::ingress_uow::ObservationError;
 mod actor;
 mod capability;
 mod publication;
 mod scheduler;
 mod telemetry;
 
-use crate::{
-    ingress_uow::{initialize_room_observations, RoomObservationRepository},
-    server::routes::websocket::WebSocketState,
-};
+use crate::ingress_uow::{initialize_room_observations, RoomObservationRepository};
+use crate::server::routes::websocket::WebSocketState;
 use jid::BareJid;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::task::TaskTracker;
 use waddle_extensions::{ConfiguredRoomObserver, PluginId, RoomObservationSubscription};
-use waddle_xmpp::muc::{
-    room_actor::{NotifyRoomExtensions, RoomExtensionSubscriber, SubscribeRoomExtension},
-    room_registry_actor::GetRoom,
+use waddle_xmpp::muc::room_actor::{
+    NotifyRoomExtensions, RoomExtensionSubscriber, SubscribeRoomExtension,
 };
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ObservationRuntimeError {
     #[error(transparent)]
-    Ingress(#[from] crate::ingress_uow::IngressUowError),
+    Ingress(#[from] IngressUowError),
     #[error(transparent)]
-    Store(#[from] crate::ingress_uow::ObservationError),
+    Store(#[from] ObservationError),
     #[error("room result has invalid host identity")]
     InvalidResult,
     #[error("room result owner is unavailable")]

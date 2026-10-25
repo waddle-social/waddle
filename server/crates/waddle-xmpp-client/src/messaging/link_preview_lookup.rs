@@ -37,7 +37,9 @@ pub struct LinkPreviewLookupReady {
     pub normalized_url: Url,
     /// Token expiry; stale tokens must not be attached to sends.
     pub expires_at: DateTime<Utc>,
+    /// Human-readable title rendered by the host.
     pub title: Option<String>,
+    /// Longer human-readable description.
     pub description: Option<String>,
     /// Server-cached preview image (trusted-path check applied on parse).
     pub image: Option<LinkPreviewImageData>,
@@ -47,6 +49,7 @@ pub struct LinkPreviewLookupReady {
 
 /// Typed outcome of a link-preview lookup IQ.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LinkPreviewLookup {
     /// Preview resolved; token available until `expires_at`.
     Ready(Box<LinkPreviewLookupReady>),
@@ -61,6 +64,7 @@ pub enum LinkPreviewLookup {
 /// Build the lookup IQ. No `to` attribute: RFC 6120 §10.3 routes an
 /// IQ without `to` to the user's own server, which is where the
 /// resolver lives.
+#[must_use]
 pub fn build_link_preview_lookup_iq(url: &Url, scope: &BareJid) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -90,6 +94,7 @@ pub fn build_link_preview_lookup_iq(url: &Url, scope: &BareJid) -> Element {
 /// semantic match for the request, non-HTTPS preview URLs — collapses
 /// to [`LinkPreviewLookup::Failed`] (web `parseLookupResponse` parity:
 /// a malformed ready payload yields no preview).
+#[must_use]
 pub fn parse_link_preview_lookup_response(iq: &Element, requested_url: &Url) -> LinkPreviewLookup {
     let Some(lookup) = find_lookup_element(iq) else {
         return LinkPreviewLookup::Failed;
@@ -117,7 +122,7 @@ fn parse_ready_preview(lookup: &Element, requested_url: &Url) -> Option<LinkPrev
     if token.len() > MAX_LINK_PREVIEW_TOKEN_BYTES {
         return None;
     }
-    let token = LinkPreviewToken::new(token).ok()?;
+    let token = LinkPreviewToken::try_new(token).ok()?;
     let original_url = eligible_preview_url(preview.attr("original-url")?)?;
     if original_url != *requested_url {
         return None;
@@ -144,6 +149,7 @@ fn parse_ready_preview(lookup: &Element, requested_url: &Url) -> Option<LinkPrev
 
 /// Web `isEligiblePreviewUrl` parity: HTTPS with a dotted hostname.
 /// Also the pre-flight gate callers apply before issuing a lookup.
+#[must_use]
 pub fn eligible_preview_url(value: &str) -> Option<Url> {
     let url = Url::parse(value.trim()).ok()?;
     (url.scheme() == "https" && url.host_str().is_some_and(|host| host.contains('.')))

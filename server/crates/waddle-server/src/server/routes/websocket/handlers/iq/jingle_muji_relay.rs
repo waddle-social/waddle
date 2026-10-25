@@ -20,6 +20,8 @@ use super::errors::{forbidden_iq_error, internal_server_error_iq_error};
 use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
+use crate::auth::Session;
+use crate::server::routes::websocket::ResolvedPrincipal;
 #[cfg(test)]
 use waddle_xmpp::muc::room_actor::GetSnapshot;
 
@@ -167,11 +169,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let session = synthetic_session(&sender);
     let deps = build_interpret_deps(
         state,
-        Some(
-            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
-                &session,
-            ),
-        ),
+        Some(ResolvedPrincipal::from_authenticated_session(&session)),
     );
     let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
     // Mirror the local adapter's post-terminate Muji-presence clear. It
@@ -196,13 +194,13 @@ pub(crate) async fn handle_relayed_muji_initiate(
 
 /// Minimal synthetic session for interpret-side owner checks, same
 /// shape the other reserved MUC-proxy deliveries use.
-fn synthetic_session(sender: &jid::FullJid) -> crate::auth::Session {
+fn synthetic_session(sender: &jid::FullJid) -> Session {
     let bare = sender.to_bare();
     let localpart = bare
         .node()
         .map(|node| node.to_string())
         .unwrap_or_else(|| bare.to_string());
-    crate::auth::Session::new(
+    Session::new(
         bare.to_string().as_str(),
         localpart.as_str(),
         localpart.as_str(),
@@ -343,7 +341,7 @@ mod tests {
             .sfu
             .as_ref()
             .expect("calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice);
         assert_eq!(
             sfu.participant_occupant_session(&call, &identity),
@@ -377,7 +375,7 @@ mod tests {
             .sfu
             .as_ref()
             .expect("calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice);
         assert_eq!(sfu.participant_occupant_session(&call, &identity), None);
     }
@@ -419,7 +417,8 @@ mod tests {
             .sfu
             .as_ref()
             .expect("the calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("room JID is a valid call id");
+        let call =
+            waddle_sfu::CallId::try_new(room.to_string()).expect("room JID is a valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         handle_relayed_muji_initiate(
             &state,
@@ -490,7 +489,7 @@ mod tests {
             "the stale generation must receive unknown-session: {stale_frames:?}",
         );
         let sfu = state.deps.protocol.sfu.as_ref().expect("calls fixture SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         assert!(sfu.has_call_participant(&call, &identity));
         assert!(
@@ -544,13 +543,13 @@ mod tests {
         // A registration with NO room actor for its room — exactly the
         // state a departing occupant is left in when the last MUC leave
         // tore the actor down before their Jingle terminate arrived.
-        let call = waddle_sfu::CallId::new("vanished@muc.example.com").expect("valid call id");
+        let call = waddle_sfu::CallId::try_new("vanished@muc.example.com").expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         let generation = occupancy_session();
         sfu.register_call_participant_with_session(
             &call,
             &identity,
-            &waddle_sfu::SessionBinding::new("relay-sid").expect("session binding"),
+            &waddle_sfu::SessionBinding::try_new("relay-sid").expect("session binding"),
             generation,
         );
         assert!(sfu.has_call_participant(&call, &identity));

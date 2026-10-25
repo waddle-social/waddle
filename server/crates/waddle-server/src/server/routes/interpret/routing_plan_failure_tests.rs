@@ -1,25 +1,22 @@
 //! Required recipient reads refuse ingress; historical bounces remain authoritative.
-use super::super::{
-    effects::{PlanFailure, PlanSink},
-    message_plan::{build_plan_deps, finish_plan},
-    Deps,
-};
+use super::super::effects::{PlanFailure, PlanSink};
+use super::super::message_plan::{build_plan_deps, finish_plan};
+use super::super::Deps;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
+    IngressDecisionClass, IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
 use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, WireHandledCount},
-    pending_delivery::SmSessionId,
-    protocol::StanzaDispatcher,
-    registry::ConnectionRegistry,
-    stream_management::{InMemorySmSessionRegistry, SmRegistryError},
-    xep::xep0191::BlockingStorage,
-    Stanza,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, WireHandledCount};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::protocol::StanzaDispatcher;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmRegistryError};
+use waddle_xmpp::xep::xep0191::BlockingStorage;
+use waddle_xmpp::Stanza;
 
 async fn resumable(fixture: &IngressFixture) -> IngressSubmission {
     let mut submission = fixture.submission(Some("recipient-read-retry"), "hello");
@@ -191,7 +188,7 @@ async fn nonexistent_rejection(fixture: IngressFixture) {
     use crate::ingress::execute::{execute_effects, terminalize_if_complete};
     use std::time::Duration;
     let registry = ConnectionRegistry::new();
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

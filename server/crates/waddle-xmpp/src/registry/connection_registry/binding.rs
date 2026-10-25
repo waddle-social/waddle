@@ -1,6 +1,7 @@
 use super::{ConnectionEntry, ConnectionRegistry};
 use dashmap::DashMap;
 use jid::FullJid;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, OwnedMutexGuard};
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -53,7 +54,7 @@ impl SocketLifecycle {
 #[derive(Default)]
 pub(super) struct BindState {
     incumbent: Option<Arc<SocketLifecycle>>,
-    retirements: std::collections::HashSet<OccupancySessionGeneration>,
+    retirements: HashSet<OccupancySessionGeneration>,
     actor_retirements: Vec<Arc<SocketLifecycle>>,
 }
 type BindSlot = Mutex<BindState>;

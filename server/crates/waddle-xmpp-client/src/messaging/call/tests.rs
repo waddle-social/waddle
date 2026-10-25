@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    build_finish, build_finish_migrated, build_muji_session_initiate, build_proceed, build_propose,
+    build_reject, build_reject_with_options, build_retract, build_retract_with_options,
+    build_ringing, build_session_accept, build_session_initiate, build_session_terminate,
+    jingle_reason_from_wire_name, jingle_reason_wire_name, parse_call_event, wrap_jmi_message,
+    CallEventKind, CallMedia, Element, FullJid, Jid, JingleReason, MujiSessionVideo, SessionId,
+    TieBreak, NS_HINTS, NS_JINGLE, NS_JINGLE_MESSAGE, NS_JINGLE_RTP, NS_MUJI,
+    NS_WADDLE_LIVEKIT_TRANSPORT,
+};
 
 #[test]
 fn parses_propose_with_audio_video() {
@@ -312,7 +320,7 @@ fn build_muji_session_initiate_descriptions_include_rtcp_mux() {
         &sid("muji-1"),
         &full("alice@waddle.test/desktop"),
         "room@muc.waddle.test",
-        true,
+        MujiSessionVideo::WithVideo,
     );
     for content in elem.children().filter(|c| c.name() == "content") {
         let desc = content
@@ -419,7 +427,8 @@ fn build_jmi_helpers_roundtrip_through_parser() {
 
 #[test]
 fn build_tie_break_jmi_helpers_emit_expired_reason_and_tie_break() {
-    let reject = build_reject_with_options(&sid("c1"), Some(JingleReason::Expired), true);
+    let reject =
+        build_reject_with_options(&sid("c1"), Some(JingleReason::Expired), TieBreak::Marked);
     assert!(
         reject.get_child("tie-break", NS_JINGLE_MESSAGE).is_some(),
         "XEP-0353 tie-break reject carries <tie-break/>"
@@ -432,7 +441,8 @@ fn build_tie_break_jmi_helpers_emit_expired_reason_and_tie_break() {
         "XEP-0353 tie-break reject carries <reason><expired/></reason>"
     );
 
-    let retract = build_retract_with_options(&sid("c1"), Some(JingleReason::Expired), true);
+    let retract =
+        build_retract_with_options(&sid("c1"), Some(JingleReason::Expired), TieBreak::Marked);
     assert!(retract.get_child("tie-break", NS_JINGLE_MESSAGE).is_some());
     assert!(retract
         .get_child("reason", NS_JINGLE)
@@ -515,7 +525,7 @@ fn build_muji_session_initiate_carries_muji_room_and_requested_media() {
         &sid("muji-1"),
         &full("alice@waddle.test/desktop"),
         "room@muc.waddle.test",
-        false,
+        MujiSessionVideo::AudioOnly,
     );
     assert_eq!(jingle.name(), "jingle");
     assert_eq!(jingle.ns(), NS_JINGLE);
@@ -557,7 +567,7 @@ fn build_muji_session_initiate_adds_video_when_requested() {
         &sid("muji-1"),
         &full("alice@waddle.test/desktop"),
         "room@muc.waddle.test",
-        true,
+        MujiSessionVideo::WithVideo,
     );
     let media: Vec<_> = jingle
         .children()

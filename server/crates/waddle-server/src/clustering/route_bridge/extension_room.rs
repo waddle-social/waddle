@@ -1,15 +1,14 @@
-use super::*;
+use super::{NodeId, NodeIdentity, OrderedRelayDeliveryBridge, RelayHandle};
 use crate::clustering::relay::{RelayExtensionRoomSend, RelayExtensionRoomSendReply};
+use crate::server::extension_host_adapter::EXTENSION_ROOM_MAILBOX_TIMEOUT;
+use crate::server::extension_host_adapter::EXTENSION_ROOM_REPLY_TIMEOUT;
 
 impl OrderedRelayDeliveryBridge {
     /// Origin side of a forwarded extension room send (#1893). The ask and
     /// its re-ask share this handle, so the re-ask skips the relay lookup.
     pub(crate) fn extension_room_handle(&self, owner: &NodeIdentity) -> RelayHandle {
         RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
-            .with_ask_timeouts(
-                crate::server::extension_host_adapter::EXTENSION_ROOM_MAILBOX_TIMEOUT,
-                crate::server::extension_host_adapter::EXTENSION_ROOM_REPLY_TIMEOUT,
-            )
+            .with_ask_timeouts(EXTENSION_ROOM_MAILBOX_TIMEOUT, EXTENSION_ROOM_REPLY_TIMEOUT)
     }
 
     /// Owner side: run the local host send. It never forwards again.

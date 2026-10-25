@@ -1,6 +1,9 @@
 //! Exercise the production detach drain after the relay actor queues a frame.
 use super::super::replay::{drain_outbound_into_replay, PendingRowDrainPolicy, ReplayDrainSink};
-use super::*;
+use super::{
+    create_test_websocket_state_with_clustering, mpsc, Arc, FullJid, InMemorySmSessionRegistry,
+    OutboundStanza, StreamManagementState,
+};
 
 pub(crate) async fn drain_registered_remote_frame(
     sm: Arc<InMemorySmSessionRegistry>,

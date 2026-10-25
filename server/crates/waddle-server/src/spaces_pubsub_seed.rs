@@ -102,11 +102,11 @@ mod tests {
         seed_owners_on_node(&storage, &spaces, "general", &owners).await;
 
         let alice_aff = storage
-            .get_affiliation(&spaces, "general", &jid("alice"))
+            .affiliation(&spaces, "general", &jid("alice"))
             .await
             .expect("get alice");
         let bob_aff = storage
-            .get_affiliation(&spaces, "general", &jid("bob"))
+            .affiliation(&spaces, "general", &jid("bob"))
             .await
             .expect("get bob");
         assert_eq!(alice_aff, Affiliation::Owner);
@@ -127,7 +127,7 @@ mod tests {
         seed_owners_on_node(&storage, &spaces, "general", &owners).await;
 
         let aff = storage
-            .get_affiliation(&spaces, "general", &jid("alice"))
+            .affiliation(&spaces, "general", &jid("alice"))
             .await
             .expect("get aff");
         assert_eq!(aff, Affiliation::Owner);
@@ -154,7 +154,7 @@ mod tests {
         seed_owners_on_node(&storage, &spaces, "general", &[jid("alice")]).await;
 
         let aff = storage
-            .get_affiliation(&spaces, "general", &jid("alice"))
+            .affiliation(&spaces, "general", &jid("alice"))
             .await
             .expect("get aff");
         assert_eq!(aff, Affiliation::Owner);
@@ -179,7 +179,7 @@ mod tests {
         seed_owners_on_node(&storage, &spaces, "general", &[jid("admin")]).await;
 
         let aff = storage
-            .get_affiliation(&spaces, "general", &jid("admin"))
+            .affiliation(&spaces, "general", &jid("admin"))
             .await
             .expect("get aff");
         assert_eq!(aff, Affiliation::Owner);
@@ -206,7 +206,7 @@ mod tests {
 
         for node in ["general", "engineering"] {
             let aff = storage
-                .get_affiliation(&spaces, node, &jid("admin"))
+                .affiliation(&spaces, node, &jid("admin"))
                 .await
                 .expect("get aff");
             assert_eq!(aff, Affiliation::Owner, "admin must be Owner on {node}");
@@ -230,7 +230,7 @@ mod tests {
 
         for node in ["general", "engineering", "design"] {
             let aff = storage
-                .get_affiliation(&spaces, node, &jid("alice"))
+                .affiliation(&spaces, node, &jid("alice"))
                 .await
                 .expect("get aff");
             assert_eq!(aff, Affiliation::Owner, "alice should be Owner on {node}");
@@ -254,7 +254,7 @@ mod tests {
             .expect("back-fill seed");
 
         let aff = storage
-            .get_affiliation(&spaces, "preexisting", &jid("late-admin"))
+            .affiliation(&spaces, "preexisting", &jid("late-admin"))
             .await
             .expect("get aff");
         assert_eq!(aff, Affiliation::Owner);

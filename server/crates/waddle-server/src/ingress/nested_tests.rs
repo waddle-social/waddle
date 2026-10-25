@@ -1,11 +1,16 @@
-use super::*;
-use crate::ingress::{effects::Effect, test_support::IngressFixture, PlannedEffect};
+use super::{
+    Arc, AuthorityUnavailable, Duration, IngressAuthority, IngressDecisionClass, IngressSubmission,
+    NestedContinuation, NestedOutcome, TestGate,
+};
+use crate::ingress::effects::Effect;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::PlannedEffect;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_extensions::PluginId;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, TransportGeneration};
 
 async fn submission(f: &IngressFixture, origin: &str) -> IngressSubmission {
-    let plugin = PluginId::new("nested-test").expect("plugin id");
+    let plugin = PluginId::try_new("nested-test").expect("plugin id");
     let mut tx = f.uow.begin().await.expect("grant transaction");
     ExtensionGrantRepository::sync_configured(
         &mut tx,
@@ -61,7 +66,7 @@ async fn state(
     f: &IngressFixture,
     authority: Arc<IngressAuthority>,
 ) -> Arc<crate::server::routes::websocket::WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
         crate::db::PoolConfig,
     )

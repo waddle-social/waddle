@@ -1,13 +1,18 @@
-use super::*;
+use super::{
+    ClientConfig, ClientHandle, ClientRequest, ClientResult, ClientState, ConnectionEvent,
+    DriverTask, Duration, HashMap, StanzaId, StreamManagementEvent, WebSocketTransport,
+    WebSocketTransportFactory, XmppClient, XmppRuntime,
+};
 
 use std::collections::VecDeque;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 use jid::{BareJid, FullJid};
 use minidom::Element;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use url::Url;
 
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
@@ -22,12 +27,12 @@ use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage
 use crate::ConnectionConfig;
 
 fn config() -> ClientConfig {
-    ClientConfig::new(
+    ClientConfig::try_new(
         ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
-        WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
-        OAuthBearerConfig::new(
+        WebSocketConfig::try_new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
+        OAuthBearerConfig::try_new(
             BareJid::from_str("alice@example.com").unwrap(),
-            ClientResource::new("macbook").unwrap(),
+            ClientResource::try_new("macbook").unwrap(),
             AccessToken::new("token"),
         )
         .unwrap(),
@@ -38,7 +43,7 @@ fn config() -> ClientConfig {
 fn config_with_resume_state() -> ClientConfig {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("prev-stream"), 0, 0).unwrap());
+        Some(SmResumeState::try_new(StreamId::new("prev-stream"), 0, 0).unwrap());
     config
 }
 
@@ -64,9 +69,9 @@ fn make_driver_task_with_config(
 ) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
     let (evt_tx, evt_rx) = broadcast::channel::<ClientEvent>(256);
-    let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+    let state = watch::Sender::new(SessionSnapshot::new());
     let task = DriverTask {
-        runtime: XmppRuntime::new(config).unwrap(),
+        runtime: XmppRuntime::try_new(config).unwrap(),
         transport: Box::new(transport),
         commands: cmd_rx,
         events: evt_tx,
@@ -94,6 +99,36 @@ async fn confirm_latest_enable_sent(task: &mut DriverTask, shared: &MockTranspor
         .expect("transport sent stream-management enable");
     task.apply_transport_event(TransportEvent::MessageSent(enable))
         .await;
+}
+
+#[test]
+fn snapshot_publication_survives_panicking_writer() {
+    let (mut task, commands, _events) = make_driver_task(MockTransport::new(
+        vec![],
+        vec![],
+        MockTransportShared::default(),
+    ));
+    let handle = ClientHandle::from_parts(commands, task.events.clone(), task.state.clone());
+    let observer = handle.clone();
+    let initial = handle.snapshot();
+
+    // Inject an unwind while watch holds its write guard. Production only
+    // replaces complete snapshots; this callback is solely a fault injector.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        task.state.send_if_modified(|_| {
+            panic!("snapshot writer panicked");
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(handle.snapshot(), initial);
+
+    task.runtime.queue_request(ClientRequest::Connect).unwrap();
+    task.publish_snapshot();
+
+    assert_eq!(handle.snapshot(), *task.runtime.snapshot());
+    assert_eq!(observer.snapshot(), handle.snapshot());
+    assert_eq!(observer.state(), ClientState::Connecting);
+    assert_eq!(initial.phase, SessionPhase::Disconnected);
 }
 
 // ── IQ correlation unit tests ─────────────────────────────────────────────
@@ -192,7 +227,7 @@ async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
         .insert("unreplayable-iq".to_string(), iq_tx);
 
     task.dispatch_client_event(ClientEvent::IqCancelled {
-        stanza_id: StanzaId::new("unreplayable-iq").unwrap(),
+        stanza_id: StanzaId::try_new("unreplayable-iq").unwrap(),
     });
 
     assert!(!task.pending_iqs.contains_key("unreplayable-iq"));
@@ -208,7 +243,7 @@ async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
 async fn send_iq_resolves_via_mock_driver() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<XmppCommand>(1);
     let (evt_tx, _) = broadcast::channel::<ClientEvent>(1);
-    let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+    let state = watch::Sender::new(SessionSnapshot::new());
 
     let handle = ClientHandle {
         commands: cmd_tx,
@@ -249,7 +284,7 @@ async fn driver_forwards_core_message_delivery_ack() {
     ));
 
     task.dispatch_client_event(ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
-        stanza_id: StanzaId::new("core-tracked").unwrap(),
+        stanza_id: StanzaId::try_new("core-tracked").unwrap(),
     }));
 
     let mut got_ack = false;
@@ -505,7 +540,7 @@ async fn driver_connects_runtime_and_transport_until_ready() {
         false,
     );
 
-    let client = XmppClient::new(config()).unwrap();
+    let client = XmppClient::try_new(config()).unwrap();
     let driver = client.driver_with_factory(factory).unwrap();
 
     let handle = driver.connect().await.unwrap();
@@ -588,7 +623,7 @@ async fn driver_disconnects_cleanly() {
         false,
     );
 
-    let client = XmppClient::new(config()).unwrap();
+    let client = XmppClient::try_new(config()).unwrap();
     let driver = client.driver_with_factory(factory).unwrap();
     let handle = driver.connect().await.unwrap();
     let mut rx = handle.events();
@@ -634,7 +669,7 @@ async fn driver_cleans_up_failed_connects() {
         true,
     );
 
-    let client = XmppClient::new(config()).unwrap();
+    let client = XmppClient::try_new(config()).unwrap();
     let driver = client.driver_with_factory(factory).unwrap();
 
     let error = driver.connect().await.unwrap_err();

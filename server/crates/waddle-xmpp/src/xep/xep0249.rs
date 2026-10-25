@@ -161,7 +161,7 @@ fn parse_invite_element(x_elem: &Element) -> Option<DirectInvite> {
     let thread = x_elem
         .attr("thread")
         .filter(|s| !s.is_empty())
-        .and_then(ThreadId::new);
+        .and_then(ThreadId::try_new);
 
     debug!(
         room = %jid,
@@ -429,7 +429,7 @@ mod tests {
     fn test_build_direct_invite_continue_thread() {
         let jid: BareJid = "room@conference.example.com".parse().unwrap();
         let mut invite = DirectInvite::new(jid);
-        invite.set_continue(ThreadId::new("thread-1"));
+        invite.set_continue(ThreadId::try_new("thread-1"));
 
         let elem = build_direct_invite(&invite);
 

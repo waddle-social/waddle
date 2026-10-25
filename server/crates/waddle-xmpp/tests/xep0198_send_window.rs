@@ -146,7 +146,7 @@ fn resume_after_paced_burst_replays_exactly_the_unacked_tail_in_order() {
         let _ = state.record_outbound(format!("<message id='{n}'/>"), SmEvictionPath::Batch);
     }
 
-    let replay = state.get_stanzas_to_resend(client_h.max(50));
+    let replay = state.stanzas_to_resend(client_h.max(50));
     // client_h is 50 (last full-ack pause), tail is 51..=55.
     assert_eq!(replay.len(), 5, "exactly the unacked tail replays");
     for (offset, entry) in replay.iter().enumerate() {

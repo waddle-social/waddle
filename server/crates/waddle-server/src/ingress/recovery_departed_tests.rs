@@ -1,15 +1,24 @@
 //! XEP-0045 ghost users: maintenance settles copies the room no longer owes.
-use super::*;
-use crate::ingress::IngressDecision;
-use kameo::actor::Spawn;
-use waddle_xmpp::{
-    muc::{
-        durable::OccupancyLeaveCause,
-        room_actor::{LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::{GetRoom, RoomRegistryActor},
-    },
-    xep::xep0421::OccupantIdSecret,
+#[cfg(feature = "clustering")]
+use super::StateEnvironment;
+use super::{
+    append_count, build_interpret_deps, commit_submission, execute_effects, pass,
+    pass_with_row_deadline, persistent_sm, planned_room, receipt_key, state_for, store_detached,
+    Arc, CanonicalMessageRepository, Case, DeliveryProgressRepository, Deps, Duration,
+    EffectReceiptRepository, ExternalEffect, ImmediateSink, IngressEffectIntent, IngressFixture,
+    IngressSubmission, MaintenanceCursor, MaintenanceOutcome, MessageKey, RecoveryEnvironment,
+    WebSocketState,
 };
+use crate::ingress::IngressDecision;
+#[cfg(feature = "clustering")]
+use crate::server::routes::websocket::tests as socket_tests;
+use kameo::actor::Spawn;
+use waddle_xmpp::muc::durable::OccupancyLeaveCause;
+use waddle_xmpp::muc::room_actor::{
+    LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
+};
+use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
 const DEPARTED_COPIES: &str = "ingress.maintenance.departed_occupant_copies";
 
@@ -95,7 +104,7 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
     let registry = (case == DepartedCase::UnhostedRoom).then(|| {
         RoomRegistryActor::spawn(RoomRegistryActor::new(
             "muc.example.com".into(),
-            OccupantIdSecret::new(vec![b'd'; 32]).expect("occupant-id secret"),
+            OccupantIdSecret::try_new(vec![b'd'; 32]).expect("occupant-id secret"),
         ))
     });
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {

@@ -34,10 +34,12 @@ pub const MAM_NS: &str = "urn:xmpp:mam:2";
 /// is not a standard MAM field. Keep Waddle-specific filtering in a Waddle
 /// namespace so official MAM semantics stay conformant.
 pub const WADDLE_MAM_THREAD_NS: &str = "urn:waddle:mam-thread:0";
+/// Protocol token `{urn:waddle:mam-thread:0}thread`.
 pub const WADDLE_MAM_THREAD_FIELD: &str = "{urn:waddle:mam-thread:0}thread";
 
 /// Full Text Search in MAM namespace (XEP-0431).
 pub const FULLTEXT_MAM_NS: &str = "urn:xmpp:fulltext:0";
+/// Protocol token `{urn:xmpp:fulltext:0}fulltext`.
 pub const FULLTEXT_MAM_FIELD: &str = "{urn:xmpp:fulltext:0}fulltext";
 
 /// Result Set Management namespace (XEP-0059).
@@ -48,9 +50,9 @@ pub const DATA_FORMS_NS: &str = "jabber:x:data";
 
 /// Stanza ID namespace (XEP-0359).
 pub const STANZA_ID_NS: &str = "urn:xmpp:sid:0";
-
 /// `true` when a message is a query-scoped MAM response envelope, not
 /// an offline-deliverable user message.
+#[must_use]
 pub fn is_mam_query_response_message(message: &xmpp_parsers::message::Message) -> bool {
     if message.type_ != xmpp_parsers::message::MessageType::Normal
         || !message.bodies.is_empty()

@@ -15,12 +15,17 @@ const NS_CLIENT: &str = "jabber:client";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_DATA_FORMS: &str = "jabber:x:data";
+/// Ns pubsub publish options feature used by this protocol implementation.
 pub const NS_PUBSUB_PUBLISH_OPTIONS_FEATURE: &str =
     "http://jabber.org/protocol/pubsub#publish-options";
 
+/// Protocol token `urn:xmpp:mds:displayed:0`.
 pub const NS_MDS: &str = "urn:xmpp:mds:displayed:0";
+/// Protocol token `urn:xmpp:mds:displayed:0`.
 pub const MDS_NODE: &str = "urn:xmpp:mds:displayed:0";
+/// Protocol token `urn:xmpp:mds:displayed:0+notify`.
 pub const NS_MDS_NOTIFY: &str = "urn:xmpp:mds:displayed:0+notify";
+/// Protocol token `urn:xmpp:sid:0`.
 pub const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#publish-options";
 
@@ -30,8 +35,11 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 /// entity required by XEP-0490 for room and account-server stanza IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
+    /// Identifier of the chat associated with this value.
     pub chat_id: Jid,
+    /// Identifier used for stanza correlation.
     pub stanza_id: StanzaId,
+    /// JID of the archive that assigned the XEP-0359 stanza identifier.
     pub stanza_id_by: BareJid,
 }
 
@@ -95,6 +103,7 @@ fn build_displayed_payload(stanza_id: &StanzaId, stanza_id_by: &BareJid) -> Elem
 /// Build the XEP-0490 §3 publish IQ for a single chat-id displayed
 /// marker. The IQ is addressed to no `to` attribute, which routes to
 /// the user's own PEP service per XEP-0163.
+#[must_use]
 pub fn build_mds_publish_iq(
     iq_id: &str,
     chat_id: &Jid,
@@ -125,6 +134,7 @@ pub fn build_mds_publish_iq(
 
 /// Build the XEP-0490 §3.1 catch-up retrieve IQ for the user's own
 /// MDS node.
+#[must_use]
 pub fn build_mds_catchup_iq(iq_id: &str) -> Element {
     let items = Element::builder("items", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
@@ -140,6 +150,7 @@ pub fn build_mds_catchup_iq(iq_id: &str) -> Element {
 /// Build an explicit XEP-0060 `<subscribe>` IQ for the MDS node. Used
 /// in place of caps-driven `+notify` filtering when the chat client
 /// does not advertise XEP-0115 caps in its presence.
+#[must_use]
 pub fn build_mds_subscribe_iq(iq_id: &str, subscriber_bare_jid: &str) -> Element {
     let subscribe = Element::builder("subscribe", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), MDS_NODE)
@@ -172,6 +183,7 @@ fn parse_displayed_into_entry(item: &Element) -> Option<MdsCatchupEntry> {
 /// Parse a catch-up `<iq type='result'>` into typed entries. Items
 /// that don't carry the expected `<displayed>/<stanza-id>` shape are
 /// silently dropped — they're not a XEP-0490 entry and never will be.
+#[must_use]
 pub fn parse_mds_catchup_result(iq: &Element) -> Vec<MdsCatchupEntry> {
     let Some(pubsub) = iq.get_child("pubsub", NS_PUBSUB) else {
         return Vec::new();
@@ -192,6 +204,7 @@ pub fn parse_mds_catchup_result(iq: &Element) -> Vec<MdsCatchupEntry> {
 /// Parse an inbound PEP event (`<message><event><items
 /// node='urn:xmpp:mds:displayed:0'>...`) into typed entries. Returns
 /// `None` when the message is not an MDS event.
+#[must_use]
 pub fn parse_mds_event(message: &Element) -> Option<Vec<MdsCatchupEntry>> {
     if message.name() != "message" {
         return None;
@@ -219,13 +232,14 @@ fn parse_displayed_payload(displayed: &Element) -> Option<(StanzaId, BareJid)> {
     if stanza_ids.next().is_some() {
         return None;
     }
-    let stanza_id = StanzaId::new(stanza_id_elem.attr("id")?).ok()?;
+    let stanza_id = StanzaId::try_new(stanza_id_elem.attr("id")?).ok()?;
     let stanza_id_by = stanza_id_elem.attr("by")?.parse::<BareJid>().ok()?;
     Some((stanza_id, stanza_id_by))
 }
 
 /// XEP-0490 PEP notifications are owner-self events. A client must not
 /// apply displayed state carried by an arbitrary contact's `<message/>`.
+#[must_use]
 pub fn mds_event_from_matches_account(message_from: Option<&str>, account_bare_jid: &str) -> bool {
     let Some(message_from) = message_from else {
         return false;
@@ -256,7 +270,7 @@ mod tests {
     }
 
     fn stanza_id(value: &str) -> StanzaId {
-        StanzaId::new(value).expect("test stanza id is non-empty")
+        StanzaId::try_new(value).expect("test stanza id is non-empty")
     }
 
     fn displayed_payload(id: &str, by: &str) -> Element {

@@ -4,23 +4,21 @@ use std::time::{Duration, Instant};
 
 use jid::{BareJid, Jid};
 use uuid::Uuid;
-use waddle_server::{
-    clustering::claims::PostgresClaimStore,
-    config::{IngressConfig, LineageConfig},
-    db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress::{IngressAuthority, IngressStreamIdentity, IngressSubmission},
-    server::effects::{IngressPlan, RoomExecutionPath},
-    sm_persistence::DatabaseSmPersistence,
+use waddle_server::clustering::claims::PostgresClaimStore;
+use waddle_server::config::{IngressConfig, LineageConfig};
+use waddle_server::db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress::{IngressAuthority, IngressStreamIdentity, IngressSubmission};
+use waddle_server::server::effects::{IngressPlan, RoomExecutionPath};
+use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
-use waddle_xmpp::{
-    auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
-    ingress::{
-        ConnectionGeneration, DigestContext, DigestInput, IngressEffectIntent, MessageKey,
-        NormalizedTarget, SmIngressId, WireHandledCount,
-    },
-    ownership::{ClaimEpoch, ClaimStore, NodeIdentity, SharedNodeIdentity},
-    pending_delivery::SmSessionId,
+use waddle_xmpp::ingress::{
+    ConnectionGeneration, DigestContext, DigestInput, IngressEffectIntent, MessageKey,
+    NormalizedTarget, SmIngressId, WireHandledCount,
 };
+use waddle_xmpp::ownership::{ClaimEpoch, ClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use xmpp_parsers::message::{Message, MessageType};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,7 +96,7 @@ impl IngressFixture {
             .parse()
             .expect("fixture target bare JID");
         let claim_epoch = ClaimEpoch(17);
-        let handle = IngressAuthority::new(
+        let handle = IngressAuthority::try_new(
             IngressConfig {
                 pool_size: 4,
                 retry_attempts: 5,

@@ -1,16 +1,16 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, DurableDirectEffect, DurableEffect, Effect,
+    IngressEffectIntent, IngressFixture, PlannedEffect,
+};
 use kameo::actor::Spawn;
-use waddle_server::ingress::{
-    effects::{direct::ExternalDirectEffect, ProjectionRef},
-    execute::execute_effects,
-    Deps, ExternalEffect, ExternalOutcome, ImmediateSink,
-};
-use waddle_xmpp::{
-    inbox::{ConversationKind, InboxEntry},
-    ingress::{EffectMessageIdentity, InboxProjectionMutation},
-    registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-    Stanza,
-};
+use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+use waddle_server::ingress::effects::ProjectionRef;
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::{EffectMessageIdentity, InboxProjectionMutation};
+use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
+use waddle_xmpp::Stanza;
 
 async fn two_resource_inbox_push(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
@@ -26,7 +26,7 @@ async fn two_resource_inbox_push(fixture: IngressFixture) {
         registry.register_with_carbons(resource.clone(), sender, false);
         users
             .ask(RegisterUserResource {
-                entry: registry.get_entry(resource).expect("registered resource"),
+                entry: registry.entry(resource).expect("registered resource"),
                 jid: resource.clone(),
             })
             .await

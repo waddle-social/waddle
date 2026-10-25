@@ -5,9 +5,11 @@
 //! bridge. The XMPP layer only ever sees these; LiveKit-specific
 //! representations live in [`crate::token`] and [`crate::livekit`].
 
+use crate::UnboundOccupantPolicy;
 use jid::FullJid;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use waddle_xmpp_core::{types::Voice, OccupancySessionGeneration};
+use waddle_xmpp_core::types::Voice;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::error::SfuError;
 
@@ -28,7 +30,7 @@ const MAX_SID_LEN: usize = 256;
 pub struct CallId(String);
 
 impl CallId {
-    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
         if value.is_empty() || value.len() > 256 {
             return Err(SfuError::InvalidCallId(value));
@@ -68,7 +70,7 @@ impl std::fmt::Display for CallId {
 pub struct SessionBinding(String);
 
 impl SessionBinding {
-    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
         if value.trim().is_empty() || value.len() > MAX_SID_LEN {
             return Err(SfuError::InvalidSessionBinding);
@@ -94,7 +96,7 @@ impl std::fmt::Display for SessionBinding {
 pub struct RoomSid(String);
 
 impl RoomSid {
-    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
         if !is_valid_printable_ascii_sid(&value) {
             return Err(SfuError::InvalidRoomSid);
@@ -122,7 +124,7 @@ impl<'de> Deserialize<'de> for RoomSid {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(de::Error::custom)
+        Self::try_new(value).map_err(de::Error::custom)
     }
 }
 
@@ -137,7 +139,7 @@ impl std::fmt::Display for RoomSid {
 pub struct ParticipantSid(String);
 
 impl ParticipantSid {
-    pub fn new(value: impl Into<String>) -> Result<Self, SfuError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, SfuError> {
         let value = value.into();
         if !is_valid_printable_ascii_sid(&value) {
             return Err(SfuError::InvalidParticipantSid);
@@ -165,7 +167,7 @@ impl<'de> Deserialize<'de> for ParticipantSid {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(de::Error::custom)
+        Self::try_new(value).map_err(de::Error::custom)
     }
 }
 
@@ -223,7 +225,7 @@ pub struct CallTeardownIntentLite {
     /// `occupant_session` is `Some` (#1703): `TearDown` for an intent minted
     /// by a CONFIRMED departure (the room actor removed the session or the
     /// live connection asked), `Keep` for stale/unconfirmed cleanup.
-    pub unbound_occupant: crate::UnboundOccupantPolicy,
+    pub unbound_occupant: UnboundOccupantPolicy,
     /// The signaling session whose terminate produced this intent
     /// (#1608): the executor re-checks it against the live
     /// registration's binding immediately before the destructive
@@ -435,20 +437,26 @@ mod tests {
 
     #[test]
     fn room_sid_requires_printable_ascii() {
-        assert!(RoomSid::new("RM_123").is_ok());
-        assert!(matches!(RoomSid::new(""), Err(SfuError::InvalidRoomSid)));
+        assert!(RoomSid::try_new("RM_123").is_ok());
         assert!(matches!(
-            RoomSid::new("RM_\n123"),
+            RoomSid::try_new(""),
             Err(SfuError::InvalidRoomSid)
         ));
-        assert!(RoomSid::new("RM 123").is_ok(), "space is printable ASCII");
+        assert!(matches!(
+            RoomSid::try_new("RM_\n123"),
+            Err(SfuError::InvalidRoomSid)
+        ));
+        assert!(
+            RoomSid::try_new("RM 123").is_ok(),
+            "space is printable ASCII"
+        );
     }
 
     #[test]
     fn participant_sid_requires_printable_ascii() {
-        assert!(ParticipantSid::new("PA_123").is_ok());
+        assert!(ParticipantSid::try_new("PA_123").is_ok());
         assert!(matches!(
-            ParticipantSid::new("π"),
+            ParticipantSid::try_new("π"),
             Err(SfuError::InvalidParticipantSid)
         ));
     }

@@ -1,13 +1,12 @@
 //! Pure application of the policies captured before admission.
-use waddle_xmpp::{mam::MamTxStoreOutcome, Stanza};
+use waddle_xmpp::mam::MamTxStoreOutcome;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
-use crate::{
-    ingress_uow::ReconcileVerdict,
-    server::routes::interpret::effects::{
-        delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
-        PlanEffectDependency, PlanSuppressionPolicy, PlannedEffect,
-    },
+use crate::ingress_uow::ReconcileVerdict;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, IngressPlan, PlanEffectDependency, PlanSuppressionPolicy, PlannedEffect,
 };
 
 pub fn filter_external_effects(
@@ -371,9 +370,8 @@ mod tests {
 
     #[test]
     fn planned_subject_retry_only_rebroadcasts_without_thread() {
-        use crate::server::routes::interpret::effects::{
-            delivery::PeerDeliveryKind, EffectSink, PlanSink,
-        };
+        use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+        use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
         let sender: jid::FullJid = "sender@example.com/device".parse().expect("sender");
         let peer: jid::FullJid = "peer@example.com/device".parse().expect("peer");
         #[derive(Clone, Copy)]

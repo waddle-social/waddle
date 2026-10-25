@@ -1,4 +1,5 @@
-use super::*;
+use super::{debug, error, Arc, Message, Sink, SinkExt};
+use crate::clustering::NodeAdmissionPermit;
 
 /// Interrupt only socket I/O when a verified resume targets this exact live
 /// connection. Protocol handlers finish their current durable work normally.
@@ -193,10 +194,7 @@ pub(super) async fn send_ws_text_frames_with_authority<S, E, I>(
     sender: &mut S,
     frames: I,
     failure_message: &'static str,
-    authority: (
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    ),
+    authority: (&NodeAdmissionPermit, &tokio_util::sync::CancellationToken),
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -264,10 +262,7 @@ pub(super) async fn send_ws_message_with_authority<S, E>(
     sender: &mut S,
     message: Message,
     failure_message: &'static str,
-    authority: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    authority: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,

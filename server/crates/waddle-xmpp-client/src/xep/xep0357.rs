@@ -18,10 +18,10 @@ use crate::discovery::CLIENT_NS;
 
 /// XEP-0357 namespace.
 pub const NS_PUSH: &str = "urn:xmpp:push:0";
-
 /// Build the XEP-0357 §5 `<enable/>` IQ. Never carries
 /// provider-credential fields — those belong to the Push Service
 /// registration round trip.
+#[must_use]
 pub fn build_xep0357_enable_iq(
     service_jid: &str,
     node: &str,
@@ -44,6 +44,7 @@ pub fn build_xep0357_enable_iq(
 
 /// Build the XEP-0357 §6.1 `<disable/>` IQ. A `None` `node` disables
 /// ALL nodes at the service for the bound user.
+#[must_use]
 pub fn build_xep0357_disable_iq(service_jid: &str, node: Option<&str>) -> Element {
     let id = format!("push-disable-{}", next_id());
     let mut disable = Element::builder("disable", NS_PUSH)

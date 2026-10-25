@@ -1,11 +1,7 @@
-use crate::{
-    bindings::{
-        self, exports,
-        waddle::extension::{runtime, types},
-    },
-    config::JevConfig,
-    decisions::{self, Failure},
-};
+use crate::bindings::waddle::extension::{runtime, types};
+use crate::bindings::{self, exports};
+use crate::config::JevConfig;
+use crate::decisions::{self, Failure};
 
 struct JevJudgments;
 bindings::export!(JevJudgments with_types_in bindings);

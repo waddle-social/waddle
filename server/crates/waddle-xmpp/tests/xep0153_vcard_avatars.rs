@@ -167,7 +167,8 @@ fn xep0153_sha1_hash_from_base64_matches_direct_hash() {
     // produce the SAME hash as hashing the decoded bytes directly,
     // otherwise PEP avatar sync would disagree with vCard-temp
     // avatar sync about whether the avatar changed.
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     let bytes = b"image bytes";
     let encoded = STANDARD.encode(bytes);
 

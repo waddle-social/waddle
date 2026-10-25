@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    channel, channel_for_bare, claims, claims_for_target, connection_origin, inbound,
+    message_payload, message_payload_to, origin_claim, origin_node, presence_stanza, room_channel,
+    room_claim, room_jid, sender_claim, target_claim_for_bare, NodeId, OrderedRelayDiversion,
+    OrderedRelayDiversionReason, OrderedRelayMucProxyKind, OrderedRelayPayload,
+    OrderedRelaySenderState, OrderedRelaySequence, RemoteStanzaEnvelope,
+    MAX_TRACKED_ORDERED_RELAY_CHANNELS, ORDERED_RELAY_DIVERSION_COOLDOWN,
+};
 use libp2p::identity::Keypair;
 
 #[test]

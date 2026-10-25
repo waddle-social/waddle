@@ -66,7 +66,8 @@ pub struct MamFilterStanzaId(String);
 impl MamFilterStanzaId {
     /// Construct a validated stanza-id token. Returns `None` for an
     /// empty token or one exceeding [`MAX_FILTER_STANZA_ID_LEN`].
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         if value.is_empty() || value.len() > MAX_FILTER_STANZA_ID_LEN {
             return None;
@@ -77,6 +78,7 @@ impl MamFilterStanzaId {
     /// The raw token string. Use this only at the SQL/storage boundary
     /// and at the wire/data-form boundary — keep `MamFilterStanzaId`
     /// throughout the routing/handler chain.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -94,19 +96,19 @@ mod tests {
 
     #[test]
     fn rejects_empty_string() {
-        assert!(MamFilterStanzaId::new("").is_none());
+        assert!(MamFilterStanzaId::try_new("").is_none());
     }
 
     #[test]
     fn accepts_max_length_exactly() {
         let s = "x".repeat(MAX_FILTER_STANZA_ID_LEN);
-        assert!(MamFilterStanzaId::new(s).is_some());
+        assert!(MamFilterStanzaId::try_new(s).is_some());
     }
 
     #[test]
     fn rejects_over_max_length_by_one() {
         let s = "x".repeat(MAX_FILTER_STANZA_ID_LEN + 1);
-        assert!(MamFilterStanzaId::new(s).is_none());
+        assert!(MamFilterStanzaId::try_new(s).is_none());
     }
 
     #[test]
@@ -116,13 +118,13 @@ mod tests {
         // because that's MAX_FILTER_STANZA_ID_LEN + 3 bytes.
         let allowed_chars = MAX_FILTER_STANZA_ID_LEN / 3;
         let too_many_chars = allowed_chars + 1;
-        assert!(MamFilterStanzaId::new("あ".repeat(allowed_chars)).is_some());
-        assert!(MamFilterStanzaId::new("あ".repeat(too_many_chars)).is_none());
+        assert!(MamFilterStanzaId::try_new("あ".repeat(allowed_chars)).is_some());
+        assert!(MamFilterStanzaId::try_new("あ".repeat(too_many_chars)).is_none());
     }
 
     #[test]
     fn as_str_returns_inner() {
-        let id = MamFilterStanzaId::new("sid-A").expect("non-empty");
+        let id = MamFilterStanzaId::try_new("sid-A").expect("non-empty");
         assert_eq!(id.as_str(), "sid-A");
     }
 }

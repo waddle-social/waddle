@@ -1,5 +1,9 @@
+use crate::ownership::CurrentNodeIdentityGuard;
+use crate::ownership::NodeIdentity;
 use crate::pending_delivery::SmSessionId;
 use jid::FullJid;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use tracing::debug;
 
 use crate::ownership::{ClaimError, Entity, EntityType};
@@ -34,7 +38,7 @@ pub enum PendingPromotionRetryRetention {
 #[derive(Debug, Clone)]
 pub enum ShutdownSmClaimLoss {
     Recorded(super::super::persistence::SmClaimFence),
-    Disabled(crate::ownership::NodeIdentity),
+    Disabled(NodeIdentity),
 }
 
 /// Shutdown owns every captured payload, including captures it must abandon
@@ -42,7 +46,7 @@ pub enum ShutdownSmClaimLoss {
 #[derive(Debug)]
 pub struct ShutdownSmDrainBatch {
     pub sessions: Vec<DetachedSession>,
-    pub lost_claims: std::collections::HashMap<SmSessionId, ShutdownSmClaimLoss>,
+    pub lost_claims: HashMap<SmSessionId, ShutdownSmClaimLoss>,
 }
 
 /// The `ClaimStore` entity naming an SM session's ownership claim (element
@@ -54,7 +58,7 @@ fn sm_session_entity(stream_id: &str) -> Entity {
 struct PendingAcquisitionGuard<'a> {
     registry: &'a InMemorySmSessionRegistry,
     stream_id: String,
-    identity: crate::ownership::NodeIdentity,
+    identity: NodeIdentity,
     disposition: PendingClaimAcquisitionDisposition,
     armed: bool,
 }
@@ -63,7 +67,7 @@ impl<'a> PendingAcquisitionGuard<'a> {
     fn new(
         registry: &'a InMemorySmSessionRegistry,
         stream_id: &str,
-        identity: crate::ownership::NodeIdentity,
+        identity: NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) -> Self {
         Self {
@@ -154,7 +158,7 @@ impl Drop for PendingPromotionRetryLease<'_> {
 struct DrainedSessionBatch<'a> {
     registry: &'a InMemorySmSessionRegistry,
     sessions: Vec<DetachedSession>,
-    lost_claims: std::collections::HashMap<SmSessionId, ShutdownSmClaimLoss>,
+    lost_claims: HashMap<SmSessionId, ShutdownSmClaimLoss>,
 }
 
 impl<'a> DrainedSessionBatch<'a> {
@@ -162,7 +166,7 @@ impl<'a> DrainedSessionBatch<'a> {
         Self {
             registry,
             sessions: Vec::with_capacity(capacity),
-            lost_claims: std::collections::HashMap::new(),
+            lost_claims: HashMap::new(),
         }
     }
 
@@ -351,11 +355,7 @@ impl InMemorySmSessionRegistry {
         }
     }
 
-    fn begin_published_first_claim(
-        &self,
-        stream_id: &str,
-        identity: &crate::ownership::NodeIdentity,
-    ) {
+    fn begin_published_first_claim(&self, stream_id: &str, identity: &NodeIdentity) {
         for inventory in [
             &self.sessions,
             &self.claimed_sessions,
@@ -454,10 +454,7 @@ impl InMemorySmSessionRegistry {
     /// the detached resumable pool. The live fence is first converted into
     /// the registry's existing terminal retry inventory, so a failed or
     /// timed-out release retains the immutable owner+epoch for the janitor.
-    pub async fn release_attached_session_claim(
-        &self,
-        stream_id: &crate::pending_delivery::SmSessionId,
-    ) {
+    pub async fn release_attached_session_claim(&self, stream_id: &SmSessionId) {
         let stream_id = stream_id.as_str();
         let Ok(stream_lock) = self.stream_lock(stream_id) else {
             return;
@@ -714,10 +711,7 @@ impl InMemorySmSessionRegistry {
     /// Used after self-fence rotation: fresh admissions now carry the new
     /// identity, while anything returned here is provably stale local work
     /// that the final pre-rotation inventory may have missed.
-    pub fn locally_owned_claim_ids_for_owner(
-        &self,
-        owner: &crate::ownership::NodeIdentity,
-    ) -> Option<Vec<String>> {
+    pub fn locally_owned_claim_ids_for_owner(&self, owner: &NodeIdentity) -> Option<Vec<String>> {
         let mut out = Vec::new();
         {
             let pending = self.pending_claim_acquisitions.read().ok()?;
@@ -891,10 +885,7 @@ impl InMemorySmSessionRegistry {
     /// restore-release, or an idempotent self-reacquire after a hung
     /// release) would strip the live socket's fence and make it stealable.
     /// Terminal inventory for a DIFFERENT fence is deliberately untouched.
-    pub(super) fn cancel_pending_release_matching_active_fence(
-        &self,
-        stream_id: &crate::pending_delivery::SmSessionId,
-    ) {
+    pub(super) fn cancel_pending_release_matching_active_fence(&self, stream_id: &SmSessionId) {
         let stream_id = stream_id.as_str();
         // Canonical bookkeeping lock order (pending-release before fences),
         // matching `try_record_claim_fence`/`try_record_terminal_claim_fence`
@@ -946,7 +937,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn reconcile_rejected_enable_while_live(
         &self,
         stream_id: &str,
-        pending_identity: &crate::ownership::NodeIdentity,
+        pending_identity: &NodeIdentity,
     ) -> bool {
         match self.stream_liveness(stream_id) {
             Some(false) => return false,
@@ -1015,7 +1006,7 @@ impl InMemorySmSessionRegistry {
     fn remove_pending_claim_acquisition(
         &self,
         stream_id: &str,
-        identity: &crate::ownership::NodeIdentity,
+        identity: &NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) {
         let no_remaining_for_stream = {
@@ -1038,7 +1029,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn reconcile_uncertain_claim_acquisition(
         &self,
         stream_id: &str,
-        identity: crate::ownership::NodeIdentity,
+        identity: NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) {
         let Ok(stream_lock) = self.stream_lock(stream_id) else {
@@ -1052,7 +1043,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn reconcile_uncertain_claim_acquisition_locked(
         &self,
         stream_id: &str,
-        identity: crate::ownership::NodeIdentity,
+        identity: NodeIdentity,
         disposition: PendingClaimAcquisitionDisposition,
     ) {
         let pending_key = (stream_id.to_string(), identity.clone(), disposition);
@@ -1196,8 +1187,7 @@ impl InMemorySmSessionRegistry {
         let Ok(pending) = self.pending_claim_releases.read() else {
             return stream_ids.len();
         };
-        let pending_ids: std::collections::HashSet<&str> =
-            pending.iter().map(|(id, _)| id.as_str()).collect();
+        let pending_ids: HashSet<&str> = pending.iter().map(|(id, _)| id.as_str()).collect();
         stream_ids
             .iter()
             .filter(|id| pending_ids.contains(id.as_str()))
@@ -1362,7 +1352,7 @@ impl InMemorySmSessionRegistry {
         }
         drop(inventories);
         if let Some(storage) = &self.persistence {
-            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            let session_id = SmSessionId::new(stream_id.to_string());
             forgotten_fences.sort_by(|left, right| {
                 left.owner()
                     .node_id
@@ -1691,7 +1681,7 @@ impl InMemorySmSessionRegistry {
         let Some(persistence) = self.persistence.as_ref() else {
             return Ok(0);
         };
-        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+        let session_id = SmSessionId::new(stream_id.to_string());
         persistence
             .record_promotion_failure(&session_id)
             .await
@@ -1817,7 +1807,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn retirement_identity_locked(
         &self,
         stream_id: &SmSessionId,
-    ) -> Result<Option<crate::ownership::CurrentNodeIdentityGuard>, SmRegistryError> {
+    ) -> Result<Option<CurrentNodeIdentityGuard>, SmRegistryError> {
         let fence = self
             .claim_fences
             .read()
@@ -1840,7 +1830,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &SmSessionId,
         fence: &super::super::persistence::SmClaimFence,
-        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        authority: Option<&CurrentNodeIdentityGuard>,
     ) -> Result<bool, SmRegistryError> {
         let current = match authority {
             Some(authority) => {
@@ -2122,7 +2112,7 @@ impl InMemorySmSessionRegistry {
         // its queue would silently lose messages on the very storage
         // blip this path tolerates.
         if let Some(storage) = &self.persistence {
-            let session_id = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+            let session_id = SmSessionId::new(session.stream_id.clone());
             match storage.get_session(&session_id).await {
                 Ok(Some(persisted)) => match storage.list_unacked(&session_id).await {
                     Ok(rows) => {
@@ -2132,7 +2122,7 @@ impl InMemorySmSessionRegistry {
                                     .unacked_stanzas
                                     .iter()
                                     .map(|entry| entry.sequence)
-                                    .collect::<std::collections::HashSet<_>>();
+                                    .collect::<HashSet<_>>();
                                 session.unacked_stanzas.retain(|entry| {
                                     durable.contains(&entry.sequence)
                                         || super::super::sequence::sequence_gt(
@@ -2144,7 +2134,7 @@ impl InMemorySmSessionRegistry {
                                     .unacked_stanzas
                                     .iter()
                                     .map(|entry| entry.sequence)
-                                    .collect::<std::collections::HashSet<_>>();
+                                    .collect::<HashSet<_>>();
                                 session.unacked_stanzas.extend(
                                     durable_session
                                         .unacked_stanzas
@@ -2280,7 +2270,7 @@ impl InMemorySmSessionRegistry {
                 .unacked_stanzas
                 .iter()
                 .map(|entry| entry.sequence)
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<HashSet<_>>();
             existing.unacked_stanzas.extend(
                 session
                     .unacked_stanzas
@@ -2322,10 +2312,7 @@ impl InMemorySmSessionRegistry {
     /// with no stream-shard lock held: `stream_id` is freshly minted and
     /// cannot yet appear in `sessions`/`claimed_sessions`, so there is nothing
     /// else to coordinate with under that lock.
-    pub async fn ensure_session_claim(
-        &self,
-        stream_id: &str,
-    ) -> Option<crate::ownership::CurrentNodeIdentityGuard> {
+    pub async fn ensure_session_claim(&self, stream_id: &str) -> Option<CurrentNodeIdentityGuard> {
         self.ensure_session_claim_inner(stream_id, None).await
     }
 
@@ -2333,7 +2320,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         capture: &super::PromotionCaptureCustody,
-    ) -> Option<crate::ownership::CurrentNodeIdentityGuard> {
+    ) -> Option<CurrentNodeIdentityGuard> {
         let identity = self.node_identity.current();
         if !capture.begin_first_claim(&identity) {
             // An interrupted acquisition may have committed remotely. Never
@@ -2383,7 +2370,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         capture: Option<&super::PromotionCaptureCustody>,
-    ) -> Option<crate::ownership::CurrentNodeIdentityGuard> {
+    ) -> Option<CurrentNodeIdentityGuard> {
         if self
             .pending_resume_claim_custody
             .read()
@@ -2432,9 +2419,7 @@ impl InMemorySmSessionRegistry {
                     }
                     return None;
                 } else {
-                    self.cancel_pending_release_matching_active_fence(
-                        &crate::pending_delivery::SmSessionId::new(stream_id),
-                    );
+                    self.cancel_pending_release_matching_active_fence(&SmSessionId::new(stream_id));
                     Some(publication_guard)
                 }
             }
@@ -2774,7 +2759,7 @@ impl InMemorySmSessionRegistry {
     pub async fn release_claim_with_authority(
         &self,
         operation: super::SmSessionOperationGuard,
-        authority: &crate::ownership::CurrentNodeIdentityGuard,
+        authority: &CurrentNodeIdentityGuard,
     ) -> Result<(), SmRegistryError> {
         self.validate_operation_authority(&operation, authority)?;
         self.release_claim_locked(&operation.stream_id).await
@@ -2970,7 +2955,7 @@ impl InMemorySmSessionRegistry {
         // portable/in-memory persistence, which keeps no such cache — see
         // `SmPersistenceStorage::evict_claim_cache`'s doc comment).
         if let Some(storage) = &self.persistence {
-            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            let session_id = SmSessionId::new(stream_id.to_string());
             storage.evict_claim_cache(&session_id, &fence);
         }
     }
@@ -2992,7 +2977,7 @@ impl InMemorySmSessionRegistry {
     pub async fn complete_claim_with_authority(
         &self,
         operation: super::SmSessionOperationGuard,
-        authority: &crate::ownership::CurrentNodeIdentityGuard,
+        authority: &CurrentNodeIdentityGuard,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         self.validate_operation_authority(&operation, authority)?;
         self.complete_claim_checked_locked(&operation.stream_id, None, Some(authority))
@@ -3002,7 +2987,7 @@ impl InMemorySmSessionRegistry {
     fn validate_operation_authority(
         &self,
         operation: &super::SmSessionOperationGuard,
-        authority: &crate::ownership::CurrentNodeIdentityGuard,
+        authority: &CurrentNodeIdentityGuard,
     ) -> Result<(), SmRegistryError> {
         let expected_shard = self.stream_lock(&operation.stream_id)?;
         if !std::sync::Arc::ptr_eq(&expected_shard, &operation.shard) {
@@ -3057,7 +3042,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         client_h: Option<u32>,
-        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        authority: Option<&CurrentNodeIdentityGuard>,
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
             .await?;
@@ -3178,9 +3163,7 @@ impl InMemorySmSessionRegistry {
             // exact-release retry for the identical owner+epoch (e.g. an
             // earlier failed resume's restore-release) — the janitor's
             // pool-backed liveness probe cannot see an attached stream.
-            self.cancel_pending_release_matching_active_fence(
-                &crate::pending_delivery::SmSessionId::new(stream_id),
-            );
+            self.cancel_pending_release_matching_active_fence(&SmSessionId::new(stream_id));
         }
         Ok(outcome)
     }
@@ -3193,7 +3176,7 @@ impl InMemorySmSessionRegistry {
         &self,
         mut session: DetachedSession,
         client_h: Option<u32>,
-        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        authority: Option<&CurrentNodeIdentityGuard>,
     ) -> Result<DetachedSession, SmRegistryError> {
         self.validate_promotion_capture_locked(&session)?;
         let fence = session.promotion_custody.captured_fence().cloned().ok_or(

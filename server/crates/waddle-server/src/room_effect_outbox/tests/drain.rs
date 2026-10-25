@@ -16,9 +16,15 @@ use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 use waddle_xmpp::{Stanza, Voice};
 use xmpp_parsers::minidom::Element;
 
-use super::*;
+use super::{
+    admin_effects, config_effects, full_jid, initial_revision, lifecycle, nick, origin,
+    producing_node, room_jid, store_with_db, AdminPresenceKind, OccupantPresenceUpdate,
+    RoomEffectKey, RoomEffectLastError, RoomEffectOutboxStore, CLAIM_TIMEOUT_MS,
+};
 #[cfg(feature = "clustering")]
-use crate::clustering::{route_bridge::OrderedRelayDeliveryBridge, NodeId};
+use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
+#[cfg(feature = "clustering")]
+use crate::clustering::NodeId;
 #[cfg(feature = "clustering")]
 use crate::config::ClusteringMessagingConfig;
 use crate::room_effect_outbox::drain::{

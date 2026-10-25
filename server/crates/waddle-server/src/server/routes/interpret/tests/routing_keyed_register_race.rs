@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    chat_msg, jid, register_into_both_tiers, test_registry, FullJidDeliveryOutcome,
+    SmIngressAppendContext, Stanza,
+};
+use kameo::actor::Spawn;
 
 #[tokio::test]
 async fn keyed_fallback_never_enters_an_actor_registered_after_socket_lookup() {
@@ -10,7 +14,7 @@ async fn keyed_fallback_never_enters_an_actor_registered_after_socket_lookup() {
         let users = UserRegistryActor::spawn(UserRegistryActor::new());
         let target: jid::FullJid = "bob@example.com/phone".parse().expect("target");
         // The owning-socket attempt missed the resource before the bind finished.
-        assert!(connections.get_entry(&target).is_none());
+        assert!(connections.entry(&target).is_none());
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         register_into_both_tiers(&connections, &users, &target, sender).await;
 

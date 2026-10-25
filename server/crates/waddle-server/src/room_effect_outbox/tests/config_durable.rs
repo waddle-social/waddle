@@ -20,7 +20,10 @@ use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp::{Affiliation, Role, Voice};
 
-use super::*;
+use super::{
+    full_jid, initial_revision, lifecycle, origin, producing_node, room_jid, RoomEffectKey,
+    RoomEffectOutboxStore,
+};
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};
 use crate::server::routes::websocket::tests::{
@@ -266,7 +269,7 @@ async fn actor_with_outbox_config(
             "room-effect-config-test".to_owned(),
             config,
         ),
-        OccupantIdSecret::new(b"room-effect-actor-outbox-secret-32b".to_vec())
+        OccupantIdSecret::try_new(b"room-effect-actor-outbox-secret-32b".to_vec())
             .expect("test occupant-id secret"),
     ));
     actor
@@ -554,7 +557,7 @@ async fn moderation_flip_drain_replays_persisted_voice_changes_to_sfu() {
     assert_eq!(
         recorder.update_snapshot(),
         vec![(
-            waddle_sfu::CallId::new(room_jid.to_string()).expect("valid call id"),
+            waddle_sfu::CallId::try_new(room_jid.to_string()).expect("valid call id"),
             waddle_sfu::Identity::from_jid(recipient),
             waddle_sfu::MediaCapabilities::listen_only(),
         )]
@@ -702,7 +705,7 @@ async fn managed_members_only_drain_replays_persisted_voice_changes_to_sfu() {
     assert_eq!(
         recorder.update_snapshot(),
         vec![(
-            waddle_sfu::CallId::new(room_jid.to_string()).expect("valid call id"),
+            waddle_sfu::CallId::try_new(room_jid.to_string()).expect("valid call id"),
             waddle_sfu::Identity::from_jid(recipient),
             waddle_sfu::MediaCapabilities::from_muc_voice(Voice::Voiced),
         )]
@@ -1229,7 +1232,7 @@ async fn armed_config_effect_preserves_original_recipients_across_dormancy_and_s
         .await
         .expect("fresh registry reacquires the room");
     let reopened_store =
-        RoomEffectOutboxStore::new(fresh_state.deps.app_state.db_pool.global().clone())
+        RoomEffectOutboxStore::try_new(fresh_state.deps.app_state.db_pool.global().clone())
             .await
             .expect("reopen room effect outbox store");
     assert!(

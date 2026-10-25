@@ -439,10 +439,10 @@ fn provider_message_tools_build_xep_mam_queries() {
     });
 
     let request = ProviderRequest {
-        endpoint: NonEmptyString::new("https://api.example.test/v1/chat/completions")
+        endpoint: NonEmptyString::try_new("https://api.example.test/v1/chat/completions")
             .expect("endpoint"),
-        model: NonEmptyString::new("waddle-test").expect("model"),
-        api_key: NonEmptyString::new("secret").expect("api key"),
+        model: NonEmptyString::try_new("waddle-test").expect("model"),
+        api_key: NonEmptyString::try_new("secret").expect("api key"),
         context_limit: 7,
         messages: vec![],
         tools: vec![],
@@ -739,7 +739,7 @@ fn channel_public_command_requires_active_room() {
 fn success_executor(answer: &str) -> FakeExecutor {
     FakeExecutor {
         answer: Ok(ProviderAnswer {
-            text: NonEmptyString::new(answer).expect("answer"),
+            text: NonEmptyString::try_new(answer).expect("answer"),
         }),
     }
 }
@@ -805,7 +805,7 @@ fn execution_context(prompt: &str) -> ExecutionContext {
         requester: Some(types::BareJid {
             value: "alice@example.com".to_string(),
         }),
-        prompt: CleanPrompt::new(prompt.to_string()).expect("prompt"),
+        prompt: CleanPrompt::try_new(prompt.to_string()).expect("prompt"),
         response_target: Some(ResponseTarget {
             room: types::RoomJid {
                 value: "chat@muc.example.com".to_string(),
@@ -822,7 +822,7 @@ fn command_execution_context(prompt: &str) -> ExecutionContext {
         requester: Some(types::BareJid {
             value: "alice@example.com".to_string(),
         }),
-        prompt: CleanPrompt::new(prompt.to_string()).expect("prompt"),
+        prompt: CleanPrompt::try_new(prompt.to_string()).expect("prompt"),
         response_target: None,
     }
 }

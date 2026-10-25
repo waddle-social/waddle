@@ -1,6 +1,7 @@
 //! Exact-target inventory for authenticated operator commands. Never exported
 //! as metric attributes: node identifiers and owner JIDs stay on the XMPP path.
 
+use crate::db::DatabaseDriver;
 use jid::BareJid;
 use waddle_xmpp::XmppError;
 
@@ -72,7 +73,7 @@ impl DatabasePushServiceStore {
         let conn = self.db.guard().await.map_err(inventory_error)?;
         // Standalone push stores intentionally have no outbox tables. Probe
         // schema only; the actual inventory is one coherent SQL statement.
-        let probe = if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+        let probe = if self.db.driver() == DatabaseDriver::Postgres {
             "SELECT CAST(CASE WHEN to_regclass('notification_outbox') IS NULL THEN 0 ELSE 1 END AS BIGINT)"
         } else {
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox'"
@@ -240,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn inventory_includes_parked_outbox_without_provider_acceptance() {
         let push = store().await;
-        let outbox = crate::notification_outbox::NotificationOutboxStore::new(push.db.clone())
+        let outbox = crate::notification_outbox::NotificationOutboxStore::try_new(push.db.clone())
             .await
             .expect("outbox schema");
         let node = PushOperatorNode::parse("outbox-only-node").expect("node");
@@ -290,7 +291,7 @@ mod tests {
         )
         .await
         .expect("configured provider");
-        crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("outbox");
         let node = push

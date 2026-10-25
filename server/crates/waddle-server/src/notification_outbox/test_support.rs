@@ -2,8 +2,19 @@
 
 use super::drain::{enqueue_outbox_job_tx, mark_candidate_outboxed_tx};
 use super::publish::OUTBOX_CLAIM_TIMEOUT_MS;
-use super::*;
+use super::{
+    build_waddle_context, BareJid, DndReader, DndState, InboxStorage, Jid, NotificationActivity,
+    NotificationActivityError, NotificationActivityReader, NotificationCandidate,
+    NotificationClass, NotificationOutboxError, NotificationOutboxJob, NotificationOutboxStore,
+    NotificationOutboxTarget, NotificationThreadId, PushEvalDeps, PushServiceNodeName, RichSummary,
+    RoomPolicyCacheEntry, RoomPolicyStore, StanzaId,
+};
 use crate::db::Database;
+use crate::notification_activity::NoopActivityReader;
+use crate::notification_activity::NotificationActivityStore;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::pubsub::DatabasePubSubStorage;
+use std::collections::BTreeMap;
 
 pub(super) fn bare(raw: &str) -> BareJid {
     raw.parse().expect("bare jid")
@@ -66,12 +77,12 @@ pub(super) fn target() -> NotificationOutboxTarget {
 pub(super) fn target_named(node: &str) -> NotificationOutboxTarget {
     NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(node).expect("node"),
+        PushServiceNodeName::try_new(node).expect("node"),
     )
 }
 
 pub(super) async fn store() -> NotificationOutboxStore {
-    NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
+    NotificationOutboxStore::try_new(Database::in_memory("notification-outbox").await.unwrap())
         .await
         .expect("store")
 }
@@ -86,9 +97,8 @@ pub(super) async fn store() -> NotificationOutboxStore {
 /// Static so a `&NoopActivityReader` borrow stays valid for the
 /// duration of every call site without needing a `let binding =`
 /// dance at each invocation.
-pub(super) static NOOP_ACTIVITY_READER: crate::notification_activity::NoopActivityReader =
-    crate::notification_activity::NoopActivityReader;
-pub(super) fn noop_activity_reader() -> &'static crate::notification_activity::NoopActivityReader {
+pub(super) static NOOP_ACTIVITY_READER: NoopActivityReader = NoopActivityReader;
+pub(super) fn noop_activity_reader() -> &'static NoopActivityReader {
     &NOOP_ACTIVITY_READER
 }
 
@@ -96,25 +106,20 @@ pub(super) fn noop_activity_reader() -> &'static crate::notification_activity::N
 /// Extracted as a `type` alias to keep clippy's `type_complexity`
 /// lint quiet without leaking `#[allow]` into the codebase.
 pub(super) type FreshEvalCaches = (
-    std::collections::BTreeMap<BareJid, RoomPolicyCacheEntry>,
-    std::collections::BTreeMap<BareJid, DndState>,
-    std::collections::BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
+    BTreeMap<BareJid, RoomPolicyCacheEntry>,
+    BTreeMap<BareJid, DndState>,
+    BTreeMap<(BareJid, BareJid), Option<NotificationActivity>>,
 );
 
 /// Build a fresh [`PushEvalDeps`] / [`PushEvalCaches`] pair for
 /// unit-testing the typed evaluator function directly. Returns
 /// owned caches so each call site can hold them and pass `&mut`.
 pub(super) fn fresh_eval_caches() -> FreshEvalCaches {
-    (
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
-    )
+    (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
 }
 
 pub(super) fn eval_deps_for_test<'a>(
-    settings_projection:
-        &'a crate::notification_settings_projection::NotificationSettingsProjectionStore,
+    settings_projection: &'a NotificationSettingsProjectionStore,
     room_policy: &'a dyn RoomPolicyStore,
     dnd_reader: &'a dyn DndReader,
     activity_reader: &'a dyn NotificationActivityReader,
@@ -212,14 +217,11 @@ impl RoomPolicyStore for ErroringRoomPolicy {
     }
 }
 
-pub(super) async fn settings_projection(
-) -> crate::notification_settings_projection::NotificationSettingsProjectionStore {
-    let storage = crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+pub(super) async fn settings_projection() -> NotificationSettingsProjectionStore {
+    let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
         .expect("settings pubsub storage");
-    crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
-        storage.database(),
-    )
+    NotificationSettingsProjectionStore::new(storage.database())
 }
 
 /// Witness fixture for upstream-storage preservation: an
@@ -328,8 +330,8 @@ pub(super) fn active_channel_mention_candidate_for(
     )
 }
 
-pub(super) async fn activity_store() -> crate::notification_activity::NotificationActivityStore {
-    crate::notification_activity::NotificationActivityStore::new(
+pub(super) async fn activity_store() -> NotificationActivityStore {
+    NotificationActivityStore::try_new(
         Database::in_memory("notification-activity-eval")
             .await
             .expect("activity db"),
@@ -342,7 +344,7 @@ pub(super) async fn activity_store() -> crate::notification_activity::Notificati
 /// per-`(owner, conversation)` read calls so the slice 2b T0/T1
 /// stage-split and per-batch cache can be asserted.
 pub(super) struct CountingActivityReader {
-    inner: crate::notification_activity::NotificationActivityStore,
+    inner: NotificationActivityStore,
     calls: std::sync::atomic::AtomicUsize,
 }
 

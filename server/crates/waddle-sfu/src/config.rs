@@ -6,6 +6,7 @@
 //! [`std::fmt::Debug`] impl redacts the payload so the values never
 //! leak into structured logs.
 
+use crate::turn::TurnHost;
 use std::fmt;
 
 use chrono::Duration;
@@ -91,7 +92,7 @@ impl fmt::Debug for ApiSecret {
 pub struct WebsocketUrl(Url);
 
 impl WebsocketUrl {
-    pub fn new(url: Url) -> Result<Self, InvalidWebsocketUrl> {
+    pub fn try_new(url: Url) -> Result<Self, InvalidWebsocketUrl> {
         match url.scheme() {
             "wss" | "ws" => Ok(Self(url)),
             other => Err(InvalidWebsocketUrl::UnexpectedScheme(other.to_string())),
@@ -160,7 +161,7 @@ pub struct SfuConfig {
     /// API secret does not also forge inbound webhook deliveries.
     pub webhook_secret: ApiSecret,
     pub ws_url: WebsocketUrl,
-    pub turn_host: crate::turn::TurnHost,
+    pub turn_host: TurnHost,
     pub turn_tls_port: u16,
     pub turn_udp_port: u16,
     pub turn_shared_secret: TurnSharedSecret,
@@ -217,7 +218,7 @@ impl SfuConfig {
             turn_shared_secret.ok_or(FromEnvError::Missing("LIVEKIT_TURN_SHARED_SECRET"))?;
 
         let parsed_url: url::Url = ws_url.parse().map_err(FromEnvError::InvalidUrl)?;
-        let ws_url = WebsocketUrl::new(parsed_url).map_err(FromEnvError::InvalidScheme)?;
+        let ws_url = WebsocketUrl::try_new(parsed_url).map_err(FromEnvError::InvalidScheme)?;
 
         let turn_tls_port = parse_port_env("LIVEKIT_TURN_TLS_PORT", 443)?;
         let turn_udp_port = parse_port_env("LIVEKIT_TURN_UDP_PORT", 3478)?;
@@ -241,7 +242,7 @@ impl SfuConfig {
             api_secret: api_secret_value,
             webhook_secret,
             ws_url,
-            turn_host: crate::turn::TurnHost::new(turn_host),
+            turn_host: TurnHost::new(turn_host),
             turn_tls_port,
             turn_udp_port,
             turn_shared_secret: TurnSharedSecret::from_text(&turn_shared_secret),

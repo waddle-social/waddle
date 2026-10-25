@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    Affiliation, Context, InviteMembershipGrant, MediatedInviteOperationState,
+    MediatedInviteRollbackAbort, MediatedInviteRollbackCommit, MediatedInviteRollbackError,
+    MediatedInviteRollbackPreparation, RoomActor, RoomMutationError,
+};
+use crate::muc::durable::AffiliationEntry;
+use crate::muc::durable::RoomDurableMutation;
+use crate::muc::RoomMutationEffects;
 
 /// Enter the fail-closed compensation phase for one temporary grant.
 ///
@@ -42,7 +49,7 @@ impl kameo::message::Message<PrepareMediatedInviteGrantRollback> for RoomActor {
             return Ok(MediatedInviteRollbackPreparation::Prepared);
         }
         if !self.invite_grant_is_active(&msg.grant)
-            || self.room.get_affiliation(&msg.grant.invitee) != Affiliation::Member
+            || self.room.affiliation(&msg.grant.invitee) != Affiliation::Member
         {
             return Ok(MediatedInviteRollbackPreparation::Superseded);
         }
@@ -85,7 +92,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
                 return Ok(MediatedInviteRollbackCommit::Superseded);
             }
         }
-        if self.room.get_affiliation(&msg.grant.invitee) != Affiliation::Member {
+        if self.room.affiliation(&msg.grant.invitee) != Affiliation::Member {
             return Ok(MediatedInviteRollbackCommit::Superseded);
         }
         match self.gate_mutation().await {
@@ -101,14 +108,12 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
             }
         }
         self.commit_durable(
-            crate::muc::durable::RoomDurableMutation::MediatedInviteRollback(
-                crate::muc::durable::AffiliationEntry::new(
-                    msg.grant.invitee.clone(),
-                    (msg.grant.previous_affiliation != Affiliation::None)
-                        .then_some(msg.grant.previous_affiliation),
-                ),
-            ),
-            crate::muc::RoomMutationEffects::none(),
+            RoomDurableMutation::MediatedInviteRollback(AffiliationEntry::new(
+                msg.grant.invitee.clone(),
+                (msg.grant.previous_affiliation != Affiliation::None)
+                    .then_some(msg.grant.previous_affiliation),
+            )),
+            RoomMutationEffects::none(),
         )
         .await
         .map_err(MediatedInviteRollbackError::PersistFailedBeforeApply)?;

@@ -158,6 +158,7 @@ See [docs/adrs/](docs/adrs/) for detailed architectural decisions.
 - **[Feature RFCs](docs/rfcs/)**: Proposals for new features
 - **[Technical Specs](docs/specs/)**: Detailed API and protocol specifications
 - **[Database Lineage Runbook](docs/operations/db-lineage.md)**: Enrollment, adoption, and readiness attestation for durable database deployments
+- **[VAPID bootstrap runbook](docs/operations/vapid-bootstrap.md)**: First-boot Web Push key, then remove `WADDLE_VAPID_PRIVATE_KEY` from the deployment
 - **[Call Stack Operator Runbook](docs/specs/call-stack-operator-runbook.md)**: Rollout, verification, and troubleshooting for media/call operations
 - **[Rust Crates](docs/RUST_CRATES.md)**: Recommended dependencies
 

@@ -1495,7 +1495,7 @@ mod tests {
                 .expect("independent backing"),
         );
         let service: BareJid = "push.example.com".parse().expect("service");
-        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
             .await
             .expect("registration store");
         let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
@@ -1692,7 +1692,7 @@ mod tests {
         else {
             return;
         };
-        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
             .await
             .expect("registrations");
         let push = DatabasePushServiceStore::new_with_secret_key(

@@ -1,21 +1,30 @@
 //! RFC 0018 §2: pool stores are tripwires; only the authority transaction writes.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-    ImmediateSink, IngressDecisionClass,
+
+#[cfg(feature = "clustering")]
+use super::InMemorySmSessionRegistry;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOriginKind;
+use super::{
+    plan_message_dispatch, poison, Arc, Deps, Effect, ExternalEffect, InMemoryInboxStorage,
+    InMemoryMamStorage, InMemoryPendingDeliveryStorage, InboxStorage, MamStorage,
+    PendingDeliveryStorage, Stanza, StanzaDispatcher, XmppStateMachine,
 };
+
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{ImmediateSink, IngressDecisionClass};
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
 #[cfg(not(feature = "clustering"))]
 use crate::server::routes::websocket::tests::create_test_websocket_state;
-use crate::server::routes::websocket::{
-    interpret_loop::build_interpret_deps,
-    tests::{create_test_session, register_test_connection},
-    ResolvedPrincipal,
-};
+use crate::server::routes::websocket::tests::{create_test_session, register_test_connection};
+use crate::server::routes::websocket::ResolvedPrincipal;
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
-use waddle_xmpp::muc::{
-    room_actor::{ChangeAffiliation, GetSnapshot, Join},
-    room_registry_actor::CreateRoom,
-};
+use waddle_xmpp::muc::room_actor::{ChangeAffiliation, GetSnapshot, Join};
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 fn machine(sender: &jid::FullJid) -> XmppStateMachine {
     let mut dispatcher = StanzaDispatcher::new();
@@ -354,7 +363,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&"guest@example.com".parse().expect("guest")),
+                .affiliation(&"guest@example.com".parse().expect("guest")),
             waddle_xmpp::Affiliation::None
         ),
     }

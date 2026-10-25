@@ -1,7 +1,16 @@
-use super::*;
+//! JavaScript client methods for archived messages and history search.
+
+use super::{
+    bare_jid, build_dm_search_history_iq, build_mam_iq, build_room_search_history_iq,
+    build_user_search_iq, future_to_promise, jid_domain, js_error, mam_page_to_js,
+    parse_user_search_result, send_iq_command, send_mam_query_command, to_js_value, wasm_bindgen,
+    Element, JsValue, MamIqBuilder, Promise, UserSearchQuery, WaddleClient, WaddleMamPageParam,
+    WaddleUserSearchResult, NS_USER_SEARCH,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Fetch up to `max` room archive entries for a thread; no `before_id` selects the latest page.
     pub fn fetch_room_history_by_thread(
         &self,
         room_jid: String,
@@ -63,6 +72,8 @@ impl WaddleClient {
         })
     }
 
+    /// Search the room archive for `query`, resolving to a `WaddleMamPage` of at most
+    /// `max` matches.
     pub fn search_room_history(&self, room_jid: String, query: String, max: u32) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -74,6 +85,8 @@ impl WaddleClient {
         })
     }
 
+    /// Search the personal archive for messages exchanged with a peer, resolving to a
+    /// `WaddleMamPage`.
     pub fn search_dm_history(&self, peer_jid: String, query: String, max: u32) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -90,6 +103,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch a room archive page using a `WaddleMamPageParam` object; malformed paging
+    /// input rejects the Promise.
     pub fn fetch_room_history_page(
         &self,
         room_jid: String,
@@ -110,6 +125,7 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch the peer's messages from the personal archive using a `WaddleMamPageParam` object.
     pub fn fetch_dm_history_page(
         &self,
         peer_jid: String,
@@ -133,6 +149,7 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch an unfiltered personal archive page using a `WaddleMamPageParam` object.
     pub fn fetch_personal_history_page(&self, max: u32, page_param: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -150,6 +167,7 @@ impl WaddleClient {
         })
     }
 
+    /// Search the server's user directory and resolve to matching `WaddleUserSearchResult` objects.
     pub fn search_users(&self, query: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -186,6 +204,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch up to `max` room archive messages before the optional cursor; no cursor
+    /// selects the latest page.
     pub fn fetch_room_history(
         &self,
         room_jid: String,
@@ -209,6 +229,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch up to `max` messages exchanged with a peer before the optional cursor,
+    /// defaulting to the latest page.
     pub fn fetch_dm_history(
         &self,
         peer_jid: String,

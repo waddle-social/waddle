@@ -1,7 +1,35 @@
-use super::*;
+//! JavaScript client methods for roster, profiles, avatars, and account discovery.
+
+use super::{
+    bare_jid, build_disco_info_iq, build_disco_items_iq, build_fetch_bookmarks_iq,
+    build_fetch_dm_bookmarks_iq, build_fetch_threads_iq, build_fetch_vcard4_iq,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq, build_pep_items_iq,
+    build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,
+    build_publish_vcard4_iq, build_retract_activity_iq, build_retract_mood_iq,
+    build_retract_tune_iq, build_roster_get_iq, build_waddle_inbox_mark_read_iq, discovery,
+    future_to_promise, inbox_page_to_js, jid_domain, js_error, muc_affiliation_to_string,
+    parse_bookmarks_response, parse_disco_info_result, parse_muc_admin_affiliation_query,
+    parse_muc_affiliation, parse_pep_activity, parse_pep_mood, parse_pep_tune, parse_pep_vcard4,
+    parse_push_vapid_from_disco_info, parse_roster_result, parse_threads_response,
+    read_dm_bookmark_notify, send_inbox_query_command, send_iq_command,
+    send_iq_command_stanza_aware, send_stanza_command, to_js_value, wasm_bindgen, BareJid,
+    BookmarkItem, ClientError, Element, FetchThreadsQuery, JsValue, MucAdminAffiliationItem,
+    Promise, PushVapidDiscoParseError, Rc, RefCell, RegisterPushDeviceOptions, Serialize,
+    SetDmNotificationModeOptions, SetRoomNotificationModeOptions, ThreadSort, ThreadStatusFilter,
+    VCard4, WaddleActivityOpts, WaddleActivityResult, WaddleBookmarkItem, WaddleClient,
+    WaddleClientInner, WaddleDmBookmarkItem, WaddleFetchInboxOptions, WaddleFetchThreadsOptions,
+    WaddleInboxMarkRead, WaddleMoodOpts, WaddleMoodResult, WaddlePepProfile,
+    WaddleRegisterDeviceResult, WaddleRoomBot, WaddleRoomMember, WaddleRosterContact,
+    WaddleServerVersion, WaddleSetDmNotificationModeOutcome, WaddleSetRoomNotificationModeOutcome,
+    WaddleThreadCallAnchor, WaddleThreadCallEnded, WaddleThreadEntry, WaddleThreadSort,
+    WaddleThreadStatusFilter, WaddleThreadsPage, WaddleTuneOpts, WaddleTuneResult, WaddleVCard4,
+    WaddleVapidAdvertisement, NS_CLIENT, NS_MUC_ADMIN, NS_ROSTER, NS_VERSION,
+};
+use crate::state::InboxPage;
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Request a presence subscription from `peer_jid`; resolves after the stanza is sent.
     pub fn subscribe_to_presence(&self, peer_jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -60,9 +88,9 @@ impl WaddleClient {
         future_to_promise(async move {
             let opts: RegisterPushDeviceOptions = serde_wasm_bindgen::from_value(options)
                 .map_err(|err| push_registration_js_error("protocol-shape", err.to_string()))?;
-            let service_jid = waddle_xmpp_client::push::PushServiceJid::new(&opts.service_jid)
+            let service_jid = waddle_xmpp_client::push::PushServiceJid::try_new(&opts.service_jid)
                 .map_err(push_registration_client_js_error)?;
-            let app_id = waddle_xmpp_client::push::PushAppId::new(&opts.app_id)
+            let app_id = waddle_xmpp_client::push::PushAppId::try_new(&opts.app_id)
                 .map_err(push_registration_client_js_error)?;
             let environment = opts.environment;
             let credentials = opts
@@ -202,7 +230,7 @@ impl WaddleClient {
     /// * Find the item whose id matches `room_jid`; if missing,
     ///   construct a fresh item with the given `name` (or `None`).
     /// * Replace the fallback `<notify/>` child via
-    ///   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+    ///   `merge_notify_into_extensions` — foreign `<advanced/>`
     ///   children and identity-scoped siblings written by other
     ///   clients are preserved verbatim (XEP-0492 §3). The same call
     ///   toggles the Waddle rich XEP-0357 push-summary opt-in
@@ -268,6 +296,7 @@ impl WaddleClient {
                 waddle_xmpp_client::notification_settings::SetRoomNotificationModeOutcome::Error => {
                     WaddleSetRoomNotificationModeOutcome::Error
                 }
+                _ => WaddleSetRoomNotificationModeOutcome::Error,
             };
             to_js_value(&outcome)
         })
@@ -315,13 +344,13 @@ impl WaddleClient {
     /// * Fetch existing DM items (first-publish `item-not-found` →
     ///   empty); find the one whose id == `dmJid` and read its hosted
     ///   `<notify/>` via [`read_dm_bookmark_notify`].
-    /// * Merge the new mode via [`merge_notify`] (the single §3-conformant
+    /// * Merge the new mode via `merge_notify` (the single §3-conformant
     ///   core shared with the MUC carrier — foreign `<advanced/>` and
     ///   identity-scoped siblings preserved verbatim; rich opt-in (#719)
     ///   toggled).
     /// * The node is sparse / override-only: if the merged `<notify/>`
     ///   collapses to the §3 direct-chat default (`always`, no opt-in, no
-    ///   foreign `<advanced/>`) per [`dm_notify_is_default`], RETRACT the
+    ///   foreign `<advanced/>`) per `dm_notify_is_default`, RETRACT the
     ///   item and resolve to `Removed` instead of publishing. Otherwise
     ///   publish and resolve to `Ok` with the surfaced item — the chat
     ///   reconciles without a refetch.
@@ -378,11 +407,14 @@ impl WaddleClient {
                 waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Error => {
                     WaddleSetDmNotificationModeOutcome::Error
                 }
+                _ => WaddleSetDmNotificationModeOutcome::Error,
             };
             to_js_value(&outcome)
         })
     }
 
+    /// Resolve to the server's software identity, or `null` if querying it fails or
+    /// yields no version payload.
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -419,6 +451,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch persistent room members with the requested affiliation; rejects unsupported
+    /// affiliation names.
     pub fn list_room_members(&self, room_jid: String, affiliation: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -462,6 +496,8 @@ impl WaddleClient {
         })
     }
 
+    /// Set a user's persistent room affiliation; rejects invalid affiliation names or
+    /// failed admin IQs.
     pub fn set_room_affiliation(
         &self,
         room_jid: String,
@@ -506,12 +542,20 @@ impl WaddleClient {
             // include forwarded last-message payloads.
             let iq = waddle_xmpp_client::inbox::build_inbox_query_iq_element(
                 request_id.as_str(),
-                opts.only_unread,
-                !opts.no_messages,
+                if opts.only_unread {
+                    waddle_xmpp_client::inbox::InboxReadFilter::UnreadOnly
+                } else {
+                    waddle_xmpp_client::inbox::InboxReadFilter::All
+                },
+                if opts.no_messages {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Omit
+                } else {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Include
+                },
             );
             let page = match send_inbox_query_command(inner, iq, request_id).await {
                 Ok(page) => page,
-                Err(_) => crate::state::InboxPage {
+                Err(_) => InboxPage {
                     entries: Vec::new(),
                     fin: waddle_xmpp_client::inbox::InboxFin::default(),
                 },
@@ -571,6 +615,7 @@ impl WaddleClient {
         })
     }
 
+    /// Mark a conversation, or its selected thread, read through the server inbox command.
     pub fn mark_inbox_read(&self, partner_jid: String, thread_id: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -590,6 +635,7 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the account's roster contacts, including subscription states and groups.
     pub fn list_roster_contacts(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -613,6 +659,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleMoodOpts` object to the account's mood PEP node; rejects invalid
+    /// input or a failed publish.
     pub fn publish_mood(&self, mood_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -628,6 +676,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current mood PEP item; resolves after the server acknowledges it.
     pub fn retract_mood(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -640,6 +689,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleActivityOpts` object to PEP; rejects invalid activity names or
+    /// failed publication.
     pub fn publish_activity(&self, activity_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -656,6 +707,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current activity PEP item.
     pub fn retract_activity(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -668,6 +720,7 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleTuneOpts` object to PEP; rejects malformed options or failed publication.
     pub fn publish_tune(&self, tune_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -690,6 +743,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current tune PEP item.
     pub fn retract_tune(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -702,6 +756,7 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the peer's vCard4 properties, or `null` when no vCard4 item is present.
     pub fn fetch_vcard4(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -725,6 +780,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleVCard4` object on the account's vCard4 PEP node; omitted
+    /// properties are excluded.
     pub fn publish_vcard4(&self, vcard_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -745,6 +802,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch a user's mood, activity, and tune; unavailable individual PEP values are
+    /// returned as absent.
     pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

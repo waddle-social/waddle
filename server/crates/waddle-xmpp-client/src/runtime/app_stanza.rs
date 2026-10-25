@@ -1,3 +1,8 @@
+//! Application stanza dispatch and request-result correlation inside the runtime.
+
+use crate::messaging::CarbonDirection;
+use crate::messaging::MessageRejection;
+use crate::messaging::MessagingEvent;
 use minidom::Element;
 
 use crate::event::{ClientEvent, ConnectionEvent};
@@ -147,10 +152,7 @@ impl XmppRuntime {
 /// deliberately skip it because XEP-0280 carbons only cover
 /// chat-eligible messages — a pubsub service's headline notifications
 /// are never carbon-copied.
-fn pubsub_notification_events(
-    event: &crate::messaging::MessagingEvent,
-    account: &jid::BareJid,
-) -> Vec<ClientEvent> {
+fn pubsub_notification_events(event: &MessagingEvent, account: &jid::BareJid) -> Vec<ClientEvent> {
     let crate::messaging::MessagingEvent::Message(message) = event else {
         return Vec::new();
     };
@@ -177,9 +179,7 @@ fn pubsub_notification_events(
 impl XmppRuntime {
     fn message_rejection_events(&mut self, element: &Element, direct: bool) -> Vec<ClientEvent> {
         let account = self.account_bare_jid().clone();
-        let Some(rejection) =
-            crate::messaging::MessageRejection::parse(element, direct.then_some(&account))
-        else {
+        let Some(rejection) = MessageRejection::parse(element, direct.then_some(&account)) else {
             return Vec::new();
         };
         self.sm_state.reject_message(&rejection, &account);
@@ -205,7 +205,7 @@ enum CarbonOutcome {
     /// A verified carbon: the wrapping stanza came from the account's
     /// own bare JID and contained `<sent|received>/<forwarded>/<message>`.
     Unwrapped {
-        direction: crate::messaging::CarbonDirection,
+        direction: CarbonDirection,
         inner: Element,
         /// XEP-0297 §5: the `<forwarded/>` wrapper may carry the original
         /// delivery time as a `<delay/>` child. Propagated so the inner
@@ -248,9 +248,9 @@ fn unwrap_carbon(element: &Element, account: &jid::BareJid) -> CarbonOutcome {
     }
 
     let direction = if carbon.name() == "sent" {
-        crate::messaging::CarbonDirection::Sent
+        CarbonDirection::Sent
     } else {
-        crate::messaging::CarbonDirection::Received
+        CarbonDirection::Received
     };
     let Some(forwarded) = carbon.get_child("forwarded", NS_FORWARD) else {
         return CarbonOutcome::Forged;

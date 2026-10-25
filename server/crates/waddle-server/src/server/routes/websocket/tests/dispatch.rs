@@ -1,16 +1,12 @@
-use super::super::{
-    interpret_loop::build_interpret_deps,
-    replay::{drain_outbound_into_replay, drive_interpret_loop},
-    stanza_to_xml,
-    state::WsConnState,
-};
+use super::super::interpret_loop::build_interpret_deps;
+use super::super::replay::{drain_outbound_into_replay, drive_interpret_loop};
+use super::super::stanza_to_xml;
+use super::super::state::WsConnState;
 use super::create_test_websocket_state;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    protocol::{Blocklist, InboundEvent, OutboundEvent},
-    registry::OutboundStanza,
-    Stanza,
-};
+use waddle_xmpp::protocol::{Blocklist, InboundEvent, OutboundEvent};
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::Stanza;
 
 // ---------------------------------------------------------------
 // #229 PR11 - DeliveryKind dispatch in the per-connection main loop
@@ -178,7 +174,7 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
     )
     .await;
 
-    let queue = conn.sm_state.get_stanzas_to_resend(0);
+    let queue = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(queue.len(), 1, "DirectFrame recorded once");
     assert_eq!(
         queue[0].stanza_xml, expected_xml,
@@ -242,7 +238,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
     )
     .await;
 
-    let queue = conn.sm_state.get_stanzas_to_resend(0);
+    let queue = conn.sm_state.stanzas_to_resend(0);
     assert!(
         !queue.is_empty(),
         "PeerStanza drain MUST record at least the recipient-pass wire frame"

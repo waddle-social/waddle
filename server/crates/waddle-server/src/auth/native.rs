@@ -11,11 +11,11 @@
 //! - Plaintext passwords are never stored
 //! - Each user has a unique random salt
 
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
-    Argon2,
-};
-use base64::prelude::*;
+use crate::db::Value;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHasher, SaltString};
+use argon2::Argon2;
+use base64::prelude::{Engine, BASE64_STANDARD};
 use kameo::actor::ActorRef;
 use tracing::debug;
 use waddle_xmpp::ScramCredentials;
@@ -383,11 +383,7 @@ impl NativeUserStore {
         Ok(ids)
     }
 
-    async fn delete_rows(
-        &self,
-        sql: &str,
-        param: impl Into<crate::db::Value>,
-    ) -> Result<u64, AuthError> {
+    async fn delete_rows(&self, sql: &str, param: impl Into<Value>) -> Result<u64, AuthError> {
         self.actor
             .ask(DbExecute {
                 sql: sql.to_string(),

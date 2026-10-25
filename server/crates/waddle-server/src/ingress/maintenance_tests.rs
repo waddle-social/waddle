@@ -2,29 +2,23 @@ use super::{
     requeue_failed_accounting, run_maintenance_pass, run_maintenance_pass_with_cursor,
     MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome, RECOVERY_ACCOUNTING_QUEUE_BOUND,
 };
-use crate::{
-    db::DatabaseDriver,
-    ingress::{
-        commit::commit_submission,
-        effects::{
-            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-            Effect,
-        },
-        execute::{execute_effects, test_hooks},
-        gc::{run_retention_gc_coordinator, RetentionGcCoordinator},
-        test_support::IngressFixture,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
-    },
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-};
-use std::{sync::Arc, time::Duration};
+use crate::db::DatabaseDriver;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use crate::ingress::effects::Effect;
+use crate::ingress::execute::{execute_effects, test_hooks};
+use crate::ingress::gc::{run_retention_gc_coordinator, RetentionGcCoordinator};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect};
+use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey},
-    registry::ConnectionRegistry,
-    Stanza,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::Stanza;
 
 #[path = "maintenance_waits_tests.rs"]
 mod lease_waits;
@@ -686,7 +680,7 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
     store_detached(&sm, &resource).await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -879,6 +873,48 @@ fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttemp
         pending: vec![waddle_xmpp::ingress::IngressEffectKind::RouteDirect],
         generation,
     }
+}
+
+#[tokio::test]
+async fn recovered_obligation_credit_survives_a_writer_panic_without_double_counting() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    let key = interrupted_delivery(&fixture, "accounting-after-writer-panic").await;
+    let evidence = super::evidence_now(&fixture.db, key)
+        .await
+        .expect("receipted delivery evidence");
+    assert!(evidence.receipts > 0);
+    let cursor = MaintenanceCursor::default();
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _credit = cursor.recovery_credited.write();
+        panic!("telemetry credit writer failed");
+    }));
+    assert!(panic.is_err());
+    let before = metrics
+        .counter_sum("ingress.maintenance.recovered_obligations", &[])
+        .unwrap_or(0);
+
+    for generation in 1..=2 {
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("accounting queue")
+            .push(accounting_attempt(key, generation));
+        super::spawn_recovery_accounting(
+            &fixture.db,
+            &fixture.uow,
+            &cursor,
+            immediate_budget(),
+            None,
+        );
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            metrics.counter_sum("ingress.maintenance.recovered_obligations", &[]),
+            Some(before + u64::from(evidence.receipts)),
+            "the receipt is credited once across repeated accounting"
+        );
+    }
+    fixture.close().await;
 }
 
 struct EmptyRecoveryEnvironment(ConnectionRegistry);

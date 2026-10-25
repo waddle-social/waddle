@@ -29,6 +29,7 @@ use super::super::handlers::errors::{message_error_reply, send_message_error};
 use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::muc::pin::{PinChangeRequest, PinPreview};
+use crate::muc::PinPermission;
 use crate::types::{Affiliation, Role};
 use crate::xep::xep_waddle_pin::{extract_pin_intent_from_message, PinIntent, NS_WADDLE_PIN_V0};
 use chrono::{DateTime, Utc};
@@ -80,10 +81,10 @@ impl RoomHandler for MucPinHandler {
         // Outcasts are filtered at the join gate but defensively
         // excluded anyway via both checks.
         let allowed = match ctx.pin_permission {
-            crate::muc::PinPermission::AdminsOnly => {
+            PinPermission::AdminsOnly => {
                 matches!(sender.affiliation, Affiliation::Owner | Affiliation::Admin)
             }
-            crate::muc::PinPermission::Anyone => {
+            PinPermission::Anyone => {
                 matches!(
                     sender.affiliation,
                     Affiliation::Owner | Affiliation::Admin | Affiliation::Member
@@ -420,7 +421,8 @@ mod tests {
     }
 
     fn occupant_id_secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(b"secret-secret-secret-secret-12345".to_vec()).expect("valid secret")
+        OccupantIdSecret::try_new(b"secret-secret-secret-secret-12345".to_vec())
+            .expect("valid secret")
     }
 
     #[test]

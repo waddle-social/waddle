@@ -2,18 +2,14 @@
 pub mod ingress_support;
 
 use ingress_support::IngressFixture;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::room::{DurableRoomEffect, RoomFenceRequirement};
+use waddle_server::ingress::effects::Effect;
 use waddle_server::ingress::{
-    commit::commit_submission,
-    effects::{
-        room::{DurableRoomEffect, RoomFenceRequirement},
-        Effect,
-    },
     DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    mam::{ArchiveExpectation, ArchivedMessage, ArchivedTombstone},
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, ArchivedTombstone};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 fn archive_plan(fixture: &IngressFixture, id: &str) -> IngressSubmission {
@@ -68,13 +64,12 @@ fn archive_plan(fixture: &IngressFixture, id: &str) -> IngressSubmission {
 }
 
 async fn tombstone_survives_expired_origin_alias(fixture: IngressFixture) {
-    use waddle_server::ingress::{effects::PlanEffectDependency, ExternalEffect};
+    use waddle_server::ingress::effects::PlanEffectDependency;
+    use waddle_server::ingress::ExternalEffect;
     use waddle_server::ingress_uow::MamArchiveRepository;
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-        Stanza,
-    };
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
+    use waddle_xmpp::Stanza;
 
     let archive: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let original = archive_plan(&fixture, "old-id");

@@ -1,4 +1,5 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::{
     make_test_session, realistic_test_session_for_jid, EnsureClaimTestAction,
@@ -588,14 +589,12 @@ async fn cancelled_known_resume_result_retains_displaced_payload_before_cache_pu
     // Queue an exclusive publication transition behind this held authority.
     // The successful resume CAS may return B, but publishing B must wait.
     let authority = identity.guard_if_current(&owner).await.unwrap();
-    let blocking_identity = identity.clone();
-    let (writer_started, writer_pending) = tokio::sync::oneshot::channel();
-    let writer = tokio::spawn(async move {
-        writer_started.send(()).unwrap();
-        blocking_identity.with_publications_blocked(|| ()).await;
-    });
-    writer_pending.await.unwrap();
-    tokio::task::yield_now().await;
+    let writer = identity.with_publications_blocked(|| ());
+    tokio::pin!(writer);
+    assert!(
+        futures::poll!(&mut writer).is_pending(),
+        "exclusive publication must be queued before resume starts"
+    );
     let resuming = registry.clone();
     let resume = tokio::spawn(async move { resuming.claim_session(original_id).await });
     let acquired = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -652,7 +651,7 @@ async fn cancelled_known_resume_result_retains_displaced_payload_before_cache_pu
     );
 
     drop(authority);
-    writer.await.unwrap();
+    writer.await;
     registry.retry_pending_claim_releases(1).await;
     assert_eq!(registry.current_sm_claim_fence(original_id), Some(acquired));
     let drained = registry.drain_expired().await.unwrap();

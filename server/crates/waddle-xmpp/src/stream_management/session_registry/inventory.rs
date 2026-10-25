@@ -1,5 +1,8 @@
 //! Durable unavailable-resource custody, using expired SM rows as inventory.
+use crate::stream_management::persistence::SmClaimFence;
+use crate::stream_management::persistence::SmPersistenceError;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::persistence::{PersistedUnackedStanza, PromotionAppendOutcome};
@@ -233,10 +236,7 @@ impl InMemorySmSessionRegistry {
     pub(super) fn validate_promotion_capture_with_fences(
         &self,
         session: &DetachedSession,
-        fences: &std::collections::HashMap<
-            String,
-            crate::stream_management::persistence::SmClaimFence,
-        >,
+        fences: &HashMap<String, SmClaimFence>,
     ) -> Result<(), SmRegistryError> {
         if let Some(expected) = session.promotion_custody.fence() {
             if fences.get(&session.stream_id) != Some(expected) {
@@ -274,7 +274,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn registered_promotion_fence_locked(
         &self,
         session: &DetachedSession,
-    ) -> Result<crate::stream_management::persistence::SmClaimFence, SmRegistryError> {
+    ) -> Result<SmClaimFence, SmRegistryError> {
         if session.promotion_custody.fence().is_none() {
             return Err(SmRegistryError::StorageUnavailable(
                 super::traits::StorageOutageCause::Backend,
@@ -286,7 +286,7 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn promotion_capture_fence_locked(
         &self,
         session: &DetachedSession,
-    ) -> Result<crate::stream_management::persistence::SmClaimFence, SmRegistryError> {
+    ) -> Result<SmClaimFence, SmRegistryError> {
         self.validate_promotion_capture_locked(session)?;
         if session.promotion_custody.fence().is_none() {
             if matches!(
@@ -400,10 +400,7 @@ impl InMemorySmSessionRegistry {
     }
 }
 
-fn storage_error(
-    error: crate::stream_management::persistence::SmPersistenceError,
-    fence: &crate::stream_management::persistence::SmClaimFence,
-) -> SmRegistryError {
+fn storage_error(error: SmPersistenceError, fence: &SmClaimFence) -> SmRegistryError {
     match error {
         crate::stream_management::persistence::SmPersistenceError::NotOwner { .. } => {
             SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))

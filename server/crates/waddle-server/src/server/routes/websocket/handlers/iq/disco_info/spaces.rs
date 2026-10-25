@@ -1,5 +1,12 @@
-use super::*;
+use super::{
+    build_disco_info_response, build_disco_info_response_with_extensions,
+    build_spaces_metadata_form_for_requester_with_owners, chrono, internal_server_error_iq_error,
+    item_not_found_iq_error, space_affiliation_for_requester, space_details_from_node,
+    spaces_service_bare_jid, spaces_service_features, warn, DiscoInfoRequest, DiscoInfoResponse,
+    Feature, Identity, WebSocketState,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
+use crate::space_identity::SpaceNode;
 
 pub(super) async fn handle_spaces_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
@@ -63,7 +70,7 @@ pub(super) async fn handle_spaces_disco_info<'a>(
             .deps
             .app_state
             .spaces_metadata_store
-            .get_by_node(&crate::space_identity::SpaceNode::from(node))
+            .get_by_node(&SpaceNode::from(node))
             .await
         {
             space.name = metadata.name;

@@ -1,9 +1,14 @@
 //! XEP-0045 ghost users: a stalled `route_muc` row evicts the occupants pinning it.
-use super::*;
-use waddle_xmpp::{
-    muc::room_registry_actor::GetRoom, registry::OutboundStanza,
-    stream_management::InMemorySmSessionRegistry,
+use super::{
+    build_interpret_deps, commit_submission, pass, persistent_sm, planned_room, receipt_key,
+    state_for, store_detached, Arc, CanonicalMessageRepository, Case, DeliveryProgressRepository,
+    EffectReceiptRepository, IngressEffectIntent, IngressFixture, MaintenanceCursor,
+    MaintenanceOutcome, MessageKey, RecoveryEnvironment, StateEnvironment, WebSocketState,
 };
+use crate::server::routes::websocket::tests as socket_tests;
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
 const EVICTED: &str = "muc.ghost_occupants.evicted";
 const STALLED: &str = "ingress.maintenance.unrecoverable_obligations";

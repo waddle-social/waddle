@@ -149,7 +149,7 @@ pub(super) async fn owner_self_caps_fan_out(
 /// XEP-0163 §3 is presence-driven: a resource that has explicitly gone
 /// `<presence type="unavailable"/>` MUST NOT receive PEP notifications
 /// even if its CAPS still advertise `+notify` (PR #439 review issue
-/// Qodo #2). We use the `get_available_resources_for_user` helper
+/// Qodo #2). We use the `available_resources_for_user` helper
 /// rather than `get_resources_for_user`, which would return all
 /// connected sockets including unavailable/invisible ones.
 ///
@@ -174,7 +174,7 @@ async fn deliver_to_user_resources(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(target)
+        .available_resources_for_user(target)
         .into_iter()
         .map(|(jid, _priority)| jid)
         .collect();

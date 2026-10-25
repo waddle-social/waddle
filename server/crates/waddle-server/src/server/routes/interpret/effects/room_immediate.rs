@@ -2,10 +2,8 @@
 use super::super::Deps;
 use super::room::{DurableRoomEffect, ExternalRoomEffect, RoomActorMutation, RoomFenceRequirement};
 use super::EffectOutcome;
-use waddle_xmpp::{
-    muc::room_actor::{ApplyPin, GetRoomSnapshot, SetSubject},
-    muc::room_registry_actor::GetRoom,
-};
+use waddle_xmpp::muc::room_actor::{ApplyPin, GetRoomSnapshot, SetSubject};
+use waddle_xmpp::muc::room_registry_actor::GetRoom;
 
 pub(super) async fn execute_durable(effect: DurableRoomEffect, deps: &Deps<'_>) -> EffectOutcome {
     match effect {

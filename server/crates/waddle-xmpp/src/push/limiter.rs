@@ -22,11 +22,11 @@
 
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use lru::LruCache;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::Instant;
 
 use super::sender::{Urgency, WebPushRequest, WebPushSender};
@@ -95,6 +95,9 @@ struct PairState {
 pub struct Limiter {
     global: Arc<Semaphore>,
     config: LimiterConfig,
+    // Internal keys and timestamp replacements only reserve pacing slots,
+    // never authority. A failed operation may conservatively delay a send;
+    // no caller callbacks run while this non-poisoning mutex is held.
     pairs: Mutex<LruCache<(EndpointHash, Urgency), PairState>>,
 }
 
@@ -122,15 +125,7 @@ impl Limiter {
         // this before the global permit means a backed-up pair waits
         // without holding a slot the rest of the process could use.
         let sleep_until = {
-            // Recover from a poisoned mutex instead of propagating the
-            // panic — each entry's `next_available` is self-contained
-            // (no inter-entry invariant), so a panicking sibling task
-            // cannot leave the map in an inconsistent state. Matches
-            // the pattern used by `InProcessVapidSigner`'s cache lock.
-            let mut pairs = self
-                .pairs
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut pairs = self.pairs.lock().await;
             // `LruCache::get_or_insert_mut` looks up + LRU-promotes
             // an existing entry, or constructs a new one (evicting
             // the oldest if at capacity).
@@ -265,7 +260,7 @@ mod tests {
     }
 
     fn jwt() -> VapidJwt {
-        VapidJwt::new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2EifQ.sig").expect("jwt")
+        VapidJwt::try_new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2EifQ.sig").expect("jwt")
     }
 
     fn payload() -> EncryptedPayload {
@@ -346,6 +341,52 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(150),
             "per-pair bucket must serialize same-(endpoint,urgency); elapsed {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sends_preserve_bucket_spacing_after_panicking_guard_holder() {
+        let limiter = Arc::new(Limiter::new(LimiterConfig {
+            global_concurrency: 1,
+            per_pair_min_interval: Duration::from_millis(50),
+            ..LimiterConfig::default()
+        }));
+        let sender = RateLimitedWebPushSender::new(
+            Arc::new(PeakSender::with_delay(0)),
+            Arc::clone(&limiter),
+        );
+        let p = payload();
+        let j = jwt();
+        let url = endpoint("/panic");
+        let start = Instant::now();
+        assert!(matches!(
+            sender
+                .send(make_request(&url, &p, &j, Urgency::Normal))
+                .await,
+            WebPushOutcome::Delivered { .. }
+        ));
+
+        let panicking_limiter = Arc::clone(&limiter);
+        let result = tokio::spawn(async move {
+            let _pairs = panicking_limiter.pairs.lock().await;
+            panic!("bucket holder panicked");
+        })
+        .await;
+        assert!(result.expect_err("guard holder must panic").is_panic());
+
+        // Exercise the public wrapper after the unwind. Both sends must
+        // complete, retaining the reservation made before the panic.
+        for _ in 0..2 {
+            assert!(matches!(
+                sender
+                    .send(make_request(&url, &p, &j, Urgency::Normal))
+                    .await,
+                WebPushOutcome::Delivered { .. }
+            ));
+        }
+        assert!(
+            start.elapsed() >= Duration::from_millis(100),
+            "a panicking holder must not discard the existing bucket reservation"
         );
     }
 

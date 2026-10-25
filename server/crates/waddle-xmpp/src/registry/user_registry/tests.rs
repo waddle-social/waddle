@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    ActorRef, BareJid, ClaimEpoch, DemoteUserActor, DemoteUserActorIfOwner, ForceDetachOrigin,
+    FullJid, GetOrCreateUser, GetUser, GetUserForLocalClaim, HashMap, ListUsers, ListUsersOwnedBy,
+    ReapUserIfEmpty, RecordPendingUserUnregister, RegisterUserResource,
+    RegisterUserResourceIfOwnerOrAbsent, RemoveUser, RetryUserRegistryConvergence,
+    StaleRetirementQueueResult, UnregisterAndReleaseIfEmpty, UnregisterAndReleaseOutcome,
+    UnregisterAndReleaseRetryableFailure, UnregisterUserResource, UserActor, UserClaimLease,
+    UserCount, UserEntry, UserRegistryActor, UserRegistryConvergenceReport, UserRegistryError,
+    WireUserClusteringClaims, CLAIM_RELEASE_TIMEOUT, STALE_RETIREMENT_RETRY_DELAY,
+};
 use crate::ownership::{
     ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
     ResumeIdentityProof, SharedNodeIdentity, StalePredicate,

@@ -1,14 +1,12 @@
-use super::*;
+use super::{commit_submission, IngressDecisionClass, IngressFixture, IngressSubmission};
 use jid::BareJid;
 use waddle_extensions::PluginId;
-use waddle_server::{
-    ingress::{AliasOutcomeClass, ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
+use waddle_server::ingress::{
+    AliasOutcomeClass, ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity,
 };
-use waddle_xmpp::{
-    auth::ExtensionGrantRef,
-    ingress::{DigestContext, DigestInput, NormalizedTarget, TransportGeneration},
-};
+use waddle_server::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use waddle_xmpp::auth::ExtensionGrantRef;
+use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, TransportGeneration};
 
 async fn grant(f: &IngressFixture, plugin: &PluginId, room: Option<&BareJid>) -> ExtensionGrantRef {
     let mut tx = f.uow.begin().await.expect("transaction");
@@ -66,7 +64,7 @@ fn digest(s: &mut IngressSubmission) {
     .expect("digest");
 }
 async fn admission(f: IngressFixture) {
-    let plugin = PluginId::new("test-plugin").expect("plugin");
+    let plugin = PluginId::try_new("test-plugin").expect("plugin");
     let sender: BareJid = "test-plugin@extensions.example.com"
         .parse()
         .expect("sender");
@@ -114,7 +112,7 @@ async fn admission(f: IngressFixture) {
     f.close().await;
 }
 async fn refusal(f: IngressFixture) {
-    let plugin = PluginId::new("test-plugin").expect("plugin");
+    let plugin = PluginId::try_new("test-plugin").expect("plugin");
     let room: BareJid = "room@conference.example.com".parse().expect("room");
     let g = grant(&f, &plugin, Some(&room)).await;
     let mut s = extension(&f, g, f.principal.bare_jid().clone(), None, "refused");
@@ -129,7 +127,7 @@ async fn refusal(f: IngressFixture) {
     s.plan.sanitized_message.to = Some(room.into());
     digest(&mut s);
     s.identity = IngressStreamIdentity::Extension {
-        plugin: PluginId::new("other").expect("plugin"),
+        plugin: PluginId::try_new("other").expect("plugin"),
         requester: None,
     };
     assert_eq!(
@@ -156,7 +154,7 @@ async fn refusal(f: IngressFixture) {
 }
 async fn namespaces(f: IngressFixture) {
     for name in ["plugin-x", "plugin-y"] {
-        let plugin = PluginId::new(name).expect("plugin");
+        let plugin = PluginId::try_new(name).expect("plugin");
         let g = grant(&f, &plugin, None).await;
         let sender: BareJid = format!("{name}@extensions.example.com")
             .parse()
@@ -178,7 +176,7 @@ async fn namespaces(f: IngressFixture) {
     assert_eq!(f.count("ingress_messages").await, 2);
     let client = f.submission(Some("client"), "hello");
     let first = commit_submission(&f.uow, &client, 1).await.expect("client");
-    let g = grant(&f, &PluginId::new("direct").expect("plugin"), None).await;
+    let g = grant(&f, &PluginId::try_new("direct").expect("plugin"), None).await;
     let req = f.principal.bare_jid().clone();
     let mut s = extension(&f, g, req.clone(), Some(req), "client");
     digest(&mut s);
@@ -222,7 +220,7 @@ async fn ingress_extension_namespaces_postgres() {
 }
 
 async fn requester_fence(fixture: IngressFixture) {
-    let plugin = PluginId::new("requester-plugin").expect("plugin");
+    let plugin = PluginId::try_new("requester-plugin").expect("plugin");
     let grant = grant(&fixture, &plugin, None).await;
     let requester = fixture.principal.bare_jid().clone();
     let submission = extension(

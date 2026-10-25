@@ -1,18 +1,21 @@
 //! #1760: settled route progress never owns the last recoverable delivery payload.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, execute_uow::FAIL_DELIVERY_PROGRESS_TX, test_support::IngressFixture,
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, EffectReceiptRepository,
+    ExternalDeliveryEffect, ExternalOutcome, ImmediateSink, Stanza,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
+use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    pending_delivery::SmSessionId,
-    stream_management::{
-        persistence::{IngressCustodyDisposition, SmClaimFence, SmPersistenceStorage},
-        DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
-    },
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::stream_management::persistence::{
+    IngressCustodyDisposition, SmClaimFence, SmPersistenceStorage,
+};
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
 
 #[derive(Clone, Copy)]
@@ -41,7 +44,7 @@ async fn retirement_authority(fixture: &IngressFixture) -> crate::ingress::Ingre
             action: None,
         };
         tx.commit().await.expect("close lineage read");
-        return crate::ingress::IngressAuthority::new(
+        return crate::ingress::IngressAuthority::try_new(
             Default::default(),
             fixture.db.clone(),
             config,

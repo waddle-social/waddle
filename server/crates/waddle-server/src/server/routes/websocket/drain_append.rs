@@ -6,7 +6,9 @@
 //! obligation finds no `sm_ingress_appends` proof and queues the stanza again.
 
 use super::replay::DrainedAppend;
-use super::*;
+use super::{warn, Stanza, StreamManagementState, WebSocketState};
+use crate::ingress::append_authority::AppendAuthorityRejection;
+use crate::ingress::identity::IngressAppendObligationRef;
 use waddle_xmpp::stream_management::{
     SmDrainedAppendTicket, SmIngressAppendKey, SmKeyedAppendOutcome, SmRelayedAppendObligation,
 };
@@ -78,9 +80,7 @@ impl DrainAuthority {
             Err(reason) => Err(reason),
             Ok(()) if exhausted => Err(AppendAuthorityRejection::ServicesUnavailable),
             Ok(()) if stanza.is_some() => {
-                let reference = crate::ingress::identity::IngressAppendObligationRef::from_relayed(
-                    obligation.clone(),
-                );
+                let reference = IngressAppendObligationRef::from_relayed(obligation.clone());
                 check_canonical_obligation(
                     state.deps.app_state.db_pool.global(),
                     stanza.expect("matched typed stanza"),
@@ -216,7 +216,7 @@ pub(super) fn key_recipient_pass_stanza(
         Stanza::Message(_) => Some(obligation.key),
         _ => {
             crate::ingress::append_authority::record_authorization_failure(
-                &crate::ingress::append_authority::AppendAuthorityRejection::NotMessage,
+                &AppendAuthorityRejection::NotMessage,
                 &obligation.sender_bare,
             );
             None

@@ -1,10 +1,10 @@
 //! Host refusal follows the settled offline quota result, with no new transport frame.
 use super::super::ExtensionHostAdapterError;
 use super::direct_ingress::{adapter, invocation, plugin, request};
-use crate::{
-    ingress::test_support::IngressFixture, pending_delivery::DatabasePendingDeliveryStorage,
-};
-use std::{sync::Arc, time::Duration};
+use crate::ingress::test_support::IngressFixture;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use std::sync::Arc;
+use std::time::Duration;
 use waddle_xmpp::pending_delivery::QuotaPolicy;
 
 async fn quota_refusal(f: IngressFixture) {
@@ -30,7 +30,7 @@ async fn quota_refusal(f: IngressFixture) {
     .await;
     use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
     let context = host::InvocationContext {
-        waddle_id: WaddleId::new("quota-boundary").expect("waddle"),
+        waddle_id: WaddleId::try_new("quota-boundary").expect("waddle"),
         plugin_id: plugin(),
         requester: Some(invocation().actor_jid.to_bare()),
         source_room: None,
@@ -42,7 +42,7 @@ async fn quota_refusal(f: IngressFixture) {
         &context,
         host::SendMessageRequest {
             target: host::MessageTarget::Direct("juliet@example.com".parse().expect("recipient")),
-            body: DisplayText::new("host quota refusal").expect("body"),
+            body: DisplayText::try_new("host quota refusal").expect("body"),
             thread_id: None,
             reply_to: None,
             markup: vec![],

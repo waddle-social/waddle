@@ -1,5 +1,6 @@
 //! Immutable planning input reused by every transaction attempt.
-use super::{identity::IngressStreamIdentity, principal::IngressPrincipal};
+use super::identity::IngressStreamIdentity;
+use super::principal::IngressPrincipal;
 use crate::server::routes::interpret::effects::IngressPlan;
 use jid::{BareJid, DomainRef};
 use waddle_xmpp::ingress::{DigestInput, NormalizedTarget, TransportGeneration};

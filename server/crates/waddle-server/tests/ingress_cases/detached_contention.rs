@@ -1,12 +1,15 @@
 //! Canonical contention prevents queue admission until durable send authority is available.
-use super::*;
-use std::time::Duration;
-use waddle_server::ingress::{
-    effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-    execute::execute_effects,
-    Deps, ExternalEffect, ExternalOutcome, ImmediateSink,
+use super::{
+    archive_plan, commit_submission, CanonicalMessageRepository, Effect, IngressEffectIntent,
+    IngressFixture, PlannedEffect,
 };
-use waddle_xmpp::{ingress::EffectMessageIdentity, registry::ConnectionRegistry, Stanza};
+use std::time::Duration;
+use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink};
+use waddle_xmpp::ingress::EffectMessageIdentity;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::Stanza;
 
 async fn progress_lock_contention(fixture: IngressFixture) {
     let resources: Vec<jid::FullJid> = ["juliet@example.com/phone", "juliet@example.com/laptop"]

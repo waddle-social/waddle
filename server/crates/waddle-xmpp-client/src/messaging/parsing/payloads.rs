@@ -1,9 +1,22 @@
+//! Parsing of message corrections, reactions, markers, and retractions.
+
 use minidom::Element;
 
 use crate::error::{ClientError, ClientResult};
 
-use super::super::namespaces::*;
-use super::super::types::*;
+use super::super::namespaces::{
+    NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT,
+    NS_REACTIONS, NS_WADDLE_EXTENSION, NS_WADDLE_IN_CALL,
+};
+use super::super::types::{
+    ChatStatePayload, CorrectionPayload, DisplayedMarkerPayload, ExtensionCapabilityData,
+    ExtensionCommandNode, ExtensionDisplayText, ExtensionEnrichmentData, ExtensionEnvelopeData,
+    ExtensionLaunchContextData, ExtensionLaunchData, ExtensionNamespace,
+    ExtensionPayloadAttributeData, ExtensionPayloadElementData, ExtensionPluginId,
+    ExtensionRoomJid, ExtensionSourceData, ExtensionTextId, ExtensionTimestamp, ExtensionXmlName,
+    InCallReactionEmoji, InCallReactionPayload, InCallSessionId, MarkableMarkerPayload,
+    ModerationPayload, ReactionPayload, RetractionPayload, RetractionTombstonePayload,
+};
 
 pub(crate) fn validate_chat_state(state: &str) -> ClientResult<&str> {
     match state {
@@ -14,6 +27,8 @@ pub(crate) fn validate_chat_state(state: &str) -> ClientResult<&str> {
     }
 }
 
+/// Read the first supported XEP-0085 child; return None when no valid chat state is present.
+#[must_use]
 pub fn parse_chat_state_payload(element: &Element) -> Option<ChatStatePayload> {
     element
         .children()
@@ -24,6 +39,8 @@ pub fn parse_chat_state_payload(element: &Element) -> Option<ChatStatePayload> {
         })
 }
 
+/// Read a nonempty XEP-0333 displayed target identifier; absent or empty identifiers return None.
+#[must_use]
 pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMarkerPayload> {
     element
         .get_child("displayed", NS_CHAT_MARKERS)
@@ -32,6 +49,8 @@ pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMark
         .map(|id| DisplayedMarkerPayload { id: id.to_string() })
 }
 
+/// Recognize an XEP-0333 markable child only when the enclosing message has a nonblank identifier.
+#[must_use]
 pub fn parse_markable_marker_payload(
     element: &Element,
     message_id: Option<&str>,
@@ -45,6 +64,8 @@ pub fn parse_markable_marker_payload(
         .map(|_| MarkableMarkerPayload)
 }
 
+/// Read extension enrichments from the Waddle envelope, returning None when no valid enrichments remain.
+#[must_use]
 pub fn parse_extension_envelope(element: &Element) -> Option<ExtensionEnvelopeData> {
     let envelope = element.get_child("extensions", NS_WADDLE_EXTENSION)?;
     let version = envelope
@@ -66,14 +87,14 @@ pub fn parse_extension_envelope(element: &Element) -> Option<ExtensionEnvelopeDa
 }
 
 fn parse_extension_enrichment(element: &Element) -> Option<ExtensionEnrichmentData> {
-    let id = ExtensionTextId::new(element.attr("id")?)?;
-    let plugin = ExtensionPluginId::new(element.attr("plugin")?)?;
+    let id = ExtensionTextId::try_new(element.attr("id")?)?;
+    let plugin = ExtensionPluginId::try_new(element.attr("plugin")?)?;
     let capability = ExtensionCapabilityData::from_attr(element.attr("capability")?)?;
     if capability != ExtensionCapabilityData::MessageEnrich {
         return None;
     }
-    let payload_namespace = ExtensionNamespace::new(element.attr("payload-ns")?)?;
-    let created = ExtensionTimestamp::new(element.attr("created")?)?;
+    let payload_namespace = ExtensionNamespace::try_new(element.attr("payload-ns")?)?;
+    let created = ExtensionTimestamp::try_new(element.attr("created")?)?;
     let source = element
         .get_child("source", NS_WADDLE_EXTENSION)
         .and_then(parse_extension_source);
@@ -84,7 +105,7 @@ fn parse_extension_enrichment(element: &Element) -> Option<ExtensionEnrichmentDa
             .find(|child| child.name() == "view" && child.ns() == NS_WADDLE_EXTENSION)
             .and_then(|view| view.attr("title"))
             .filter(|title| !title.trim().is_empty())
-            .and_then(ExtensionDisplayText::new)
+            .and_then(ExtensionDisplayText::try_new)
     });
     let summary = payload_container.and_then(|payload| {
         payload
@@ -96,7 +117,7 @@ fn parse_extension_enrichment(element: &Element) -> Option<ExtensionEnrichmentDa
             })
             .map(|text| text.text().trim().to_string())
             .filter(|text| !text.is_empty())
-            .and_then(ExtensionDisplayText::new)
+            .and_then(ExtensionDisplayText::try_new)
     });
     let payloads = payload_container
         .map(|payload| {
@@ -129,7 +150,7 @@ fn parse_extension_enrichment(element: &Element) -> Option<ExtensionEnrichmentDa
 
 fn parse_extension_source(element: &Element) -> Option<ExtensionSourceData> {
     Some(ExtensionSourceData {
-        stanza_id: ExtensionTextId::new(element.attr("stanza-id")?)?,
+        stanza_id: ExtensionTextId::try_new(element.attr("stanza-id")?)?,
         body_start: element
             .attr("body-start")
             .and_then(|value| value.parse::<u32>().ok()),
@@ -155,23 +176,25 @@ fn parse_extension_launch(element: &Element) -> Option<ExtensionLaunchData> {
         .unwrap_or_default();
 
     Some(ExtensionLaunchData {
-        id: ExtensionTextId::new(element.attr("id")?)?,
-        plugin: ExtensionPluginId::new(element.attr("plugin")?)?,
-        action: ExtensionTextId::new(element.attr("action")?)?,
-        command_node: ExtensionCommandNode::new(element.attr("command-node")?)?,
-        label: ExtensionDisplayText::new(element.attr("label")?.trim())?,
+        id: ExtensionTextId::try_new(element.attr("id")?)?,
+        plugin: ExtensionPluginId::try_new(element.attr("plugin")?)?,
+        action: ExtensionTextId::try_new(element.attr("action")?)?,
+        command_node: ExtensionCommandNode::try_new(element.attr("command-node")?)?,
+        label: ExtensionDisplayText::try_new(element.attr("label")?.trim())?,
         context,
         payloads,
-        expires_at: element.attr("expires-at").and_then(ExtensionTimestamp::new),
-        token: element.attr("token").and_then(ExtensionTextId::new),
+        expires_at: element
+            .attr("expires-at")
+            .and_then(ExtensionTimestamp::try_new),
+        token: element.attr("token").and_then(ExtensionTextId::try_new),
     })
 }
 
 fn parse_extension_launch_context(element: &Element) -> Option<ExtensionLaunchContextData> {
     Some(ExtensionLaunchContextData {
-        waddle_id: ExtensionTextId::new(element.attr("waddle-id")?)?,
-        room: element.attr("room").and_then(ExtensionRoomJid::new),
-        source_stanza_id: element.attr("stanza-id").and_then(ExtensionTextId::new),
+        waddle_id: ExtensionTextId::try_new(element.attr("waddle-id")?)?,
+        room: element.attr("room").and_then(ExtensionRoomJid::try_new),
+        source_stanza_id: element.attr("stanza-id").and_then(ExtensionTextId::try_new),
     })
 }
 
@@ -181,7 +204,7 @@ fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayload
         .iter()
         .filter_map(|((_ns, name), value)| {
             Some(ExtensionPayloadAttributeData {
-                name: ExtensionXmlName::new(name.as_str())?,
+                name: ExtensionXmlName::try_new(name.as_str())?,
                 value: value.clone(),
             })
         })
@@ -192,14 +215,16 @@ fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayload
         .collect();
     let text = element.text().trim().to_string();
     Some(ExtensionPayloadElementData {
-        namespace: ExtensionNamespace::new(element.ns())?,
-        name: ExtensionXmlName::new(element.name())?,
+        namespace: ExtensionNamespace::try_new(element.ns())?,
+        name: ExtensionXmlName::try_new(element.name())?,
         attributes,
         text: if text.is_empty() { None } else { Some(text) },
         children,
     })
 }
 
+/// Read an XEP-0444 target identifier and its complete reaction set; absent or malformed payloads return None.
+#[must_use]
 pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     let reactions = element.get_child("reactions", NS_REACTIONS)?;
     let target_id = reactions.attr("id")?.trim();
@@ -218,6 +243,8 @@ pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     })
 }
 
+/// Read the call-session reaction marker and validate its session and emoji fields.
+#[must_use]
 pub fn parse_in_call_reaction_payload(element: &Element) -> Option<InCallReactionPayload> {
     let carrier = element.get_child("in-call", NS_WADDLE_IN_CALL)?;
     let sid = carrier.attr("sid")?.trim();
@@ -232,11 +259,13 @@ pub fn parse_in_call_reaction_payload(element: &Element) -> Option<InCallReactio
         return None;
     }
     Some(InCallReactionPayload {
-        sid: InCallSessionId::new(sid).ok()?,
-        emoji: InCallReactionEmoji::new(emoji).ok()?,
+        sid: InCallSessionId::try_new(sid).ok()?,
+        emoji: InCallReactionEmoji::try_new(emoji).ok()?,
     })
 }
 
+/// Read an XEP-0424 retraction target and optional metadata from the message.
+#[must_use]
 pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> {
     let retract = element.get_child("retract", NS_MESSAGE_RETRACT)?;
     if retract
@@ -253,6 +282,8 @@ pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> 
         })
 }
 
+/// Read an XEP-0424 tombstone, preserving optional retraction and moderation attribution.
+#[must_use]
 pub fn parse_retraction_tombstone_payload(element: &Element) -> Option<RetractionTombstonePayload> {
     let retracted = element.get_child("retracted", NS_MESSAGE_RETRACT)?;
     let retraction_id = retracted
@@ -278,6 +309,8 @@ fn is_bare_jid(value: &str) -> bool {
     !value.contains('/')
 }
 
+/// Read the XEP-0425 moderator, retraction target, and optional reason from the message.
+#[must_use]
 pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> {
     let from = element.attr("from")?;
     if element.attr("type") != Some("groupchat") || !is_bare_jid(from) {
@@ -303,6 +336,8 @@ pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> 
     })
 }
 
+/// Read the nonempty XEP-0308 replacement target identifier from the message.
+#[must_use]
 pub fn parse_correction_payload(element: &Element) -> Option<CorrectionPayload> {
     element
         .get_child("replace", NS_MESSAGE_CORRECT)

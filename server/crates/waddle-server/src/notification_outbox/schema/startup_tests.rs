@@ -1,9 +1,16 @@
-use super::*;
+use super::{
+    migrate_coalescing_index_tx, notification_outbox_table_sql, NotificationOutboxStore,
+    NOTIFICATION_OUTBOX_CLASS_CHECK_SQL, OUTBOX_SCHEMA_GATE, OUTBOX_SCHEMA_GATE_WAIT,
+};
+use crate::db::Database;
 use crate::db::{DatabaseConfig, DatabaseDriver};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
 };
+use crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS;
+use jid::BareJid;
+use minidom::Element;
 use std::sync::Arc;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, IngressEffectIntent, MessageKey, SemanticDigest,
@@ -136,7 +143,7 @@ async fn assert_custody(fixture: &IngressFixture, before: &[RetainedJob]) {
 }
 
 async fn stable_current_boot(fixture: IngressFixture) {
-    let initial = NotificationOutboxStore::new(fixture.db.clone())
+    let initial = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("initial schema");
     retain_unknown_work(&fixture).await;
@@ -150,7 +157,7 @@ async fn stable_current_boot(fixture: IngressFixture) {
         }
     };
     let original = scalar(&fixture.db, sql).await;
-    let restarted = NotificationOutboxStore::new(independent_database(&fixture).await)
+    let restarted = NotificationOutboxStore::try_new(independent_database(&fixture).await)
         .await
         .expect("current boot");
     assert_custody(&fixture, &before).await;
@@ -220,7 +227,7 @@ async fn concurrent_boot(fixture: IngressFixture, state: SchemaState) {
     let retained = if matches!(state, SchemaState::Fresh) {
         None
     } else {
-        NotificationOutboxStore::new(fixture.db.clone())
+        NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("existing schema");
         retain_unknown_work(&fixture).await;
@@ -237,7 +244,7 @@ async fn concurrent_boot(fixture: IngressFixture, state: SchemaState) {
         let start = Arc::clone(&barrier);
         tasks.push(tokio::spawn(async move {
             start.wait().await;
-            NotificationOutboxStore::new(database).await
+            NotificationOutboxStore::try_new(database).await
         }));
     }
     let results = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -313,7 +320,7 @@ enum IndexScenario {
 }
 
 async fn index_upgrade_controls(fixture: IngressFixture, scenario: IndexScenario) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("schema");
     retain_unknown_work(&fixture).await;
@@ -509,7 +516,7 @@ async fn postgres_one_slot_pool_completes_schema_initialization_without_leaked_g
     let (database, tag) = tagged_database(&f, 1).await;
     let store = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        NotificationOutboxStore::new(database),
+        NotificationOutboxStore::try_new(database),
     )
     .await
     .expect("detached gate returns the only pool slot")
@@ -531,7 +538,7 @@ async fn postgres_gate_timeout_closes_detached_session_and_preserves_custody() {
     let Some(f) = IngressFixture::postgres("gate_timeout").await else {
         return;
     };
-    NotificationOutboxStore::new(f.db.clone())
+    NotificationOutboxStore::try_new(f.db.clone())
         .await
         .expect("schema");
     let (database, tag) = tagged_database(&f, 1).await;
@@ -567,7 +574,7 @@ async fn postgres_canceled_caller_keeps_gate_until_outstanding_schema_work_finis
     let Some(f) = IngressFixture::postgres("canceled_schema").await else {
         return;
     };
-    let store = NotificationOutboxStore::new(f.db.clone())
+    let store = NotificationOutboxStore::try_new(f.db.clone())
         .await
         .expect("schema");
     retain_unknown_work(&f).await;
@@ -583,7 +590,7 @@ async fn postgres_canceled_caller_keeps_gate_until_outstanding_schema_work_finis
     .await
     .expect("hold actual relation");
     let database = independent_database(&f).await;
-    let caller = tokio::spawn(async move { NotificationOutboxStore::new(database).await });
+    let caller = tokio::spawn(async move { NotificationOutboxStore::try_new(database).await });
     let blocked="SELECT COUNT(*) FROM pg_locks WHERE relation=to_regclass('notification_candidates') AND NOT granted";
     wait_scalar(&f.db, blocked, 1).await;
     let gate_owner = scalar(&f.db, &format!("SELECT pid::bigint FROM pg_locks WHERE locktype='advisory' AND classid={}::oid AND objid={}::oid AND granted", OUTBOX_SCHEMA_GATE.0, OUTBOX_SCHEMA_GATE.1)).await;
@@ -617,7 +624,7 @@ async fn postgres_resolved_index_namespace_preserves_same_name_decoy() {
     let Some(f) = IngressFixture::postgres("index_namespace").await else {
         return;
     };
-    let store = NotificationOutboxStore::new(f.db.clone())
+    let store = NotificationOutboxStore::try_new(f.db.clone())
         .await
         .expect("actual schema");
     let mut tx = f.db.begin_immediate().await.expect("catalog control");

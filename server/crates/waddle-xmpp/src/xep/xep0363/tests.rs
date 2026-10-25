@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_upload_error, build_upload_slot_response, effective_content_type, is_upload_request,
+    parse_upload_request, sanitize_filename, Element, Iq, UploadBadRequest, UploadError,
+    UploadSlot, NS_HTTP_UPLOAD,
+};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 fn upload_request_iq(id: &str, filename: &str, size: u64) -> Iq {

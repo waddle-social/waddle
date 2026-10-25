@@ -26,10 +26,12 @@ use base64::Engine;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-use crate::{config::ApiSecret, ParticipantSid, RoomSid};
+use crate::config::ApiSecret;
+use crate::{ParticipantSid, RoomSid};
 
 /// Errors that arise while verifying a LiveKit webhook delivery.
 ///
@@ -88,7 +90,7 @@ pub fn verify_webhook_signature(
     // unrequired — but `exp` must be present: `validate_exp` only
     // checks the claim when it exists, and a signed token without
     // `exp` would otherwise verify forever (unbounded replay window).
-    validation.required_spec_claims = std::collections::HashSet::from(["exp".to_owned()]);
+    validation.required_spec_claims = HashSet::from(["exp".to_owned()]);
     validation.validate_exp = true;
     validation.validate_nbf = true;
     // `leeway` is in seconds; allow a small clock-skew window so a
@@ -322,12 +324,12 @@ mod tests {
                 assert_eq!(env.room.name, "general@muc.test");
                 assert_eq!(
                     env.room.sid,
-                    Some(RoomSid::new("RM_xxx").expect("valid typed room sid"))
+                    Some(RoomSid::try_new("RM_xxx").expect("valid typed room sid"))
                 );
                 assert_eq!(env.participant.identity, "alice@waddle.test/desktop");
                 assert_eq!(
                     env.participant.sid,
-                    Some(ParticipantSid::new("PA_xxx").expect("valid typed participant sid"))
+                    Some(ParticipantSid::try_new("PA_xxx").expect("valid typed participant sid"))
                 );
             }
             other => panic!("expected ParticipantLeft, got {other:?}"),

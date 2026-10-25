@@ -23,3 +23,6 @@ xmpp-parsers = { workspace = true }
 # constructors) to cross-crate tests. Production builds MUST NOT enable
 # this feature; downstream crates enable it via `[dev-dependencies]` only.
 test-utils = []
+
+[lints]
+workspace = true

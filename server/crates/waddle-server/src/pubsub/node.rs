@@ -1,12 +1,11 @@
+use crate::db::Row;
 use jid::BareJid;
 use tracing::error;
 use waddle_xmpp::pubsub::{AccessModel, NodeConfig, PubSubNode};
 use waddle_xmpp::XmppError;
 
-use super::{
-    item::{clear_bookmark_projection_tx, clear_dm_bookmark_projection_tx},
-    DatabasePubSubStorage,
-};
+use super::item::{clear_bookmark_projection_tx, clear_dm_bookmark_projection_tx};
+use super::DatabasePubSubStorage;
 
 impl DatabasePubSubStorage {
     pub(super) async fn insert_node(&self, node: &PubSubNode) -> Result<(), XmppError> {
@@ -352,7 +351,7 @@ impl DatabasePubSubStorage {
         Ok(())
     }
 
-    fn decode_node(row: &crate::db::Row) -> Result<PubSubNode, XmppError> {
+    fn decode_node(row: &Row) -> Result<PubSubNode, XmppError> {
         let owner_raw: String = row
             .get(0)
             .map_err(|error| XmppError::internal(error.to_string()))?;

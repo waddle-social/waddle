@@ -29,7 +29,9 @@
 //! tier short of Owner), `member` ↔
 //! [`waddle_xmpp_core::pubsub::Affiliation::Member`], `none` removes the row.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use jid::BareJid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
@@ -445,7 +447,7 @@ async fn handle_set_role(ctx: CommandContext, state: Arc<AppState>) -> CommandRe
 // ---------------------------------------------------------------------------
 
 fn parse_optional_text(form: &DataForm, var: &str) -> Option<String> {
-    form.get_value(var)
+    form.value(var)
         .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
@@ -461,7 +463,7 @@ fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
-    match form.get_value("page_size") {
+    match form.value("page_size") {
         Some(raw) if !raw.is_empty() => {
             let parsed: u32 = raw
                 .parse()
@@ -488,7 +490,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<SpacesListArgs, String
         });
     }
     let prefix = form
-        .get_value("prefix")
+        .value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
     let page_size = parse_page_size(form)?;
@@ -768,8 +770,8 @@ async fn rollback_space_delete_cleanups(
     state: &AppState,
     cleanups: &[SpaceDeleteCleanup],
     space_node: &str,
-    skip_rooms: &std::collections::BTreeSet<BareJid>,
-    skip_parent_tuple_rooms: &std::collections::BTreeSet<BareJid>,
+    skip_rooms: &BTreeSet<BareJid>,
+    skip_parent_tuple_rooms: &BTreeSet<BareJid>,
 ) {
     for cleanup in cleanups.iter().rev() {
         if skip_rooms.contains(&cleanup.room_jid) {
@@ -829,9 +831,9 @@ async fn restore_space_node_items(
     state: &AppState,
     space_node: &str,
     items: &[(String, PubSubItem)],
-    skip_rooms: &std::collections::BTreeSet<BareJid>,
-) -> std::collections::BTreeSet<BareJid> {
-    let mut failed_rooms = std::collections::BTreeSet::new();
+    skip_rooms: &BTreeSet<BareJid>,
+) -> BTreeSet<BareJid> {
+    let mut failed_rooms = BTreeSet::new();
     for (item_id, item) in items.iter().rev() {
         if item_id
             .parse::<BareJid>()
@@ -1101,7 +1103,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         canonical_space_jid(&state.spaces_jid, &args.space_jid, args.space_node.as_ref())?;
 
     // Collect channels-to-destroy from both sources.
-    let mut targets: std::collections::BTreeSet<BareJid> = std::collections::BTreeSet::new();
+    let mut targets: BTreeSet<BareJid> = BTreeSet::new();
 
     let linked = state
         .channel_space_link_store
@@ -1122,14 +1124,13 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             targets.insert(room_jid);
         }
     }
-    let bookmarked_rooms: std::collections::BTreeSet<BareJid> = items
+    let bookmarked_rooms: BTreeSet<BareJid> = items
         .iter()
         .filter_map(|stored| stored.id.parse::<BareJid>().ok())
         .collect();
 
     let mut cleanups: Vec<SpaceDeleteCleanup> = Vec::new();
-    let mut destroy_targets: std::collections::BTreeSet<BareJid> =
-        std::collections::BTreeSet::new();
+    let mut destroy_targets: BTreeSet<BareJid> = BTreeSet::new();
     for room_jid in &targets {
         let mut cleanup = SpaceDeleteCleanup {
             room_jid: room_jid.clone(),
@@ -1154,8 +1155,8 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                                 state,
                                 &cleanups,
                                 &node_name,
-                                &std::collections::BTreeSet::new(),
-                                &std::collections::BTreeSet::new(),
+                                &BTreeSet::new(),
+                                &BTreeSet::new(),
                             )
                             .await;
                             return Err(internal_err(format!(
@@ -1175,8 +1176,8 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                         state,
                         &cleanups,
                         &node_name,
-                        &std::collections::BTreeSet::new(),
-                        &std::collections::BTreeSet::new(),
+                        &BTreeSet::new(),
+                        &BTreeSet::new(),
                     )
                     .await;
                     return Err(error);
@@ -1192,8 +1193,8 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                     state,
                     &cleanups,
                     &node_name,
-                    &std::collections::BTreeSet::new(),
-                    &std::collections::BTreeSet::new(),
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
                 )
                 .await;
                 return Err(internal_err(format!("channel-space link storage: {error}")));
@@ -1228,8 +1229,8 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
                     state,
                     &cleanups,
                     &node_name,
-                    &std::collections::BTreeSet::new(),
-                    &std::collections::BTreeSet::new(),
+                    &BTreeSet::new(),
+                    &BTreeSet::new(),
                 )
                 .await;
                 tracing::warn!(
@@ -1255,18 +1256,14 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             .retract_item(&state.spaces_jid, &node_name, &item_id)
             .await
         {
-            let failed_restores = restore_space_node_items(
-                state,
-                &node_name,
-                &retracted_items,
-                &std::collections::BTreeSet::new(),
-            )
-            .await;
+            let failed_restores =
+                restore_space_node_items(state, &node_name, &retracted_items, &BTreeSet::new())
+                    .await;
             rollback_space_delete_cleanups(
                 state,
                 &cleanups,
                 &node_name,
-                &std::collections::BTreeSet::new(),
+                &BTreeSet::new(),
                 &failed_restores,
             )
             .await;
@@ -1277,8 +1274,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         retracted_items.push((item_id, item));
     }
 
-    let mut destroyed_rooms: std::collections::BTreeSet<BareJid> =
-        std::collections::BTreeSet::new();
+    let mut destroyed_rooms: BTreeSet<BareJid> = BTreeSet::new();
     for room_jid in &destroy_targets {
         // `NotRegistered` is fine (dormant room, no live actor);
         // `DurableWipeFailed` means the registry kept the room because
@@ -1681,7 +1677,7 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 7);
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.get_value("next_cursor"), Some("eng"));
+        assert_eq!(form.value("next_cursor"), Some("eng"));
     }
 
     #[test]
@@ -1707,7 +1703,7 @@ mod tests {
         };
         let form = build_space_form(NODE_UPDATE, &space);
         assert!(matches!(form.form_type, FormType::Result));
-        assert_eq!(form.get_value("FORM_TYPE"), Some(NODE_UPDATE));
+        assert_eq!(form.value("FORM_TYPE"), Some(NODE_UPDATE));
     }
 
     #[test]

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use super::*;
+use super::{
+    build_pubsub_storage, Affiliation, BareJid, DatabasePubSubStorage, NodeConfig, PubSubItem,
+    PubSubStorage,
+};
 
 fn jid(value: &str) -> BareJid {
     value.parse().expect("valid JID")
@@ -925,10 +928,7 @@ async fn database_affiliations_persist_across_reopen() {
     let reopened = DatabasePubSubStorage::open(Some(&url))
         .await
         .expect("reopen");
-    let aff = reopened
-        .get_affiliation(&owner, "n", &bob)
-        .await
-        .expect("get");
+    let aff = reopened.affiliation(&owner, "n", &bob).await.expect("get");
     assert_eq!(aff, Affiliation::Outcast);
 
     for cleanup in [

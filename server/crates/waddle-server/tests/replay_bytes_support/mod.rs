@@ -212,7 +212,7 @@ impl ReplayBytesFixture {
         );
         let mut resumed = StreamManagementState::new();
         resumed.restore_from_session(session);
-        let replay = resumed.get_stanzas_to_resend(0);
+        let replay = resumed.stanzas_to_resend(0);
         assert_eq!(replay.len(), self.wire.len());
         for (index, entry) in replay.iter().enumerate() {
             assert_eq!(

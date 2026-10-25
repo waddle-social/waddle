@@ -1,4 +1,4 @@
-use super::*;
+use super::{BareJid, PubSubError, Session};
 
 pub(super) fn session_bare_jid(
     session: &Session,

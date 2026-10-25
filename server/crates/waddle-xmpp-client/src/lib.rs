@@ -1,5 +1,8 @@
 //! Native XMPP client scaffold for Waddle.
 
+#![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(clippy::fn_params_excessive_bools, clippy::must_use_candidate)]
+
 pub mod admin_commands;
 pub mod avatar;
 pub mod bootstrap;
@@ -43,8 +46,8 @@ pub use avatar::{Avatar, AvatarChanged, AvatarId, AvatarInfo, AvatarItemId};
 pub use bootstrap::{
     AuthMechanism, AuthenticationRequest, BootstrapElement, OAuthBearerRequest,
     RequiredStreamFeature, ResourceBindingRequest, ResourceBindingResult, SaslFailure,
-    SaslFailureCondition, StreamFeatures, NS_BIND, NS_CLIENT, NS_SASL, NS_SESSION, NS_SM,
-    NS_STREAMS,
+    SaslFailureCondition, StreamFeatures, StreamResumption, NS_BIND, NS_CLIENT, NS_SASL,
+    NS_SESSION, NS_SM, NS_STREAMS,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use client::{ClientDriver, ClientHandle, XmppClient};
@@ -131,11 +134,9 @@ pub use transport::{
 pub use transport::{DefaultTransportFactory, WebSocketTransport, WebSocketTransportFactory};
 #[cfg(feature = "wasm")]
 pub use transport_wasm::{WasmTransportEvent, WasmWebSocket};
+pub use waddle_xmpp_core::mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD};
 pub use waddle_xmpp_core::roster::{AskType, RosterItem, Subscription, ROSTER_NS};
-pub use waddle_xmpp_core::{
-    mam::{FULLTEXT_MAM_FIELD, WADDLE_MAM_THREAD_FIELD},
-    ConnectionConfig,
-};
+pub use waddle_xmpp_core::ConnectionConfig;
 pub use xep::xep0292::{
     build_fetch_vcard4_iq, build_publish_vcard4_iq, build_vcard4_element, parse_pep_vcard4,
     parse_vcard4_element, VCard4, NS_VCARD4, PEP_NODE_VCARD4,

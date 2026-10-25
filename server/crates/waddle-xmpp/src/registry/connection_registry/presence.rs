@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    debug, info, Arc, AtomicBool, BareJid, ConnectionRegistry, FullJid, LastActivityState,
+    Ordering, PresenceState,
+};
 use chrono::Utc;
 
 impl ConnectionRegistry {
@@ -116,7 +119,7 @@ impl ConnectionRegistry {
     }
 
     /// Get the stored presence state for a connected resource.
-    pub fn get_presence_state(&self, jid: &FullJid) -> Option<PresenceState> {
+    pub fn presence_state(&self, jid: &FullJid) -> Option<PresenceState> {
         self.presence_states.get(jid).map(|r| r.value().clone())
     }
 
@@ -156,7 +159,7 @@ impl ConnectionRegistry {
     }
 
     /// Get the last recorded offline activity for a bare JID.
-    pub fn get_last_activity(&self, bare_jid: &BareJid) -> Option<LastActivityState> {
+    pub fn last_activity(&self, bare_jid: &BareJid) -> Option<LastActivityState> {
         self.last_activity
             .get(bare_jid)
             .map(|entry| entry.value().clone())
@@ -173,7 +176,7 @@ impl ConnectionRegistry {
     }
 
     /// Get all available resources for a bare JID with their priorities.
-    pub fn get_available_resources_for_user(&self, bare_jid: &BareJid) -> Vec<(FullJid, i8)> {
+    pub fn available_resources_for_user(&self, bare_jid: &BareJid) -> Vec<(FullJid, i8)> {
         self.connections
             .iter()
             .filter(|entry| {

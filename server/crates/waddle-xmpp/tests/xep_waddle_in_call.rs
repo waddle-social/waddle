@@ -123,8 +123,8 @@ fn in_call_reaction_message_round_trips_with_transient_hints() {
     let from = "alice@example.test/laptop"
         .parse()
         .expect("sender full jid");
-    let sid = InCallSessionId::new("call-123").expect("valid sid");
-    let emoji = InCallReactionEmoji::new("👍").expect("valid emoji");
+    let sid = InCallSessionId::try_new("call-123").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
     let message = build_in_call_reaction_message(to, from, &sid, &emoji, MessageType::Chat);
 
     assert_eq!(message.type_, MessageType::Chat);
@@ -208,8 +208,8 @@ fn in_call_reaction_rejects_empty_sid() {
 
 #[test]
 fn in_call_reaction_values_are_trimmed_before_serialization() {
-    let sid = InCallSessionId::new(" call-123 ").expect("valid sid");
-    let emoji = InCallReactionEmoji::new(" 👍 ").expect("valid emoji");
+    let sid = InCallSessionId::try_new(" call-123 ").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new(" 👍 ").expect("valid emoji");
     assert_eq!(sid.as_str(), "call-123");
     assert_eq!(emoji.as_str(), "👍");
 }

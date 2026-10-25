@@ -1,3 +1,8 @@
+//! Compilation, instantiation, and execution of extension Wasm components.
+
+use crate::config::RuntimeLimits;
+use crate::host_tools::HostToolError;
+use crate::types::ObservationFailure;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,7 +26,13 @@ pub struct WasmRuntime {
 }
 
 impl WasmRuntime {
-    pub fn new() -> Result<Self> {
+    /// Create the fuel-metered component engine and policy-constrained HTTP client shared
+    /// by loaded extensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Wasmtime engine or HTTP client cannot be initialized.
+    pub fn try_new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
@@ -30,10 +41,12 @@ impl WasmRuntime {
             .context("failed to create wasmtime engine")?;
         Ok(Self {
             engine,
-            http: super::http::HttpRuntime::new()?,
+            http: super::http::HttpRuntime::try_new()?,
         })
     }
 
+    /// Borrow the shared Wasmtime engine configured for components and fuel metering.
+    #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
@@ -45,7 +58,7 @@ pub struct LoadedExtension {
     component: Component,
     linker: Linker<HostState>,
     http: super::http::HttpRuntime,
-    limits: crate::config::RuntimeLimits,
+    limits: RuntimeLimits,
 }
 
 impl std::fmt::Debug for LoadedExtension {
@@ -55,6 +68,13 @@ impl std::fmt::Debug for LoadedExtension {
 }
 
 impl LoadedExtension {
+    /// Compile a component file and link its WASI, logging, extension host-tool,
+    /// delivery, and runtime imports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component cannot be read/compiled or its WASI and
+    /// extension host imports cannot be linked.
     pub fn load(runtime: &WasmRuntime, wasm_path: &Path) -> Result<Self> {
         let engine = runtime.engine().clone();
         let component = Component::from_file(&engine, wasm_path)
@@ -85,11 +105,16 @@ impl LoadedExtension {
             component,
             linker,
             http: runtime.http.clone(),
-            limits: crate::config::RuntimeLimits::default(),
+            limits: RuntimeLimits::default(),
         })
     }
 
-    pub fn with_limits(mut self, limits: crate::config::RuntimeLimits) -> Result<Self> {
+    /// Replace the execution and network resource limits used when creating invocation stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error if the limits are outside host-supported bounds.
+    pub fn with_limits(mut self, limits: RuntimeLimits) -> Result<Self> {
         limits.validate().map_err(anyhow::Error::msg)?;
         self.limits = limits;
         Ok(self)
@@ -102,6 +127,13 @@ impl LoadedExtension {
         Ok(())
     }
 
+    /// Instantiate a fresh guest store and invoke lifecycle initialization with the
+    /// supplied configuration, under the configured deadline and resource limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for initialization deadline/resource failures, component
+    /// instantiation/traps, a guest-reported error, or an invalid manifest.
     pub async fn call_init(&self, config: &str) -> Result<ExtensionManifest> {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
@@ -137,6 +169,14 @@ impl LoadedExtension {
         }
     }
 
+    /// Instantiate a fresh guest store and dispatch an event with the supplied host
+    /// tools, authority, configuration, capability grants, and HTTP origins. Failures
+    /// retain diagnostic context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event(
         &self,
         event: ExtensionEvent,
@@ -166,6 +206,13 @@ impl LoadedExtension {
         })
     }
 
+    /// Dispatch an event in a fresh bounded store, returning a stable observation failure
+    /// category rather than a diagnostic string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event_typed(
         &self,
         event: ExtensionEvent,
@@ -174,7 +221,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
@@ -191,6 +238,11 @@ impl LoadedExtension {
     }
 
     /// Invoke with server-owned authority, without serializing the canonical key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event_typed_with_delivery(
         &self,
         event: ExtensionEvent,
@@ -199,7 +251,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+    ) -> std::result::Result<ExtensionResponse, ObservationFailure> {
         self.invoke_with_deadline(
             event,
             tools,
@@ -225,8 +277,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
-    {
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
             self.invoke(
@@ -239,7 +290,7 @@ impl LoadedExtension {
             ),
         )
         .await
-        .map_err(|_| (crate::types::ObservationFailure::DeadlineExceeded, None))?
+        .map_err(|_| (ObservationFailure::DeadlineExceeded, None))?
     }
 
     async fn invoke(
@@ -250,8 +301,7 @@ impl LoadedExtension {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-    ) -> std::result::Result<ExtensionResponse, (crate::types::ObservationFailure, Option<String>)>
-    {
+    ) -> std::result::Result<ExtensionResponse, (ObservationFailure, Option<String>)> {
         use crate::types::ObservationFailure;
         let mut store = Store::new(
             &self.engine,
@@ -322,9 +372,7 @@ struct InvocationBinding {
     delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
 }
 
-fn classify_delivery_error(
-    error: crate::host_tools::HostToolError,
-) -> crate::types::ObservationFailure {
+fn classify_delivery_error(error: HostToolError) -> ObservationFailure {
     use crate::host_tools::HostToolErrorCode;
     use crate::types::ObservationFailure;
     match error.code {
@@ -336,14 +384,14 @@ fn classify_delivery_error(
     }
 }
 
-fn classify_runtime_error(error: wasmtime::Error) -> crate::types::ObservationFailure {
+fn classify_runtime_error(error: wasmtime::Error) -> ObservationFailure {
     if matches!(
         error.downcast_ref::<wasmtime::Trap>(),
         Some(wasmtime::Trap::OutOfFuel)
     ) {
-        crate::types::ObservationFailure::ResourceLimit
+        ObservationFailure::ResourceLimit
     } else {
-        crate::types::ObservationFailure::RuntimeFailure
+        ObservationFailure::RuntimeFailure
     }
 }
 
@@ -353,7 +401,7 @@ mod limit_tests {
 
     #[tokio::test]
     async fn spinning_wasm_exhausts_fuel_without_blocking_the_executor() {
-        let runtime = WasmRuntime::new().expect("runtime");
+        let runtime = WasmRuntime::try_new().expect("runtime");
         let module = wasmtime::Module::new(
             runtime.engine(),
             r#"(module (func (export "run") (loop br 0)))"#,
@@ -383,7 +431,7 @@ mod limit_tests {
 
     #[tokio::test]
     async fn wasm_memory_growth_is_rejected_at_the_store_limit() {
-        let runtime = WasmRuntime::new().expect("runtime");
+        let runtime = WasmRuntime::try_new().expect("runtime");
         let module = wasmtime::Module::new(
             runtime.engine(),
             r#"(module

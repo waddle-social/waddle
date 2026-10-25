@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_pack_element, build_pack_publish_iq, build_pack_retract_iq, build_sticker_marker_element,
+    build_sticker_pack_items_iq, build_sticker_packs_items_iq, compute_pack_hash, compute_pack_id,
+    parse_pack_element, parse_sticker_packs_result, BareJid, Element, HashAlgo, PackId, PackRef,
+    PackSticker, StickerDimensions, StickerHash, StickerMarker, StickerPackDoc, StickerText,
+    NS_FILE_METADATA, NS_HASHES, NS_PUBSUB, NS_SFS, NS_STICKERS, NS_URL_DATA, STICKERS_NODE,
+};
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -331,7 +337,7 @@ fn localized_name_summary_repeats_round_trip() {
 #[test]
 fn parse_accepts_the_xep_example_pack_verbatim() {
     let pack: Element = XEP_EXAMPLE_PACK_XML.parse().expect("example XML parses");
-    let id = PackId::new(XEP_EXAMPLE_ID).expect("example id");
+    let id = PackId::try_new(XEP_EXAMPLE_ID).expect("example id");
     let doc = parse_pack_element(id.clone(), &pack).expect("example pack parses");
 
     assert_eq!(doc.id, id);
@@ -383,7 +389,7 @@ fn parse_drops_items_missing_mandatory_children() {
     </pack>"
         .parse()
         .expect("valid xml");
-    assert!(parse_pack_element(PackId::new("p").expect("id"), &pack).is_none());
+    assert!(parse_pack_element(PackId::try_new("p").expect("id"), &pack).is_none());
 }
 
 #[test]
@@ -391,7 +397,7 @@ fn parse_rejects_wrong_namespace_and_unknown_hash_algos() {
     let wrong_ns: Element = "<pack xmlns='urn:xmpp:stickers:1'><name>n</name></pack>"
         .parse()
         .expect("valid xml");
-    assert!(parse_pack_element(PackId::new("p").expect("id"), &wrong_ns).is_none());
+    assert!(parse_pack_element(PackId::try_new("p").expect("id"), &wrong_ns).is_none());
 
     // A sticker whose only hash uses an unsupported algorithm has no
     // usable typed hash ⇒ the item is dropped.
@@ -409,7 +415,7 @@ fn parse_rejects_wrong_namespace_and_unknown_hash_algos() {
     </pack>"
         .parse()
         .expect("valid xml");
-    assert!(parse_pack_element(PackId::new("p").expect("id"), &pack).is_none());
+    assert!(parse_pack_element(PackId::try_new("p").expect("id"), &pack).is_none());
 }
 
 // ── Items result parsing ─────────────────────────────────────────────
@@ -493,7 +499,7 @@ fn single_pack_items_iq_carries_item_id_and_node() {
         "iq-3",
         &bare("romeo@montague.lit"),
         "generic/sticker/node",
-        &PackId::new(XEP_EXAMPLE_ID).expect("id"),
+        &PackId::try_new(XEP_EXAMPLE_ID).expect("id"),
     );
     assert_eq!(iq.attr("to"), Some("romeo@montague.lit"));
     let items = iq
@@ -511,7 +517,7 @@ fn publish_iq_uses_the_recomputed_pack_id_as_item_id() {
     // MUST be the id derived from the pack content (XEP-0449
     // §pack-hash), never the single-slot `current` idiom.
     let doc = StickerPackDoc {
-        id: PackId::new("caller-supplied-wrong-id").expect("id"),
+        id: PackId::try_new("caller-supplied-wrong-id").expect("id"),
         ..marsey_doc()
     };
     let (id, iq) = build_pack_publish_iq("iq-4", &doc);
@@ -538,7 +544,7 @@ fn publish_iq_uses_the_recomputed_pack_id_as_item_id() {
 
 #[test]
 fn retract_iq_targets_the_pack_item() {
-    let iq = build_pack_retract_iq("iq-5", &PackId::new(XEP_EXAMPLE_ID).expect("id"));
+    let iq = build_pack_retract_iq("iq-5", &PackId::try_new(XEP_EXAMPLE_ID).expect("id"));
     assert_eq!(iq.attr("type"), Some("set"));
     let retract = iq
         .get_child("pubsub", NS_PUBSUB)
@@ -568,7 +574,7 @@ fn bare_sticker_marker_has_no_attributes() {
 fn pack_marker_carries_pack_and_optional_location() {
     let own_pep = build_sticker_marker_element(&StickerMarker {
         pack: Some(PackRef {
-            id: PackId::new(XEP_EXAMPLE_ID).expect("id"),
+            id: PackId::try_new(XEP_EXAMPLE_ID).expect("id"),
             jid: None,
             node: None,
         }),
@@ -579,7 +585,7 @@ fn pack_marker_carries_pack_and_optional_location() {
 
     let foreign = build_sticker_marker_element(&StickerMarker {
         pack: Some(PackRef {
-            id: PackId::new(XEP_EXAMPLE_ID).expect("id"),
+            id: PackId::try_new(XEP_EXAMPLE_ID).expect("id"),
             jid: Some(bare("romeo@montague.lit")),
             node: Some("generic/sticker/node".to_string()),
         }),
@@ -593,10 +599,10 @@ fn pack_marker_carries_pack_and_optional_location() {
 
 #[test]
 fn pack_id_rejects_blank_values() {
-    assert!(PackId::new("").is_none());
-    assert!(PackId::new("   ").is_none());
+    assert!(PackId::try_new("").is_none());
+    assert!(PackId::try_new("   ").is_none());
     assert_eq!(
-        PackId::new(XEP_EXAMPLE_ID).map(|id| id.to_string()),
+        PackId::try_new(XEP_EXAMPLE_ID).map(|id| id.to_string()),
         Some(XEP_EXAMPLE_ID.to_string())
     );
 }

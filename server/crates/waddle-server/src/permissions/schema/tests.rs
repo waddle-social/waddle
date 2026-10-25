@@ -1,9 +1,9 @@
-use super::*;
+use super::{ComputedPermission, ObjectType, PermissionSchema, SPICEDB_SCHEMA};
 
 #[test]
 fn test_space_schema() {
     let schema = PermissionSchema::default();
-    let space_schema = schema.get_schema(ObjectType::Space).unwrap();
+    let space_schema = schema.schema(ObjectType::Space).unwrap();
 
     // Check relations
     assert!(space_schema.is_valid_relation("owner"));
@@ -12,22 +12,22 @@ fn test_space_schema() {
     assert!(!space_schema.is_valid_relation("invalid"));
 
     // Check permissions
-    assert!(space_schema.get_permission("delete").is_some());
-    assert!(space_schema.get_permission("view").is_some());
-    assert!(space_schema.get_permission("invalid").is_none());
+    assert!(space_schema.permission("delete").is_some());
+    assert!(space_schema.permission("view").is_some());
+    assert!(space_schema.permission("invalid").is_none());
 }
 
 #[test]
 fn test_channel_schema() {
     let schema = PermissionSchema::default();
-    let channel_schema = schema.get_schema(ObjectType::Channel).unwrap();
+    let channel_schema = schema.schema(ObjectType::Channel).unwrap();
 
     // Check relations
     assert!(channel_schema.is_valid_relation("parent"));
     assert!(channel_schema.is_valid_relation("viewer"));
 
     // Check permission computation
-    let delete_perm = channel_schema.get_permission("delete").unwrap();
+    let delete_perm = channel_schema.permission("delete").unwrap();
     match delete_perm {
         ComputedPermission::Arrow(rel, perm) => {
             assert_eq!(rel, "parent");
@@ -40,10 +40,10 @@ fn test_channel_schema() {
 #[test]
 fn test_message_schema() {
     let schema = PermissionSchema::default();
-    let message_schema = schema.get_schema(ObjectType::Message).unwrap();
+    let message_schema = schema.schema(ObjectType::Message).unwrap();
 
     // Author can edit
-    let edit_perm = message_schema.get_permission("edit").unwrap();
+    let edit_perm = message_schema.permission("edit").unwrap();
     match edit_perm {
         ComputedPermission::DirectRelation(rel) => {
             assert_eq!(rel, "author");

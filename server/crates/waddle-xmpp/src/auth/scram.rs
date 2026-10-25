@@ -17,7 +17,7 @@
 //! 4. Server verifies and sends server-final-message: `v=serversignature`
 
 use crate::XmppError;
-use base64::prelude::*;
+use base64::prelude::{Engine, BASE64_STANDARD};
 
 mod crypto;
 mod parser;

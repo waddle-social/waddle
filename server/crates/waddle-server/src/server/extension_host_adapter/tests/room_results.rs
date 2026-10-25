@@ -1,47 +1,37 @@
 //! Saved observation output follows the ordinary room ingress authority.
 use super::groupchat_ingress::GroupchatFixture;
-use crate::{
-    ingress::{
-        nested::{NestedContinuation, NestedOutcome},
-        test_support::IngressFixture,
-    },
-    ingress_uow::{
-        initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
-        EffectIntentRepository, RoomObservationRepository,
-    },
-    server::routes::{
-        interpret::{
-            effects::{
-                room::ExternalRoomEffect, Effect, ExternalEffect, PlanSuppressionPolicy,
-                PlannedEffect,
-            },
-            plan_room_result,
-        },
-        websocket::interpret_loop::build_interpret_deps,
-    },
+use crate::ingress::nested::{NestedContinuation, NestedOutcome};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{
+    initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
+    EffectIntentRepository, RoomObservationRepository,
 };
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+use crate::server::routes::interpret::effects::{
+    Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
+};
+use crate::server::routes::interpret::plan_room_result;
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
 use chrono::Utc;
 use waddle_extensions::{
     ConfiguredRoomObserver, ExtensionPayload, ObservationGeneration, PluginId,
     RoomObservationOutcome, RoomObservationResult, RoomObservationScope,
     RoomObservationSubscription, Sha256Digest, XmlAttribute, XmlElement, XmlNode,
 };
-use waddle_xmpp::{
-    ingress::{
-        DigestContext, DigestInput, IngressEffectIntent, MessageKey, NormalizedTarget,
-        SemanticDigest,
-    },
-    protocol::{handlers::register_default_message_handlers, StanzaDispatcher, XmppStateMachine},
-    Stanza,
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, IngressEffectIntent, MessageKey, NormalizedTarget, SemanticDigest,
 };
+use waddle_xmpp::protocol::handlers::register_default_message_handlers;
+use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::xep0359::{add_origin_id, add_stanza_id, StanzaId};
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 fn observer(room: &jid::BareJid) -> ConfiguredRoomObserver {
     ConfiguredRoomObserver {
-        plugin: PluginId::new("jev-result-fixture").expect("plugin"),
-        generation: ObservationGeneration::new(1).expect("generation"),
-        identity: Sha256Digest::new("a".repeat(64)).expect("identity"),
+        plugin: PluginId::try_new("jev-result-fixture").expect("plugin"),
+        generation: ObservationGeneration::try_new(1).expect("generation"),
+        identity: Sha256Digest::try_new("a".repeat(64)).expect("identity"),
         scope: RoomObservationScope::Rooms(vec![room.clone()]),
         max_concurrent: 1,
     }
@@ -78,13 +68,14 @@ fn source_message(room: &jid::BareJid, source_id: &str, origin_id: &str) -> Mess
 }
 
 fn score_payload() -> ExtensionPayload {
-    let ns = waddle_extensions::PayloadNamespace::new("urn:waddle:safety-scores:1").expect("ns");
+    let ns =
+        waddle_extensions::PayloadNamespace::try_new("urn:waddle:safety-scores:1").expect("ns");
     let attr = |local_name: &str, value: &str| XmlAttribute {
         namespace: None,
         local_name: local_name.to_string(),
         value: value.to_string(),
     };
-    let score = XmlElement::new(
+    let score = XmlElement::try_new(
         ns.clone(),
         "score",
         vec![
@@ -95,9 +86,9 @@ fn score_payload() -> ExtensionPayload {
         vec![],
     )
     .expect("score");
-    ExtensionPayload::new(
+    ExtensionPayload::try_new(
         ns.clone(),
-        XmlElement::new(
+        XmlElement::try_new(
             ns,
             "safety-scores",
             vec![attr("model-version", "test-model")],

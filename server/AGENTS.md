@@ -2,6 +2,8 @@
 
 ## Rust quality and protocol boundaries
 
+- For Rust API, import and module-layout changes, follow
+  [the Rust style conventions](../docs/rust-style.md).
 - Rust toolchain changes follow [`docs/rust-toolchain-bump.md`](../docs/rust-toolchain-bump.md).
 - Local and CI Clippy checks MUST use `-D warnings`. Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified in the PR description. Prefer removing dead code, exercising it, or narrowing visibility.
 - Never construct XMPP/XML with `format!`, string concatenation, or `println!`. Build payloads with Rust structs/builders (`xmpp_parsers`, `minidom::Element`, etc.) and serialize them.
@@ -38,30 +40,20 @@
 - In-process server state for `tests/xepNNNN_*.rs` comes from `waddle_server::test_support` (feature `test-support`; suites that need it carry `#![cfg(feature = "test-support")]` and run in the `--all-features` lanes and the `waddle-server-xmpp-server-tests` lane, which enables the feature explicitly; never enabled in the release image).
 - The active C2S transport is WebSocket only; do not add TCP C2S or S2S harness tests.
 
-## Graceful restart (Ecdysis)
+## Listener inheritance and graceful shutdown
 
-The server implements [Cloudflare's Ecdysis pattern](https://blog.cloudflare.com/ecdysis-rust-graceful-restarts/) for zero-downtime restarts.
-
-### Signal conventions
-- `SIGTERM` — Graceful shutdown: stop accepting, drain in-flight connections (30s timeout), exit.
-- `SIGQUIT` — Graceful restart: new process starts, old process drains and exits.
-- `systemctl reload waddle` sends SIGQUIT (graceful restart).
-- `systemctl stop waddle` sends SIGTERM (graceful shutdown).
-
-### Fd inheritance
-- On restart, the parent process passes listening sockets to the child via `LISTEN_FDS` / `LISTEN_FD_NAMES` env vars.
-- On cold start (no `LISTEN_FDS`), listeners are bound fresh.
-- The crate `waddle-ecdysis` handles all fd passing, signal handling, and drain coordination.
-- **Unix-only**: `waddle-ecdysis` will not compile on non-Unix platforms.
-
-### State loss on restart
-In-memory state is **not** transferred across restarts:
-- MUC room presence and rosters
-- Stream Management sessions (XEP-0198)
-- Connection registry
-- PubSub/PEP storage
-
-Connected XMPP clients receive a clean stream close (`</stream:stream>`) during drain and reconnect via XEP-0198 stream resumption. This is acceptable for the current deployment model.
-
-### Configuration
-- `WADDLE_DRAIN_TIMEOUT_SECS` — Drain timeout in seconds (default: 30).
+- `SIGTERM` and `SIGQUIT` stop accepting, drain connections and exit. A process
+  supervisor or deployment controller starts the replacement; the server does
+  not fork or re-exec itself.
+- An external launcher can transfer sockets through `LISTEN_FDS` and
+  `LISTEN_FD_NAMES`. Capture their exclusive ownership once in synchronous
+  startup, before creating the runtime or opening unrelated descriptors, and
+  register them with Tokio after entering the runtime. Cold starts bind fresh
+  sockets. `waddle-ecdysis` is Unix-only.
+- Process-local actors and registries are rebuilt on replacement. Determine
+  resumption and delivery recovery from their durable storage and ownership
+  fences; a process restart alone establishes neither loss nor completion.
+- `WADDLE_DRAIN_TIMEOUT_SECS` configures the drain timeout (default: 30).
+- For startup secret handling and descriptor safety changes, read
+  [the startup safety notes](../docs/planning/startup-safety-2020-2024.md)
+  and the [VAPID bootstrap runbook](docs/operations/vapid-bootstrap.md).

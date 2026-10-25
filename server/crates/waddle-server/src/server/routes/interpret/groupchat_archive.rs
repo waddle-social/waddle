@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    build_inbox_push, debug, extract_correction_from_message, extract_explicit_mentions,
+    extract_reactions_from_message, extract_references_from_message,
+    extract_retraction_from_message, groupchat_entry, groupchat_thread_entry, message_to_string,
+    parse_reply_from_message, warn, Arc, ArchiveIdRewrite, ArchivedMention, ArchivedReactionSet,
+    ArchivedReference, ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload,
+    ArchivedTombstone, BareJid, Deps, FullJid, GroupchatThreadProjection,
+    InMemorySmSessionRegistry, InboxEntry, IngressEffectIntent, Jid, MamArchivedMessage,
+    MamStorage, Message, RetractionKind, RichMessageId, RichText, Stanza, Xep0359StanzaId,
+    NS_REPLY, STANZA_ID_NS,
+};
+use std::collections::BTreeMap;
 use waddle_xmpp::mam::{MamStorageError, StoreOutcome, TerminalTombstoneOutcome};
 #[cfg(feature = "clustering")]
 use waddle_xmpp::muc::RoomClaimFenceContext;
@@ -422,7 +433,7 @@ pub(super) async fn plan_groupchat_retraction_tombstone(
         let Some(retraction_id) = message
             .id
             .as_ref()
-            .and_then(|id| RichMessageId::new(id.0.clone()))
+            .and_then(|id| RichMessageId::try_new(id.0.clone()))
         else {
             return GroupchatRetractionTombstoneOutcome::Failed;
         };
@@ -639,7 +650,7 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
         .id
         .as_ref()
         .map(|id| id.0.clone())
-        .and_then(RichMessageId::new)
+        .and_then(RichMessageId::try_new)
     else {
         warn!(
             archive = %room,
@@ -742,7 +753,8 @@ pub(super) async fn apply_groupchat_retraction_tombstone_outcome(
 fn replay_target(
     target: &waddle_xmpp::tombstone::TombstoneTarget,
 ) -> waddle_xmpp::ingress::TombstoneReplayTarget {
-    use waddle_xmpp::{ingress::TombstoneReplayTarget, tombstone::TombstoneTarget};
+    use waddle_xmpp::ingress::TombstoneReplayTarget;
+    use waddle_xmpp::tombstone::TombstoneTarget;
     match target {
         TombstoneTarget::Groupchat { stanza_id, room } => TombstoneReplayTarget::Groupchat {
             stanza_id: stanza_id.clone(),
@@ -844,7 +856,7 @@ pub(super) struct GroupchatInboxProjectionInputs<'a> {
     pub room: &'a BareJid,
     pub message: &'a Message,
     pub is_recipient: bool,
-    pub thread: &'a Option<GroupchatThreadProjection>,
+    pub thread: Option<&'a GroupchatThreadProjection>,
     pub dispatch_timestamp: i64,
     pub notification_recovery: Option<super::effects::room::PlannedGroupchatNotificationRecovery>,
 }
@@ -1084,7 +1096,7 @@ pub(super) fn extract_groupchat_reply_reference(
         .payloads
         .iter()
         .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)?;
-    let id = RichMessageId::new(reply.attr("id")?)?;
+    let id = RichMessageId::try_new(reply.attr("id")?)?;
     // XEP-0461 §3 makes `id` MUST and `to` SHOULD; for groupchat we
     // additionally restrict `to` to a room-scoped JID. A `to` that
     // fails the scope check is dropped (the reply still carries the
@@ -1124,13 +1136,13 @@ pub(super) fn rich_archive_payload(
 ) -> Option<ArchivedRichMessage> {
     let payload = extract_correction_from_message(message)
         .and_then(|correction| {
-            RichMessageId::new(correction.replaces_id)
+            RichMessageId::try_new(correction.replaces_id)
                 .map(|replaces_id| ArchivedRichPayload::Correction { replaces_id })
         })
         .or_else(|| {
             extract_retraction_from_message(message).and_then(|kind| match kind {
-                RetractionKind::Request(retraction) => RichMessageId::new(retraction.retracts_id)
-                    .map(|target_id| {
+                RetractionKind::Request(retraction) => {
+                    RichMessageId::try_new(retraction.retracts_id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: None,
@@ -1138,12 +1150,13 @@ pub(super) fn rich_archive_payload(
                                 .id
                                 .as_ref()
                                 .map(|id| id.0.clone())
-                                .and_then(RichMessageId::new),
+                                .and_then(RichMessageId::try_new),
                         })
-                    }),
+                    })
+                }
                 RetractionKind::Tombstone(retracted) => {
                     message.id.as_ref().map(|id| id.0.clone()).and_then(|id| {
-                        RichMessageId::new(id).map(|target_id| {
+                        RichMessageId::try_new(id).map(|target_id| {
                             ArchivedRichPayload::Retraction(ArchivedRetraction {
                                 target_id,
                                 stamp: retracted
@@ -1153,7 +1166,7 @@ pub(super) fn rich_archive_payload(
                                         chrono::DateTime::parse_from_rfc3339(stamp).ok()
                                     })
                                     .map(|stamp| stamp.with_timezone(&chrono::Utc)),
-                                retraction_id: RichMessageId::new(retracted.retraction_id),
+                                retraction_id: RichMessageId::try_new(retracted.retraction_id),
                             })
                         })
                     })
@@ -1162,31 +1175,31 @@ pub(super) fn rich_archive_payload(
         })
         .or_else(|| {
             extract_reactions_from_message(message).and_then(|reactions| {
-                RichMessageId::new(reactions.message_id).map(|target_id| {
+                RichMessageId::try_new(reactions.message_id).map(|target_id| {
                     ArchivedRichPayload::Reactions(ArchivedReactionSet {
                         target_id,
                         emojis: reactions
                             .emojis
                             .into_iter()
-                            .filter_map(RichText::new)
+                            .filter_map(RichText::try_new)
                             .collect(),
                     })
                 })
             })
         });
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
+        RichMessageId::try_new(reply.id).map(|id| ArchivedReply { id, to: reply.to })
     });
     let references = extract_references_from_message(message)
         .into_iter()
         .filter_map(|reference| {
-            let ref_type = RichText::new(reference.ref_type.as_str())?;
+            let ref_type = RichText::try_new(reference.ref_type.as_str())?;
             Some(ArchivedReference {
                 ref_type,
                 begin: reference.begin.and_then(|value| value.try_into().ok()),
                 end: reference.end.and_then(|value| value.try_into().ok()),
-                uri: RichText::new(reference.uri),
-                anchor: reference.anchor.and_then(RichText::new),
+                uri: RichText::try_new(reference.uri),
+                anchor: reference.anchor.and_then(RichText::try_new),
             })
         })
         .collect::<Vec<_>>();
@@ -1199,9 +1212,9 @@ pub(super) fn rich_archive_payload(
                     begin: mention.begin,
                     end: mention.end,
                     jid: mention.jid,
-                    occupant_id: mention.occupant_id.and_then(RichText::new),
-                    mentions: mention.mentions.and_then(RichText::new),
-                    uri: mention.uri.and_then(RichText::new),
+                    occupant_id: mention.occupant_id.and_then(RichText::try_new),
+                    mentions: mention.mentions.and_then(RichText::try_new),
+                    uri: mention.uri.and_then(RichText::try_new),
                     active: mention.active,
                     noping: mention.noping,
                 })
@@ -1212,14 +1225,14 @@ pub(super) fn rich_archive_payload(
         .subjects
         .iter()
         .map(|(lang, text)| (lang.0.clone(), text.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     // XEP-0421: capture the server-stamped occupant-id into the typed
     // projection so the non-`stanza_xml` fallback reconstruction can
     // re-emit it (#1268). `MucCanonicalizeHandler` stamped it (and
     // stripped any client-supplied one) before the archive event was
     // emitted, so this value is server-authored.
     let occupant_id = waddle_xmpp::xep::xep0421::extract_occupant_id_from_message(message)
-        .and_then(|id| waddle_xmpp_core::mam::ArchivedOccupantId::new(id.as_str()));
+        .and_then(|id| waddle_xmpp_core::mam::ArchivedOccupantId::try_new(id.as_str()));
     let muc_sender = muc_sender.cloned();
     if payload.is_none()
         && reply.is_none()

@@ -17,7 +17,15 @@ use waddle_xmpp::registry::{
 use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
-use super::*;
+#[cfg(feature = "clustering")]
+use super::promote_session_unacked_with_policy;
+#[cfg(feature = "clustering")]
+use super::StreamPromotionDeps;
+use super::{
+    is_senderless_inbox_projection, parse_stanza, promote_displaced_sessions,
+    promote_session_unacked, promote_session_with_custody, DisplacedPromotionDeps,
+    PromotionFailureReason, TerminalOverflowPromotionDeps,
+};
 
 fn full(s: &str) -> FullJid {
     s.parse().unwrap()
@@ -56,9 +64,7 @@ async fn dual_register(
     sender: tokio::sync::mpsc::Sender<OutboundStanza>,
 ) {
     registry.register(jid.clone(), sender);
-    let entry = registry
-        .get_entry(&jid)
-        .expect("just registered on DashMap");
+    let entry = registry.entry(&jid).expect("just registered on DashMap");
     user_registry
         .ask(RegisterUserResource { jid, entry })
         .await

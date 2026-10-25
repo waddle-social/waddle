@@ -10,10 +10,8 @@ use waddle_xmpp::mam::RichMessageId;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
 
-use crate::db::{
-    actor::{DbActor, DbExecute, DbQuery},
-    row_value, Value, ValueExt,
-};
+use crate::db::actor::{DbActor, DbExecute, DbQuery};
+use crate::db::{row_value, Value, ValueExt};
 use crate::server::routes::websocket::link_preview_telemetry::{
     record_link_preview_event, LinkPreviewTelemetryEvent,
 };
@@ -174,7 +172,7 @@ fn committed_link_preview_media_ref_effects(
     stale_refs: Vec<CurrentPreviewRefRow>,
     current_slots: Vec<uuid::Uuid>,
 ) -> Vec<IngressEffectIntent> {
-    let Some(message_id) = RichMessageId::new(message_id.to_string()) else {
+    let Some(message_id) = RichMessageId::try_new(message_id.to_string()) else {
         return Vec::new();
     };
     let archive = jid::Jid::from(archive_jid.clone());
@@ -260,14 +258,12 @@ fn is_cached_preview_filename(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{
-        actor::{DbExecute, DbQueryOne},
-        DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig, ValueExt,
-    };
+    use crate::db::actor::{DbExecute, DbQueryOne};
+    use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig, ValueExt};
     use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
 
     async fn db_pool() -> DatabasePool {
-        let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

@@ -1,3 +1,6 @@
+//! Conversion between component host-tool requests and typed framework contracts.
+
+use crate::types::FrameworkTypeError;
 use chrono::{DateTime, Utc};
 use xmpp_parsers::jid::BareJid;
 
@@ -26,7 +29,7 @@ impl From<host_domain::ListChannelsResponse> for wit_types::ListChannelsResponse
 impl From<host_domain::ChannelSummary> for wit_types::ChannelSummary {
     fn from(value: host_domain::ChannelSummary) -> Self {
         Self {
-            room: RoomJid::new(value.room.to_string())
+            room: RoomJid::try_new(value.room.to_string())
                 .expect("host returned valid bare room jid")
                 .into(),
             name: value.name.map(Into::into),
@@ -87,7 +90,7 @@ impl From<host_domain::ListRoomMembersResponse> for wit_types::ListRoomMembersRe
 impl From<host_domain::RoomMember> for wit_types::RoomMember {
     fn from(value: host_domain::RoomMember) -> Self {
         Self {
-            room: RoomJid::new(value.room.to_string())
+            room: RoomJid::try_new(value.room.to_string())
                 .expect("host returned valid bare room jid")
                 .into(),
             jid: wit_types::Jid {
@@ -243,7 +246,7 @@ impl TryFrom<wit_types::MamQuery> for host_domain::MamQuery {
                 .transpose()?,
             thread_id: value
                 .thread_id
-                .map(|thread_id| ThreadId::new(thread_id.value))
+                .map(|thread_id| ThreadId::try_new(thread_id.value))
                 .transpose()
                 .map_err(host_type_error)?,
             sender: value
@@ -253,9 +256,9 @@ impl TryFrom<wit_types::MamQuery> for host_domain::MamQuery {
             text: value
                 .text
                 .map(|text| {
-                    DisplayText::new(text.value).map_err(|error| {
+                    DisplayText::try_new(text.value).map_err(|error| {
                         HostToolError::invalid_request(
-                            DisplayText::new(error.to_string())
+                            DisplayText::try_new(error.to_string())
                                 .expect("type error message is non-empty"),
                         )
                     })
@@ -298,7 +301,7 @@ impl From<host_domain::ArchivedMessage> for wit_types::ArchivedMessage {
             to_jid: wit_types::Jid {
                 value: value.to.to_string(),
             },
-            sent_at: Timestamp::new(value.sent_at.to_rfc3339())
+            sent_at: Timestamp::try_new(value.sent_at.to_rfc3339())
                 .expect("rfc3339 timestamp is non-empty")
                 .into(),
             body: value.body.map(Into::into),
@@ -312,9 +315,9 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
     type Error = HostToolError;
 
     fn try_from(value: wit_types::SendMessageRequest) -> Result<Self, Self::Error> {
-        let body = DisplayText::new(value.body.value).map_err(|error| {
+        let body = DisplayText::try_new(value.body.value).map_err(|error| {
             HostToolError::invalid_request(
-                DisplayText::new(error.to_string()).expect("type error message is non-empty"),
+                DisplayText::try_new(error.to_string()).expect("type error message is non-empty"),
             )
         })?;
         let markup = value
@@ -328,13 +331,13 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
             body,
             thread_id: value
                 .thread_id
-                .map(|thread_id| ThreadId::new(thread_id.value))
+                .map(|thread_id| ThreadId::try_new(thread_id.value))
                 .transpose()
                 .map_err(host_type_error)?,
             reply_to: value.reply_to.map(TryInto::try_into).transpose().map_err(
                 |error: anyhow::Error| {
                     HostToolError::invalid_request(
-                        DisplayText::new(error.to_string())
+                        DisplayText::try_new(error.to_string())
                             .expect("type error message is non-empty"),
                     )
                 },
@@ -346,7 +349,7 @@ impl TryFrom<wit_types::SendMessageRequest> for host_domain::SendMessageRequest 
                 .transpose()
                 .map_err(|error: anyhow::Error| {
                     HostToolError::invalid_request(
-                        DisplayText::new(error.to_string())
+                        DisplayText::try_new(error.to_string())
                             .expect("type error message is non-empty"),
                     )
                 })?,
@@ -382,7 +385,7 @@ fn validate_message_markup(
     for span in spans {
         if span.start >= span.end || span.end > body_len {
             return Err(HostToolError::invalid_request(
-                DisplayText::new("message markup span range is outside the body")
+                DisplayText::try_new("message markup span range is outside the body")
                     .expect("static message is non-empty"),
             ));
         }
@@ -392,7 +395,7 @@ fn validate_message_markup(
             let overlaps = left.start < right.end && right.start < left.end;
             if overlaps {
                 return Err(HostToolError::invalid_request(
-                    DisplayText::new("message markup block ranges must not overlap")
+                    DisplayText::try_new("message markup block ranges must not overlap")
                         .expect("static message is non-empty"),
                 ));
             }
@@ -424,11 +427,11 @@ impl TryFrom<wit_types::PubsubGetItemsRequest> for host_domain::PubSubGetItemsRe
     type Error = HostToolError;
 
     fn try_from(value: wit_types::PubsubGetItemsRequest) -> Result<Self, Self::Error> {
-        let node = PubSubNode::new(value.node.value).map_err(host_type_error)?;
+        let node = PubSubNode::try_new(value.node.value).map_err(host_type_error)?;
         let item_ids = value
             .item_ids
             .into_iter()
-            .map(|id| PubSubItemId::new(id.value).map_err(host_type_error))
+            .map(|id| PubSubItemId::try_new(id.value).map_err(host_type_error))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             node,
@@ -482,7 +485,7 @@ impl From<HostToolErrorCode> for wit_types::HostToolErrorCode {
 fn parse_bare_jid(value: String) -> std::result::Result<BareJid, HostToolError> {
     value.parse::<BareJid>().map_err(|_| {
         HostToolError::invalid_request(
-            DisplayText::new("invalid bare JID").expect("static host-tool error is non-empty"),
+            DisplayText::try_new("invalid bare JID").expect("static host-tool error is non-empty"),
         )
     })
 }
@@ -492,14 +495,14 @@ fn parse_timestamp(value: String) -> std::result::Result<DateTime<Utc>, HostTool
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|_| {
             HostToolError::invalid_request(
-                DisplayText::new("invalid RFC3339 timestamp")
+                DisplayText::try_new("invalid RFC3339 timestamp")
                     .expect("static host-tool error is non-empty"),
             )
         })
 }
 
-fn host_type_error(error: crate::types::FrameworkTypeError) -> HostToolError {
+fn host_type_error(error: FrameworkTypeError) -> HostToolError {
     HostToolError::invalid_request(
-        DisplayText::new(error.to_string()).expect("type error message is non-empty"),
+        DisplayText::try_new(error.to_string()).expect("type error message is non-empty"),
     )
 }

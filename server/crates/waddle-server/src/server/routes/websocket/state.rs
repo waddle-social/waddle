@@ -1,4 +1,33 @@
-use super::*;
+use super::{
+    warn, ActorRef, AppState, Arc, AuthState, BareJid, Blocklist, CommandRegistry, ConnectionPhase,
+    ConnectionRegistry, ExtensionManager, FullJid, InMemorySmSessionRegistry, InboundEvent,
+    InboxStorage, MamStorage, OccupantIdSecret, PubSubStorage, RoomRegistryActor, Session,
+    StanzaDispatcher, StreamManagementState, XmppStateMachine,
+};
+use crate::call_teardown_outbox::CallTeardownOutboxStore;
+use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
+use crate::config::LinkPreviewConfig;
+use crate::dnd_projection::DndProjectionStore;
+use crate::dnd_reader::PepDndReader;
+use crate::ingress::IngressAuthority;
+use crate::notification_activity::NotificationActivityStore;
+use crate::notification_outbox::NotificationOutboxStore;
+use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+use crate::pep_feed_bridge::PepFeedBridge;
+use crate::profile::AvatarLockMap;
+use crate::push_service::DatabasePushServiceStore;
+use crate::room_effect_outbox::drain::RoomEffectCompletion;
+use crate::room_effect_outbox::RoomEffectArmSupervisor;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
+use crate::server::caps_resolution::CapsResolver;
+use crate::server::extension_bot_avatar::BotAvatars;
+use crate::server::extension_host_adapter::BotRoomLocks;
+use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
+use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
+use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+use crate::server::routes::interpret::SmInboundCompletionTracker;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct ActiveCallThread {
@@ -50,9 +79,8 @@ struct ResolverAffiliationSyncCompletion {
 
 #[derive(Debug)]
 struct ResolverAffiliationSyncState {
-    workers:
-        std::collections::HashMap<ResolverAffiliationSyncWorkerKey, ResolverAffiliationSyncSlot>,
-    recent_completions: std::collections::VecDeque<ResolverAffiliationSyncCompletion>,
+    workers: HashMap<ResolverAffiliationSyncWorkerKey, ResolverAffiliationSyncSlot>,
+    recent_completions: VecDeque<ResolverAffiliationSyncCompletion>,
     max_workers: usize,
 }
 
@@ -180,8 +208,8 @@ impl ResolverAffiliationSyncScheduler {
     pub(crate) fn with_capacity(max_workers: usize) -> Self {
         Self {
             state: std::sync::Mutex::new(ResolverAffiliationSyncState {
-                workers: std::collections::HashMap::new(),
-                recent_completions: std::collections::VecDeque::new(),
+                workers: HashMap::new(),
+                recent_completions: VecDeque::new(),
                 max_workers,
             }),
         }
@@ -1143,7 +1171,7 @@ impl RemoteMucMemberships {
         occupant: &FullJid,
         generation_ceiling: u64,
         occupant_session: MembershipGenerationFilter,
-    ) -> std::collections::HashMap<BareJid, waddle_xmpp_core::OccupancySessionGeneration> {
+    ) -> HashMap<BareJid, waddle_xmpp_core::OccupancySessionGeneration> {
         self.entries
             .iter()
             .filter_map(|entry| {
@@ -1408,15 +1436,15 @@ pub struct WebSocketDeps {
     /// stamping site uses the same key.
     pub occupant_id_secret: OccupantIdSecret,
     /// Operator controls for server-side link preview enrichment.
-    pub link_preview: crate::config::LinkPreviewConfig,
+    pub link_preview: LinkPreviewConfig,
     /// Snapshot of `WADDLE_PROVIDER_*_WEBHOOK_*` env vars, built once at
     /// startup; the extension webhook handler reads from this instead of
     /// re-parsing env on every request.
-    pub provider_ingress: Arc<crate::server::routes::extension_webhooks::ProviderIngressRegistry>,
+    pub provider_ingress: Arc<ProviderIngressRegistry>,
     /// Tracker for spawned provider webhook dispatch tasks, drained on
     /// graceful shutdown so in-flight deliveries can finish updating the
     /// ledger before runtime teardown.
-    pub provider_dispatch_tasks: crate::server::routes::extension_webhooks::ProviderDispatchTracker,
+    pub provider_dispatch_tasks: ProviderDispatchTracker,
     /// RFC 7395 §3.8 keepalive knobs (issue #1090), parsed and
     /// validated at startup from `WADDLE_WS_KEEPALIVE_*` env vars.
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
@@ -1466,7 +1494,7 @@ pub struct ProtocolServices {
     /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
     /// Extension bots' manifest avatars, fetched and served in-band.
-    pub(crate) bot_avatars: Arc<crate::server::extension_bot_avatar::BotAvatars>,
+    pub(crate) bot_avatars: Arc<BotAvatars>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
@@ -1488,55 +1516,53 @@ pub struct ProtocolServices {
     /// XEP-0357 push subscription storage.
     pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
     /// First-party XMPP Push Service state and fake provider dispatch.
-    pub push_service: Arc<crate::push_service::DatabasePushServiceStore>,
+    pub push_service: Arc<DatabasePushServiceStore>,
     /// User-server notification candidate/outbox state. This coalesces
     /// committed XMPP state into durable XEP-0357 PubSub publish jobs while
     /// leaving canonical registration state in `push_store`.
-    pub notification_outbox: Arc<crate::notification_outbox::NotificationOutboxStore>,
+    pub notification_outbox: Arc<NotificationOutboxStore>,
     /// Durable convergence queue for failed LiveKit admin teardown and
     /// cross-node Muji-presence cleanup effects.
-    pub call_teardown_outbox: Arc<crate::call_teardown_outbox::CallTeardownOutboxStore>,
+    pub call_teardown_outbox: Arc<CallTeardownOutboxStore>,
     /// Single supervised producer retry path used when a direct atomic Muji
     /// teardown insertion encounters a transient database failure.
-    pub(crate) call_teardown_persistence:
-        crate::call_teardown_outbox::CallTeardownPersistenceSupervisor,
+    pub(crate) call_teardown_persistence: CallTeardownPersistenceSupervisor,
     /// Durable, per-room FIFO mutation-effect queue.  Producers own enqueueing
     /// in their mutation transaction; this shared handle is exclusively the
     /// consumer/janitor and arm-supervisor boundary.
-    pub room_effect_outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    pub room_effect_outbox: Arc<RoomEffectOutboxStore>,
     /// Origin-owned retry path for committed staged config effects.  It has
     /// only the truthful Arm disposition; rollback/supersession deletes rows
     /// transactionally elsewhere.
-    pub room_effect_arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    pub room_effect_arm_supervisor: RoomEffectArmSupervisor,
     /// Async LiveKit admin view of the concrete SFU, retained separately
     /// from the synchronous protocol service for the teardown janitor.
     pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
-    pub notification_settings_projection:
-        Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>,
+    pub notification_settings_projection: Arc<NotificationSettingsProjectionStore>,
     /// Durable derived projection of the user's `urn:waddle:dnd:0` PEP
     /// item (#367). Lookup keys: `owner_bare_jid` → typed
     /// [`waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd`]. Consulted at
     /// T1 push dispatch via [`crate::dnd_reader::PepDndReader`].
-    pub dnd_projection: Arc<crate::dnd_projection::DndProjectionStore>,
+    pub dnd_projection: Arc<DndProjectionStore>,
     /// PEP-backed DND reader plumbed into the T1 push gate
     /// (`notification_outbox`). Reads [`dnd_projection`] + a
     /// `chrono::Utc::now()` clock and resolves the typed
     /// [`crate::notification_outbox::DndState`] used to suppress
     /// candidates with [`crate::notification_outbox::SuppressedReason::WaddleDnd`].
-    pub dnd_reader: Arc<crate::dnd_reader::PepDndReader>,
+    pub dnd_reader: Arc<PepDndReader>,
     /// Durable per-(user, conversation) activity projection backing
     /// the XEP-0513 `<active/>` push filter. Ingested from typed
     /// XEP-0085 chat-state changes, XEP-0490 read-marker advances,
     /// outbound message commits, and XEP-0045 presence events; read
     /// by the T1 push-gate evaluator (`notification_outbox`).
-    pub notification_activity: Arc<crate::notification_activity::NotificationActivityStore>,
+    pub notification_activity: Arc<NotificationActivityStore>,
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
     /// Durable ingress authority for message commits and SM handled-frontier writes.
-    pub ingress: Arc<crate::ingress::IngressAuthority>,
+    pub ingress: Arc<IngressAuthority>,
     /// Bounded admission for deferred link-preview resolver fetches
     /// (#1470). Serial frame dispatch used to throttle lookups to one in
     /// flight per connection as a side effect of blocking; once resolution
@@ -1550,7 +1576,7 @@ pub struct ProtocolServices {
     /// XEP-0115 entity-capabilities resolver. Maintains the
     /// process-wide hash-keyed `CapsCache` plus per-resource caps
     /// mappings used by XEP-0163 §3 fan-out filtering.
-    pub caps_resolver: Arc<crate::server::caps_resolution::CapsResolver>,
+    pub caps_resolver: Arc<CapsResolver>,
     /// Per-(BareJid) mutex set guarding the `user_avatar_source`
     /// read-then-publish critical section. Both the OIDC publish
     /// chain (`profile::publish::ensure_pep_profile_published`) and
@@ -1563,7 +1589,7 @@ pub struct ProtocolServices {
     /// Entries are evicted by `AvatarLockGuard::drop` when no
     /// acquirer is in flight, so the map stays bounded by current
     /// contention rather than growing to the lifetime user set.
-    pub avatar_source_locks: Arc<crate::profile::AvatarLockMap>,
+    pub avatar_source_locks: Arc<AvatarLockMap>,
     /// Tracker for the OIDC → PEP profile-publish background tasks.
     /// The auth callback registers each `tokio::spawn` here so the
     /// graceful-shutdown drain can `wait()` on in-flight publishes
@@ -1576,7 +1602,7 @@ pub struct ProtocolServices {
     /// a typed feed entry on `community.<domain>` so the community
     /// Feed pane surfaces user activity automatically. Holds per-
     /// (user, kind) throttle state.
-    pub pep_feed_bridge: Arc<crate::pep_feed_bridge::PepFeedBridge>,
+    pub pep_feed_bridge: Arc<PepFeedBridge>,
     /// Active MUC call-thread anchors keyed by room bare JID. The room
     /// anchor message records a XEP-0359 origin-id so the SFU webhook path
     /// can later fasten a historical `<call-thread-ended/>` record to that
@@ -1592,7 +1618,7 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
-    pub extension_bot_rooms: crate::server::extension_host_adapter::BotRoomLocks,
+    pub extension_bot_rooms: BotRoomLocks,
     /// Local departures retained until the owning room actor can project them.
     pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
     /// At most one detached resolver-affiliation repair per room/member pair.
@@ -1712,15 +1738,12 @@ pub(super) struct WsConnState {
     pub(super) sm_state: StreamManagementState,
     /// Exact claim acquired by this connection; registry demotion must never erase its ingress identity.
     pub(super) sm_ingress_fence: Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
-    pub(super) sm_inbound_completion: crate::server::routes::interpret::SmInboundCompletionTracker,
+    pub(super) sm_inbound_completion: SmInboundCompletionTracker,
     /// Set only after a selected stanza's reserved SM slot has been settled
     /// as unhandled because its serving generation was revoked.
     pub(super) inbound_frame_terminal: Option<InboundFrameTerminal>,
-    pub(super) ordered_relay_handoff_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<
-            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-        >,
-    >,
+    pub(super) ordered_relay_handoff_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
     /// Per-connection XEP-0280 opt-in state. Updated when this resource
     /// sends `<enable/>` / `<disable/>` and restored from detached SM state
     /// on resume so re-registration preserves carbons behavior.
@@ -1788,7 +1811,7 @@ pub(super) struct WsConnState {
     /// may only consume acks out of order; everything else must reach
     /// the main frame dispatcher in arrival order, so the connection
     /// loop processes this queue before polling the socket again.
-    pub(super) deferred_inbound: std::collections::VecDeque<axum::extract::ws::Utf8Bytes>,
+    pub(super) deferred_inbound: VecDeque<axum::extract::ws::Utf8Bytes>,
     /// The send-window pause ran out of reserved inbound headroom before it
     /// could read a recovering XEP-0198 ack.  Cleanup must promote the
     /// already-recorded queue rather than detach a resumable snapshot: the
@@ -1807,8 +1830,7 @@ pub(super) struct WsConnState {
     /// Room-effect completions for responses recorded only into in-memory
     /// replay after transport loss. They settle only once cleanup proves a
     /// detached replay owner exists; `NotPersisted` leaves them leased.
-    pub(super) pending_replay_completions:
-        Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    pub(super) pending_replay_completions: Vec<RoomEffectCompletion>,
     /// Countable stanzas dropped because terminal recovery hit
     /// [`TERMINAL_RECOVERY_QUEUE_CAP`]. Logged at most once per connection.
     pub(super) terminal_sm_recovery_dropped: usize,
@@ -1878,8 +1900,7 @@ impl WsConnState {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             sm_state,
             sm_ingress_fence: None,
-            sm_inbound_completion:
-                crate::server::routes::interpret::SmInboundCompletionTracker::default(),
+            sm_inbound_completion: SmInboundCompletionTracker::default(),
             inbound_frame_terminal: None,
             ordered_relay_handoff_tx: None,
             carbons_enabled: false,
@@ -1905,7 +1926,7 @@ impl WsConnState {
             live_resume_control,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
-            deferred_inbound: std::collections::VecDeque::new(),
+            deferred_inbound: VecDeque::new(),
             sm_recovery_required: false,
             terminal_sm_recovery: StreamManagementState::new(),
             pending_replay_completions: Vec::new(),

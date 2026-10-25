@@ -630,7 +630,7 @@ describe("ResumeStateStore", () => {
     const store = new ResumeStateStore(persistence);
 
     const captured = store.captureFromDisconnect(
-      { get_resume_state: () => ({ previd: "p2", inboundH: 1, outboundH: 2 }) },
+      { resume_state: () => ({ previd: "p2", inboundH: 1, outboundH: 2 }) },
       "web-xyz",
     );
 
@@ -644,7 +644,7 @@ describe("ResumeStateStore", () => {
     const { persistence, calls } = createRecordingPersistence();
     const store = new ResumeStateStore(persistence);
     store.captureFromDisconnect(
-      { get_resume_state: () => ({ previd: "p3", inboundH: 0, outboundH: 0 }) },
+      { resume_state: () => ({ previd: "p3", inboundH: 0, outboundH: 0 }) },
       "web-r",
     );
 

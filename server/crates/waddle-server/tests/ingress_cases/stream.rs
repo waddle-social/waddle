@@ -1,14 +1,13 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, CanonicalMessageRepository, IngressDecisionClass,
+    IngressEffectIntent, IngressFixture, MessageEnvelope,
+};
 
 async fn resumable_wire_binding(fixture: IngressFixture) {
-    use waddle_server::{
-        ingress::IngressStreamIdentity,
-        ingress_uow::{SmIngressRepository, SmIngressStreamRepository},
-    };
-    use waddle_xmpp::{
-        ingress::{IngressOrdinal, WireHandledCount},
-        pending_delivery::SmSessionId,
-    };
+    use waddle_server::ingress::IngressStreamIdentity;
+    use waddle_server::ingress_uow::{SmIngressRepository, SmIngressStreamRepository};
+    use waddle_xmpp::ingress::{IngressOrdinal, WireHandledCount};
+    use waddle_xmpp::pending_delivery::SmSessionId;
     let stream_id = SmSessionId::new("authority-wire-stream");
     let mut tx = fixture.uow.begin().await.expect("enroll stream");
     let sm_ingress_id = SmIngressStreamRepository::mint(&mut tx, &stream_id)
@@ -145,15 +144,11 @@ async fn ingress_wire_binding_postgres() {
 }
 
 async fn committed_rejection_wire_replay(fixture: IngressFixture) {
-    use waddle_server::{
-        ingress::IngressStreamIdentity,
-        ingress_uow::{EffectIntentRepository, SmIngressStreamRepository},
-    };
-    use waddle_xmpp::{
-        ingress::{FrozenStanzaError, IngressOrdinal, WireHandledCount},
-        pending_delivery::SmSessionId,
-        Stanza,
-    };
+    use waddle_server::ingress::IngressStreamIdentity;
+    use waddle_server::ingress_uow::{EffectIntentRepository, SmIngressStreamRepository};
+    use waddle_xmpp::ingress::{FrozenStanzaError, IngressOrdinal, WireHandledCount};
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::Stanza;
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let stream_id = SmSessionId::new("rejection-wire-stream");
     let mut tx = fixture.uow.begin().await.expect("enroll rejection stream");
@@ -269,14 +264,10 @@ async fn ingress_committed_rejection_wire_replay_postgres() {
 }
 
 async fn ordinal_collision_rolls_back(fixture: IngressFixture) {
-    use waddle_server::{
-        ingress::IngressStreamIdentity,
-        ingress_uow::{SmIngressRepository, SmIngressStreamRepository},
-    };
-    use waddle_xmpp::{
-        ingress::{IngressOrdinal, MessageKey, WireHandledCount},
-        pending_delivery::SmSessionId,
-    };
+    use waddle_server::ingress::IngressStreamIdentity;
+    use waddle_server::ingress_uow::{SmIngressRepository, SmIngressStreamRepository};
+    use waddle_xmpp::ingress::{IngressOrdinal, MessageKey, WireHandledCount};
+    use waddle_xmpp::pending_delivery::SmSessionId;
     let stream_id = SmSessionId::new("ordinal-conflict-stream");
     let previous = fixture.submission(None, "previous position");
     let key = MessageKey::new();

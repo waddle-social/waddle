@@ -71,7 +71,8 @@ pub fn compute_photo_hash(data: &[u8]) -> String {
 ///
 /// Returns None if the base64 data is invalid.
 pub fn compute_photo_hash_from_base64(base64_data: &str) -> Option<String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     let data = STANDARD.decode(base64_data).ok()?;
     Some(compute_photo_hash(&data))
 }
@@ -134,7 +135,8 @@ mod tests {
 
     #[test]
     fn test_compute_photo_hash_from_base64() {
-        use base64::{engine::general_purpose::STANDARD, Engine};
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
         let data = b"test photo data";
         let encoded = STANDARD.encode(data);
         let hash = compute_photo_hash_from_base64(&encoded);

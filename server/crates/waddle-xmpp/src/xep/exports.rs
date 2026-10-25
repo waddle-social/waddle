@@ -380,7 +380,7 @@ pub use super::xep0492::{
 };
 
 pub use super::xep0469::{
-    build_pinned_element, get_pin_state, is_bookmark_pinned, is_pinned_element, pin_bookmark,
+    build_pinned_element, is_bookmark_pinned, is_pinned_element, pin_bookmark, pin_state,
     set_pin_state, sort_bookmarks_pinned_first, unpin_bookmark, PinState, Pinnable,
     NS_BOOKMARKS_PINNING,
 };

@@ -1,4 +1,12 @@
-use super::*;
+//! Browser methods for room presence, avatars, and HTTP upload service discovery.
+
+use super::{
+    build_disco_info_iq, build_disco_items_iq, build_pin_list_iq, build_upload_slot_iq, discovery,
+    future_to_promise, jid_domain, js_error, parse_pin_list_response,
+    request_avatar_with_iq_skipping, send_avatar_iq_command, send_iq_command, send_stanza_command,
+    to_js_value, upload_slot_to_js, wasm_bindgen, BareJid, Element, JsValue, Promise, WaddleAvatar,
+    WaddleAvatarFetch, WaddleClient, WaddlePinEntry, NS_CLIENT,
+};
 
 /// In-call presence sub-state flags (`urn:waddle:in-call:0`) the chat
 /// passes to [`WaddleClient::update_muji_presence`] as a plain JS object
@@ -9,7 +17,9 @@ use super::*;
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InCallPresenceFlags {
+    /// Advertise that the participant has raised their hand in the call.
     pub hand_raised: bool,
+    /// Advertise that the participant has muted their call microphone.
     pub muted: bool,
 }
 
@@ -52,7 +62,7 @@ fn resolve_in_call_flags(
 }
 
 /// Best-effort parse of the `in_call` FFI argument into
-/// [`InCallPresenceFlags`]. This NEVER fails: presence sends — and in
+/// `InCallPresenceFlags`. This NEVER fails: presence sends — and in
 /// particular the call-teardown leave marker that clears `<muji/>` for
 /// remote occupants — must not be blocked by a malformed or stale
 /// `in_call` value. Each non-object shape degrades to a sensible flag set
@@ -116,6 +126,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send unavailable presence to `room_jid/nick` and leave the room.
     pub fn leave_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -141,7 +152,7 @@ impl WaddleClient {
     ///   first, awaits the room's echo, then re-emits with contents
     ///   declared.
     /// - `in_call`: a plain JS object `{ handRaised, muted }`
-    ///   ([`InCallPresenceFlags`]) appended as an `<in-call
+    ///   (`InCallPresenceFlags`) appended as an `<in-call
     ///   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
     ///   `<muji/>` (#1029 raised hand / #1030 mute), one marker child per
     ///   set flag. This is the FFI in-call "set method": the caller
@@ -182,16 +193,20 @@ impl WaddleClient {
                 // re-spelling element/attr names + media tokens at the
                 // wasm boundary.
                 let muji = waddle_xmpp_client::messaging::build_muji_element(
-                    preparing,
-                    active, // audio is implied by "active in a call"
-                    active && video,
+                    waddle_xmpp_client::messaging::MujiElementOptions {
+                        preparing,
+                        audio: active,
+                        video: active && video,
+                    },
                 );
                 builder = builder.append(muji);
                 if in_call.hand_raised || in_call.muted {
                     builder = builder.append(
                         waddle_xmpp_client::messaging::build_in_call_presence_state_element(
-                            in_call.hand_raised,
-                            in_call.muted,
+                            waddle_xmpp_client::messaging::InCallPresenceMarkers {
+                                hand_raised: in_call.hand_raised,
+                                muted: in_call.muted,
+                            },
                         ),
                     );
                 }
@@ -243,7 +258,7 @@ impl WaddleClient {
                 .map_err(|err| js_error(format!("invalid JID: {err}")))?;
             let known_ids: Vec<_> = known_ids
                 .into_iter()
-                .filter_map(waddle_xmpp_client::AvatarItemId::new)
+                .filter_map(waddle_xmpp_client::AvatarItemId::try_new)
                 .collect();
             let fetch = request_avatar_with_iq_skipping(&bare, &known_ids, |stanza| {
                 let inner = inner.clone();
@@ -266,6 +281,8 @@ impl WaddleClient {
         })
     }
 
+    /// Discover an HTTP upload service on the account domain; resolves to its JID or
+    /// `null` when none is advertised.
     pub fn discover_upload_service(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -292,6 +309,8 @@ impl WaddleClient {
         })
     }
 
+    /// Allocate an HTTP upload slot for a filename, byte size, and MIME type; resolves to
+    /// `WaddleUploadSlot`.
     pub fn request_upload_slot(
         &self,
         service_jid: String,

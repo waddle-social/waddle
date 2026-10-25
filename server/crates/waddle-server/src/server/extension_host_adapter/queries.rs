@@ -2,14 +2,16 @@ use jid::BareJid;
 use tracing::warn;
 use waddle_xmpp::roster::{RosterItem, Subscription};
 
-use crate::{
-    db::blocking::DatabaseBlockingStorage,
-    permissions::{Object, ObjectType, Permission},
-};
+use crate::db::blocking::DatabaseBlockingStorage;
+use crate::permissions::{Object, ObjectType, Permission};
 
+use super::conversions::{
+    host_muc_affiliation, host_muc_role, host_presence_show, host_presence_show_str,
+    host_roster_item, occupant_jid,
+};
 use super::{
-    conversions::*, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
-    HostChannel, HostMucMember, HostPresence, HostPresenceShow, HostRosterItem, HostSpace,
+    ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation, HostChannel,
+    HostMucMember, HostPresence, HostPresenceShow, HostRosterItem, HostSpace,
 };
 
 impl ExtensionHostAdapter {
@@ -154,8 +156,8 @@ impl ExtensionHostAdapter {
 
         let registry = &self.state.deps.protocol.connection_registry;
         let mut out = Vec::new();
-        for (jid, priority) in registry.get_available_resources_for_user(target) {
-            let state = registry.get_presence_state(&jid);
+        for (jid, priority) in registry.available_resources_for_user(target) {
+            let state = registry.presence_state(&jid);
             out.push(HostPresence {
                 jid,
                 show: state

@@ -1,5 +1,10 @@
-use super::*;
+use super::{
+    chat_msg, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
+    pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps,
+    InboxStorage, IngressEffectIntent, MamStorage, OutboundEvent, Stanza,
+};
 use crate::ingress::IngressEffectCapture;
+use kameo::actor::Spawn;
 
 // Live full-JID messages prepare recipient effects before enqueue.
 #[tokio::test]

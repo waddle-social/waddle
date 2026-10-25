@@ -1,5 +1,6 @@
 package social.waddle.android.client
 
+import social.waddle.client.ffi.WaddleGroupDmHistoryAccess
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -32,8 +33,8 @@ class FakeGroupDmState {
     @Volatile
     var leaveFailure: Throwable? = null
 
-    /** Recorded (roomJid, inviteeJid, fullHistory) invites. */
-    val inviteCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+    /** Recorded (roomJid, inviteeJid, history access) invites. */
+    val inviteCalls = CopyOnWriteArrayList<Triple<String, String, WaddleGroupDmHistoryAccess>>()
 
     @Volatile
     var inviteFailure: Throwable? = null
@@ -54,8 +55,8 @@ class FakeGroupDmState {
         leaveFailure?.let { throw it }
     }
 
-    fun inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Boolean) {
-        inviteCalls += Triple(roomJid, inviteeJid, fullHistory)
+    fun inviteToGroupDm(roomJid: String, inviteeJid: String, history: WaddleGroupDmHistoryAccess) {
+        inviteCalls += Triple(roomJid, inviteeJid, history)
         inviteFailure?.let { throw it }
     }
 }

@@ -32,14 +32,14 @@ impl ObservationDeliveryCapability {
 fn unavailable() -> HostToolError {
     HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new("observation delivery authority is unavailable")
+        message: DisplayText::try_new("observation delivery authority is unavailable")
             .expect("static error"),
     }
 }
 
 fn denied() -> HostToolError {
     HostToolError::denied(
-        DisplayText::new("observation delivery authority is no longer current")
+        DisplayText::try_new("observation delivery authority is no longer current")
             .expect("static denial"),
     )
 }
@@ -122,9 +122,9 @@ mod tests {
         let room = "room@conference.example.org".parse().expect("room");
         let sender: jid::BareJid = "author@example.org".parse().expect("sender");
         let observer = ConfiguredRoomObserver {
-            plugin: PluginId::new("capability-fixture").expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("a".repeat(64)).expect("identity"),
+            plugin: PluginId::try_new("capability-fixture").expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("a".repeat(64)).expect("identity"),
             scope: RoomObservationScope::Rooms(vec![room]),
             max_concurrent: 1,
         };
@@ -200,7 +200,7 @@ mod tests {
         );
         tx.commit().await.expect("start commit");
         let context = InvocationContext {
-            waddle_id: WaddleId::new("room-observation").expect("context"),
+            waddle_id: WaddleId::try_new("room-observation").expect("context"),
             plugin_id: subscription.plugin,
             requester: None,
             source_room: Some(subscription.room),
@@ -216,7 +216,7 @@ mod tests {
         let capability = ObservationDeliveryCapability::new(&state, &work);
         assert!(capability.validate(&context, &work.source).await.is_ok());
         let mut wrong = context.clone();
-        wrong.plugin_id = PluginId::new("different-plugin").expect("plugin");
+        wrong.plugin_id = PluginId::try_new("different-plugin").expect("plugin");
         assert!(capability.validate(&wrong, &work.source).await.is_err());
         let mut source = work.source.clone();
         source.revision = waddle_extensions::MessageRevision::new(1);

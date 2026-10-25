@@ -1,5 +1,14 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
-use super::super::*;
+use super::super::{
+    apply_remote_resource_presence_to_registry, apply_remote_resource_state, mpsc, Arc, AtomicBool,
+    ConnectionEntry, Mutex, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    RegisterUserResourceIfOwnerOrAbsent, RelayRegisterRemoteUserResource,
+    RelayRemoteResourceRegistrationReply, RelayRemoteResourceRegistrationStatus,
+    RelayRemoteResourceUnregisterReply, RelayRemoteResourceUnregisterStatus,
+    RelayUnregisterRemoteUserResource, RemoteOwnerRegistration,
+    MAX_REMOTE_OWNER_REGISTRATION_LOCKS, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+    REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT, REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE,
+};
 use super::owner_update::remote_owner_registration_is_current;
 
 pub(in super::super) use super::owner_update::owner_remote_entry_if_current;
@@ -761,11 +770,20 @@ mod tests {
     use crate::clustering::route_bridge::tests::{
         origin_identity, receiver_identity, services_with_claims, test_peer_id,
     };
+    use crate::clustering::route_bridge::{
+        remote_registration_request, RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
+        RemoteResourceStateSnapshot,
+    };
+    use crate::clustering::trace_context::RelayTraceContext;
+    use crate::clustering::NodeId;
+    use crate::config::ClusteringMessagingConfig;
+    use std::sync::atomic::Ordering;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
     use waddle_xmpp::ownership::{
         ClaimEpoch, ClaimError, InProcessClaimStore, ResumeIdentityProof, StalePredicate,
     };
+    use waddle_xmpp::ownership::{ClaimSnapshot, ClaimStore, Entity, NodeIdentity};
 
     struct PausedFirstAcquire {
         inner: InProcessClaimStore,
@@ -1193,7 +1211,7 @@ mod tests {
             .get()
             .expect("services")
             .connection_registry
-            .get_entry(&old.jid)
+            .entry(&old.jid)
             .is_none());
         assert_eq!(
             bridge
@@ -1363,7 +1381,7 @@ mod tests {
             );
         } else {
             assert!(
-                services.connection_registry.get_entry(&old.jid).is_none(),
+                services.connection_registry.entry(&old.jid).is_none(),
                 "revoked generation must not publish a route after its actor ask completes"
             );
         }

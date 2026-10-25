@@ -1,9 +1,36 @@
 //! The observer-retention phase rides passes on its own interval (#1901).
 
 use super::{run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor};
-use crate::{ingress::gc::RetentionGcBudget, ingress::test_support::IngressFixture};
+use crate::ingress::gc::RetentionGcBudget;
+use crate::ingress::test_support::IngressFixture;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 use uuid::Uuid;
+
+#[tokio::test]
+async fn observer_retention_runs_after_a_schedule_writer_panics() {
+    let fixture = IngressFixture::sqlite().await;
+    let cursor = MaintenanceCursor::default();
+    insert_expired_work(&fixture, 1).await;
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _schedule = cursor.observer_retention_due_at.write();
+        panic!("observer schedule writer failed");
+    }));
+    assert!(panic.is_err());
+    assert!(cursor.observer_retention_due());
+
+    run_maintenance_pass_with_cursor(
+        &fixture.db,
+        &fixture.uow,
+        MaintenanceBudget::DEFAULT,
+        &cursor,
+        None,
+    )
+    .await;
+    assert_eq!(fixture.count("extension_room_observation_work").await, 0);
+    assert!(!cursor.observer_retention_due());
+    fixture.close().await;
+}
 
 /// Completed work settled at the epoch, with no canonical row: collectable.
 async fn insert_expired_work(fixture: &IngressFixture, count: usize) {

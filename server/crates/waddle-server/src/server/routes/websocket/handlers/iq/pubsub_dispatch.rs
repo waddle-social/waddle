@@ -1,5 +1,13 @@
 use super::pubsub_admin::handle_pubsub_admin_request;
-use super::*;
+use super::{
+    build_iq_error_xml_typed, build_pubsub_error, build_pubsub_items_result,
+    build_pubsub_publish_result, build_pubsub_success, debug, handle_community_items,
+    handle_community_publish, handle_community_retract, handle_extension_route_items,
+    handle_spaces_items, handle_spaces_publish, handle_spaces_retract, iq_to_xml,
+    is_pep_self_or_to, is_pubsub_iq, not_authorized_iq_error, parse_pubsub_iq, warn, BareJid,
+    ConnectionPhase, Element, IqHandlerContext, Jid, PubSubError, PubSubItemsRead, PubSubRequest,
+    Session, WebSocketState,
+};
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
@@ -7,7 +15,7 @@ pub(super) async fn handle_pubsub_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
 ) -> Vec<String> {
     let iq = ctx.iq;
     let id = ctx.id;
@@ -69,9 +77,7 @@ pub(super) async fn handle_pubsub_iq(
                         spaces_domain,
                         &node,
                         item,
-                        authenticated_session
-                            .as_ref()
-                            .map(ResolvedPrincipal::from_authenticated_session),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -82,9 +88,7 @@ pub(super) async fn handle_pubsub_iq(
                         community_domain,
                         &node,
                         item,
-                        authenticated_session
-                            .as_ref()
-                            .map(ResolvedPrincipal::from_authenticated_session),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -301,9 +305,7 @@ pub(super) async fn handle_pubsub_iq(
                         iq,
                         state,
                         muc_domain,
-                        authenticated_session
-                            .as_ref()
-                            .map(ResolvedPrincipal::from_authenticated_session),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                         request,
                     )
                     .await;
@@ -452,9 +454,7 @@ pub(super) async fn handle_pubsub_iq(
                         spaces_domain,
                         &node,
                         &item_id,
-                        authenticated_session
-                            .as_ref()
-                            .map(ResolvedPrincipal::from_authenticated_session),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }
@@ -466,9 +466,7 @@ pub(super) async fn handle_pubsub_iq(
                         community_domain,
                         &node,
                         &item_id,
-                        authenticated_session
-                            .as_ref()
-                            .map(ResolvedPrincipal::from_authenticated_session),
+                        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     )
                     .await;
                 }

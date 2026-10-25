@@ -1,19 +1,16 @@
 mod ingress_support;
 
 use ingress_support::IngressFixture;
-use waddle_server::{
-    ingress::{
-        commit::commit_submission,
-        effects::{direct::DurableDirectEffect, Effect},
-        DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
-    },
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::CanonicalMessageRepository,
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::direct::DurableDirectEffect;
+use waddle_server::ingress::effects::Effect;
+use waddle_server::ingress::{
+    DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    mam::{ArchiveExpectation, ArchivedMessage},
-};
+use waddle_server::ingress_substrate::MessageEnvelope;
+use waddle_server::ingress_uow::CanonicalMessageRepository;
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 fn archive_plan(

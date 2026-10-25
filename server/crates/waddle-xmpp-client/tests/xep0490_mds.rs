@@ -2,15 +2,12 @@
 
 use jid::{BareJid, Jid};
 use minidom::Element;
-use waddle_xmpp_client::{
-    mds::{
-        build_mds_publish_iq, parse_mds_catchup_result, parse_mds_event, MDS_NODE, NS_MDS,
-        NS_STANZA_ID,
-    },
-    messaging::NS_CLIENT,
-    pep::{NS_PUBSUB, NS_PUBSUB_EVENT},
-    StanzaId,
+use waddle_xmpp_client::mds::{
+    build_mds_publish_iq, parse_mds_catchup_result, parse_mds_event, MDS_NODE, NS_MDS, NS_STANZA_ID,
 };
+use waddle_xmpp_client::messaging::NS_CLIENT;
+use waddle_xmpp_client::pep::{NS_PUBSUB, NS_PUBSUB_EVENT};
+use waddle_xmpp_client::StanzaId;
 
 fn jid(value: &str) -> Jid {
     value.parse().expect("test JID parses")
@@ -21,7 +18,7 @@ fn bare_jid(value: &str) -> BareJid {
 }
 
 fn stanza_id(value: &str) -> StanzaId {
-    StanzaId::new(value).expect("test stanza id is non-empty")
+    StanzaId::try_new(value).expect("test stanza id is non-empty")
 }
 
 fn item(namespace: &str, chat_id: &Jid, stanza_id: &StanzaId, by: &BareJid) -> Element {

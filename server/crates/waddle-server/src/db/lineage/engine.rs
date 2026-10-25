@@ -1,14 +1,16 @@
-use crate::{
-    config::LineageConfig,
-    db::{ConnectionGuard, Database, DatabaseDriver, DatabaseError, Row, Rows, Transaction, Value},
+use crate::config::LineageConfig;
+use crate::db::{
+    ConnectionGuard, Database, DatabaseDriver, DatabaseError, Row, Rows, Transaction, Value,
 };
-use sqlx::{postgres::PgPool, sqlite::SqlitePool, Row as SqlxRow};
+use sqlx::postgres::PgPool;
+use sqlx::sqlite::SqlitePool;
+use sqlx::Row as SqlxRow;
 
+use super::sql::{
+    lineage_table_sql, LINEAGE_COLUMNS, LINEAGE_FORMAT, READ_POSTGRES_LIVE_IDENTITY_SQL,
+    READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, READ_ROW_SQL,
+};
 use super::{
-    sql::{
-        lineage_table_sql, LINEAGE_COLUMNS, LINEAGE_FORMAT, READ_POSTGRES_LIVE_IDENTITY_SQL,
-        READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, READ_ROW_SQL,
-    },
     DeploymentUuid, LineageError, LineageRecord, LineageUuid, PgDatabaseIdentity, PgIdentity,
     PgSchemaIdentity,
 };
@@ -758,7 +760,7 @@ async fn update_record(
     Ok(())
 }
 
-fn record_values(record: &LineageRecord) -> Vec<crate::db::Value> {
+fn record_values(record: &LineageRecord) -> Vec<Value> {
     let identity = record.postgres_identity.as_ref();
     crate::db_params![
         record.format,

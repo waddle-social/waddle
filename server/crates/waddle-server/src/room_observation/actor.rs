@@ -1,16 +1,16 @@
 //! A responsive actor loop with bounded workers and round-robin room admission.
 use super::{subscription, ObservationRuntimeError};
-use crate::{ingress_uow::RoomObservationRepository, server::routes::websocket::WebSocketState};
+use crate::ingress_uow::IngressUowError;
+use crate::ingress_uow::IngressUowTransaction;
+use crate::ingress_uow::ObservationWork;
+use crate::ingress_uow::RoomObservationRepository;
+use crate::server::routes::websocket::WebSocketState;
 use jid::BareJid;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Weak},
-    time::Duration,
-};
-use tokio::{
-    sync::{mpsc, Semaphore},
-    task::JoinSet,
-};
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use waddle_extensions::{ConfiguredRoomObserver, RoomObservationSubscription};
 use waddle_xmpp::muc::room_registry_actor::GetOrRestoreDurableRoom;
@@ -174,7 +174,7 @@ async fn process_room(
 
 pub(super) async fn persist_outcome(
     state: &WebSocketState,
-    work: &crate::ingress_uow::ObservationWork,
+    work: &ObservationWork,
     outcome: &waddle_extensions::RoomObservationOutcome,
 ) -> Result<bool, ObservationRuntimeError> {
     crate::ingress_uow::run_with_retry(5, || async {
@@ -198,11 +198,10 @@ pub(super) async fn persist_outcome(
 /// Cancellation on either side of this await leaves safe durable evidence:
 /// a reclaimable reservation before commit, a bounded unresolved start afterwards.
 async fn invoke_after_commit(
-    tx: crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: IngressUowTransaction<'_>,
     may_invoke: bool,
     invoke: impl AsyncFnOnce() -> waddle_extensions::RoomObservationOutcome,
-) -> Result<Option<waddle_extensions::RoomObservationOutcome>, crate::ingress_uow::IngressUowError>
-{
+) -> Result<Option<waddle_extensions::RoomObservationOutcome>, IngressUowError> {
     tx.commit().await?;
     if !may_invoke {
         return Ok(None);

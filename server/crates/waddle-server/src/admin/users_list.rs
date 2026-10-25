@@ -114,7 +114,7 @@ async fn handle(
     xmpp_domain: String,
 ) -> CommandResult {
     let caller_bare = bare_from_jid(&ctx.from);
-    if !caller_is_owner(&caller_bare, &app_state).await {
+    if !caller_is_owner(caller_bare.as_ref(), &app_state).await {
         return CommandResult::Error(XmppError::forbidden(Some(
             "Admin commands require the community owner role".to_string(),
         )));
@@ -146,8 +146,8 @@ async fn handle(
     }
 }
 
-async fn caller_is_owner(caller: &Option<BareJid>, app_state: &AppState) -> bool {
-    let Some(jid) = caller.as_ref() else {
+async fn caller_is_owner(caller: Option<&BareJid>, app_state: &AppState) -> bool {
+    let Some(jid) = caller else {
         return false;
     };
     is_community_owner(app_state, jid).await
@@ -171,18 +171,18 @@ pub fn parse_args(form: Option<&DataForm>) -> Result<UsersListArgs, String> {
     if !matches!(form.form_type, FormType::Submit) {
         return Ok(UsersListArgs::default());
     }
-    if form.get_form_type_value() != Some(FORM_TYPE) {
+    if form.form_type_value() != Some(FORM_TYPE) {
         // Foreign / mistyped FORM_TYPE — treat as "no args" rather
         // than rejecting; the client may have stripped a non-essential
         // hidden field.
     }
 
     let prefix = form
-        .get_value("prefix")
+        .value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
 
-    let page_size = match form.get_value("page_size") {
+    let page_size = match form.value("page_size") {
         Some(raw) if !raw.is_empty() => {
             let parsed: u32 = raw
                 .parse()
@@ -193,7 +193,7 @@ pub fn parse_args(form: Option<&DataForm>) -> Result<UsersListArgs, String> {
     };
 
     let after_cursor = form
-        .get_value("after_cursor")
+        .value("after_cursor")
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
@@ -399,7 +399,7 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 3, "jid/display_name/has_owner_hat");
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.get_value("next_cursor"), Some("alice"));
+        assert_eq!(form.value("next_cursor"), Some("alice"));
     }
 
     #[test]

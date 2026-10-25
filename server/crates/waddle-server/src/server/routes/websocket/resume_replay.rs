@@ -24,7 +24,7 @@ pub(super) fn replay_frames(
     server_domain: &str,
 ) -> Vec<ResponseFrame> {
     sm_state
-        .get_stanzas_to_resend(client_h)
+        .stanzas_to_resend(client_h)
         .into_iter()
         .map(|entry| {
             ResponseFrame::from_serialized_xml(stamp_replay_delay(

@@ -50,11 +50,10 @@
 use async_trait::async_trait;
 use jid::{BareJid, Jid};
 use minidom::Element;
+use std::collections::HashMap;
 use tracing::debug;
-use xmpp_parsers::{
-    iq::Iq,
-    stanza_error::{DefinedCondition, ErrorType, StanzaError},
-};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 /// Namespace for XEP-0191 Blocking Command.
 pub const NS_BLOCKING: &str = "urn:xmpp:blocking";
@@ -137,7 +136,7 @@ pub trait BlockingStorage: Send + Sync {
 /// fixture that wants to seed a blocklist without a real database.
 #[derive(Debug, Default)]
 pub struct InMemoryBlockingStorage {
-    per_user: std::sync::Mutex<std::collections::HashMap<BareJid, Vec<Jid>>>,
+    per_user: std::sync::Mutex<HashMap<BareJid, Vec<Jid>>>,
 }
 
 impl InMemoryBlockingStorage {

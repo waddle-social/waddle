@@ -13,7 +13,7 @@ pub(super) fn observation_body(message: &Message, wire_body: &str) -> Option<Dis
         Some(range) => strip_fallback_ranges(wire_body, &[range]),
         None => wire_body.to_owned(),
     };
-    DisplayText::new(body).ok()
+    DisplayText::try_new(body).ok()
 }
 
 fn supported_reply_range(message: &Message, body_len: usize) -> Option<FallbackRange> {

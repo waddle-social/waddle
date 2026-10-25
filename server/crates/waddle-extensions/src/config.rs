@@ -1,3 +1,5 @@
+//! Extension module configuration, permissions, and runtime resource limits.
+
 use std::collections::BTreeMap;
 
 use oci_client::Reference;
@@ -6,14 +8,18 @@ use serde_json::Value;
 
 use crate::types::ExtensionCapability;
 
+/// Operator configuration for one local or digest-pinned extension component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionModuleConfig {
+    /// Operator-assigned module name used for diagnostics and cache isolation.
     pub name: String,
     /// Explicit opt-in to durable room observation; omission subscribes to no rooms.
     #[serde(default, alias = "roomObservation")]
     pub room_observation: Option<RoomObservationConfig>,
+    /// Execution and network limits applied to each invocation of this module.
     #[serde(default, alias = "runtimeLimits")]
     pub runtime_limits: RuntimeLimits,
+    /// OCI repository locator used with the separately configured immutable digest.
     #[serde(default)]
     pub registry: String,
     /// Immutable OCI artifact digest for the extension WASM component.
@@ -26,8 +32,10 @@ pub struct ExtensionModuleConfig {
     /// name a component without publishing it. Non-local modules reject tags.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Payload namespace expected from this component and eligible for discovery advertisement.
     #[serde(default)]
     pub namespace: String,
+    /// Guest configuration passed to initialization and runtime configuration access.
     #[serde(default)]
     pub config: Value,
     /// Host/operator-granted capabilities for this module. The runtime grants
@@ -55,11 +63,15 @@ pub struct ExtensionModuleConfig {
     pub local_path: Option<String>,
 }
 
+/// Enabled state, artifact cache, and component modules loaded at host startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionConfig {
+    /// Whether the feature or operation is enabled.
     pub enabled: bool,
+    /// Filesystem directory in which downloaded Wasm components are cached.
     #[serde(alias = "cacheDir")]
     pub cache_dir: String,
+    /// Ordered module configurations resolved and initialized at host startup.
     #[serde(default)]
     pub modules: Vec<ExtensionModuleConfig>,
 }
@@ -78,6 +90,11 @@ impl ExtensionConfig {
     /// Load extension configuration from `WADDLE_EXTENSIONS_JSON`.
     ///
     /// If the variable is missing or blank, falls back to `Default`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error for malformed JSON or any invalid cache directory or
+    /// module configuration.
     pub fn from_env() -> Result<Self, String> {
         let Some(raw) = std::env::var("WADDLE_EXTENSIONS_JSON")
             .ok()
@@ -93,6 +110,12 @@ impl ExtensionConfig {
         Ok(config)
     }
 
+    /// Validate the cache directory and every configured module.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error when the cache directory is blank or a module fails
+    /// its own configuration validation.
     pub fn validate(&self) -> Result<(), String> {
         if self.cache_dir.trim().is_empty() {
             return Err("extension cacheDir must not be empty".to_string());
@@ -105,6 +128,13 @@ impl ExtensionConfig {
 }
 
 impl ExtensionModuleConfig {
+    /// Validate execution limits, observation settings, and local or digest-pinned
+    /// artifact configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error for an empty module name or local path, invalid
+    /// runtime/observation limits, or an invalid digest-pinned OCI configuration.
     pub fn validate(&self) -> Result<(), String> {
         self.runtime_limits.validate()?;
         if let Some(observation) = &self.room_observation {
@@ -170,6 +200,13 @@ impl ExtensionModuleConfig {
         Ok((&self.registry, digest))
     }
 
+    /// Borrow the configured immutable artifact digest after validating its SHA-256
+    /// prefix and hexadecimal length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error if the digest is missing or is not `sha256:` followed
+    /// by exactly 64 ASCII hexadecimal characters.
     pub fn required_digest(&self) -> Result<&str, String> {
         let digest = self.digest.as_deref().ok_or_else(|| {
             format!(

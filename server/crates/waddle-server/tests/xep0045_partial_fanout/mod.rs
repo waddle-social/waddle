@@ -2,7 +2,12 @@
 //! occupant's copy. Clustered production retains keyed legacy settlement, so
 //! recovery completes the remote obligation and terminalizes the row.
 
-use super::*;
+use super::{
+    cluster_e2e_serial_lock, free_tcp_port, generate_pool, open_control_db,
+    partial_room_fanout_completes_on_retransmission_after_relay_recovery, register_test_swarm_node,
+    relay_for_live_peer, reset_and_enroll, spawn_cluster_server, swarm, CancellationToken,
+    ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig, Duration,
+};
 
 const CHILD_PROCESS: &str = "WADDLE_TEST_PARTIAL_FANOUT_CHILD";
 const TEST_NAME: &str =

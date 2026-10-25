@@ -4,7 +4,7 @@
 
 use waddle_server::notification_activity::NotificationActivityReader;
 
-use crate::support::*;
+use crate::support::{activity_store, bare};
 
 /// XEP-0085 ingestion: a writer call persists the typed chat
 /// state and is readable via the projection store's reader trait.

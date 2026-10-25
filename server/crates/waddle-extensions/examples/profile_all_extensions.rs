@@ -193,32 +193,32 @@ fn build_provider_webhook(idx: usize) -> ProviderWebhook {
         ProviderDeliveryId, ProviderEventType, ProviderFieldName, ProviderId, WaddleId,
     };
     ProviderWebhook {
-        waddle_id: WaddleId::new("local").unwrap(),
-        provider: ProviderId::new("github").unwrap(),
-        event_type: ProviderEventType::new("issues").unwrap(),
-        delivery_id: ProviderDeliveryId::new(format!("delivery-{idx}")).unwrap(),
+        waddle_id: WaddleId::try_new("local").unwrap(),
+        provider: ProviderId::try_new("github").unwrap(),
+        event_type: ProviderEventType::try_new("issues").unwrap(),
+        delivery_id: ProviderDeliveryId::try_new(format!("delivery-{idx}")).unwrap(),
         payload: ProviderPayload {
             fields: vec![
                 ProviderField {
-                    path: vec![ProviderFieldName::new("action").unwrap()],
-                    value: ProviderFieldValue::Text(ProviderFieldText::new("opened").unwrap()),
+                    path: vec![ProviderFieldName::try_new("action").unwrap()],
+                    value: ProviderFieldValue::Text(ProviderFieldText::try_new("opened").unwrap()),
                 },
                 ProviderField {
                     path: vec![
-                        ProviderFieldName::new("issue").unwrap(),
-                        ProviderFieldName::new("title").unwrap(),
+                        ProviderFieldName::try_new("issue").unwrap(),
+                        ProviderFieldName::try_new("title").unwrap(),
                     ],
                     value: ProviderFieldValue::Text(
-                        ProviderFieldText::new(format!("issue #{idx}: something")).unwrap(),
+                        ProviderFieldText::try_new(format!("issue #{idx}: something")).unwrap(),
                     ),
                 },
                 ProviderField {
                     path: vec![
-                        ProviderFieldName::new("issue").unwrap(),
-                        ProviderFieldName::new("html_url").unwrap(),
+                        ProviderFieldName::try_new("issue").unwrap(),
+                        ProviderFieldName::try_new("html_url").unwrap(),
                     ],
                     value: ProviderFieldValue::Text(
-                        ProviderFieldText::new(format!(
+                        ProviderFieldText::try_new(format!(
                             "https://github.com/waddle-social/waddle/issues/{idx}"
                         ))
                         .unwrap(),
@@ -262,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
         fmt_mb(rss_after_load.saturating_sub(rss_start)),
     );
 
-    let waddle_id = waddle_extensions::WaddleId::new("local").unwrap();
+    let waddle_id = waddle_extensions::WaddleId::try_new("local").unwrap();
     let requester: Option<xmpp_parsers::jid::BareJid> =
         Some("alice@waddle.social".parse().unwrap());
 

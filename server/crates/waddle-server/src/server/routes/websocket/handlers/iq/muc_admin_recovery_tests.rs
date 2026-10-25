@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    reconcile_ambiguous_admin_result, recover_admin_result_after_actor_failure, AdminItem,
+    AdminReconciliationOutcome, Affiliation, ApplyAdminItems, BareJid, FullJid, GetSnapshot,
+};
 use crate::server::routes::websocket::tests::create_test_websocket_state;
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::muc::{RoomCommittedCoordinates, RoomConfig};
@@ -585,18 +588,18 @@ async fn assert_admin_recovery_preserves_final_roster(
         AdminReconciliationOutcome::Inconclusive
     ));
     let restored = successor.ask(GetSnapshot).await.expect("restored snapshot");
-    assert!(restored.room.get_occupant("owner").is_some());
+    assert!(restored.room.occupant("owner").is_some());
     assert_eq!(
-        restored.room.get_occupant("later").is_some(),
+        restored.room.occupant("later").is_some(),
         !commit_admin
             || !affiliation_changes
                 .iter()
                 .any(|affiliation| *affiliation == Affiliation::Outcast
                     || (members_only && *affiliation == Affiliation::None))
     );
-    assert!(restored.room.get_occupant("departed").is_none());
+    assert!(restored.room.occupant("departed").is_none());
     assert_eq!(
-        restored.room.get_affiliation(&later.to_bare()),
+        restored.room.affiliation(&later.to_bare()),
         foreign_affiliation.unwrap_or(if commit_admin {
             new_affiliation
         } else {
@@ -655,7 +658,7 @@ async fn assert_admin_recovery_preserves_final_roster(
         .await
         .expect("current snapshot")
         .room
-        .get_occupant("newest")
+        .occupant("newest")
         .is_some());
 }
 

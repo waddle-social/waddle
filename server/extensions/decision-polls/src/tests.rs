@@ -1,4 +1,5 @@
-use super::*;
+use super::types;
+use super::{manifest, poll_options, PollOption};
 
 #[test]
 fn manifest_declares_decision_poll_commands_as_channel_scoped() {

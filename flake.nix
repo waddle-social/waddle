@@ -522,6 +522,8 @@
               ./server/.config/nextest.toml
               ./server/README.md
               ./server/capabilities.toml
+              ./server/scripts/check-poison-recovery.py
+              ./server/scripts/check-rust-structure.py
               ./server/crates
               ./server/extensions
               ./server/vendor
@@ -697,6 +699,10 @@
               cargoArtifacts = workspaceAllFeaturesArtifacts;
               cargoExtraArgs = "--locked --workspace --all-features";
               cargoClippyExtraArgs = "--all-targets -- -D warnings";
+              preBuild = baseArgs.preBuild + ''
+                ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
+                ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
+              '';
             }
           );
           waddle-server-test = craneLib.cargoNextest (

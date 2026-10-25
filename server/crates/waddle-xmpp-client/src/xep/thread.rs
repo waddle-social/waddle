@@ -22,6 +22,7 @@ pub struct ThreadRef {
 
 /// Build a `<thread/>` element, optionally with a `parent` attribute for
 /// nested threads.
+#[must_use]
 pub fn build_thread_element(thread: &ThreadRef) -> Element {
     let mut builder = Element::builder("thread", NS_CLIENT);
     if let Some(parent) = thread.parent.as_deref() {
@@ -33,6 +34,7 @@ pub fn build_thread_element(thread: &ThreadRef) -> Element {
 /// Parse the `<thread/>` child of a message, if any. Looks first in the
 /// client namespace and then in the empty namespace to handle both WebSocket
 /// and c2s framings.
+#[must_use]
 pub fn parse_thread(message: &Element) -> Option<ThreadRef> {
     let thread_el = message
         .get_child("thread", NS_CLIENT)

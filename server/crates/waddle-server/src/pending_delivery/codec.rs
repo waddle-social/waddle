@@ -1,9 +1,12 @@
-use super::*;
+use super::{
+    BareJid, PendingPayload, PendingRow, PendingRowId, PendingStorageError, SmSessionId, StanzaId,
+};
+use crate::db::Row;
 
 pub(super) const PAYLOAD_KIND_ARCHIVED: &str = "archived";
 pub(super) const PAYLOAD_KIND_TRANSIENT: &str = "transient";
 
-pub(super) fn decode_row(row: &crate::db::Row) -> Result<PendingRow, PendingStorageError> {
+pub(super) fn decode_row(row: &Row) -> Result<PendingRow, PendingStorageError> {
     let row_id: String = row
         .get(0)
         .map_err(|e| PendingStorageError::Other(e.to_string()))?;

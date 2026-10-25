@@ -18,6 +18,8 @@
 //! `waddle-server`) is unchanged by the XEP-0050 cutover — only the
 //! wire shape changes.
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+use crate::client::ClientHandle;
 use std::str::FromStr;
 
 use jid::BareJid;
@@ -56,13 +58,19 @@ pub const REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD: &str = "device-id";
 /// `serde_wasm_bindgen` (JS sends `"web"` / `"apns"` / `"fcm"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PushPlatform {
+    /// Browser Web Push registration.
     Web,
+    /// Apple Push Notification service registration.
     Apns,
+    /// Cloud push registration using FCM device tokens.
     Fcm,
 }
 
 impl PushPlatform {
+    /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Web => "web",
@@ -81,10 +89,13 @@ impl PushPlatform {
 /// verbatim through the WASM boundary; unknown values fail at
 /// deserialization rather than reaching the IQ builder as typos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum PushEnvironment {
     #[serde(rename = "prod")]
+    /// Use the provider's production push endpoint.
     Production,
     #[serde(rename = "sandbox")]
+    /// Use the provider's sandbox push endpoint.
     Sandbox,
 }
 
@@ -95,7 +106,13 @@ pub enum PushEnvironment {
 pub struct PushServiceJid(BareJid);
 
 impl PushServiceJid {
-    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+    /// Validate that a push service address is a bare domain JID without a localpart.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MalformedResultForm` if the trimmed address is empty, is not a
+    /// bare JID, or contains a localpart.
+    pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
             return Err(PushRegistrationError::MalformedResultForm {
@@ -118,6 +135,8 @@ impl PushServiceJid {
         Ok(Self(jid))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -130,7 +149,12 @@ impl PushServiceJid {
 pub struct PushAppId(String);
 
 impl PushAppId {
-    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+    /// Trim an application identifier and reject an empty result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MalformedResultForm` if the identifier is empty after trimming.
+    pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
             return Err(PushRegistrationError::MalformedResultForm {
@@ -140,6 +164,8 @@ impl PushAppId {
         Ok(Self(value.to_string()))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -149,27 +175,45 @@ impl PushAppId {
 /// when the Push Service response shape violates the expected
 /// protocol choreography.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PushRegistrationError {
     #[error("missing <command/> response during {stage}")]
-    MissingCommandResponse { stage: &'static str },
-    #[error("unexpected command status during {stage}; expected {expected}")]
-    UnexpectedStatus {
+    /// Missing `<command/>` response during `stage`.
+    MissingCommandResponse {
+        #[doc = "Protocol handshake stage at which the operation failed."]
         stage: &'static str,
+    },
+    #[error("unexpected command status during {stage}; expected {expected}")]
+    /// Unexpected command status during `stage`; expected `expected`.
+    UnexpectedStatus {
+        /// Protocol handshake stage at which the operation failed.
+        stage: &'static str,
+        /// Expected protocol status or value for this stage.
         expected: &'static str,
     },
     #[error("missing sessionid in stage 2")]
+    /// Missing sessionid in stage 2.
     MissingSessionId,
     #[error("stage 4 sessionid did not match the session opened in stage 2")]
+    /// Stage 4 sessionid did not match the session opened in stage 2.
     SessionIdMismatch,
     #[error("missing result form in stage 4")]
+    /// Missing result form in stage 4.
     MissingResultForm,
     #[error("malformed register-device result form: {reason}")]
-    MalformedResultForm { reason: String },
+    /// Malformed register-device result form: `reason`.
+    MalformedResultForm {
+        #[doc = "Human-readable explanation for the operation."]
+        reason: String,
+    },
     #[error("XEP-0050 command session expired")]
+    /// XEP-0050 command session expired.
     SessionExpired,
 }
 
 impl PushEnvironment {
+    /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Production => "prod",
@@ -181,14 +225,24 @@ impl PushEnvironment {
 /// Platform-discriminated provider credentials. Each variant carries
 /// the EXACT subset of fields its provider needs — typed-payloads
 /// hard rule (no shared `Option<&str>` bag at the boundary).
+///
+/// Credential strings are copied into the registration form without local
+/// validation; the Push Service validates the submitted provider material.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushDeviceCredentials {
+    /// Browser push delivery using an endpoint and encryption keys.
     WebPush {
+        /// Provider HTTPS delivery URL from the browser's push subscription.
         endpoint: String,
+        /// Base64url-encoded, uncompressed P-256 public key for RFC 8291 encryption.
         p256dh: String,
+        /// Base64url-encoded 16-octet authentication secret for RFC 8291 key derivation.
         auth: String,
     },
+    /// Apple Push Notification service registration.
     Apns {
+        /// Provider-issued device address for native push delivery.
         device_token: String,
     },
     /// FCM (Android push). `p256dh` / `auth` are the device's
@@ -196,13 +250,18 @@ pub enum PushDeviceCredentials {
     /// Push Service encrypts every notification to them, so FCM only
     /// carries ciphertext.
     Fcm {
+        /// FCM registration token identifying the receiving app installation.
         registration_token: String,
+        /// Base64url-encoded, uncompressed P-256 public key for RFC 8291 encryption.
         p256dh: String,
+        /// Base64url-encoded 16-octet authentication secret for RFC 8291 key derivation.
         auth: String,
     },
 }
 
 impl PushDeviceCredentials {
+    /// Return the registration platform implied by this push endpoint.
+    #[must_use]
     pub fn platform(&self) -> PushPlatform {
         match self {
             Self::WebPush { .. } => PushPlatform::Web,
@@ -218,10 +277,14 @@ impl PushDeviceCredentials {
 pub struct PushNodeId(String);
 
 impl PushNodeId {
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume this value and return its owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -236,10 +299,14 @@ impl PushNodeId {
 pub struct PushDeviceId(String);
 
 impl PushDeviceId {
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume this value and return its owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -252,7 +319,9 @@ impl PushDeviceId {
 /// the matching `disable-device` opt-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterDeviceResult {
+    /// Assigned XEP-0357 node used in the account server's push-enable request.
     pub node: PushNodeId,
+    /// Push Service device-row identifier used to deregister this device.
     pub device_id: PushDeviceId,
 }
 
@@ -278,14 +347,19 @@ pub struct RegisterDeviceResult {
 /// that need `Send` futures get them structurally because the
 /// `ClientHandle` impl's future is `Send` anyway.
 pub trait CommandDriver {
+    /// Send a parsed IQ request and await its correlated result or stanza error.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn send_iq(&self, iq: Element)
         -> impl std::future::Future<Output = ClientResult<Element>> + '_;
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-impl CommandDriver for crate::client::ClientHandle {
+impl CommandDriver for ClientHandle {
     async fn send_iq(&self, iq: Element) -> ClientResult<Element> {
-        crate::client::ClientHandle::send_iq(self, iq).await
+        ClientHandle::send_iq(self, iq).await
     }
 }
 
@@ -299,6 +373,7 @@ impl CommandDriver for crate::client::ClientHandle {
 /// PR-comment fix: previously this fn took both as arguments and
 /// a mismatched pair would silently produce a form the server
 /// rejects at runtime.
+#[must_use]
 pub fn build_register_device_submit_form(
     app_id: &str,
     environment: PushEnvironment,
@@ -337,10 +412,10 @@ pub fn build_register_device_submit_form(
 
 /// FORM_TYPE for the `disable-device` XEP-0050 command submit form.
 pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
-
 /// Build the XEP-0004 submit form for the `disable-device` command.
 /// Carries the XEP-0357 `node` id and the Push Service-assigned
 /// `device-id` so the service can locate the row.
+#[must_use]
 pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm {
     DataForm::new(
         DataFormType::Submit,
@@ -356,6 +431,7 @@ pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm
 /// result form. Returns `None` when either field is missing or empty —
 /// the chat MUST NOT persist a half-populated record because the
 /// follow-up `disable-device` opt-out would have no way to scope.
+#[must_use]
 pub fn parse_register_device_result(form: &DataForm) -> Option<RegisterDeviceResult> {
     // Form-shape gate (PR-comment fix): refuse to parse anything that
     // isn't a stage-4 `<x type='result' FORM_TYPE=REGISTER_DEVICE_FORM_TYPE>`.
@@ -480,6 +556,10 @@ fn verify_iq_from_matches(iq: &Element, push_service_jid: &PushServiceJid) -> Cl
 ///
 /// Errors flow through `ClientResult<StanzaError>` typed values —
 /// never stringly-typed payloads (CLAUDE.md typed-payloads hard rule).
+///
+/// # Errors
+///
+/// Returns typed registration errors for incomplete command responses, unexpected statuses, expired or mismatched sessions, malformed forms, or a rejected final registration; transport and IQ errors are propagated.
 pub async fn register_push_device<D: CommandDriver>(
     driver: &D,
     push_service_jid: &PushServiceJid,
@@ -774,7 +854,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_accepts_exact_match() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         assert!(
             verify_iq_from_matches(&iq_with_from(Some("push.example.com")), &service_jid).is_ok()
         );
@@ -783,7 +863,7 @@ mod tests {
     #[test]
     fn verify_iq_from_accepts_case_variation_on_domain() {
         // RFC 6122 §2.4: domainpart comparison is case-insensitive.
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         assert!(
             verify_iq_from_matches(&iq_with_from(Some("Push.Example.COM")), &service_jid).is_ok()
         );
@@ -791,7 +871,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_absent_from() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(None), &service_jid)
             .expect_err("missing `from` must reject");
         match err {
@@ -806,7 +886,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_unrelated_jid() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(Some("attacker.tld")), &service_jid)
             .expect_err("unrelated `from` must reject");
         assert!(matches!(err, ClientError::PushRegistration(_)));
@@ -815,7 +895,7 @@ mod tests {
     #[test]
     fn verify_iq_from_rejects_prefix_substring_collision() {
         // `push.example.com` MUST NOT match `push.example.com.attacker.tld`.
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(
             &iq_with_from(Some("push.example.com.attacker.tld")),
             &service_jid,
@@ -826,7 +906,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_empty_from() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(Some("")), &service_jid)
             .expect_err("empty `from` must reject");
         assert!(matches!(err, ClientError::PushRegistration(_)));

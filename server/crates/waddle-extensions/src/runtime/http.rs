@@ -1,3 +1,6 @@
+//! Permission and resource enforcement for extension outbound HTTP requests.
+
+use crate::config::RuntimeLimits;
 use bytes::BytesMut;
 use futures::StreamExt;
 
@@ -11,7 +14,12 @@ pub(super) struct HttpRuntime {
     pub permits: std::sync::Arc<tokio::sync::Semaphore>,
 }
 impl HttpRuntime {
-    pub fn new() -> anyhow::Result<Self> {
+    /// Initialize the host HTTP client with the extension network policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be initialized with the host network policy.
+    pub fn try_new() -> anyhow::Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -29,24 +37,24 @@ pub(super) async fn execute_runtime_http_request(
     request: wit_types::OutgoingHttpRequest,
     allowed_origins: &[String],
     runtime: &HttpRuntime,
-    limits: &crate::config::RuntimeLimits,
+    limits: &RuntimeLimits,
 ) -> std::result::Result<wit_types::HttpResponse, HostToolError> {
     let url = request.url.value;
     let parsed = reqwest::Url::parse(&url).map_err(|_| {
         HostToolError::invalid_request(
-            DisplayText::new("extension HTTP request URL is invalid")
+            DisplayText::try_new("extension HTTP request URL is invalid")
                 .expect("static HTTP error is non-empty"),
         )
     })?;
     if parsed.scheme() != "https" {
         return Err(HostToolError::invalid_request(
-            DisplayText::new("extension HTTP requests must use https://")
+            DisplayText::try_new("extension HTTP requests must use https://")
                 .expect("static HTTP error is non-empty"),
         ));
     }
     let origin = http_origin(&parsed).ok_or_else(|| {
         HostToolError::invalid_request(
-            DisplayText::new("extension HTTP request URL must include a host")
+            DisplayText::try_new("extension HTTP request URL must include a host")
                 .expect("static HTTP error is non-empty"),
         )
     })?;
@@ -56,14 +64,14 @@ pub(super) async fn execute_runtime_http_request(
         .any(|allowed| allowed == origin)
     {
         return Err(HostToolError::denied(
-            DisplayText::new("extension HTTP origin is not allowed")
+            DisplayText::try_new("extension HTTP origin is not allowed")
                 .expect("static HTTP error is non-empty"),
         ));
     }
 
     let _permit = runtime.permits.acquire().await.map_err(|_| HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new("extension HTTP capacity unavailable").expect("static error"),
+        message: DisplayText::try_new("extension HTTP capacity unavailable").expect("static error"),
     })?;
     let client = &runtime.client;
     let mut builder = match request.method {
@@ -77,7 +85,7 @@ pub(super) async fn execute_runtime_http_request(
     if let Some(body) = request.body {
         if body.len() > limits.http_max_request_bytes as usize {
             return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP request body is too large")
+                DisplayText::try_new("extension HTTP request body is too large")
                     .expect("static HTTP error is non-empty"),
             ));
         }
@@ -85,7 +93,7 @@ pub(super) async fn execute_runtime_http_request(
     }
     let response = builder.send().await.map_err(|_| HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new("extension HTTP request failed")
+        message: DisplayText::try_new("extension HTTP request failed")
             .expect("HTTP error is non-empty"),
     })?;
     let status = response.status().as_u16();
@@ -94,12 +102,12 @@ pub(super) async fn execute_runtime_http_request(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| HostToolError {
             code: HostToolErrorCode::TemporaryFailure,
-            message: DisplayText::new("extension HTTP response body failed")
+            message: DisplayText::try_new("extension HTTP response body failed")
                 .expect("HTTP error is non-empty"),
         })?;
         if body.len() + chunk.len() > limits.http_max_response_bytes as usize {
             return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP response body exceeded limit")
+                DisplayText::try_new("extension HTTP response body exceeded limit")
                     .expect("static HTTP error is non-empty"),
             ));
         }
@@ -107,7 +115,7 @@ pub(super) async fn execute_runtime_http_request(
     }
     let body = String::from_utf8(body.to_vec()).map_err(|_| HostToolError {
         code: HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new("extension HTTP response body was not UTF-8")
+        message: DisplayText::try_new("extension HTTP response body was not UTF-8")
             .expect("HTTP error is non-empty"),
     })?;
     Ok(wit_types::HttpResponse { status, body })
@@ -121,13 +129,13 @@ pub(super) fn apply_runtime_http_headers(
     for header in headers {
         if header.name.trim().is_empty() {
             return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP header name must be non-empty")
+                DisplayText::try_new("extension HTTP header name must be non-empty")
                     .expect("static HTTP error is non-empty"),
             ));
         }
         if is_disallowed_extension_http_header(&header.name) {
             return Err(HostToolError::invalid_request(
-                DisplayText::new("extension HTTP header is controlled by the host")
+                DisplayText::try_new("extension HTTP header is controlled by the host")
                     .expect("static HTTP error is non-empty"),
             ));
         }

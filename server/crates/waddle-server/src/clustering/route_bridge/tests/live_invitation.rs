@@ -1,5 +1,9 @@
 //! Generated room messages keep their frozen authority at the registered socket.
-use super::*;
+use super::{
+    commit_submission, DeliveryKind, EffectMessageIdentity, IngressAppendObligationRef,
+    IngressEffectIntent, IngressFixture, Message, RelayRemoteResourceFrameStatus, RemoteStanza,
+    SocketFixture, Stanza,
+};
 use crate::server::routes::websocket::handlers::message::{
     group_dm_invite, muc_direct, muc_invite,
 };

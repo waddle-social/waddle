@@ -6,9 +6,11 @@
 
 use minidom::Element;
 use std::time::Duration;
-use waddle_server::{db::Database, sm_persistence::DatabaseSmPersistence};
+use waddle_server::db::Database;
+use waddle_server::sm_persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use waddle_xmpp::stream_management::{persistence::SmPersistenceStorage, SM_NS};
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+use waddle_xmpp::stream_management::SM_NS;
 use xmpp_parsers::message::{Id, Message, MessageType};
 
 const ACCOUNTS: &[(&str, &str)] = &[("alice", "resume-receipts-password")];

@@ -1,25 +1,25 @@
 //! Regression coverage for the real interpreter -> commit -> execute seam.
+use super::commit::commit_submission;
+use super::execute::execute_effects;
 use super::test_support::IngressFixture;
-use super::{commit::commit_submission, execute::execute_effects, *};
-use crate::server::routes::interpret::{
-    effects::{EffectSink, PlanSink},
-    interpret,
+use super::{
+    Deps, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecisionClass,
+    IngressEffectCapture, IngressStreamIdentity, IngressSubmission, RoomExecutionPath,
 };
+use crate::ingress::effects;
+use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::interpret;
 use jid::{BareJid, FullJid};
 use kameo::actor::Spawn;
 use std::time::Duration;
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    mam::{MamStorage, SqlxMamStorage},
-    muc::{
-        pin::{PinChangeRequest, PinPreview, PinStateChange, PinnedEntry},
-        room_actor::{ApplyPin, GetPinList, Join},
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
-    },
-    protocol::OutboundEvent,
-    registry::ConnectionRegistry,
-    xep::xep0421::OccupantIdSecret,
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::muc::pin::{PinChangeRequest, PinPreview, PinStateChange, PinnedEntry};
+use waddle_xmpp::muc::room_actor::{ApplyPin, GetPinList, Join};
+use waddle_xmpp::muc::room_registry_actor::{CreateRoom, RoomRegistryActor};
+use waddle_xmpp::protocol::OutboundEvent;
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 async fn plan_events(
@@ -76,7 +76,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
         .expect("register occupant");
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -710,7 +710,7 @@ async fn room_pin_snapshot_failure(fixture: IngressFixture, unpin: bool) {
     registry.register(sender.clone(), tx);
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -925,13 +925,14 @@ impl EffectSink for BlockAfterRoomEffect {
 
 async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool, unpin: bool) {
     use crate::ingress_uow::SmIngressStreamRepository;
-    use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
+    use waddle_xmpp::ingress::WireHandledCount;
+    use waddle_xmpp::pending_delivery::SmSessionId;
     let room: BareJid = "secondary-snapshot@muc.example.com".parse().expect("room");
     let sender: FullJid = "romeo@example.com/phone".parse().expect("sender");
     let registry = ConnectionRegistry::new();
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -1199,7 +1200,7 @@ async fn room_pin_preview_lookup_failure(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let room: BareJid = "preview@muc.example.com".parse().expect("room");
     let actor = rooms

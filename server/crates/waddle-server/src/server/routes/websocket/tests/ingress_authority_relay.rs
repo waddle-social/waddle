@@ -1,17 +1,16 @@
 //! XEP-0198 §4: the failed ordered-relay ask follows committed responsibility.
-use super::*;
-use crate::clustering::{
-    ordered_relay::OrderedRelayPayload,
-    route_bridge::{
-        tests::services_with_claims, OrderedRelayDeliveryBridge, TEST_CANCELLED_ENVELOPES,
-    },
-    ClusteringHandles,
+use super::{
+    connection, create_test_websocket_state, create_test_websocket_state_with_extension_manager,
+    empty_extension_manager, handle_xmpp_frame, Arc, Stanza, TestStateOverrides, WebSocketState,
+    WsConnState,
 };
+use crate::clustering::ordered_relay::OrderedRelayPayload;
+use crate::clustering::route_bridge::tests::services_with_claims;
+use crate::clustering::route_bridge::{OrderedRelayDeliveryBridge, TEST_CANCELLED_ENVELOPES};
+use crate::clustering::ClusteringHandles;
 use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    ownership::{Entity, EntityType, NodeIdentity},
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 
 /// XEP-0198 §4–§6: a failed relay ask leaves a durable obligation and h=1, with no client retry.
 #[tokio::test]
@@ -123,7 +122,7 @@ async fn failed_ordered_room_ask(base: Arc<WebSocketState>) {
         panic!("relay message");
     };
     assert_eq!(relayed.bodies, message.bodies);
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert_ack(&state, &mut conn, 1).await;
     assert_durable(&state, canonical.message_key, &room, &relayed).await;

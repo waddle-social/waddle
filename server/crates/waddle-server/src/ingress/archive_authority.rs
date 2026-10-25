@@ -1,10 +1,8 @@
 //! Restore and finalize the derived archive position under canonical authority.
 use crate::ingress_uow::{EffectIntentRepository, IngressUowError, IngressUowTransaction};
 use jid::BareJid;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    mam::{ArchiveExpectation, ArchivedMessage, MamTxStoreOutcome},
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, MamTxStoreOutcome};
 
 pub(super) fn restore(
     planned: &mut [IngressEffectIntent],

@@ -1,23 +1,27 @@
-use super::super::super::{
-    connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority},
-    outbound::{handle_outbound_stanza, OutboundAuthority},
-    send::InterruptibleSink,
-    timers::TransportTimers,
+use super::super::super::connection::{
+    finish_connection, ConnectionShutdownChannels, FrameAuthority,
 };
-use super::*;
-use crate::clustering::{
-    relay::{RelayForceDetachRemoteUserResource, RelayRemoteResourceForceDetachStatus},
-    route_bridge::{track_remote_socket_for_test, wire_for_test, OrderedRelayDeliveryBridge},
-    trace_context::RelayTraceContext,
+use super::super::super::outbound::{handle_outbound_stanza, OutboundAuthority};
+use super::super::super::send::InterruptibleSink;
+use super::super::super::timers::TransportTimers;
+use super::{
+    bind_fresh_test_connection, create_test_session, create_test_websocket_state,
+    finish_test_socket_cleanup, mpsc, publish_stream_id_and_presence, Arc, FullJid, OutboundStanza,
+    RegistrationAfterFrame, Stanza,
 };
+use crate::clustering::relay::{
+    RelayForceDetachRemoteUserResource, RelayRemoteResourceForceDetachStatus,
+};
+use crate::clustering::route_bridge::{
+    track_remote_socket_for_test, wire_for_test, OrderedRelayDeliveryBridge,
+};
+use crate::clustering::trace_context::RelayTraceContext;
 use std::time::Duration;
-use waddle_xmpp::{
-    muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
-    muc::room_registry_actor::CreateRoom,
-    ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity},
-    registry::{ForceDetachOrigin, ForceDetachOutcome, SocketCleanupState},
-    stream_management::SmSessionRegistry,
-};
+use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, SocketCleanupState};
+use waddle_xmpp::stream_management::SmSessionRegistry;
 
 #[tokio::test]
 async fn cross_node_fresh_bind_retires_socket_blocked_in_readiness() {

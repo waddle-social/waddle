@@ -25,6 +25,7 @@
 //! therefore ramp up from zero to a baseline as the projection fills.
 //! That is expected behavior, not a regression.
 
+use crate::db::Rows;
 use async_trait::async_trait;
 use jid::BareJid;
 use thiserror::Error;
@@ -45,7 +46,7 @@ pub struct NotificationActivityStore {
 }
 
 impl NotificationActivityStore {
-    pub async fn new(db: Database) -> Result<Self, NotificationActivityError> {
+    pub async fn try_new(db: Database) -> Result<Self, NotificationActivityError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
@@ -64,7 +65,7 @@ impl NotificationActivityStore {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, NotificationActivityError> {
+    ) -> Result<Rows, NotificationActivityError> {
         let conn = self.db.guard().await?;
         Ok(conn.query(sql, params).await?)
     }

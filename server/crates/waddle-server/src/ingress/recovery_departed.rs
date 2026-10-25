@@ -94,21 +94,16 @@ use std::time::Duration;
 
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    muc::{
-        durable::RoomClaimFenceContext,
-        room_actor::{GetOccupantByJid, RoomActor},
-        room_registry_actor::{GetRoom, RoomRegistryActor},
-    },
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::muc::durable::RoomClaimFenceContext;
+use waddle_xmpp::muc::room_actor::{GetOccupantByJid, RoomActor};
+use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
 
-use crate::{
-    ingress_uow::{IngressUnitOfWork, IngressUowError},
-    server::routes::interpret::Deps,
-};
+use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
+use crate::server::routes::interpret::Deps;
 
-use super::{recovery_executor::AttemptClassification, recovery_reachability, RouteProgress};
+use super::recovery_executor::AttemptClassification;
+use super::{recovery_reachability, RouteProgress};
 
 /// Bounded budget for one room probe, matching the statement budget every
 /// recovery transaction runs under. A slower answer is not proof of absence.

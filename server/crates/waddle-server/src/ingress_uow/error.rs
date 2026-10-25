@@ -1,9 +1,11 @@
+use crate::inbox::InboxTxError;
+use crate::server::routes::interpret::effects::PlanFailure;
 use thiserror::Error;
 use waddle_xmpp::ingress::ProtocolEpoch;
 
-use crate::{
-    db::DatabaseError, ingress_substrate::IngressSubstrateError, ingress_uow::DbRetryClass,
-};
+use crate::db::DatabaseError;
+use crate::ingress_substrate::IngressSubstrateError;
+use crate::ingress_uow::DbRetryClass;
 use waddle_xmpp::ingress::EffectIntentCodecError;
 
 /// Fail-closed errors from the ingress unit of work.
@@ -16,7 +18,7 @@ pub enum IngressUowError {
     #[error("stored send attempt state is malformed")]
     InvalidStoredSendAttempt,
     #[error(transparent)]
-    Plan(#[from] crate::server::routes::interpret::effects::PlanFailure),
+    Plan(#[from] PlanFailure),
     #[error("planned room delivery is missing its authoritative stanza-id")]
     MissingRoomStanzaId,
     #[error("stored effect receipt identity is malformed")]
@@ -71,7 +73,7 @@ pub enum IngressUowError {
     #[error(transparent)]
     MamStore(waddle_xmpp::mam::MamTxStoreError),
     #[error(transparent)]
-    Inbox(#[from] crate::inbox::InboxTxError),
+    Inbox(#[from] InboxTxError),
     #[error(transparent)]
     RoomObservation(#[from] super::ObservationError),
     #[error(transparent)]

@@ -1,4 +1,10 @@
-use super::*;
+//! Construction of typed extension context from XMPP message payloads.
+
+use super::{
+    is_official_namespace, warn, DetectedLink, EffectiveModuleConfigError, ExtensionModuleConfig,
+    FullJidValue, HashSet, Message, Path, Regex, ReplyTarget, Result, StanzaId, ThreadId, Value,
+    MAX_DETECTED_LINKS, XEP_0359_STANZA_ID_NS,
+};
 
 pub(super) fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {
     msg.payloads
@@ -9,7 +15,7 @@ pub(super) fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<
                 && payload.attr("by") == Some(room)
         })
         .and_then(|payload| payload.attr("id"))
-        .and_then(|id| StanzaId::new(id.to_string()).ok())
+        .and_then(|id| StanzaId::try_new(id.to_string()).ok())
 }
 
 pub(super) fn push_feature_namespace(
@@ -109,8 +115,12 @@ pub(super) fn reply_target_from_payloads(payloads: &[minidom::Element]) -> Optio
         .iter()
         .find(|payload| payload.name() == "reply" && payload.ns() == "urn:xmpp:reply:0")
         .and_then(|payload| {
-            let id = payload.attr("id").and_then(|id| StanzaId::new(id).ok())?;
-            let to = payload.attr("to").and_then(|to| FullJidValue::new(to).ok());
+            let id = payload
+                .attr("id")
+                .and_then(|id| StanzaId::try_new(id).ok())?;
+            let to = payload
+                .attr("to")
+                .and_then(|to| FullJidValue::try_new(to).ok());
             Some(ReplyTarget { id, to })
         })
 }
@@ -118,7 +128,7 @@ pub(super) fn reply_target_from_payloads(payloads: &[minidom::Element]) -> Optio
 pub(super) fn thread_id_from_message(msg: &Message) -> Option<ThreadId> {
     msg.thread
         .as_ref()
-        .and_then(|thread| ThreadId::new(thread.id.clone()).ok())
+        .and_then(|thread| ThreadId::try_new(thread.id.clone()).ok())
         .or_else(|| {
             msg.payloads
                 .iter()
@@ -126,7 +136,7 @@ pub(super) fn thread_id_from_message(msg: &Message) -> Option<ThreadId> {
                     payload.name() == "thread-reply" && payload.ns() == "urn:waddle:forums:0"
                 })
                 .and_then(|payload| payload.attr("thread-id"))
-                .and_then(|thread_id| ThreadId::new(thread_id).ok())
+                .and_then(|thread_id| ThreadId::try_new(thread_id).ok())
         })
 }
 

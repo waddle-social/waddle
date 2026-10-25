@@ -9,7 +9,10 @@ use tokio::sync::mpsc;
 use waddle_xmpp::muc::{RoomLifecycleId, RoomLifecycleState, RoomRevision};
 use waddle_xmpp::registry::OutboundStanza;
 
-use super::*;
+use super::{
+    config_effects_for, full_jid, initial_revision, lifecycle, origin, producing_node, room_jid,
+    store_with_db, RoomEffectOriginInstanceId, RoomEffectOutboxStore, RoomEffectProducingNode,
+};
 use crate::room_effect_outbox::drain::{
     complete_after_write, drain_due_effects, drain_reservation_inline,
 };
@@ -330,7 +333,7 @@ async fn standalone_janitor_arms_predecessor_instance_rows_without_touching_curr
     let predecessor_room = integration_room_jid("standalone-predecessor");
     let current_room = integration_room_jid("standalone-current");
     let predecessor_origin =
-        RoomEffectOriginInstanceId::new("predecessor-instance".to_owned()).expect("origin");
+        RoomEffectOriginInstanceId::try_new("predecessor-instance".to_owned()).expect("origin");
     let current_origin = crate::room_effect_outbox::room_effect_origin_instance_id();
 
     let (predecessor_lifecycle, predecessor_revision) =

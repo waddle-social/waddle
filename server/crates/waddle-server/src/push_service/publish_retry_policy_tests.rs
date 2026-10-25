@@ -1,10 +1,14 @@
-use super::*;
+use super::{
+    claim_publish_job_tx, prune_delivery_attempts_tx, prune_publish_jobs_tx,
+    record_known_publish_job_failure_tx, DatabasePushServiceStore,
+    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED,
+};
 use crate::push_service::test_support::{notification_item, owner, scalar_i64, store};
 
 async fn expired_batch_backoff_uses_each_rows_durable_count(
     fixture: crate::ingress::test_support::IngressFixture,
 ) {
-    let store = DatabasePushServiceStore::new(fixture.db.clone())
+    let store = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("store");
     let node = store
@@ -94,7 +98,7 @@ async fn node_retirement_preserves_terminal_history_and_does_not_count_noops() {
     .await
     .expect("configured push service");
     let registrations =
-        crate::push_registrations::DatabasePushRegistrationStore::new(store.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(store.db.clone())
             .await
             .expect("registrations");
     let node = store

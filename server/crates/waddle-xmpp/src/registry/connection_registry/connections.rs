@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    debug, instrument, mpsc, Arc, AtomicBool, ConnectionEntry, ConnectionRegistry, FullJid,
+    Ordering, OutboundStanza,
+};
+use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
     /// Register a connection with its outbound channel.
@@ -180,7 +184,7 @@ impl ConnectionRegistry {
     pub fn unregister_if_sm_stream_id(
         &self,
         jid: &FullJid,
-        stream_id: &crate::pending_delivery::SmSessionId,
+        stream_id: &SmSessionId,
     ) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
             if entry.sm_stream_id().as_ref() != Some(stream_id) {
@@ -236,7 +240,7 @@ impl ConnectionRegistry {
     /// Used by handlers that need to inspect or atomically transition
     /// per-connection flags (e.g. the XEP-0160 offline-flush CAS via
     /// [`ConnectionEntry::claim_offline_flush`]).
-    pub fn get_entry(&self, jid: &FullJid) -> Option<ConnectionEntry> {
+    pub fn entry(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         self.connections.get(jid).map(|entry| entry.clone())
     }
 

@@ -1,6 +1,8 @@
 //! Monotone physical insertion metadata for bounded notification recovery laps.
 
-use super::*;
+use super::{DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId, PendingStorageError};
+use crate::db::DatabaseError;
+use crate::db::Transaction;
 
 const INITIALIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const BACKFILL_BATCH: i64 = 128;
@@ -19,7 +21,7 @@ pub(super) async fn initialize(
 
 async fn begin(
     storage: &DatabasePendingDeliveryStorage,
-) -> Result<crate::db::Transaction<'_>, PendingStorageError> {
+) -> Result<Transaction<'_>, PendingStorageError> {
     let mut tx = storage.db.begin_immediate().await.map_err(other)?;
     if tx.driver() == DatabaseDriver::Postgres {
         // Fresh catalog reads are required after waiting for another initializer.
@@ -37,7 +39,7 @@ async fn begin(
     Ok(tx)
 }
 
-fn other(error: crate::db::DatabaseError) -> PendingStorageError {
+fn other(error: DatabaseError) -> PendingStorageError {
     PendingStorageError::Other(error.to_string())
 }
 
@@ -55,9 +57,7 @@ async fn initialize_inner(
     tx.commit().await.map_err(other)
 }
 
-async fn initialize_postgres(
-    tx: &mut crate::db::Transaction<'_>,
-) -> Result<(), PendingStorageError> {
+async fn initialize_postgres(tx: &mut Transaction<'_>) -> Result<(), PendingStorageError> {
     let identity = {
         let mut rows = tx.query("SELECT attidentity::text FROM pg_attribute WHERE attrelid = 'pending_delivery'::regclass AND attname = 'notification_recovery_ordinal' AND NOT attisdropped", ()).await.map_err(other)?;
         rows.next()
@@ -86,7 +86,7 @@ async fn initialize_postgres(
     Ok(())
 }
 
-async fn initialize_sqlite(tx: &mut crate::db::Transaction<'_>) -> Result<(), PendingStorageError> {
+async fn initialize_sqlite(tx: &mut Transaction<'_>) -> Result<(), PendingStorageError> {
     let has_ordinal = {
         let mut rows = tx
             .query("PRAGMA table_info(pending_delivery)", ())

@@ -4,7 +4,11 @@ use std::ops::Deref;
 
 use jid::{BareJid, Jid};
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    DndReader, NoopDndReader, NotificationCandidate, NotificationClass, NotificationDrainDeps,
+    NotificationOutboxError, NotificationOutboxStore, NotificationOutboxTarget,
+    NotificationThreadId, PushServiceNodeName, RoomPolicyStore,
+};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
@@ -60,7 +64,7 @@ pub async fn store() -> TestStore {
     let db = Database::in_memory("notification-outbox")
         .await
         .expect("in-memory db");
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store");
     TestStore { db, store }
@@ -142,7 +146,7 @@ pub fn target() -> NotificationOutboxTarget {
 pub fn target_named(node: &str) -> NotificationOutboxTarget {
     NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(node).expect("node"),
+        PushServiceNodeName::try_new(node).expect("node"),
     )
 }
 
@@ -377,7 +381,7 @@ impl BlockingStorage for FailingBlockingStorage {
 }
 
 pub async fn activity_store() -> waddle_server::notification_activity::NotificationActivityStore {
-    waddle_server::notification_activity::NotificationActivityStore::new(
+    waddle_server::notification_activity::NotificationActivityStore::try_new(
         Database::in_memory("notification-activity-eval")
             .await
             .expect("activity db"),

@@ -1,10 +1,19 @@
-use super::*;
+use super::{
+    build_carbon_envelope, debug, warn, Arc, BareJid, CarbonKind, ConnectionRegistry, Deps,
+    FullJid, FullJidDeliveryOutcome, InMemorySmSessionRegistry, Message, Stanza, WebSocketState,
+};
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::RemoteCarbonFanout;
+#[cfg(feature = "clustering")]
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::IngressEffectCapture;
+use crate::ingress_uow::CarbonReceiptRepository;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(crate) struct CarbonRegistryDeps<'a> {
     /// Preserve the execution-owned authority for keyed owner fanout.
     pub ingress_delivery: Option<&'a Deps<'a>>,
-    pub ingress_effect_capture: Option<&'a crate::ingress::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<&'a IngressEffectCapture>,
     pub sm_session_registry: Option<&'a Arc<InMemorySmSessionRegistry>>,
     pub web_socket_state: Option<&'a WebSocketState>,
 }
@@ -65,8 +74,7 @@ pub(super) async fn send_carbons(
         // Registry-only embedders have no actor tree. Production planners
         // always supply it; retain their explicit carbon-policy source.
         if deps.user_registry.is_none() {
-            carbon_recipients
-                .extend(registry.get_other_carbon_resources_for_user(&owner, &exclude));
+            carbon_recipients.extend(registry.other_carbon_resources_for_user(&owner, &exclude));
         }
         carbon_recipients.sort();
         carbon_recipients.dedup();
@@ -153,11 +161,7 @@ pub(super) async fn relay_carbons_only(
                     let Some(sender) = message.from.as_ref().map(jid::Jid::to_bare) else {
                         return Some(super::effects::EffectOutcome::Unavailable);
                     };
-                    Some(
-                        crate::ingress::identity::IngressAppendObligationRef::from_context(
-                            context, sender,
-                        ),
-                    )
+                    Some(IngressAppendObligationRef::from_context(context, sender))
                 }
                 None => None,
             };
@@ -185,7 +189,7 @@ pub(super) async fn relay_carbons_only(
 
 #[cfg(feature = "clustering")]
 pub(crate) fn remote_carbon_delivery(
-    outcome: crate::clustering::route_bridge::RemoteCarbonFanout,
+    outcome: RemoteCarbonFanout,
     deps: &Deps<'_>,
     owner: &BareJid,
     exclude: &[FullJid],
@@ -202,9 +206,7 @@ pub(crate) fn remote_carbon_delivery(
             warn!(%owner, %reason, "remote carbon fanout incomplete");
             (FullJidDeliveryOutcome::Unavailable, carbon_recipients)
         }
-        crate::clustering::route_bridge::RemoteCarbonFanout::MaybeCommitted => {
-            (FullJidDeliveryOutcome::MaybeCommitted, Vec::new())
-        }
+        RemoteCarbonFanout::MaybeCommitted => (FullJidDeliveryOutcome::MaybeCommitted, Vec::new()),
     };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         if let Some(excluded_source) = exclude.iter().find(|source| &source.to_bare() == owner) {
@@ -269,11 +271,11 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
     // body-less) are enforced by `CarbonsMessageHandler`
     // before emitting this event; the interpreter does
     // not re-check them — but it DOES per-target filter
-    // through `get_other_carbon_resources_for_user` so a
+    // through `other_carbon_resources_for_user` so a
     // resource that disabled carbons after the message
     // entered the pipeline still gets skipped.
     let owner_str = owner.to_string();
-    let mut live_targets = registry.get_other_carbon_resources_for_user(&owner, &exclude);
+    let mut live_targets = registry.other_carbon_resources_for_user(&owner, &exclude);
     live_targets.sort();
     // Detached-but-resumable resources (XEP-0198 stream
     // management) — without this fan-out arm, briefly
@@ -317,7 +319,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         if let (Some(database), Some(context)) =
             (database, delivery.ingress_append_context.as_ref())
         {
-            match crate::ingress_uow::CarbonReceiptRepository::attempted_resources(
+            match CarbonReceiptRepository::attempted_resources(
                 database,
                 context.message_key,
                 &context.receipt,

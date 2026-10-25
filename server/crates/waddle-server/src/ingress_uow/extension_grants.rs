@@ -255,7 +255,7 @@ fn decode_grant(row: &Row) -> Result<ExtensionGrantRef, IngressUowError> {
             .parse()
             .map_err(|_| IngressUowError::InvalidStoredExtensionGrant)?,
     );
-    let plugin = PluginId::new(row.get::<String>(1)?)
+    let plugin = PluginId::try_new(row.get::<String>(1)?)
         .map_err(|_| IngressUowError::InvalidStoredExtensionGrant)?;
     let scope = match (row.get::<i64>(2)?, row.get::<Option<String>>(3)?) {
         (0, None) => ExtensionGrantScope::Send,

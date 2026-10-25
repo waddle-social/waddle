@@ -20,7 +20,7 @@ pub struct MucDestroyCompletionOutboxStore {
 }
 
 impl MucDestroyCompletionOutboxStore {
-    pub async fn new(db: Database) -> Result<Self, DatabaseError> {
+    pub async fn try_new(db: Database) -> Result<Self, DatabaseError> {
         Self::ensure_schema(&db).await?;
         Ok(Self { _db: db })
     }
@@ -211,12 +211,12 @@ mod tests {
         )
         .await
         .expect("open test postgres");
-        MucDestroyCompletionOutboxStore::new(db.clone())
+        MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
             .expect("initialize MUC destroy completion outbox");
         // A normal restart observes the catalog and skips the ALTER rather
         // than taking an unnecessary table lock.
-        MucDestroyCompletionOutboxStore::new(db.clone())
+        MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
             .expect("reinitialize MUC destroy completion outbox");
 

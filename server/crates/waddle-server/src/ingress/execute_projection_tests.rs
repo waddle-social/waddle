@@ -1,29 +1,30 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
-use crate::server::routes::interpret::effects::{Effect, PlannedEffect};
-use waddle_xmpp::{
-    ingress::{
-        LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, NotificationActivityMutation,
-    },
-    mam::RichMessageId,
+use super::{
+    execute_sealed_inbox_push, fail_after_projection_update, store_projection, EffectOutcome,
+    ExternalDirectEffect, ExternalEffect, IngressEffectIntent, SettledCompletion, SettledOutcome,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::effects::{Effect, PlannedEffect};
+use waddle_xmpp::ingress::{
+    LinkPreviewMediaRefMutation, LinkPreviewMediaRefState, NotificationActivityMutation,
+};
+use waddle_xmpp::mam::RichMessageId;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 async fn sealed_inbox_push_audience(empty_original_audience: bool) {
-    use crate::ingress::{execute_uow::execute_with_uow, IngressEffectCapture};
-    use crate::server::routes::{
-        interpret::{effects::PlanSink, interpret},
-        websocket::{interpret_loop::build_interpret_deps, tests as socket_tests},
+    use crate::ingress::execute_uow::execute_with_uow;
+    use crate::ingress::IngressEffectCapture;
+    use crate::server::routes::interpret::effects::PlanSink;
+    use crate::server::routes::interpret::interpret;
+    use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+    use crate::server::routes::websocket::tests as socket_tests;
+    use waddle_xmpp::ingress::{
+        DigestContext, DigestInput, EffectMessageIdentity, NormalizedTarget,
     };
-    use waddle_xmpp::{
-        ingress::{DigestContext, DigestInput, EffectMessageIdentity, NormalizedTarget},
-        muc::{
-            room_actor::{ChangeAffiliation, Join},
-            room_registry_actor::CreateRoom,
-        },
-        protocol::OutboundEvent,
-        Stanza,
-    };
+    use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::protocol::OutboundEvent;
+    use waddle_xmpp::Stanza;
     let fixture = IngressFixture::sqlite().await;
     let state = socket_tests::create_test_websocket_state().await;
     let room: jid::BareJid = "frozen-inbox@muc.example.com".parse().expect("room");
@@ -221,9 +222,10 @@ async fn xep0045_sealed_inbox_push_preserves_an_empty_original_audience() {
 async fn activity_atomicity(fixture: IngressFixture) {
     let owner = fixture.principal.bare_jid().clone();
     let conversation: jid::BareJid = "juliet@example.com".parse().expect("conversation");
-    let store = crate::notification_activity::NotificationActivityStore::new(fixture.db.clone())
-        .await
-        .expect("activity schema");
+    let store =
+        crate::notification_activity::NotificationActivityStore::try_new(fixture.db.clone())
+            .await
+            .expect("activity schema");
     let mut submission = fixture.submission(Some("atomic-activity"), "activity");
     let mutation = NotificationActivityMutation::ChatStateGone {
         conversation: conversation.clone(),
@@ -362,7 +364,7 @@ async fn preview_atomicity(fixture: IngressFixture) {
     let mutation = LinkPreviewMediaRefMutation {
         upload_slot_id: slot,
         archive: archive.clone(),
-        message_id: RichMessageId::new("original".to_owned()).expect("message id"),
+        message_id: RichMessageId::try_new("original".to_owned()).expect("message id"),
         current_archive_stanza_id: StanzaId::new("original-archive", archive.into()),
         state: LinkPreviewMediaRefState::Current,
     };

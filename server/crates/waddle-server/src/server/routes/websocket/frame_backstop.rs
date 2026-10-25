@@ -20,6 +20,7 @@
 //! `info_span!` (→ OTEL span), a `warn!` with stable fields (→ OTLP log), and
 //! the [`metrics::record_stanza_handler_timeout`] counter (→ OTLP metric).
 
+use crate::clustering::NodeAdmissionPermit;
 use std::future::Future;
 use std::time::Duration;
 
@@ -275,7 +276,7 @@ where
 pub(super) async fn run_with_backstop_and_admission<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> AdmissionDispatchResult<T>
 where
@@ -296,7 +297,7 @@ where
 pub(super) async fn run_commit_with_backstop_and_admission<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> AdmissionDispatchResult<T>
 where
@@ -309,10 +310,7 @@ where
 async fn run_with_backstop_impl<F, T>(
     backstop: StanzaBackstop,
     dispatch: F,
-    admission: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    admission: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> AdmissionDispatchResult<T>
 where
     F: Future<Output = T> + Send,

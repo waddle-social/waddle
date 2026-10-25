@@ -73,7 +73,7 @@ pub struct HttpFcmSender {
 
 impl HttpFcmSender {
     /// Sender for Google's production FCM endpoint, HTTPS only.
-    pub fn new() -> Result<Self, FcmSenderBuildError> {
+    pub fn try_new() -> Result<Self, FcmSenderBuildError> {
         let client = base_client_builder()
             .https_only(true)
             .build()
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn production_sender_targets_the_fcm_v1_endpoint() {
-        let sender = HttpFcmSender::new().expect("sender");
+        let sender = HttpFcmSender::try_new().expect("sender");
         let project = FcmProjectId::parse("waddle-social").expect("project");
         assert_eq!(
             sender.send_url(&project).expect("url").as_str(),
@@ -391,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn production_client_connect_timeout_preserves_pre_send_evidence() {
-        let sender = HttpFcmSender::new().expect("production sender");
+        let sender = HttpFcmSender::try_new().expect("production sender");
         crate::push::types::assert_production_connect_timeout(sender.client).await;
     }
 

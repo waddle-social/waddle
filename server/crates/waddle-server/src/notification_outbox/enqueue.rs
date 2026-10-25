@@ -1,6 +1,13 @@
 //! T0 candidate persistence: idempotent inserts and counts.
 
-use super::*;
+use super::{
+    decode_candidate, DatabaseError, NotificationCandidate, NotificationCandidateInsertOutcome,
+    NotificationOutboxError, NotificationOutboxStore, SuppressedReason,
+};
+use crate::db::DatabaseDriver;
+use crate::db::Transaction;
+use crate::ingress_uow::EffectDescendantRepository;
+use crate::ingress_uow::IngressUowError;
 
 impl NotificationOutboxStore {
     pub async fn insert_candidate(
@@ -18,7 +25,7 @@ impl NotificationOutboxStore {
     /// Use the caller's transaction so candidate and ingress receipts commit together.
     /// Preserve the original receipt timestamp so recovery retains outbox ordering.
     pub(crate) async fn insert_candidate_in_transaction(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         candidate: &NotificationCandidate,
         created_at_ms: i64,
     ) -> Result<NotificationCandidateInsertOutcome, DatabaseError> {
@@ -111,7 +118,7 @@ impl NotificationOutboxStore {
     /// Read the stable host identity after inserting a canonical candidate.
     /// Cross-archive aliases resolve to the same stored identity.
     pub(crate) async fn candidate_delivery_id_in_transaction(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         candidate: &NotificationCandidate,
     ) -> Result<Option<uuid::Uuid>, DatabaseError> {
         tx.execute(
@@ -140,12 +147,12 @@ impl NotificationOutboxStore {
     /// Reused, already marked pending custody must retain the exact existing
     /// approval and its live jobs, without inserting a new candidate or receipt.
     pub(crate) async fn attach_existing_candidate_lineage_in_transaction(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         expected: &NotificationCandidate,
-    ) -> Result<bool, crate::ingress_uow::IngressUowError> {
-        let query = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    ) -> Result<bool, IngressUowError> {
+        let query = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
         } else {
             "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL"
@@ -170,12 +177,12 @@ impl NotificationOutboxStore {
         else {
             return Ok(false);
         };
-        let mut stored = decode_candidate(&row)
-            .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+        let mut stored =
+            decode_candidate(&row).map_err(|_| IngressUowError::EffectIntentConflict)?;
         let suppression = row.get::<Option<String>>(15)?;
         if let Some(reason) = &suppression {
             SuppressedReason::from_db_value(reason)
-                .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+                .map_err(|_| IngressUowError::EffectIntentConflict)?;
         }
         let delivery = stored.delivery_id;
         let outboxed = row.get::<Option<i64>>(16)?.is_some();
@@ -198,7 +205,7 @@ impl NotificationOutboxStore {
             let proof = rows
                 .next()
                 .await?
-                .ok_or(crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+                .ok_or(IngressUowError::EffectIntentConflict)?;
             if proof.get::<bool>(0)? || !proof.get::<bool>(1)? {
                 return Ok(false);
             }
@@ -211,17 +218,17 @@ impl NotificationOutboxStore {
     /// parent arrives after T1 coalesced/fanned out the original candidate.
     /// A settled scheduling relation remains an explicit terminal disposition.
     pub(crate) async fn attach_candidate_lineage_in_transaction(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         message_key: waddle_xmpp::ingress::MessageKey,
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
-    ) -> Result<(), crate::ingress_uow::IngressUowError> {
-        crate::ingress_uow::EffectDescendantRepository::lock_raw(tx, message_key).await?;
+    ) -> Result<(), IngressUowError> {
+        EffectDescendantRepository::lock_raw(tx, message_key).await?;
         if !Self::lock_unquarantined_candidate(tx, candidate).await? {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+            return Err(IngressUowError::EffectIntentConflict);
         }
         let Some(id) = Self::candidate_delivery_id_in_transaction(tx, candidate).await? else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+            return Err(IngressUowError::EffectIntentConflict);
         };
         let mut rows = tx
             .query(
@@ -230,23 +237,22 @@ impl NotificationOutboxStore {
             )
             .await?;
         let Some(row) = rows.next().await? else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+            return Err(IngressUowError::EffectIntentConflict);
         };
         let outboxed = row.get::<Option<i64>>(0)?.is_some();
         let pending_bridge = row.get::<bool>(1)?;
         let suppression = row.get::<Option<String>>(2)?;
         if let Some(reason) = &suppression {
             SuppressedReason::from_db_value(reason)
-                .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+                .map_err(|_| IngressUowError::EffectIntentConflict)?;
         }
         let established_history = suppression.is_some() || row.get::<bool>(3)?;
         drop(rows);
-        crate::ingress_uow::EffectDescendantRepository::attach_raw(tx, message_key, effect, id)
-            .await?;
+        EffectDescendantRepository::attach_raw(tx, message_key, effect, id).await?;
         if !outboxed {
             return Ok(());
         }
-        let lineage_sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let lineage_sql = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT job_id FROM notification_outbox_lineage WHERE candidate_delivery_id = ? AND settled_at_ms IS NULL ORDER BY job_id FOR UPDATE"
         } else {
             "SELECT job_id FROM notification_outbox_lineage WHERE candidate_delivery_id = ? AND settled_at_ms IS NULL ORDER BY job_id"
@@ -258,22 +264,16 @@ impl NotificationOutboxStore {
         while let Some(row) = rows.next().await? {
             let job: String = row.get(0)?;
             jobs.push(
-                uuid::Uuid::parse_str(&job)
-                    .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?,
+                uuid::Uuid::parse_str(&job).map_err(|_| IngressUowError::EffectIntentConflict)?,
             );
         }
         for job in jobs {
-            crate::ingress_uow::EffectDescendantRepository::copy_raw(tx, id, job).await?;
+            EffectDescendantRepository::copy_raw(tx, id, job).await?;
         }
         // Existing unresolved bridges are durable unknown fanout, including
         // legacy history. Copying known children cannot discharge that proof.
         if !pending_bridge && established_history {
-            crate::ingress_uow::EffectDescendantRepository::settle_all_raw(
-                tx,
-                id,
-                chrono::Utc::now(),
-            )
-            .await?;
+            EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
         }
         Ok(())
     }
@@ -281,10 +281,10 @@ impl NotificationOutboxStore {
     /// Caller holds its canonical parent first; retain the candidate lock through
     /// ancestry mutation so another parent cannot quarantine between check/write.
     pub(super) async fn lock_unquarantined_candidate(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         candidate: &NotificationCandidate,
-    ) -> Result<bool, crate::ingress_uow::IngressUowError> {
-        let query = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    ) -> Result<bool, IngressUowError> {
+        let query = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? FOR UPDATE NOWAIT"
         } else {
             "SELECT quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ?"

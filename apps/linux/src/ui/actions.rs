@@ -5,8 +5,12 @@
 //! dedupes the server's echo against it) and undoes or flags it when the
 //! send fails.
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{
+    AdwDialogExt, AlertDialogExt, AlertDialogExtManual, BoxExt, ButtonExt, CastNone, EditableExt,
+    FileExt, FileExtManual, ListItemExt, ListModelExtManual, ObjectExt, PopoverExt, StaticType,
+    WidgetExt,
+};
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gdk, gio, glib};
 use waddle_client_session::{Delivery, IncomingMessage, LocalEcho, ReplyTo, TimelineItem};
 

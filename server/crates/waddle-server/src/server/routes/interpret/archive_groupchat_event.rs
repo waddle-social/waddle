@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    build_message_error_reply, debug, resolve_room_claim_fence, resource_constraint_error,
+    ArchiveGroupchatOutcome, ArchiveIdRewrite, BareJid, Deps, FullJid, Jid, Message,
+};
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 pub(super) enum ArchiveGroupchatEventOutcome {
@@ -132,7 +135,7 @@ async fn update_groupchat_link_preview_refs(
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
     if deps.effects.is_planning() {
-        let Some(message_id) = waddle_xmpp::mam::RichMessageId::new(message_id) else {
+        let Some(message_id) = waddle_xmpp::mam::RichMessageId::try_new(message_id) else {
             return;
         };
         super::preview_plan::update(

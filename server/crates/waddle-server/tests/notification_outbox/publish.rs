@@ -2,16 +2,23 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate, enqueue_jobs_for_test, failed_outbox_jobs_count, groupchat_candidate_for,
+    inbox_with_unread, store, target, target_named, FailingBlockingStorage, TestStore,
+};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxStore, NotificationOutboxTarget,
+    PushServiceNodeName, WADDLE_PUSH_CONTEXT_NS,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 
 fn foreign_target() -> NotificationOutboxTarget {
     NotificationOutboxTarget::new(
         bare("push-provider.example.com"),
-        PushServiceNodeName::new("web-node").expect("node"),
+        PushServiceNodeName::try_new("web-node").expect("node"),
     )
 }
 
@@ -551,9 +558,11 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
-        .await
-        .expect("push registration schema");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+        push_service.database(),
+    )
+    .await
+    .expect("push registration schema");
     let push_node = push_service
         .ensure_node(&recipient, "web")
         .await
@@ -589,7 +598,7 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
         .expect("xep0357 registration");
     let target = NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(push_node.node()).expect("push node target"),
+        PushServiceNodeName::try_new(push_node.node()).expect("push node target"),
     );
     enqueue_jobs_for_test(
         &store,
@@ -646,9 +655,11 @@ async fn first_party_push_setup(
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
-        .await
-        .expect("push registration schema");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+        push_service.database(),
+    )
+    .await
+    .expect("push registration schema");
     let push_node = push_service
         .ensure_node(recipient, "web")
         .await
@@ -684,7 +695,7 @@ async fn first_party_push_setup(
         .expect("xep0357 registration");
     let target = NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(push_node.node()).expect("push node target"),
+        PushServiceNodeName::try_new(push_node.node()).expect("push node target"),
     );
     (push_service, push_store, target)
 }
@@ -1080,7 +1091,7 @@ async fn publish_rejects_non_first_party_outbox_target() {
     )
     .await
     .expect("push service");
-    let push_store = waddle_server::push_registrations::DatabasePushRegistrationStore::new(
+    let push_store = waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
         Database::in_memory("push-regs").await.unwrap(),
     )
     .await
@@ -1723,7 +1734,7 @@ async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
         );
     }
     // Reconstruct the store to prove fairness survives worker/store restart.
-    let resumed = NotificationOutboxStore::new(store.db.clone())
+    let resumed = NotificationOutboxStore::try_new(store.db.clone())
         .await
         .expect("restart store");
     let completed = resumed

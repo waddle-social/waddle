@@ -1,18 +1,25 @@
 //! Shared link-preview protocol helpers.
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 /// Safe image MIME types Waddle accepts for cached link-preview media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PreviewImageMediaType {
+    /// PNG image data.
     Png,
+    /// JPEG image data.
     Jpeg,
+    /// GIF image data.
     Gif,
+    /// WebP image data.
     Webp,
 }
 
 impl PreviewImageMediaType {
     /// Borrow the canonical MIME text used on the wire.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -64,16 +71,23 @@ impl std::error::Error for InvalidPreviewImageMediaType {}
 /// `og:video` native path (clients fall back gracefully when it cannot play).
 /// DASH and provider embed pages remain excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DirectVideoMediaType {
+    /// MP4 video content.
     Mp4,
+    /// WebM video content.
     Webm,
+    /// Ogg video content.
     Ogg,
+    /// QuickTime video content.
     QuickTime,
+    /// HTTP Live Streaming playlist.
     Hls,
 }
 
 impl DirectVideoMediaType {
     /// Borrow the canonical MIME text used on the wire.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mp4 => "video/mp4",
@@ -128,6 +142,7 @@ impl std::error::Error for InvalidDirectVideoMediaType {}
 /// This intentionally stays string-based so crates that already parse into
 /// their local URL type can do so at the boundary without adding URL parsing
 /// dependencies to `waddle-xmpp-core`.
+#[must_use]
 pub fn first_eligible_https_url_text(body: &str) -> Option<&str> {
     body.char_indices().find_map(|(idx, _)| {
         if !body[idx..]

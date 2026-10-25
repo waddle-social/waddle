@@ -1,23 +1,24 @@
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::websocket::DmPairKey;
 use std::collections::BTreeMap;
 
 use tracing::{debug, warn};
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, FrozenStanzaError, IngressEffectIntent},
-    protocol::handlers::errors::message_error_reply,
-    Stanza,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, FrozenStanzaError, IngressEffectIntent};
+use waddle_xmpp::protocol::handlers::errors::message_error_reply;
+use waddle_xmpp::Stanza;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 use crate::ingress::IngressEffectCapture;
-use crate::server::routes::interpret::{
-    effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        Effect, EffectOutcome, ExternalEffect, IngressPlan, PlanEffectDependency, PlanFailure,
-        PlanSuppressionPolicy, PlannedEffect,
-    },
-    Deps,
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PeerDeliveryKind,
 };
+use crate::server::routes::interpret::effects::{
+    Effect, EffectOutcome, ExternalEffect, IngressPlan, PlanEffectDependency, PlanFailure,
+    PlanSuppressionPolicy, PlannedEffect,
+};
+use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::WebSocketState;
 
 pub(super) async fn handle_dm_pin_message(
@@ -84,7 +85,7 @@ pub(super) async fn handle_dm_pin_message(
     }
 
     let sender = bound_jid.to_bare();
-    let key = crate::server::routes::websocket::DmPairKey::new(sender.clone(), peer.clone());
+    let key = DmPairKey::new(sender.clone(), peer.clone());
     if matches!(intent, waddle_xmpp::xep::PinIntent::Unpin { .. }) {
         let target =
             match lookup_dm_pin_target(state, [&peer, &sender], &sender, &peer, &target).await {
@@ -498,7 +499,7 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
         return;
     }
     let sender = bound_jid.to_bare();
-    let key = crate::server::routes::websocket::DmPairKey::new(sender.clone(), peer.clone());
+    let key = DmPairKey::new(sender.clone(), peer.clone());
     let target = match lookup_dm_pin_target(
         state,
         [&peer, &sender],
@@ -557,7 +558,7 @@ pub(super) async fn handle_dm_pin_retraction_cascade(
 
 fn record_dm_pin_mutation(
     ingress_effect_capture: Option<&IngressEffectCapture>,
-    pair: &crate::server::routes::websocket::DmPairKey,
+    pair: &DmPairKey,
     target_stanza_id: StanzaId,
     action: waddle_xmpp::ingress::DmPinMutationAction,
 ) {
@@ -621,7 +622,7 @@ async fn dm_pin_error_frame(
 
 #[derive(Clone, Debug)]
 pub struct DmPinMutation {
-    pub pair: crate::server::routes::websocket::DmPairKey,
+    pub pair: DmPairKey,
     pub target_stanza_id: StanzaId,
     pub action: waddle_xmpp::ingress::DmPinMutationAction,
 }
@@ -686,8 +687,8 @@ pub(crate) async fn execute_dm_pin(mutation: DmPinMutation, deps: &Deps<'_>) -> 
 pub(crate) fn restore_recorded_dm_pin_effects(
     plan: &mut IngressPlan,
     recorded: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    envelope: &MessageEnvelope,
+) -> Result<bool, IngressUowError> {
     let mutations: Vec<_> = recorded
         .iter()
         .filter_map(|intent| {
@@ -698,10 +699,7 @@ pub(crate) fn restore_recorded_dm_pin_effects(
             } = intent
             {
                 Some(DmPinMutation {
-                    pair: crate::server::routes::websocket::DmPairKey::new(
-                        pair.0.clone(),
-                        pair.1.clone(),
-                    ),
+                    pair: DmPairKey::new(pair.0.clone(), pair.1.clone()),
                     target_stanza_id: target_stanza_id.clone(),
                     action: action.clone(),
                 })
@@ -791,10 +789,10 @@ pub(crate) fn restore_recorded_dm_pin_effects(
 /// receive the peer-addressed message, including the sender's own resources.
 /// Live authorization and recovery must use the same frozen payload semantics.
 pub(crate) fn recorded_pin_message(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     mutation: &DmPinMutation,
     stanza_id: &StanzaId,
-) -> Result<xmpp_parsers::message::Message, crate::ingress_uow::IngressUowError> {
+) -> Result<xmpp_parsers::message::Message, IngressUowError> {
     use waddle_xmpp::ingress::DmPinMutationAction;
     let (sender, peer) = recorded_pin_participants(envelope, mutation)?;
     let (action, by, preview) = match &mutation.action {
@@ -821,9 +819,9 @@ pub(crate) fn recorded_pin_message(
 }
 
 fn recorded_pin_participants(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     mutation: &DmPinMutation,
-) -> Result<(jid::BareJid, jid::BareJid), crate::ingress_uow::IngressUowError> {
+) -> Result<(jid::BareJid, jid::BareJid), IngressUowError> {
     use crate::ingress_uow::IngressUowError;
     let message = envelope.message();
     let sender = message
@@ -836,9 +834,7 @@ fn recorded_pin_participants(
         .as_ref()
         .ok_or(IngressUowError::EffectIntentMessageMissing)?
         .to_bare();
-    if mutation.pair
-        != crate::server::routes::websocket::DmPairKey::new(sender.clone(), peer.clone())
-    {
+    if mutation.pair != DmPairKey::new(sender.clone(), peer.clone()) {
         return Err(IngressUowError::EffectIntentConflict);
     }
     Ok((sender, peer))

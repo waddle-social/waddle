@@ -2,6 +2,9 @@
 //! Web Push provider wiring, capability snapshot, and shared DB plumbing
 //! (raw execute/query plus per-owner and per-node advisory locks).
 
+use crate::db::DatabaseDriver;
+use crate::db::Rows;
+use crate::db::Transaction;
 use std::sync::Arc;
 
 use jid::BareJid;
@@ -56,7 +59,7 @@ pub(super) struct PushServicePubSubBoundary {
 }
 
 pub(super) async fn lock_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     now_ms: i64,
 ) -> Result<(), XmppError> {
@@ -74,7 +77,7 @@ pub(super) async fn lock_owner_tx(
 }
 
 pub(super) async fn lock_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     now_ms: i64,
 ) -> Result<(), XmppError> {
@@ -91,10 +94,16 @@ pub(super) async fn lock_node_tx(
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn test_secret_key() -> &'static [u8] {
+    static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+    &*KEY
+}
+
 impl DatabasePushServiceStore {
     #[cfg(test)]
-    pub async fn new(db: Database) -> Result<Self, XmppError> {
-        Self::new_with_secret_key(db, b"waddle-push-service-test-secret-key").await
+    pub async fn try_new(db: Database) -> Result<Self, XmppError> {
+        Self::new_with_secret_key(db, test_secret_key()).await
     }
 
     pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {
@@ -414,7 +423,7 @@ impl DatabasePushServiceStore {
         // The old unique node/item pair proves which pending acceptance owns
         // legacy attempts. Preserve it before removing that uniqueness.
         tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
-        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        if tx.driver() == DatabaseDriver::Postgres {
             tx.execute("ALTER TABLE push_publish_jobs DROP CONSTRAINT IF EXISTS push_publish_jobs_node_item_id_key", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
         } else {
             let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
@@ -484,10 +493,10 @@ impl DatabasePushServiceStore {
 
     async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
         let alter_sql = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 format!("ALTER TABLE {table} ADD COLUMN {column_def}")
             }
         };
@@ -554,7 +563,7 @@ impl DatabasePushServiceStore {
         &self,
         sql: &str,
         params: impl IntoParams,
-    ) -> Result<crate::db::Rows, XmppError> {
+    ) -> Result<Rows, XmppError> {
         let conn = self
             .db
             .guard()
@@ -621,7 +630,7 @@ mod tests {
             let db = Database::open_local("push-service-reopen", &path)
                 .await
                 .expect("database");
-            let store = DatabasePushServiceStore::new(db).await.expect("store");
+            let store = DatabasePushServiceStore::try_new(db).await.expect("store");
             let node = store.ensure_node(&owner, "web").await.expect("node");
             node_id = node.node().to_string();
             store
@@ -651,7 +660,7 @@ mod tests {
         let reopened_db = Database::open_local("push-service-reopen-again", &path)
             .await
             .expect("reopened database");
-        let reopened = DatabasePushServiceStore::new(reopened_db)
+        let reopened = DatabasePushServiceStore::try_new(reopened_db)
             .await
             .expect("reopened store");
         let node = reopened
@@ -682,7 +691,7 @@ mod tests {
     }
     #[tokio::test]
     async fn fcm_device_seals_its_auth_secret_and_disable_scrubs_every_secret() {
-        let store = DatabasePushServiceStore::new(
+        let store = DatabasePushServiceStore::try_new(
             Database::in_memory("push-service-fcm-secrets")
                 .await
                 .expect("database"),
@@ -747,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_disable_scrubs_every_secret_like_an_owner_disable() {
-        let store = DatabasePushServiceStore::new(
+        let store = DatabasePushServiceStore::try_new(
             Database::in_memory("push-service-fcm-provider-disable")
                 .await
                 .expect("database"),

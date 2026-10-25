@@ -1,6 +1,11 @@
 //! Fenced snapshot and ingress allocation writes share one transaction.
 
-use super::*;
+use super::{
+    serialize_presence_payloads, serialize_stanza, show_wire_str, KeyedSnapshotOutcome,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PostgresFencedSmPersistence,
+    SmClaimFence, SmPersistenceError, SmPersistenceStorage,
+};
+use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
 impl PostgresFencedSmPersistence {
     pub(super) async fn store_snapshot(
@@ -42,7 +47,7 @@ impl PostgresFencedSmPersistence {
             })?;
             if crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &append.key)
                 .await?
-                == crate::sm_persistence::ingress_append::NewDeliveryAuthorization::AlreadyResolved
+                == NewDeliveryAuthorization::AlreadyResolved
             {
                 return Ok(KeyedSnapshotOutcome::ObligationAlreadyResolved);
             }

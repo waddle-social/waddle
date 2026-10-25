@@ -2,8 +2,12 @@ use super::permissions::{
     delete_channel_parent_tuple, write_channel_parent_tuple, write_channel_parent_tuple_if_absent,
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
-use super::*;
+use super::{
+    build_pubsub_error, build_pubsub_items_result, get_xmpp_channel, iq_to_xml,
+    spaces_service_bare_jid, warn, BareJid, PubSubError, WebSocketState,
+};
 use crate::space_identity::SpaceNode;
+use std::collections::HashSet;
 
 pub(super) async fn handle_spaces_items(
     iq: &xmpp_parsers::iq::Iq,
@@ -127,7 +131,7 @@ async fn backfill_missing_space_bookmarks(
         Ok(items) => items
             .into_iter()
             .map(|item| item.id)
-            .collect::<std::collections::HashSet<_>>(),
+            .collect::<HashSet<_>>(),
         Err(error) => {
             warn!(node, error = %error, "Failed to inspect Spaces items before bookmark backfill");
             return;

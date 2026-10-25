@@ -492,18 +492,17 @@ pub mod ingress_support;
 async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixture) {
     use kameo::actor::Spawn;
     use std::time::Duration;
+    use waddle_server::ingress::commit::commit_submission;
+    use waddle_server::ingress::effects::delivery::ExternalDeliveryEffect;
+    use waddle_server::ingress::effects::Effect;
+    use waddle_server::ingress::execute::{execute_effects, terminalize_if_complete};
     use waddle_server::ingress::{
-        commit::commit_submission,
-        effects::{delivery::ExternalDeliveryEffect, Effect},
-        execute::{execute_effects, terminalize_if_complete},
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
     };
-    use waddle_xmpp::{
-        ingress::IngressEffectIntent,
-        protocol::CarbonKind,
-        registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-        Stanza,
-    };
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    use waddle_xmpp::protocol::CarbonKind;
+    use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
+    use waddle_xmpp::Stanza;
 
     let registry = ConnectionRegistry::new();
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
@@ -524,7 +523,7 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
             .ask(RegisterUserResource {
                 jid: recipient.clone(),
                 entry: registry
-                    .get_entry(recipient)
+                    .entry(recipient)
                     .expect("registered carbon resource"),
             })
             .await
@@ -620,7 +619,7 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         .ask(RegisterUserResource {
             jid: middle.clone(),
             entry: registry
-                .get_entry(&middle)
+                .entry(&middle)
                 .expect("reconnected carbon resource"),
         })
         .await

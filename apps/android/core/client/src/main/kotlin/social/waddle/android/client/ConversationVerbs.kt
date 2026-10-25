@@ -281,7 +281,12 @@ internal class ConversationVerbs(
         var result: VerbResult = VerbResult.Rejected
         try {
             result = activeSession.verbCallIfCurrent(lease) {
-                it.sendReaction(bareJid(conversationJid), targetStanzaId, next, isGroupchat)
+                it.sendReaction(
+                    bareJid(conversationJid),
+                    targetStanzaId,
+                    next,
+                    messageAudience(isGroupchat),
+                )
             }
         } finally {
             // Also runs on cancellation (screen closed mid-send): the
@@ -324,7 +329,15 @@ internal class ConversationVerbs(
             when (
                 val result = activeSession.invokeIfCurrent(
                 lease,
-                { it.sendCorrection(bareJid(conversationJid), targetId, newBody, isGroupchat, options) },
+                {
+                    it.sendCorrection(
+                        bareJid(conversationJid),
+                        targetId,
+                        newBody,
+                        messageAudience(isGroupchat),
+                        options,
+                    )
+                },
             )
             ) {
                 ActiveSession.LeaseInvocation.Stale,
@@ -364,7 +377,11 @@ internal class ConversationVerbs(
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         val sender = ownMutationSender(conversationJid, isGroupchat, lease) ?: return VerbResult.NotReady
         val result = activeSession.verbCallIfCurrent(lease) {
-            it.sendRetraction(bareJid(conversationJid), targetStanzaId, isGroupchat)
+            it.sendRetraction(
+                bareJid(conversationJid),
+                targetStanzaId,
+                messageAudience(isGroupchat),
+            )
         }
         // DM only (see sendCorrection): a room rejection after stream
         // accept would leave an irreversible local tombstone; the MUC
@@ -568,7 +585,7 @@ internal class ConversationVerbs(
     ): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         return activeSession.verbCallIfCurrent(lease) {
-            it.sendChatState(bareJid(conversationJid), state, isGroupchat)
+            it.sendChatState(bareJid(conversationJid), state, messageAudience(isGroupchat))
         }
     }
 

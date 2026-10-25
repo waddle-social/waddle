@@ -1,9 +1,10 @@
 //! Late-bound execution dependencies, weakly held to avoid an authority/state cycle.
 
+use crate::server::routes::interpret::Deps;
 use std::sync::{Arc, Mutex, Weak};
 
 pub trait RecoveryEnvironment: Send + Sync {
-    fn recovery_deps(&self) -> crate::server::routes::interpret::Deps<'_>;
+    fn recovery_deps(&self) -> Deps<'_>;
 }
 
 #[derive(Clone, Default)]
@@ -16,13 +17,13 @@ impl RecoveryBinding {
         *self
             .environment
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(environment);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(environment);
     }
 
     pub(crate) fn environment(&self) -> Option<Arc<dyn RecoveryEnvironment>> {
         self.environment
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .as_ref()
             .and_then(Weak::upgrade)
     }

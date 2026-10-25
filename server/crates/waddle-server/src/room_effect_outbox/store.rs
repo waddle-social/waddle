@@ -68,7 +68,7 @@ pub struct RoomEffectOutboxStore {
     db: Database,
 }
 impl RoomEffectOutboxStore {
-    pub async fn new(db: Database) -> Result<Self, RoomEffectOutboxError> {
+    pub async fn try_new(db: Database) -> Result<Self, RoomEffectOutboxError> {
         schema::initialize(&db).await?;
         Ok(Self { db })
     }
@@ -1001,7 +1001,7 @@ fn decode_row(row: &Row) -> Result<RoomEffectRow, RoomEffectOutboxError> {
         effect: decode_effect(&kind, &row.get::<String>(6)?)?,
         available_at_ms: row.get(7)?,
         superseded: row.get(8)?,
-        origin_instance_id: RoomEffectOriginInstanceId::new(row.get(9)?)
+        origin_instance_id: RoomEffectOriginInstanceId::try_new(row.get(9)?)
             .ok_or(RoomEffectOutboxError::InvalidPayload)?,
         producing_node: RoomEffectProducingNode::from_db_value(row.get(10)?)?,
         lease_token: row

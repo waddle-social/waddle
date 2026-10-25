@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    classify, classify_effect, is_no_effect_stale_ref_relookup_error,
+    is_ordered_unsupported_envelope_error, is_stale_ref_error, ordered_send_error,
+    timeout_envelope, OrderedRelayNackReason, OrderedRelayReply, RelaySendEffect, RelaySendFailure,
+    RemoteSendError,
+};
 
 #[test]
 fn stale_ref_errors_trigger_relookup_and_others_do_not() {

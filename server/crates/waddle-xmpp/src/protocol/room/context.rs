@@ -15,6 +15,7 @@
 //! the chain against the resulting snapshot.
 
 use super::super::id_gen::IdGenerator;
+use crate::muc::PinPermission;
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0421::OccupantIdSecret;
 use jid::{BareJid, FullJid};
@@ -113,7 +114,7 @@ pub struct RoomContext<'a> {
     /// Frozen at dispatch start from `RoomConfig.pin_permission`; the
     /// `MucPinHandler` reads this to decide whether non-admin members
     /// may pin/unpin.
-    pub pin_permission: crate::muc::PinPermission,
+    pub pin_permission: PinPermission,
     /// Source of fresh, opaque XEP-0359 stanza-id values for the
     /// canonical `<stanza-id by='room'/>` stamp the
     /// [`super::canonicalize::MucCanonicalizeHandler`] applies.

@@ -1,23 +1,23 @@
 //! Real Phase B/C detached-delivery fixtures shared with the XEP-0198 suite.
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use jid::FullJid;
-use waddle_server::{
-    ingress::{
-        commit::commit_submission,
-        effects::{delivery::ExternalDeliveryEffect, Effect, PlanSuppressionPolicy},
-        execute::execute_effects,
-        Deps, ExternalEffect, ImmediateSink, IngressDecision, IngressDecisionClass,
-        IngressSubmission, PlannedEffect,
-    },
-    sm_persistence::DatabaseSmPersistence,
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::delivery::ExternalDeliveryEffect;
+use waddle_server::ingress::effects::{Effect, PlanSuppressionPolicy};
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{
+    Deps, ExternalEffect, ImmediateSink, IngressDecision, IngressDecisionClass, IngressSubmission,
+    PlannedEffect,
 };
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    registry::ConnectionRegistry,
-    stream_management::{DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry},
-    Stanza,
+use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
+use waddle_xmpp::Stanza;
 
 use crate::ingress_support::IngressFixture;
 
@@ -235,7 +235,8 @@ pub async fn restart_and_retry(fixture: IngressFixture) {
 }
 
 fn archived_submission(fixture: &IngressFixture, stamp: &str) -> IngressSubmission {
-    use waddle_server::ingress::{effects::direct::DurableDirectEffect, DurableEffect};
+    use waddle_server::ingress::effects::direct::DurableDirectEffect;
+    use waddle_server::ingress::DurableEffect;
     use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
     use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    ensure_postgres_schema, ensure_sqlite_schema, execute_postgres_batch, execute_sqlite_batch,
+    Row, SqlitePool, POSTGRES_MAM_SCHEMA, SQLITE_MAM_SCHEMA,
+};
 
 const LEGACY_INSERT: &str = "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body) VALUES ($1, $2, $3, 'sender@example.org', 'room@example.org', 'body')";
 const EXPECTED: &[(&str, i64)] = &[("id-a", 1), ("id-b", 2), ("id-c", 3)];

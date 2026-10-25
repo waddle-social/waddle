@@ -1,7 +1,12 @@
 //! Deliver one progress-owned MUC relay copy before detached settlement records it.
+use crate::ingress::append_authority::AppendAuthority;
+use crate::ingress_uow::IngressUnitOfWork;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
 use crate::server::routes::interpret::{
-    deliver_full_jid_via_ordered_relay, deliver_peer_to_full_with_registered_remote,
-    effects::delivery::ExternalDeliveryEffect, Deps, FullJidDeliveryOutcome,
+    deliver_full_jid_via_ordered_relay, deliver_peer_to_full_with_registered_remote, Deps,
+    FullJidDeliveryOutcome,
 };
 
 pub(super) enum LegacyRemoteAttempt {
@@ -13,20 +18,19 @@ pub(super) enum LegacyRemoteAttempt {
 /// live remote wire. Its ordered channel owns enqueue FIFO; this does not prove
 /// canonical archive ordering or authorize any durable manifest settlement.
 pub(super) async fn attempt_before_readiness(
-    uow: &crate::ingress_uow::IngressUnitOfWork,
+    uow: &IngressUnitOfWork,
     decision: &super::IngressDecision,
     index: usize,
     effect: &ExternalDeliveryEffect,
     resource: &jid::FullJid,
     deps: &Deps<'_>,
-) -> Result<Option<LegacyRemoteAttempt>, crate::ingress_uow::IngressUowError> {
-    use crate::server::routes::interpret::{
-        effects::ExternalEffect, DeliveryExecutionContext, SmIngressAppendContext,
-    };
+) -> Result<Option<LegacyRemoteAttempt>, IngressUowError> {
+    use crate::server::routes::interpret::effects::ExternalEffect;
+    use crate::server::routes::interpret::{DeliveryExecutionContext, SmIngressAppendContext};
     if deps.delivery_execution_context != DeliveryExecutionContext::Live
         || deps
             .connection_registry
-            .get_entry(resource)
+            .entry(resource)
             .is_some_and(|entry| entry.is_locally_hosted())
     {
         return Ok(None);
@@ -56,7 +60,7 @@ pub(super) async fn attempt_before_readiness(
         archive_positions: crate::ingress::archive_dispatch::positions(uow, key, &progress.receipt)
             .await?,
         dispatch_stream: None,
-        authority: crate::ingress::append_authority::AppendAuthority::Verified,
+        authority: AppendAuthority::Verified,
     };
     let Some(manifest) =
         crate::ingress::room_manifest_replay::load(uow, &context, resource, stanza).await?
@@ -137,7 +141,7 @@ pub(super) async fn append_sealed_legacy(
     // A target that is local now keeps its frozen child and occupancy guards.
     if deps
         .connection_registry
-        .get_entry(resource)
+        .entry(resource)
         .is_some_and(|entry| entry.is_locally_hosted())
     {
         return None;
@@ -146,12 +150,12 @@ pub(super) async fn append_sealed_legacy(
         ExternalDeliveryEffect::RelayFullJid { stanza, .. }
         | ExternalDeliveryEffect::RouteToPeer {
             stanza,
-            kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::PeerStanza,
+            kind: PeerDeliveryKind::PeerStanza,
             ..
         } => (stanza, waddle_xmpp::registry::DeliveryKind::PeerStanza),
         ExternalDeliveryEffect::RouteToPeer {
             stanza,
-            kind: crate::server::routes::interpret::effects::delivery::PeerDeliveryKind::DirectFrame,
+            kind: PeerDeliveryKind::DirectFrame,
             ..
         }
         | ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
@@ -161,7 +165,7 @@ pub(super) async fn append_sealed_legacy(
     };
     let mut legacy = deps.clone();
     if let Some(context) = legacy.ingress_append_context.as_mut() {
-        context.authority = crate::ingress::append_authority::AppendAuthority::LocalOnly;
+        context.authority = AppendAuthority::LocalOnly;
     }
     if let ExternalDeliveryEffect::RelayFullJid {
         origin, call_setup, ..

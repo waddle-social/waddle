@@ -29,6 +29,7 @@
 //! - Strip any `<occupant-id/>` received from clients (prevent spoofing)
 //! - Use a consistent generation algorithm
 
+use crate::xep::xep0317::ServerHats;
 use hmac::{Hmac, KeyInit, Mac};
 use minidom::Element;
 use sha2::Sha256;
@@ -64,7 +65,7 @@ pub struct OccupantIdSecret(Arc<[u8]>);
 impl OccupantIdSecret {
     /// Validate and wrap a deployment secret. Rejects values shorter than
     /// `OCCUPANT_ID_SECRET_MIN_BYTES`.
-    pub fn new(bytes: impl Into<Arc<[u8]>>) -> Result<Self, OccupantIdSecretError> {
+    pub fn try_new(bytes: impl Into<Arc<[u8]>>) -> Result<Self, OccupantIdSecretError> {
         let bytes: Arc<[u8]> = bytes.into();
         if bytes.len() < OCCUPANT_ID_SECRET_MIN_BYTES {
             return Err(OccupantIdSecretError::TooShort {
@@ -98,7 +99,7 @@ impl std::fmt::Debug for OccupantIdSecret {
     }
 }
 
-/// Failure reasons for `OccupantIdSecret::new`.
+/// Failure reasons for `OccupantIdSecret::try_new`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OccupantIdSecretError {
     #[error("occupant-id secret must be at least {min} bytes, got {got}")]
@@ -129,7 +130,7 @@ pub struct OccupantIdentity<'a> {
     pub bare_jid: &'a jid::BareJid,
     pub real_jid: Option<&'a jid::FullJid>,
     pub secret: &'a OccupantIdSecret,
-    pub hats: &'a crate::xep::xep0317::ServerHats,
+    pub hats: &'a ServerHats,
 }
 
 /// An opaque occupant identifier.

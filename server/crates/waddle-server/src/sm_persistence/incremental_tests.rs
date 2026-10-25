@@ -1,6 +1,10 @@
 //! Incremental detached writes preserve the durable detach envelope.
 
-use super::*;
+use super::{
+    fixed_time, fixture_principal, fixture_session, fixture_unacked, DatabaseSmPersistence,
+    Duration, IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend,
+    PersistedSession, PersistedUnackedStanza, SmPersistenceStorage,
+};
 use waddle_xmpp::stream_management::persistence::PersistedDetachedAppend;
 
 #[tokio::test]

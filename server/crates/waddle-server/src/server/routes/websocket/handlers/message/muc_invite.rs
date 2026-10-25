@@ -20,18 +20,21 @@
 //! (#1264) so a later `<decline/>` can be verified and routed to the
 //! actual inviter.
 
+use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+use crate::server::routes::interpret::effects::invite::InviteDeliveryFailure;
+use crate::server::routes::interpret::effects::PlanEffectDependency;
+use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::effects::ScopedInviteSink;
+use crate::server::routes::websocket::LEAVE_ASK_TIMEOUT;
 use tracing::warn;
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation,
-        MucInviteMembershipGrant,
-    },
-    muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
-    muc::room_registry_actor::{GetOrCreateRoom, GetRoom},
-    pending_delivery::{PendingPayload, PendingRow, PendingRowId},
-    protocol::handlers::errors::message_error_reply,
-    Stanza,
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation, MucInviteMembershipGrant,
 };
+use waddle_xmpp::muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot};
+use waddle_xmpp::muc::room_registry_actor::{GetOrCreateRoom, GetRoom};
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
+use waddle_xmpp::protocol::handlers::errors::message_error_reply;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -41,20 +44,17 @@ use crate::server::routes::websocket::muc_invites::{
 };
 use crate::server::routes::websocket::WebSocketState;
 
-use crate::server::routes::interpret::{
-    effects::{
-        Effect, EffectOutcome, ExternalEffect, MembershipOutcome, PlanFailure, PlannedEffect,
-    },
-    Deps,
+use crate::server::routes::interpret::effects::{
+    Effect, EffectOutcome, ExternalEffect, MembershipOutcome, PlanFailure, PlannedEffect,
 };
+use crate::server::routes::interpret::Deps;
 
 #[derive(Clone, Debug)]
 pub enum InviteLedgerMutation {
     Record {
         invite: OutstandingInvite,
         recorded_at: chrono::DateTime<chrono::Utc>,
-        failure:
-            Option<Box<crate::server::routes::interpret::effects::invite::InviteDeliveryFailure>>,
+        failure: Option<Box<InviteDeliveryFailure>>,
     },
     Claim {
         invite: OutstandingInvite,
@@ -133,7 +133,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     // a caller's pre-grant copy would roll back joins/leaves that projected
     // through the actor since.
     let snapshot = match tokio::time::timeout(
-        crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
+        LEAVE_ASK_TIMEOUT,
         stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
     )
     .await
@@ -237,7 +237,7 @@ pub(super) async fn handle_muc_mediated_invite(
     state: &WebSocketState,
     bound_jid: &jid::FullJid,
     authenticated_session: Option<&Session>,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
 ) -> Option<Vec<Stanza>> {
     let ingress_effect_capture = deps.ingress_effect_capture.as_ref();
     if incoming.type_ != MessageType::Normal {
@@ -307,7 +307,7 @@ pub(super) async fn handle_muc_mediated_invite(
         )]);
     }
     let inviter_bare = bound_jid.to_bare();
-    let inviter_affiliation = snapshot.room.get_affiliation(&inviter_bare);
+    let inviter_affiliation = snapshot.room.affiliation(&inviter_bare);
     // XEP-0045 §7.8.2 note: "Invitation privileges in members-only
     // rooms SHOULD be restricted to room admins; if a member without
     // privileges to edit the member list attempts to invite another
@@ -400,31 +400,30 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![]);
     }
 
-    let previous_invitee_affiliation = snapshot.room.get_affiliation(&invitee);
+    let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let mut mutation = MucMembershipMutation {
         room: room_jid.clone(),
         invitee: invitee.clone(),
         actor: room_actor.clone(),
         previous_affiliation: previous_invitee_affiliation,
     };
-    let granted_membership =
-        if snapshot.room.config.members_only {
-            match deps
+    let granted_membership = if snapshot.room.config.members_only {
+        match deps
             .effects
             .execute(
                 PlannedEffect::new(Effect::External(ExternalEffect::RoomMembershipMutation(
-                    crate::server::routes::interpret::effects::early::RoomMembershipMutation::Muc(
-                        Box::new(mutation.clone()),
-                    ),
+                    RoomMembershipMutation::Muc(Box::new(mutation.clone())),
                 ))),
                 deps,
             )
             .await
         {
-            EffectOutcome::Membership(MembershipOutcome::Granted { previous_affiliation }) => {
+            EffectOutcome::Membership(MembershipOutcome::Granted {
+                previous_affiliation,
+            }) => {
                 mutation.previous_affiliation = previous_affiliation;
                 true
-            },
+            }
             EffectOutcome::Membership(MembershipOutcome::Preserved) => false,
             _ => {
                 return Some(vec![error_frame(
@@ -437,9 +436,9 @@ pub(super) async fn handle_muc_mediated_invite(
                 )])
             }
         }
-        } else {
-            false
-        };
+    } else {
+        false
+    };
 
     // #1264: record the outstanding invite BEFORE relaying so a
     // decline arriving immediately after delivery always verifies.
@@ -453,29 +452,29 @@ pub(super) async fn handle_muc_mediated_invite(
         inviter: inviter_bare.clone(),
     };
     let failure = if granted_membership {
-        crate::server::routes::interpret::effects::invite::InviteDeliveryFailure::RollbackMuc {
+        InviteDeliveryFailure::RollbackMuc {
             grant: Box::new(mutation.clone()),
             invite: ledger.clone(),
         }
     } else {
-        crate::server::routes::interpret::effects::invite::InviteDeliveryFailure::RemoveLedger(
-            ledger.clone(),
-        )
+        InviteDeliveryFailure::RemoveLedger(ledger.clone())
     };
     let mut ledger_effect = PlannedEffect::new(Effect::External(ExternalEffect::InviteLedger(
         InviteLedgerMutation::Record {
             invite: ledger.clone(),
             recorded_at: chrono::Utc::now(),
-            failure: granted_membership.then(|| Box::new(crate::server::routes::interpret::effects::invite::InviteDeliveryFailure::RollbackMucMembership(Box::new(mutation)))),
+            failure: granted_membership.then(|| {
+                Box::new(InviteDeliveryFailure::RollbackMucMembership(Box::new(
+                    mutation,
+                )))
+            }),
         },
     )));
     if snapshot.room.config.members_only {
-        ledger_effect = ledger_effect.with_dependency(
-            crate::server::routes::interpret::effects::PlanEffectDependency::AfterRoomMembership {
-                room: room_jid.clone(),
-                member: invitee.clone(),
-            },
-        );
+        ledger_effect = ledger_effect.with_dependency(PlanEffectDependency::AfterRoomMembership {
+            room: room_jid.clone(),
+            member: invitee.clone(),
+        });
     }
     let recorded_at = match deps.effects.execute(ledger_effect, deps).await {
         EffectOutcome::InviteLedger(Ok(InviteLedgerOutcome::Recorded(RecordOutcome::New {
@@ -514,7 +513,7 @@ pub(super) async fn handle_muc_mediated_invite(
         &inbound_invite,
     );
 
-    let scoped_sink = crate::server::routes::interpret::effects::ScopedInviteSink {
+    let scoped_sink = ScopedInviteSink {
         inner: deps.effects,
         invite: ledger,
         failure: Some(failure),
@@ -586,7 +585,7 @@ pub(crate) async fn execute_muc_membership(
     else {
         return EffectOutcome::Unavailable;
     };
-    let previous_invitee_affiliation = snapshot.room.get_affiliation(&invitee);
+    let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let granted_membership = snapshot.room.config.members_only
         && previous_invitee_affiliation < waddle_xmpp::Affiliation::Member;
     if granted_membership {
@@ -625,7 +624,7 @@ pub(crate) async fn execute_muc_membership(
                                 .ask(GetSnapshot)
                                 .reply_timeout(std::time::Duration::from_secs(5))
                                 .await
-                                .map(|snapshot| snapshot.room.get_affiliation(&invitee))
+                                .map(|snapshot| snapshot.room.affiliation(&invitee))
                             {
                                 if let Err(error) =
                                     super::super::iq::persist_managed_channel_affiliation(
@@ -713,7 +712,7 @@ pub(crate) async fn rollback_muc_membership(grant: &MucMembershipMutation, deps:
     else {
         return;
     };
-    if snapshot.room.get_affiliation(&grant.invitee) != waddle_xmpp::Affiliation::Member {
+    if snapshot.room.affiliation(&grant.invitee) != waddle_xmpp::Affiliation::Member {
         return;
     }
     rollback_invite_grant(
@@ -865,9 +864,8 @@ pub(super) async fn deliver_muc_user_message(
     match deps
         .effects
         .execute(
-            PlannedEffect::new(Effect::External(effect)).with_suppression(
-                crate::server::routes::interpret::effects::PlanSuppressionPolicy::SenderOnly,
-            ),
+            PlannedEffect::new(Effect::External(effect))
+                .with_suppression(PlanSuppressionPolicy::SenderOnly),
             deps,
         )
         .await
@@ -999,7 +997,7 @@ mod tests {
                 channel_id.to_string(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(vec![b't'; 32]).expect("occupant-id secret"),
+            OccupantIdSecret::try_new(vec![b't'; 32]).expect("occupant-id secret"),
         ))
     }
 
@@ -1197,9 +1195,8 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EffectOutcome> + Send + 'a>>
         {
             Box::pin(async move {
-                use crate::server::routes::interpret::effects::{
-                    early::RoomMembershipMutation, ImmediateSink,
-                };
+                use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+                use crate::server::routes::interpret::effects::ImmediateSink;
                 match &effect.effect {
                     Effect::External(ExternalEffect::RoomMembershipMutation(
                         RoomMembershipMutation::Muc(grant),
@@ -1295,7 +1292,7 @@ mod tests {
                 .await
                 .expect("initial snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::None
         );
         let mut message = Message::new(Some(jid::Jid::from(room)));
@@ -1334,7 +1331,7 @@ mod tests {
                 .await
                 .expect("final snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             concurrent_affiliation,
             "failed invitation must restore the execution-time affiliation"
         );
@@ -1385,7 +1382,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::Admin
         );
     }
@@ -1509,7 +1506,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&recipient),
+                .affiliation(&recipient),
             waddle_xmpp::Affiliation::None
         );
     }

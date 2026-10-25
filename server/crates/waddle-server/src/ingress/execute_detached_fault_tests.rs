@@ -1,21 +1,18 @@
 //! Durable progress survives executor cancellation and rolls back on storage faults.
-use super::*;
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, Effect, EffectReceiptRepository,
+    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect, Stanza,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::execute_uow::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::{
-    ingress::{
-        commit::commit_submission,
-        execute_uow::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE},
-        test_support::IngressFixture,
-    },
-    ingress_uow::DeliveryProgressRepository,
-};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    stream_management::{DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry},
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
 
 async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
@@ -91,7 +88,7 @@ async fn detached_delivery_fault(
                         .deps
                         .protocol
                         .connection_registry
-                        .get_entry(resource)
+                        .entry(resource)
                         .expect("live entry"),
                 )
                 .await
@@ -133,9 +130,10 @@ async fn detached_delivery_fault(
     );
     submission.plan.plan = sink.take().0;
     if let Some(kind) = live_kind {
+        use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
         use crate::server::routes::interpret::{
             deliver_direct_to_full_with_registered_remote,
-            deliver_peer_to_full_with_registered_remote, effects::delivery::PeerDeliveryKind,
+            deliver_peer_to_full_with_registered_remote,
         };
         planned.direct_route_identity = Some(EffectMessageIdentity::capture_ordinal(1));
         for resource in [&first, &second]
@@ -146,7 +144,7 @@ async fn detached_delivery_fault(
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(resource)
+                .entry(resource)
                 .is_some());
             let stanza = Stanza::Message(submission.plan.sanitized_message.clone());
             match kind {

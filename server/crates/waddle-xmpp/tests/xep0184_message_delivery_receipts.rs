@@ -22,9 +22,10 @@
 use jid::{BareJid, FullJid, Jid};
 use std::sync::Arc;
 use waddle_xmpp::disco::{server_features, Feature};
+use waddle_xmpp::protocol::handlers::register_default_message_handlers;
 use waddle_xmpp::protocol::{
-    handlers::register_default_message_handlers, FixedIdGenerator, InboundEvent, InboundFrame,
-    OutboundEvent, StanzaDispatcher, XmppStateMachine, HEADLESS_RECIPIENT_RESOURCE,
+    FixedIdGenerator, InboundEvent, InboundFrame, OutboundEvent, StanzaDispatcher,
+    XmppStateMachine, HEADLESS_RECIPIENT_RESOURCE,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::{Message, MessageType};

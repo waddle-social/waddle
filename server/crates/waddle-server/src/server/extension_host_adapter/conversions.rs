@@ -1,13 +1,13 @@
 use jid::{BareJid, Jid};
 use tracing::warn;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
-use waddle_xmpp::{
-    mam::ArchivedMessage as MamArchivedMessage,
-    roster::{AskType, RosterItem, Subscription},
-};
-use xmpp_parsers::{presence::Show, stanza_error::ErrorType};
+use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
+use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
+use xmpp_parsers::presence::Show;
+use xmpp_parsers::stanza_error::ErrorType;
 
-use crate::ingress::{nested::NestedRefusal, IngressDecisionClass};
+use crate::ingress::nested::NestedRefusal;
+use crate::ingress::IngressDecisionClass;
 
 use super::{
     ExtensionHostAdapterError, HostMucAffiliation, HostMucRole, HostPresenceShow, HostRosterAsk,
@@ -38,8 +38,8 @@ pub(super) fn host_tool_error(error: ExtensionHostAdapterError) -> ext_host::Hos
     };
     ext_host::HostToolError {
         code,
-        message: DisplayText::new(error.to_string()).unwrap_or_else(|_| {
-            DisplayText::new("extension host tool failed").expect("static text")
+        message: DisplayText::try_new(error.to_string()).unwrap_or_else(|_| {
+            DisplayText::try_new("extension host tool failed").expect("static text")
         }),
     }
 }
@@ -89,7 +89,7 @@ pub(super) fn ext_archived_message(
     message: MamArchivedMessage,
 ) -> Option<ext_host::ArchivedMessage> {
     Some(ext_host::ArchivedMessage {
-        stanza_id: waddle_extensions::StanzaId::new(message.id).ok()?,
+        stanza_id: waddle_extensions::StanzaId::try_new(message.id).ok()?,
         from: message.from,
         to: message.to,
         sent_at: message.timestamp,
@@ -102,11 +102,11 @@ pub(super) fn ext_archived_message(
         // `MamArchivedMessage.body: Option<String>` and in the verbatim
         // `stanza_xml` column, which extensions can opt into via the raw
         // stanza surface if they need that distinction.
-        body: message.body.and_then(|value| DisplayText::new(value).ok()),
+        body: message.body.and_then(|value| DisplayText::try_new(value).ok()),
         thread_id: message
             .thread
             .as_ref()
-            .and_then(|t| waddle_extensions::ThreadId::new(t.id.as_str()).ok()),
+            .and_then(|t| waddle_extensions::ThreadId::try_new(t.id.as_str()).ok()),
         reply_to: message.reply.and_then(|reply| {
             // XEP-0461 §3 allows `<reply to=...>` to be either a bare or a
             // full JID. The extension/Wasm surface (`ReplyTarget.to`) is
@@ -123,7 +123,7 @@ pub(super) fn ext_archived_message(
             // bare JID survive the extension boundary.
             let to = reply.to.and_then(|jid| {
                 let jid_string = jid.to_string();
-                match waddle_extensions::FullJidValue::new(jid_string.clone()) {
+                match waddle_extensions::FullJidValue::try_new(jid_string.clone()) {
                     Ok(value) => Some(value),
                     Err(_) => {
                         warn!(
@@ -136,7 +136,7 @@ pub(super) fn ext_archived_message(
                 }
             });
             Some(waddle_extensions::ReplyTarget {
-                id: waddle_extensions::StanzaId::new(reply.id.as_str().to_string()).ok()?,
+                id: waddle_extensions::StanzaId::try_new(reply.id.as_str().to_string()).ok()?,
                 to,
             })
         }),

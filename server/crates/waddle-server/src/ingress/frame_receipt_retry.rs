@@ -1,10 +1,9 @@
 use super::IngressAuthority;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, Weak},
-    time::Duration,
-};
-use waddle_xmpp::{ingress::MessageKey, stream_management::SmIngressFrameReceipt};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::stream_management::SmIngressFrameReceipt;
 
 /// Proofs outlive socket state. The queue lock never covers database work.
 #[derive(Default)]
@@ -23,7 +22,7 @@ impl IngressAuthority {
         let mut queue = self
             .frame_receipt_retries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         for receipt in receipts {
             if !queue.messages.contains_key(&receipt.message_key) {
                 queue.order.push_back(receipt.message_key);
@@ -49,7 +48,7 @@ async fn retry(authority: Weak<IngressAuthority>) {
             let mut queue = current
                 .frame_receipt_retries
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             let Some(key) = queue.order.front() else {
                 // Clear under the retention lock, so a concurrent enqueue starts
                 // a worker even before this task has returned.
@@ -78,7 +77,7 @@ async fn retry(authority: Weak<IngressAuthority>) {
         let mut queue = current
             .frame_receipt_retries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let key = receipts[0].message_key;
         if let Some(pending) = queue.messages.get_mut(&key) {
             pending.retain(|receipt| !receipts.contains(receipt));

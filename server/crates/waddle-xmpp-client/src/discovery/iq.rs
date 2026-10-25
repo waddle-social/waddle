@@ -1,3 +1,5 @@
+//! IQ construction for discovery, uploads, roster, and user search.
+
 use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp_core::roster::RosterItem;
@@ -13,9 +15,9 @@ use super::{
     CLIENT_NS, DISCO_INFO_NS, DISCO_ITEMS_NS, MUC_ADMIN_NS, PUBSUB_NS, ROSTER_NS, UPLOAD_NS,
     USER_SEARCH_NS, WADDLE_INBOX_NS,
 };
-
 // ── IQ builders ──────────────────────────────────────────────────────────────
-
+/// Build a disco#info IQ-get addressed to the entity and optional node.
+#[must_use]
 pub fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-info-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_INFO_NS);
@@ -30,6 +32,8 @@ pub fn build_disco_info_iq(to: &str, node: Option<&str>) -> Element {
         .build()
 }
 
+/// Build a disco#items IQ-get addressed to the entity and optional node.
+#[must_use]
 pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
     let id = format!("disco-items-{}", next_id());
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
@@ -44,6 +48,8 @@ pub fn build_disco_items_iq(to: &str, node: Option<&str>) -> Element {
         .build()
 }
 
+/// Build an IQ-get requesting items from the selected PubSub node.
+#[must_use]
 pub fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
     let id = format!("pubsub-items-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -62,6 +68,8 @@ pub fn build_pubsub_items_iq(to: &BareJid, node: &SpaceNode) -> Element {
         .build()
 }
 
+/// Build an XEP-0363 upload-slot request carrying filename, byte length, and media type.
+#[must_use]
 pub fn build_upload_slot_iq(
     service_jid: &str,
     filename: &str,
@@ -89,6 +97,8 @@ pub fn build_upload_slot_iq(
         .build()
 }
 
+/// Build a Waddle inbox IQ-set marking the peer conversation or selected thread read.
+#[must_use]
 pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead) -> Element {
     let id = format!("waddle-mark-read-{}", next_id());
     let mut builder = Element::builder("mark-read", WADDLE_INBOX_NS).attr(
@@ -106,6 +116,8 @@ pub fn build_waddle_inbox_mark_read_iq(to: &str, mark_read: &WaddleInboxMarkRead
         .build()
 }
 
+/// Build an account roster IQ-get with a generated correlation identifier.
+#[must_use]
 pub fn build_roster_get_iq(to: Option<&str>, ver: Option<&str>) -> Element {
     let id = format!("roster-{}", next_id());
     let mut query = Element::builder("query", ROSTER_NS);
@@ -122,6 +134,8 @@ pub fn build_roster_get_iq(to: Option<&str>, ver: Option<&str>) -> Element {
     iq.build()
 }
 
+/// Read roster contacts and the version token; return None if the roster query is absent or any roster item is malformed.
+#[must_use]
 pub fn parse_roster_result(iq: &Element) -> Option<RosterResult> {
     let query = iq.get_child("query", ROSTER_NS)?;
     let items = query
@@ -136,6 +150,8 @@ pub fn parse_roster_result(iq: &Element) -> Option<RosterResult> {
     })
 }
 
+/// Build an IQ-get requesting the user-search service form.
+#[must_use]
 pub fn build_user_search_form_iq(to: &str) -> Element {
     let id = format!("user-search-form-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -146,6 +162,8 @@ pub fn build_user_search_form_iq(to: &str) -> Element {
         .build()
 }
 
+/// Build an IQ-set submitting the supplied username, name, and email search fields.
+#[must_use]
 pub fn build_user_search_iq(to: &str, query: &UserSearchQuery) -> Element {
     let id = format!("user-search-{}", next_id());
     let mut search = Element::builder("query", USER_SEARCH_NS);
@@ -167,6 +185,8 @@ pub fn build_user_search_iq(to: &str, query: &UserSearchQuery) -> Element {
         .build()
 }
 
+/// Read the supported user-search fields advertised by the service.
+#[must_use]
 pub fn parse_user_search_form(iq: &Element) -> Option<UserSearchForm> {
     let query = iq.get_child("query", USER_SEARCH_NS)?;
     let instructions = query
@@ -183,6 +203,8 @@ pub fn parse_user_search_form(iq: &Element) -> Option<UserSearchForm> {
     })
 }
 
+/// Read matching user JIDs and profile fields from the service response.
+#[must_use]
 pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
     let query = iq.get_child("query", USER_SEARCH_NS)?;
     let items = query
@@ -210,6 +232,8 @@ pub fn parse_user_search_result(iq: &Element) -> Option<UserSearchResult> {
     Some(UserSearchResult { items })
 }
 
+/// Build a muc#admin IQ-get requesting occupants with the selected affiliation.
+#[must_use]
 pub fn build_muc_admin_affiliation_list_iq(room_jid: &str, affiliation: MucAffiliation) -> Element {
     let id = format!("muc-admin-list-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -231,6 +255,8 @@ pub fn build_muc_admin_affiliation_list_iq(room_jid: &str, affiliation: MucAffil
         .build()
 }
 
+/// Build a muc#admin IQ-set assigning a bare JID the selected affiliation.
+#[must_use]
 pub fn build_muc_admin_affiliation_set_iq(
     room_jid: &str,
     items: &[MucAdminAffiliationItem],
@@ -274,6 +300,7 @@ pub fn build_muc_admin_affiliation_set_iq(
 /// addressed by nick — distinct from a §9.1 ban, which sets
 /// `affiliation='outcast'` by bare JID via
 /// [`build_muc_admin_affiliation_set_iq`].
+#[must_use]
 pub fn build_muc_admin_role_set_iq(
     room_jid: &str,
     nick: &str,
@@ -303,6 +330,8 @@ pub fn build_muc_admin_role_set_iq(
         .build()
 }
 
+/// Read affiliation assignments and optional reasons from a muc#admin query.
+#[must_use]
 pub fn parse_muc_admin_affiliation_query(
     element: &Element,
 ) -> Option<Vec<MucAdminAffiliationItem>> {

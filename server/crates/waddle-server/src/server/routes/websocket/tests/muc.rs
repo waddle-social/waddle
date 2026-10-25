@@ -1,4 +1,21 @@
-use super::*;
+#[cfg(feature = "clustering")]
+use super::create_test_websocket_state_with_extension_manager;
+#[cfg(feature = "clustering")]
+use super::empty_extension_manager;
+#[cfg(feature = "clustering")]
+use super::TestStateOverrides;
+use super::{
+    create_test_server_owner_session, create_test_session, create_test_websocket_state,
+    create_test_websocket_state_with_sfu, current_test_occupancy_session, disco_info_iq_frame,
+    disco_items_iq_frame, element_to_xml, get_or_create_room_actor, get_room_actor, handle_iq,
+    handle_message_for_test, handlers, mpsc, parse_message_for_test, parse_room_jid_context,
+    ready_phase, register_test_connection, snapshot_room, stanza_to_xml, Affiliation,
+    ApplyAdminItems, BareJid, ChangeAffiliation, ConnectionPhase, Element, FromStr, FullJid,
+    GetConfig, GetSnapshot, Object, ObjectType, OutboundStanza, Permission, Relation, RoomConfig,
+    Session, SetSubject, Subject, Tuple, UpdateConfig, WebSocketState, WriteTuple,
+    DEPLOYMENT_SERVER_ID,
+};
+
 use crate::permissions::CheckPermission;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -51,7 +68,7 @@ async fn handle_muc_join(
     sender_jid: &FullJid,
     nick: &str,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
 ) -> Vec<String> {
     super::handle_muc_join_with_occupancy_session(
         state,
@@ -139,7 +156,7 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
         &current_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -210,7 +227,7 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
         &sender_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let self_presence = Element::from_str(&responses[0]).expect("self presence xml");
@@ -263,7 +280,7 @@ async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constra
         &sender_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -425,7 +442,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             &creator_jid,
             "alice",
             None,
-            &Some(creator_session),
+            Some(&creator_session),
         )
         .await
     });
@@ -444,7 +461,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             &ordinary_jid,
             "bob",
             None,
-            &Some(ordinary_session),
+            Some(&ordinary_session),
         )
         .await
     });
@@ -479,7 +496,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
             "example.com",
             "muc.example.com",
             admin_state.as_ref(),
-            &Some(admin_session),
+            Some(&admin_session),
             &admin_ready,
         )
         .await
@@ -542,7 +559,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
         );
     }
     let snapshot = snapshot_room(state.as_ref(), &room_jid).await.room;
-    assert_eq!(snapshot.get_affiliation(&durable_owner), Affiliation::Owner);
+    assert_eq!(snapshot.affiliation(&durable_owner), Affiliation::Owner);
 }
 
 /// #1107 / XEP-0045 §7.6: a full JID already in the room under nick A
@@ -566,7 +583,7 @@ async fn muc_join_under_second_nick_returns_not_acceptable() {
         &sender_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -577,7 +594,7 @@ async fn muc_join_under_second_nick_returns_not_acceptable() {
         &sender_jid,
         "alice-two",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
     assert_eq!(responses.len(), 1, "one error presence: {responses:?}");
@@ -635,7 +652,7 @@ async fn muc_join_full_room_returns_service_unavailable() {
         &alice,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -664,7 +681,7 @@ async fn muc_join_full_room_returns_service_unavailable() {
         &bob,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     assert_eq!(
@@ -729,7 +746,7 @@ async fn muc_join_full_room_returns_service_unavailable() {
         &carol,
         "carol",
         None,
-        &Some(carol_session),
+        Some(&carol_session),
     )
     .await;
     let admin_self = admin_responses
@@ -784,7 +801,7 @@ async fn second_joiner_of_unmanaged_room_is_not_owner() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     let alice_presence = Element::from_str(&alice_responses[0]).expect("alice presence");
@@ -821,7 +838,7 @@ async fn second_joiner_of_unmanaged_room_is_not_owner() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     let bob_self = bob_responses
@@ -871,7 +888,7 @@ async fn muc_join_responses_use_client_namespace() {
         &sender_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -934,7 +951,7 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
             &sender_jid,
             nick,
             None,
-            &session,
+            session.as_ref(),
         )
         .await;
     }
@@ -947,7 +964,7 @@ async fn xep_0045_join_replay_exposes_existing_occupant_real_jids() {
         &joiner,
         "witness",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -1037,7 +1054,7 @@ async fn xep_0317_extension_bot_hat_rides_join_replay_and_leave() {
             jid,
             nick,
             None,
-            &session,
+            session.as_ref(),
         )
         .await;
     }
@@ -1069,7 +1086,7 @@ async fn xep_0317_extension_bot_hat_rides_join_replay_and_leave() {
         &witness,
         "witness",
         None,
-        &None,
+        None,
     )
     .await;
     let frame_from = |responses: &[String], nick: &str| {
@@ -1217,7 +1234,7 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
         &sender_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
     assert!(
@@ -1235,7 +1252,7 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
         &sender_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
     assert_eq!(denied.len(), 1);
@@ -1269,7 +1286,7 @@ async fn managed_members_only_join_requires_explicit_channel_member_affiliation(
         &sender_jid,
         "alice",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
     assert!(
@@ -1322,7 +1339,7 @@ async fn managed_registration_required_denial_increments_admission_counter() {
         &sender_jid,
         "alice",
         None,
-        &Some(session),
+        Some(&session),
     )
     .instrument(dispatch_span)
     .await;
@@ -1408,7 +1425,7 @@ async fn managed_not_authorized_denial_emits_admission_telemetry() {
         &sender_jid,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -1501,7 +1518,7 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
         &sender_jid,
         "alice",
         None,
-        &Some(malformed_session),
+        Some(&malformed_session),
     )
     .await;
 
@@ -1611,7 +1628,7 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
         &sender_jid,
         "alice",
         None,
-        &Some(malformed_session),
+        Some(&malformed_session),
     )
     .instrument(dispatch_span)
     .await;
@@ -1623,24 +1640,48 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
         "malformed identity must fail closed: {denied:?}"
     );
 
-    // Wait for the dispatch span to actually close before reading it.
-    //
-    // This assertion failed intermittently in CI with an EMPTY exported
-    // set (`exported xmpp.stanza.dispatch spans: []`), never locally.
-    // The reason is structural, not timing luck: the join path leaves
-    // background work holding the span open, and on a `current_thread`
-    // runtime that work can only progress while the test awaits — and
-    // there is no await between the join returning and this read. On an
-    // idle machine the work happens to finish during the awaits inside
-    // the join; under CI contention it does not, so the span is still
-    // open and `tracing-opentelemetry` has nothing to export yet
-    // (a span exports on close, and `exported()` already force-flushes,
-    // so flushing harder cannot help).
-    //
-    // Polling yields the runtime so that work can finish, with a bounded
-    // deadline. This does not weaken the assertion: it still requires
-    // the attribute to be present, and on timeout it reports the empty
-    // set rather than passing.
+    // Kameo messages and SQLite worker commands retain the current span.
+    // Close the fixture resources that handled the join before checking its
+    // export; flushing alone cannot close spans those resources still own.
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .stop_gracefully()
+            .await
+            .expect("fixture room registry must stop");
+        state
+            .deps
+            .protocol
+            .room_registry
+            .wait_for_shutdown_result()
+            .await
+            .expect("fixture room registry must finish shutdown");
+
+        let db_actor = state.deps.app_state.db_pool.global_actor();
+        db_actor
+            .stop_gracefully()
+            .await
+            .expect("fixture database actor must stop");
+        db_actor
+            .wait_for_shutdown_result()
+            .await
+            .expect("fixture database actor must finish shutdown");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .sqlite_pool()
+            .expect("fixture must use SQLite")
+            .close()
+            .await;
+    })
+    .await
+    .expect("fixture shutdown must release the dispatch span within five seconds");
+
+    // Allow the final span-close callbacks to reach the exporter after teardown.
     let dispatch_spans =
         await_exported_spans(&spans, "xmpp.stanza.dispatch", StdDuration::from_secs(5)).await;
     let rendered = dispatch_spans
@@ -1707,7 +1748,7 @@ async fn managed_channel_lookup_failure_counts_as_a_wait_denial() {
         &sender_jid,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -1792,7 +1833,7 @@ async fn managed_forbidden_ban_denial_increments_admission_counter() {
         &sender_jid,
         "mallory",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
     assert_eq!(denied.len(), 1);
@@ -1854,7 +1895,7 @@ async fn managed_public_channel_allows_deployment_member_without_channel_tuple()
         &sender_jid,
         "alice",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
 
@@ -1944,7 +1985,7 @@ async fn managed_join_uses_live_actor_members_only_config_over_stale_channel_row
         &sender_jid,
         "bob",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
 
@@ -2037,7 +2078,7 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
         &sender_jid,
         "bob",
         None,
-        &Some(session),
+        Some(&session),
     )
     .await;
     assert_eq!(denied.len(), 1, "denied join: {denied:?}");
@@ -2049,7 +2090,7 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
     let room = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             let room = snapshot_room(state.as_ref(), &room_jid).await.room;
-            if room.get_affiliation(&sender_jid.to_bare()) == waddle_xmpp::Affiliation::None {
+            if room.affiliation(&sender_jid.to_bare()) == waddle_xmpp::Affiliation::None {
                 break room;
             }
             tokio::task::yield_now().await;
@@ -2058,7 +2099,7 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
     .await
     .expect("detached resolver repair must complete within the test deadline");
     assert_eq!(
-        room.get_affiliation(&sender_jid.to_bare()),
+        room.affiliation(&sender_jid.to_bare()),
         waddle_xmpp::Affiliation::None,
         "the rejection must clear the stale resolver-derived Member from the live actor"
     );
@@ -2081,7 +2122,7 @@ async fn standard_members_only_join_rejects_unaffiliated_user() {
         &alice_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -2105,7 +2146,7 @@ async fn standard_members_only_join_rejects_unaffiliated_user() {
         &bob_jid,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -2148,7 +2189,7 @@ async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() 
         &setter_jid,
         "setter-nick",
         None,
-        &Some(setter_session),
+        Some(&setter_session),
     )
     .await;
     let room_actor = get_room_actor(state.as_ref(), &room_jid)
@@ -2176,7 +2217,7 @@ async fn xep_0045_section_7_2_15_join_replay_serializes_full_subject_envelope() 
         &joiner_jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -2281,7 +2322,7 @@ async fn native_muc_admin_rejects_mixed_role_and_affiliation_set() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -2319,7 +2360,7 @@ async fn native_muc_admin_rejects_mixed_role_and_affiliation_set() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -2336,7 +2377,7 @@ async fn native_muc_admin_rejects_mixed_role_and_affiliation_set() {
         .room;
     assert_eq!(snapshot.occupant_count(), 1);
     assert_ne!(
-        snapshot.get_affiliation(&alice_jid.to_bare()),
+        snapshot.affiliation(&alice_jid.to_bare()),
         Affiliation::Outcast
     );
 }
@@ -2358,7 +2399,7 @@ async fn native_muc_admin_last_owner_demotion_returns_conflict() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -2397,7 +2438,7 @@ async fn native_muc_admin_last_owner_demotion_returns_conflict() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -2413,7 +2454,7 @@ async fn native_muc_admin_last_owner_demotion_returns_conflict() {
         .expect("snapshot")
         .room;
     assert_eq!(
-        snapshot.get_affiliation(&alice_jid.to_bare()),
+        snapshot.affiliation(&alice_jid.to_bare()),
         Affiliation::Owner
     );
 }
@@ -2436,7 +2477,7 @@ async fn native_muc_admin_admin_banning_owner_returns_not_allowed() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -2465,7 +2506,7 @@ async fn native_muc_admin_admin_banning_owner_returns_not_allowed() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
 
@@ -2504,7 +2545,7 @@ async fn native_muc_admin_admin_banning_owner_returns_not_allowed() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready,
     )
     .await;
@@ -2514,7 +2555,7 @@ async fn native_muc_admin_admin_banning_owner_returns_not_allowed() {
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
     assert_eq!(
-        snapshot.get_affiliation(&alice_jid.to_bare()),
+        snapshot.affiliation(&alice_jid.to_bare()),
         Affiliation::Owner
     );
     assert_eq!(snapshot.find_nick_by_real_jid(&alice_jid), Some("alice"));
@@ -2540,7 +2581,7 @@ async fn native_muc_admin_admin_cannot_grant_admin_affiliation() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -2597,7 +2638,7 @@ async fn native_muc_admin_admin_cannot_grant_admin_affiliation() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready,
     )
     .await;
@@ -2606,7 +2647,7 @@ async fn native_muc_admin_admin_cannot_grant_admin_affiliation() {
     assert!(responses[0].contains("forbidden"));
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(snapshot.get_affiliation(&carol_bare), Affiliation::Member);
+    assert_eq!(snapshot.affiliation(&carol_bare), Affiliation::Member);
 }
 
 #[tokio::test]
@@ -2630,7 +2671,7 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -2659,7 +2700,7 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -2669,7 +2710,7 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
         &carol_jid,
         "carol",
         None,
-        &Some(carol_session),
+        Some(&carol_session),
     )
     .await;
 
@@ -2702,7 +2743,7 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready,
     )
     .await;
@@ -2725,7 +2766,7 @@ async fn native_muc_admin_admin_cannot_kick_another_admin_role() {
     }
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    let carol = snapshot.get_occupant("carol").expect("carol occupant");
+    let carol = snapshot.occupant("carol").expect("carol occupant");
     assert_eq!(carol.role, waddle_xmpp::Role::Moderator);
     assert_eq!(snapshot.find_nick_by_real_jid(&carol_jid), Some("carol"));
 }
@@ -2748,7 +2789,7 @@ async fn native_muc_admin_membership_grant_allows_optional_nick() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -2788,7 +2829,7 @@ async fn native_muc_admin_membership_grant_allows_optional_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
         &ready,
     )
     .await;
@@ -2802,7 +2843,7 @@ async fn native_muc_admin_membership_grant_allows_optional_nick() {
         .await
         .expect("snapshot")
         .room;
-    assert_eq!(snapshot.get_affiliation(&carol_bare), Affiliation::Member);
+    assert_eq!(snapshot.affiliation(&carol_bare), Affiliation::Member);
 }
 
 #[tokio::test]
@@ -2822,7 +2863,7 @@ async fn native_muc_admin_get_role_list_accepts_role_without_nick() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -2832,7 +2873,7 @@ async fn native_muc_admin_get_role_list_accepts_role_without_nick() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
 
@@ -2884,7 +2925,7 @@ async fn native_muc_admin_get_role_list_accepts_role_without_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -2915,7 +2956,7 @@ async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -2925,7 +2966,7 @@ async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
 
@@ -2976,7 +3017,7 @@ async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
         &bob_ready,
     )
     .await;
@@ -3014,7 +3055,7 @@ async fn native_muc_admin_moderator_cannot_retrieve_affiliation_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &bob_ready,
     )
     .await;
@@ -3049,7 +3090,7 @@ async fn native_muc_admin_affiliation_can_retrieve_affiliation_list() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -3059,7 +3100,7 @@ async fn native_muc_admin_affiliation_can_retrieve_affiliation_list() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
 
@@ -3113,7 +3154,7 @@ async fn native_muc_admin_affiliation_can_retrieve_affiliation_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &bob_ready,
     )
     .await;
@@ -3148,7 +3189,7 @@ async fn native_muc_admin_role_set_allows_jid_echo_without_affiliation() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -3158,7 +3199,7 @@ async fn native_muc_admin_role_set_allows_jid_echo_without_affiliation() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
 
@@ -3195,7 +3236,7 @@ async fn native_muc_admin_role_set_allows_jid_echo_without_affiliation() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -3212,7 +3253,7 @@ async fn native_muc_admin_role_set_allows_jid_echo_without_affiliation() {
         .await
         .expect("snapshot")
         .room;
-    let bob = snapshot.get_occupant("bob").expect("bob occupant");
+    let bob = snapshot.occupant("bob").expect("bob occupant");
     assert_eq!(bob.role, waddle_xmpp::Role::Visitor);
 }
 
@@ -3237,7 +3278,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -3247,7 +3288,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -3257,7 +3298,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
         &carol_jid,
         "carol",
         None,
-        &Some(carol_session),
+        Some(&carol_session),
     )
     .await;
 
@@ -3310,7 +3351,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready,
     )
     .await;
@@ -3319,7 +3360,7 @@ async fn native_muc_admin_role_moderator_cannot_grant_moderator_role() {
     assert!(responses[0].contains("forbidden"));
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    let carol = snapshot.get_occupant("carol").expect("carol occupant");
+    let carol = snapshot.occupant("carol").expect("carol occupant");
     assert_eq!(carol.role, waddle_xmpp::Role::Participant);
 }
 
@@ -3344,7 +3385,7 @@ async fn native_muc_admin_role_moderator_cannot_write_affiliations_durably() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -3354,7 +3395,7 @@ async fn native_muc_admin_role_moderator_cannot_write_affiliations_durably() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
 
@@ -3413,7 +3454,7 @@ async fn native_muc_admin_role_moderator_cannot_write_affiliations_durably() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready,
     )
     .await;
@@ -3422,7 +3463,7 @@ async fn native_muc_admin_role_moderator_cannot_write_affiliations_durably() {
     assert!(responses[0].contains("forbidden"));
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(snapshot.get_affiliation(&carol_bare), Affiliation::None);
+    assert_eq!(snapshot.affiliation(&carol_bare), Affiliation::None);
 
     let durable_membership = state
         .deps
@@ -3456,7 +3497,7 @@ async fn native_muc_admin_self_ban_returns_conflict() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -3495,7 +3536,7 @@ async fn native_muc_admin_self_ban_returns_conflict() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -3511,7 +3552,7 @@ async fn native_muc_admin_self_ban_returns_conflict() {
         .expect("snapshot")
         .room;
     assert_ne!(
-        snapshot.get_affiliation(&alice_jid.to_bare()),
+        snapshot.affiliation(&alice_jid.to_bare()),
         Affiliation::Outcast
     );
     assert_eq!(snapshot.occupant_count(), 1);
@@ -3534,7 +3575,7 @@ async fn native_muc_admin_incomplete_affiliation_item_returns_bad_request() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -3569,7 +3610,7 @@ async fn native_muc_admin_incomplete_affiliation_item_returns_bad_request() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -3596,7 +3637,7 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -3650,7 +3691,7 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -3679,7 +3720,7 @@ async fn standard_muc_owner_config_persists_room_and_enforces_nonanonymous_defau
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -3713,7 +3754,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -3723,7 +3764,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -3781,7 +3822,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
         &ready,
     )
     .await;
@@ -3834,7 +3875,7 @@ async fn standard_muc_owner_config_broadcasts_config_change_status_codes() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -4125,7 +4166,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -4135,7 +4176,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -4145,7 +4186,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         &charlie_jid,
         "charlie",
         None,
-        &Some(charlie_session),
+        Some(&charlie_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4222,7 +4263,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -4309,7 +4350,7 @@ async fn standard_muc_owner_get_returns_config_without_persisting_room() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -4330,7 +4371,7 @@ async fn standard_muc_owner_get_returns_config_without_persisting_room() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -4367,7 +4408,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -4408,7 +4449,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
         &bob_ready,
     )
     .await;
@@ -4441,7 +4482,7 @@ async fn standard_muc_owner_config_rejects_non_owner() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &bob_ready,
     )
     .await;
@@ -4495,7 +4536,7 @@ async fn room_disco_info_advertises_parent_space_metadata_for_linked_channel() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -4549,7 +4590,7 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
         &alice_jid,
         "alice",
         None,
-        &Some(session.clone()),
+        Some(&session.clone()),
     )
     .await;
 
@@ -4559,7 +4600,7 @@ async fn active_room_disco_preserves_managed_announcement_channel_type() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -4623,7 +4664,7 @@ async fn muc_owner_config_cannot_unmoderate_managed_announcement_channel() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -4667,7 +4708,7 @@ async fn muc_owner_config_cannot_unmoderate_managed_announcement_channel() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -4709,7 +4750,7 @@ async fn muc_owner_config_cannot_unmoderate_managed_announcement_channel() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -4744,13 +4785,13 @@ async fn muc_owner_config_cannot_unmoderate_managed_announcement_channel() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
     let bob = snapshot_room(state.as_ref(), &room_jid)
         .await
         .room
-        .get_occupant("bob")
+        .occupant("bob")
         .expect("bob occupant")
         .clone();
     assert_eq!(bob.role, waddle_xmpp::Role::Visitor);
@@ -4859,7 +4900,7 @@ async fn managed_space_bookmark_join_repairs_missing_parent_tuple() {
         &viewer_jid,
         "viewer",
         None,
-        &Some(viewer.clone()),
+        Some(&viewer.clone()),
     )
     .await;
 
@@ -5008,7 +5049,7 @@ async fn managed_space_bookmark_join_repairs_only_projected_parent_tuple() {
         &stale_jid,
         "stale-viewer",
         None,
-        &Some(stale_viewer.clone()),
+        Some(&stale_viewer.clone()),
     )
     .await;
     let stale_presence = Element::from_str(stale_responses.first().expect("stale join response"))
@@ -5069,7 +5110,7 @@ async fn muc_self_rejoin_does_not_emit_ghost_presence() {
         &first,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let responses = handle_muc_join(
@@ -5079,7 +5120,7 @@ async fn muc_self_rejoin_does_not_emit_ghost_presence() {
         &second,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -5140,7 +5181,7 @@ async fn muc_join_broadcast_includes_real_occupant_jid() {
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -5150,7 +5191,7 @@ async fn muc_join_broadcast_includes_real_occupant_jid() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -5198,7 +5239,7 @@ async fn muc_room_creation_denial_emits_admission_telemetry() {
         &sender,
         "mallory",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -5245,7 +5286,7 @@ async fn muc_nick_collision_returns_conflict_presence() {
         &alice,
         "dino",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let responses = handle_muc_join(
@@ -5255,7 +5296,7 @@ async fn muc_nick_collision_returns_conflict_presence() {
         &bob,
         "dino",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -5330,7 +5371,7 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -5340,7 +5381,7 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -5683,7 +5724,7 @@ async fn typed_muc_presence_is_not_join_or_update_activity() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -5693,7 +5734,7 @@ async fn typed_muc_presence_is_not_join_or_update_activity() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -5708,7 +5749,7 @@ async fn typed_muc_presence_is_not_join_or_update_activity() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -5748,7 +5789,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -5758,7 +5799,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -5767,9 +5808,9 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
     let alice_occupancy_session = current_test_occupancy_session(state.as_ref(), &alice);
     waddle_sfu::SfuService::register_call_participant_with_session(
         recorder.as_ref(),
-        &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+        &waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id"),
         &waddle_sfu::Identity::from_jid(alice.clone()),
-        &waddle_sfu::SessionBinding::new("muji-clear-session").expect("session binding"),
+        &waddle_sfu::SessionBinding::try_new("muji-clear-session").expect("session binding"),
         alice_occupancy_session,
     );
     let mut active = muc_presence_to(&room_jid, "alice");
@@ -5780,7 +5821,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         (alice_occupancy_session, None),
     )
     .await;
@@ -5793,7 +5834,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &None,
+        None,
         (alice_occupancy_session, None),
     )
     .await;
@@ -5861,7 +5902,7 @@ async fn available_presence_without_muji_clears_existing_muji_state() {
         &carol,
         "carol",
         None,
-        &None,
+        None,
     )
     .await;
     let alice_replay = replay
@@ -5894,16 +5935,16 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
     let alice_occupancy_session = current_test_occupancy_session(state.as_ref(), &alice);
     waddle_sfu::SfuService::register_call_participant_with_session(
         recorder.as_ref(),
-        &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+        &waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id"),
         &waddle_sfu::Identity::from_jid(alice.clone()),
-        &waddle_sfu::SessionBinding::new("empty-muji-session").expect("session binding"),
+        &waddle_sfu::SessionBinding::try_new("empty-muji-session").expect("session binding"),
         alice_occupancy_session,
     );
 
@@ -5915,7 +5956,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         (alice_occupancy_session, None),
     )
     .await;
@@ -5928,7 +5969,7 @@ async fn empty_muji_presence_unregisters_the_sfu_participant() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         (alice_occupancy_session, None),
     )
     .await;
@@ -5967,7 +6008,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
@@ -5980,7 +6021,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         None,
     )
     .await;
@@ -6032,7 +6073,7 @@ async fn empty_muji_presence_ends_the_active_call_thread() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6096,7 +6137,7 @@ async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor()
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
@@ -6109,7 +6150,7 @@ async fn active_muji_presence_without_sfu_does_not_register_call_thread_anchor()
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6135,7 +6176,7 @@ async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let alice_phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
@@ -6148,7 +6189,7 @@ async fn active_muji_presence_with_sfu_registers_call_thread_anchor() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6176,7 +6217,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -6186,7 +6227,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -6199,7 +6240,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         "muc.example.com",
         state.as_ref(),
         &bob_phase,
-        &None,
+        None,
         None,
     )
     .await;
@@ -6212,7 +6253,7 @@ async fn resumed_muc_join_presence_replays_existing_muji_state() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6257,7 +6298,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let _ = handle_muc_join(
@@ -6267,7 +6308,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -6281,7 +6322,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         "muc.example.com",
         state.as_ref(),
         &bob_phase,
-        &None,
+        None,
         None,
     )
     .await;
@@ -6294,7 +6335,7 @@ async fn resumed_muc_join_presence_replays_own_muji_without_plain_broadcast() {
         "muc.example.com",
         state.as_ref(),
         &bob_phase,
-        &None,
+        None,
         None,
     )
     .await;
@@ -6345,7 +6386,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let room_actor = get_room_actor(state.as_ref(), &room_jid)
@@ -6375,7 +6416,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         None,
     )
     .await;
@@ -6387,7 +6428,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6426,7 +6467,7 @@ async fn same_nick_late_join_replays_existing_muji_with_exact_owner() {
         &desktop,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
 
@@ -6439,7 +6480,7 @@ async fn same_nick_late_join_replays_existing_muji_with_exact_owner() {
         "muc.example.com",
         state.as_ref(),
         &desktop_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6451,7 +6492,7 @@ async fn same_nick_late_join_replays_existing_muji_with_exact_owner() {
         &mobile,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -6494,7 +6535,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         &desktop,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -6504,7 +6545,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         &mobile,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -6517,7 +6558,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         "muc.example.com",
         state.as_ref(),
         &mobile_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6529,7 +6570,7 @@ async fn same_nick_late_join_replays_preparing_only_muji_with_exact_owner() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
 
@@ -6576,7 +6617,7 @@ async fn superseded_connections_plain_presence_does_not_rejoin_over_the_replacem
         &alice,
         "alice",
         None,
-        (first, &Some(owner_session.clone())),
+        (first, Some(&owner_session.clone())),
     )
     .await;
     let _ = super::handle_muc_join_with_occupancy_session(
@@ -6586,7 +6627,7 @@ async fn superseded_connections_plain_presence_does_not_rejoin_over_the_replacem
         &alice,
         "alice",
         None,
-        (second, &Some(owner_session.clone())),
+        (second, Some(&owner_session.clone())),
     )
     .await;
 
@@ -6597,7 +6638,7 @@ async fn superseded_connections_plain_presence_does_not_rejoin_over_the_replacem
         "muc.example.com",
         state.as_ref(),
         &phase,
-        &Some(owner_session),
+        Some(&owner_session),
         (first, None),
     )
     .await;
@@ -6639,7 +6680,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         &desktop,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -6649,7 +6690,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         &mobile,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
     let _ = handle_muc_join(
@@ -6659,7 +6700,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -6673,7 +6714,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         "muc.example.com",
         state.as_ref(),
         &desktop_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6687,7 +6728,7 @@ async fn same_nick_plain_presence_preserves_sibling_preparing_owner() {
         "muc.example.com",
         state.as_ref(),
         &mobile_phase,
-        &None,
+        None,
         None,
     )
     .await;
@@ -6742,7 +6783,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         &desktop,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -6752,7 +6793,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         &mobile,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
     let _ = handle_muc_join(
@@ -6762,7 +6803,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while mobile_rx.try_recv().is_ok() {}
@@ -6777,7 +6818,7 @@ async fn same_nick_originator_leave_broadcasts_muji_clear() {
         "muc.example.com",
         state.as_ref(),
         &desktop_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -6832,19 +6873,19 @@ async fn stale_explicit_leave_superseded_by_replacement_unregisters_only_the_old
         &alice,
         "alice",
         None,
-        (first_generation, &Some(owner_session.clone())),
+        (first_generation, Some(&owner_session.clone())),
     )
     .await;
     assert!(first_join
         .iter()
         .any(|frame| frame.contains("status code='110'")));
 
-    let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = waddle_sfu::Identity::from_jid(alice.clone());
     recorder.register_call_participant_with_session(
         &call_id,
         &identity,
-        &waddle_sfu::SessionBinding::new("explicit-superseded-g1").expect("sid"),
+        &waddle_sfu::SessionBinding::try_new("explicit-superseded-g1").expect("sid"),
         first_generation,
     );
 
@@ -6855,7 +6896,7 @@ async fn stale_explicit_leave_superseded_by_replacement_unregisters_only_the_old
         &alice,
         "alice",
         None,
-        (second_generation, &Some(owner_session)),
+        (second_generation, Some(&owner_session)),
     )
     .await;
     assert!(second_join
@@ -6920,7 +6961,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         &desktop,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -6930,7 +6971,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         &mobile,
         "alice",
         None,
-        &None,
+        None,
     )
     .await;
     let _ = handle_muc_join(
@@ -6940,7 +6981,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         &bob,
         "bob",
         None,
-        &None,
+        None,
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -6954,7 +6995,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         "muc.example.com",
         state.as_ref(),
         &desktop_phase,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         None,
     )
     .await;
@@ -6969,7 +7010,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
         "muc.example.com",
         state.as_ref(),
         &mobile_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -7053,7 +7094,7 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
         &alice,
         "alice",
         Some(crate::notification_activity::NotificationPresenceShow::Away),
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -7097,7 +7138,7 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         &alice,
         "alice",
         Some(crate::notification_activity::NotificationPresenceShow::Chat),
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let after_join = state
@@ -7203,7 +7244,7 @@ async fn join_alice_owner_and_bob(
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -7213,7 +7254,7 @@ async fn join_alice_owner_and_bob(
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     (alice_session, alice_jid, bob_jid)
@@ -7241,7 +7282,7 @@ async fn muc_admin_kick_evicts_target_sessions_from_room_call() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -7296,7 +7337,7 @@ async fn muc_admin_ban_evicts_target_sessions_from_room_call() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -7337,7 +7378,7 @@ async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let bob_join = handle_muc_join(
@@ -7347,7 +7388,7 @@ async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
         &bob,
         " ",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     assert!(
@@ -7395,7 +7436,7 @@ async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -7439,7 +7480,7 @@ async fn muc_admin_role_demotion_does_not_evict_from_room_call() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -7486,7 +7527,7 @@ async fn muc_admin_voice_revocation_downgrades_live_sfu_grants() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready,
     )
     .await;
@@ -7540,7 +7581,7 @@ async fn muc_admin_voice_grant_upgrades_live_sfu_grants() {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &Some(alice_session.clone()),
+            Some(&alice_session.clone()),
             &ready,
         )
         .await;
@@ -7591,7 +7632,7 @@ async fn detached_invalidation_is_generation_safe_with_a_live_replacement() {
             &alice,
             "alice",
             None,
-            (old_generation, &Some(owner_session.clone())),
+            (old_generation, Some(&owner_session.clone())),
         )
         .await;
     }
@@ -7609,7 +7650,7 @@ async fn detached_invalidation_is_generation_safe_with_a_live_replacement() {
         &alice,
         "alice",
         None,
-        (replacement_generation, &Some(owner_session)),
+        (replacement_generation, Some(&owner_session)),
     )
     .await;
 
@@ -7687,7 +7728,7 @@ async fn join_from_a_superseded_connection_is_ignored() {
         "muc.example.com",
         state.as_ref(),
         &phase,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         (OccupancySessionGeneration::mint(), Some(&stale_owner)),
     )
     .await;
@@ -7710,7 +7751,7 @@ async fn join_from_a_superseded_connection_is_ignored() {
         "muc.example.com",
         state.as_ref(),
         &phase,
-        &Some(owner_session),
+        Some(&owner_session),
         (OccupancySessionGeneration::mint(), Some(&current_owner)),
     )
     .await;
@@ -7740,7 +7781,7 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -7811,7 +7852,7 @@ async fn xep0045_nick_change_denied_with_not_acceptable_without_call_teardown() 
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
 
@@ -7825,7 +7866,7 @@ async fn xep0045_nick_change_denied_with_not_acceptable_without_call_teardown() 
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &Some(owner_session),
+        Some(&owner_session),
         None,
     )
     .await;
@@ -7838,7 +7879,7 @@ async fn xep0045_nick_change_denied_with_not_acceptable_without_call_teardown() 
         "muc.example.com",
         state.as_ref(),
         &alice_phase,
-        &None,
+        None,
         None,
     )
     .await;
@@ -7951,7 +7992,7 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     for bob in [&bob_web, &bob_phone] {
@@ -7962,7 +8003,7 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
             bob,
             "bob",
             None,
-            &Some(bob_session.clone()),
+            Some(&bob_session.clone()),
         )
         .await;
         assert!(
@@ -8012,7 +8053,7 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -8101,7 +8142,7 @@ async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let bob_join = handle_muc_join(
@@ -8111,7 +8152,7 @@ async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
         &bob,
         " ",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     assert!(
@@ -8145,7 +8186,7 @@ async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -8192,7 +8233,7 @@ async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence(
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     assert!(
@@ -8209,7 +8250,7 @@ async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence(
         &bob,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     assert!(
@@ -8245,7 +8286,7 @@ async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence(
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -8290,7 +8331,7 @@ async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let room_actor = state
@@ -8323,7 +8364,7 @@ async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
         &ready_phase(&alice),
     )
     .await;
@@ -8340,12 +8381,12 @@ async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
         &alice,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
     let fresh = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert_eq!(
-        fresh.get_affiliation(&banned),
+        fresh.affiliation(&banned),
         Affiliation::None,
         "a destroyed room's ban list must not resurrect on rejoin"
     );
@@ -8404,7 +8445,7 @@ async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let room_actor = state
@@ -8453,7 +8494,7 @@ async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -8547,7 +8588,7 @@ async fn xep0115_room_disco_info_is_well_formed_with_single_roominfo_form() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -8557,7 +8598,7 @@ async fn xep0115_room_disco_info_is_well_formed_with_single_roominfo_form() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8622,7 +8663,7 @@ async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -8632,7 +8673,7 @@ async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8653,7 +8694,7 @@ async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_other),
     )
     .await;
@@ -8669,7 +8710,7 @@ async fn xep0045_reserved_nick_discovery_returns_locked_nick() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -8699,7 +8740,7 @@ async fn xep0045_occupant_jid_disco_rejected_per_section_6_6() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     let occupant_target = format!("{room_jid}/alice");
@@ -8720,7 +8761,7 @@ async fn xep0045_occupant_jid_disco_rejected_per_section_6_6() {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &None,
+            None,
             &ready_phase(&bob_jid),
         )
         .await;
@@ -8738,7 +8779,7 @@ async fn xep0045_occupant_jid_disco_rejected_per_section_6_6() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8771,7 +8812,7 @@ async fn xep0045_kick_absent_nick_returns_item_not_found() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8812,7 +8853,7 @@ async fn xep0045_member_can_retrieve_member_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8850,7 +8891,7 @@ async fn xep0045_member_can_retrieve_member_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -8892,7 +8933,7 @@ async fn xep0045_member_can_retrieve_member_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -8918,7 +8959,7 @@ async fn xep0045_owner_config_maxusers_and_persistentroom_apply() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -8936,7 +8977,7 @@ async fn xep0045_owner_config_maxusers_and_persistentroom_apply() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice_session),
+        Some(&alice_session),
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8975,7 +9016,7 @@ async fn xep0030_muc_disco_items_unknown_node_returns_item_not_found() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -8999,7 +9040,7 @@ async fn xep0059_muc_disco_items_rsm_pages_room_list() {
             &alice_jid,
             "alice",
             None,
-            &Some(alice_session.clone()),
+            Some(&alice_session.clone()),
         )
         .await;
     }
@@ -9011,7 +9052,7 @@ async fn xep0059_muc_disco_items_rsm_pages_room_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -9051,7 +9092,7 @@ async fn xep0059_muc_disco_items_rsm_pages_room_list() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -9124,7 +9165,7 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session.clone()),
+        Some(&session.clone()),
         &ready,
     )
     .await;
@@ -9141,7 +9182,7 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session.clone()),
+        Some(&session.clone()),
         &ready,
     )
     .await;
@@ -9164,7 +9205,7 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -9308,7 +9349,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
         &alice,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -9318,7 +9359,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
         &bob,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -9346,7 +9387,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(owner_session),
+        Some(&owner_session),
         &ready_phase(&alice),
     )
     .await;
@@ -9459,7 +9500,7 @@ mod remote_owner_admin_list {
             "example.com",
             "muc.example.com",
             owner.as_ref(),
-            &Some(alice_session),
+            Some(&alice_session),
             &ready_phase(&alice_jid),
         )
         .await;
@@ -9523,7 +9564,7 @@ mod remote_owner_admin_list {
                     "example.com",
                     "muc.example.com",
                     origin,
-                    &None,
+                    None,
                     &ready_phase(requester),
                 )
                 .await
@@ -9692,7 +9733,7 @@ mod remote_owner_admin_list {
             "example.com",
             "muc.example.com",
             owner.as_ref(),
-            &None,
+            None,
             &ready_phase(&bob_jid),
         )
         .await

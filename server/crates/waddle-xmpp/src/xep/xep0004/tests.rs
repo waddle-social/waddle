@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    find_data_form, is_data_form, DataForm, DataFormError, Field, FieldOption, FieldType, FormType,
+    FromElement, ToElement, NS_DATA_FORMS,
+};
 
 use minidom::Element;
 
@@ -153,8 +156,8 @@ fn test_data_form_builder() {
     assert_eq!(form.title.as_deref(), Some("Registration"));
     assert_eq!(form.instructions, vec!["Fill in the fields below."]);
     assert_eq!(form.fields.len(), 3);
-    assert_eq!(form.get_form_type_value(), Some("jabber:iq:register"));
-    assert_eq!(form.get_value("username"), None); // no value set
+    assert_eq!(form.form_type_value(), Some("jabber:iq:register"));
+    assert_eq!(form.value("username"), None); // no value set
 }
 
 #[test]
@@ -163,9 +166,9 @@ fn test_data_form_get_bool() {
         .add_field(Field::boolean("persistent", true))
         .add_field(Field::boolean("moderated", false));
 
-    assert_eq!(form.get_bool("persistent"), Some(true));
-    assert_eq!(form.get_bool("moderated"), Some(false));
-    assert_eq!(form.get_bool("nonexistent"), None);
+    assert_eq!(form.bool("persistent"), Some(true));
+    assert_eq!(form.bool("moderated"), Some(false));
+    assert_eq!(form.bool("nonexistent"), None);
 }
 
 #[test]
@@ -175,7 +178,7 @@ fn test_data_form_field_mut() {
     if let Some(f) = form.field_mut("name") {
         f.values = vec!["new".to_string()];
     }
-    assert_eq!(form.get_value("name"), Some("new"));
+    assert_eq!(form.value("name"), Some("new"));
 }
 
 // ---- Tabular (result) form ----
@@ -221,8 +224,8 @@ fn test_simple_form_round_trip() {
     assert_eq!(parsed.title, original.title);
     assert_eq!(parsed.instructions, original.instructions);
     assert_eq!(parsed.fields.len(), 3);
-    assert_eq!(parsed.get_form_type_value(), Some("urn:example:bot"));
-    assert_eq!(parsed.get_bool("public"), Some(true));
+    assert_eq!(parsed.form_type_value(), Some("urn:example:bot"));
+    assert_eq!(parsed.bool("public"), Some(true));
 }
 
 #[test]
@@ -236,8 +239,8 @@ fn test_submit_form_round_trip() {
     let parsed = DataForm::from_element(&elem).expect("parse");
 
     assert_eq!(parsed.form_type, FormType::Submit);
-    assert_eq!(parsed.get_value("name"), Some("Alice"));
-    assert_eq!(parsed.get_bool("agree"), Some(true));
+    assert_eq!(parsed.value("name"), Some("Alice"));
+    assert_eq!(parsed.bool("agree"), Some(true));
 }
 
 #[test]
@@ -274,7 +277,7 @@ fn test_multi_value_field_round_trip() {
     let elem = original.to_element();
     let parsed = DataForm::from_element(&elem).expect("parse");
 
-    let values = parsed.get_values("features").expect("features values");
+    let values = parsed.values("features").expect("features values");
     assert_eq!(values, &["chat", "video", "voice"]);
 }
 
@@ -394,7 +397,7 @@ fn test_find_data_form() {
         .expect("should parse");
 
     assert_eq!(form.form_type, FormType::Submit);
-    assert_eq!(form.get_value("name"), Some("test"));
+    assert_eq!(form.value("name"), Some("test"));
 }
 
 #[test]
@@ -438,9 +441,9 @@ fn test_parse_hand_built_server_info_form() {
 
     let form = DataForm::from_element(&elem).expect("parse");
     assert_eq!(form.form_type, FormType::Result);
-    assert_eq!(form.get_form_type_value(), Some("urn:xmpp:serverinfo:0"));
+    assert_eq!(form.form_type_value(), Some("urn:xmpp:serverinfo:0"));
     assert_eq!(
-        form.get_value("abuse-addresses"),
+        form.value("abuse-addresses"),
         Some("mailto:abuse@example.com")
     );
 }
@@ -487,8 +490,8 @@ fn test_parse_muc_config_form() {
 
     let form = DataForm::from_element(&elem).expect("parse");
     assert_eq!(form.form_type, FormType::Submit);
-    assert_eq!(form.get_value("muc#roomconfig_roomname"), Some("Test Room"));
-    assert_eq!(form.get_bool("muc#roomconfig_persistentroom"), Some(true));
+    assert_eq!(form.value("muc#roomconfig_roomname"), Some("Test Room"));
+    assert_eq!(form.bool("muc#roomconfig_persistentroom"), Some(true));
 }
 
 // ---- Boolean value parsing edge cases ----

@@ -112,7 +112,7 @@ async fn assert_same_item_id_republication(platform: PushDevicePlatform) {
     let db = Database::in_memory("xep0060-push-publication")
         .await
         .expect("queue database");
-    DatabasePushRegistrationStore::new(db.clone())
+    DatabasePushRegistrationStore::try_new(db.clone())
         .await
         .expect("registrations");
     let backing = Arc::new(

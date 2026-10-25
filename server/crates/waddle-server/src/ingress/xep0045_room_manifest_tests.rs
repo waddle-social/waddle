@@ -1,12 +1,16 @@
 //! XEP-0045 frozen room acceptance and crash/retry authority.
-use super::{commit::commit_submission, test_support::IngressFixture, *};
+use super::commit::commit_submission;
+use super::test_support::IngressFixture;
+use super::{IngressStreamIdentity, IngressSubmission, RoomManifestSnapshot};
 use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
-use crate::server::routes::interpret::effects::{room::RoomFenceRequirement, RoomExecutionPath};
+use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+use crate::server::routes::interpret::effects::RoomExecutionPath;
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
     NormalizedTarget,
 };
-use waddle_xmpp::muc::{durable::AdminMutationId, room_actor::OccupancyWatermark};
+use waddle_xmpp::muc::durable::AdminMutationId;
+use waddle_xmpp::muc::room_actor::OccupancyWatermark;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(super) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
@@ -178,17 +182,17 @@ async fn postgres_clustered_legacy_remote_completion_releases_local_successor() 
     use crate::ingress_uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
     };
+    use crate::server::routes::interpret::effects::delivery::{
+        ExternalDeliveryEffect, PeerDeliveryKind,
+    };
+    use crate::server::routes::interpret::effects::{
+        Effect, ExternalEffect, ImmediateSink, PlannedEffect,
+    };
     use crate::server::routes::interpret::{
-        effects::{
-            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-            Effect, ExternalEffect, ImmediateSink, PlannedEffect,
-        },
         Deps, FullJidDeliveryOutcome, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
     };
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use waddle_xmpp::Stanza;
     let Some(mut fixture) = IngressFixture::postgres("manifest_cluster_successor").await else {
         return;

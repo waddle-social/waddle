@@ -1,13 +1,11 @@
-use crate::server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, ExternalEffect};
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification;
+use crate::server::routes::interpret::effects::ExternalEffect;
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, FrozenStanzaError, IngressEffectIntent},
-    Stanza,
-};
-use xmpp_parsers::{
-    message::{Message, MessageType},
-    stanza_error::StanzaError,
-};
+use waddle_xmpp::ingress::{EffectMessageIdentity, FrozenStanzaError, IngressEffectIntent};
+use waddle_xmpp::Stanza;
+use xmpp_parsers::message::{Message, MessageType};
+use xmpp_parsers::stanza_error::StanzaError;
 
 pub(super) fn route_receipts(
     external: &[ExternalEffect],
@@ -138,7 +136,7 @@ fn groupchat_notification_receipt(effect: &ExternalEffect, intent: &IngressEffec
 
 fn offline_intents(
     row: &waddle_xmpp::pending_delivery::PendingRow,
-    notification: &crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification,
+    notification: &PreparedOfflineNotification,
 ) -> Vec<IngressEffectIntent> {
     use waddle_xmpp::ingress::{
         NotificationActivityMutation, NotificationCandidateOutcome, PendingDeliveryMutation,
@@ -303,10 +301,8 @@ fn early_mutation_receipts(
     external: &[ExternalEffect],
     intent: &IngressEffectIntent,
 ) -> Option<Vec<usize>> {
-    use crate::server::routes::{
-        interpret::effects::early::RoomMembershipMutation,
-        websocket::handlers::message::muc_invite::InviteLedgerMutation,
-    };
+    use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+    use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
     use waddle_xmpp::ingress::MucInviteLedgerAction;
     if !matches!(
         intent,

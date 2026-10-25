@@ -1583,7 +1583,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(client);
     let onError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const xmpp = {
-      get_resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
+      resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
       set_on_error(cb: NonNullable<typeof onError>) { onError = cb; },
     };
     const internal = client as unknown as {
@@ -1604,7 +1604,7 @@ describe("BrowserXmppClient telemetry hooks", () => {
     installInstrumentation(genuine);
     let genuineError: ((detail: TestXmppStreamErrorPayload) => void) | null = null;
     const genuineXmpp = {
-      get_resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
+      resume_state: () => ({ previd: "former-stream", inboundH: 1, outboundH: 2 }),
       set_on_error(cb: NonNullable<typeof genuineError>) { genuineError = cb; },
     };
     const genuineInternal = genuine as unknown as {

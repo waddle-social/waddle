@@ -3,7 +3,17 @@ use super::super::effects::direct::DurableDirectEffect;
 use super::super::effects::{
     DurableEffect, Effect, ExternalEffect, PlanEffectDependency, PlanSink, PlanSuppressionPolicy,
 };
-use super::*;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOriginKind;
+use super::{
+    chat_msg, detached_dm_session, interpret, jid, offline_pass_deps, pipelined_dispatcher,
+    plan_message_dispatch, register_into_both_tiers, result_iq, test_registry, Arc,
+    BlockingStorage, Deps, InMemorySmSessionRegistry, InboxStorage, MamStorage, Message,
+    OutboundEvent, Stanza, StanzaDispatcher, XmppMessageType, XmppStateMachine,
+};
+use kameo::actor::Spawn;
 use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
 use waddle_xmpp::mam::storage::InMemoryMamStorage;
 use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;

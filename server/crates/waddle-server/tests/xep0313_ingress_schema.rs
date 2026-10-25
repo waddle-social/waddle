@@ -12,11 +12,9 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, Utc};
 #[cfg(feature = "clustering")]
 use jid::Jid;
-use waddle_server::{
-    db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::{
-        AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
-    },
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress_substrate::{
+    AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
 };
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ingress::IngressEffectIntent;

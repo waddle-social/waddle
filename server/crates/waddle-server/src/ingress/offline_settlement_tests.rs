@@ -1,28 +1,20 @@
-use crate::{
-    ingress::{
-        commit::commit_submission,
-        effects::{
-            delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-            Effect,
-        },
-        execute::execute_effects,
-        test_support::IngressFixture,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
-    },
-    notification_outbox::{NotificationCandidate, NotificationOutboxStore},
-    pending_delivery::DatabasePendingDeliveryStorage,
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::delivery::{ExternalDeliveryEffect, PreparedOfflineNotification};
+use crate::ingress::effects::Effect;
+use crate::ingress::execute::execute_effects;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect};
+use crate::notification_outbox::{NotificationCandidate, NotificationOutboxStore};
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
+    PendingDeliveryMutation,
 };
-use std::{sync::Arc, time::Duration};
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-    },
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uow::DbRetryClass>) {
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
@@ -30,7 +22,7 @@ async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uo
             .await
             .expect("pending schema"),
     );
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let mut submission = fixture.submission(Some("offline-atomic"), "canonical pending body");
@@ -284,10 +276,10 @@ impl crate::ingress::RecoveryEnvironment for QuotaEnvironment {
 }
 
 async fn quota_refusal(fixture: IngressFixture, capacity_returns: bool) {
-    use crate::ingress::{
-        maintenance::{run_maintenance_pass, MaintenanceBudget, MaintenanceOutcome},
-        RecoveryEnvironment,
+    use crate::ingress::maintenance::{
+        run_maintenance_pass, MaintenanceBudget, MaintenanceOutcome,
     };
+    use crate::ingress::RecoveryEnvironment;
     use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -306,7 +298,7 @@ async fn quota_refusal(fixture: IngressFixture, capacity_returns: bool) {
             .expect("pending schema"),
         ),
     });
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let mut submission =

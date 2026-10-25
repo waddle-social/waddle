@@ -1,6 +1,11 @@
 //! Shared PubSub node configuration primitives.
 
-use std::{fmt, str::FromStr};
+use crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE;
+use crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS;
+use crate::xep0472::NS_SOCIAL_FEED;
+use crate::xep0501::NS_STORIES;
+use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -93,16 +98,21 @@ impl FromStr for PublishModel {
 
 /// XEP-0060 `pubsub#type` profile identifier for a PubSub node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PubSubNodeType {
+    /// A node containing social-feed posts.
     PubsubSocialFeed,
+    /// A node containing social-feed stories.
     PubsubSocialFeedStories,
 }
 
 impl PubSubNodeType {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            PubSubNodeType::PubsubSocialFeed => crate::xep0472::NS_SOCIAL_FEED,
-            PubSubNodeType::PubsubSocialFeedStories => crate::xep0501::NS_STORIES,
+            PubSubNodeType::PubsubSocialFeed => NS_SOCIAL_FEED,
+            PubSubNodeType::PubsubSocialFeedStories => NS_STORIES,
         }
     }
 }
@@ -118,8 +128,8 @@ impl FromStr for PubSubNodeType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            crate::xep0472::NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
-            crate::xep0501::NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
+            NS_SOCIAL_FEED => Ok(PubSubNodeType::PubsubSocialFeed),
+            NS_STORIES => Ok(PubSubNodeType::PubsubSocialFeedStories),
             _ => Err(()),
         }
     }
@@ -164,32 +174,52 @@ impl FromStr for SendLastPublishedItem {
 /// Shared node configuration for PubSub / PEP nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: AccessModel,
+    /// Policy governing who may publish items to the node.
     pub publish_model: PublishModel,
+    /// Whether the node is a leaf or a collection.
     pub node_type: Option<PubSubNodeType>,
+    /// Maximum number of retained or returned items.
     pub max_items: u32,
+    /// Whether published items persist in node storage.
     pub persist_items: bool,
+    /// Whether notifications include item payloads.
     pub deliver_payloads: bool,
+    /// Whether item retractions generate notifications.
     pub notify_retract: bool,
+    /// Whether deleting the node generates notifications.
     pub notify_delete: bool,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: SendLastPublishedItem,
 }
 
 /// Partial node configuration submitted by an XEP-0060 configure form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeConfigPatch {
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: Option<AccessModel>,
+    /// Policy governing who may publish items to the node.
     pub publish_model: Option<PublishModel>,
+    /// Whether the node is a leaf or a collection.
     pub node_type: Option<PubSubNodeType>,
+    /// Maximum number of retained or returned items.
     pub max_items: Option<u32>,
+    /// Whether published items persist in node storage.
     pub persist_items: Option<bool>,
+    /// Whether notifications include item payloads.
     pub deliver_payloads: Option<bool>,
+    /// Whether item retractions generate notifications.
     pub notify_retract: Option<bool>,
+    /// Whether deleting the node generates notifications.
     pub notify_delete: Option<bool>,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: Option<SendLastPublishedItem>,
 }
 
 impl NodeConfigPatch {
+    /// Apply only the supplied configuration fields, preserving all unspecified node settings.
+    #[must_use]
     pub fn apply_to(&self, mut config: NodeConfig) -> NodeConfig {
         if let Some(access_model) = self.access_model {
             config.access_model = access_model;
@@ -230,6 +260,7 @@ impl Default for NodeConfig {
 
 impl NodeConfig {
     /// XEP-0503 configuration for a public Space node.
+    #[must_use]
     pub fn spaces_public() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -255,6 +286,7 @@ impl NodeConfig {
     /// outcasts via `can_publish`. Distinct from `spaces_public()`
     /// (Publisher publish-model) which the owner-only stories and
     /// calendar nodes keep.
+    #[must_use]
     pub fn community_feed() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -275,6 +307,7 @@ impl NodeConfig {
     /// any authenticated, non-outcast member may publish. The server
     /// still stamps the authenticated publisher into the story payload
     /// before storing it.
+    #[must_use]
     pub fn community_stories() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -290,6 +323,7 @@ impl NodeConfig {
     }
 
     /// XEP-0503 configuration for a private Space node.
+    #[must_use]
     pub fn spaces_private() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -305,6 +339,7 @@ impl NodeConfig {
     }
 
     /// Default configuration for PEP nodes.
+    #[must_use]
     pub fn pep_default() -> Self {
         Self {
             access_model: AccessModel::Presence,
@@ -320,6 +355,7 @@ impl NodeConfig {
     }
 
     /// Default configuration for a concrete PEP node.
+    #[must_use]
     pub fn pep_for_node(node: &str) -> Self {
         let mut config = Self::pep_default();
         if node == super::pep::PEP_NODE_BOOKMARKS {
@@ -339,9 +375,9 @@ impl NodeConfig {
             config = Self::waddle_dnd_defaults();
         } else if node == super::pep::PEP_NODE_WADDLE_DM_BOOKMARKS {
             config = Self::waddle_dm_bookmarks_defaults();
-        } else if node == crate::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE {
+        } else if node == PEP_NODE_WADDLE_STATUS_PREFERENCE {
             config = Self::waddle_status_preference_defaults();
-        } else if node == crate::waddle_story_reads::PEP_NODE_WADDLE_STORY_READS {
+        } else if node == PEP_NODE_WADDLE_STORY_READS {
             config = Self::waddle_story_reads_defaults();
         }
         config
@@ -358,6 +394,7 @@ impl NodeConfig {
     /// configure-time clamp and the read-time backfill so the pin set
     /// always tracks the `pep_for_node` table and never becomes a
     /// second hand-maintained node-name list.
+    #[must_use]
     pub fn pins_whitelist_access(node: &str) -> bool {
         Self::pep_for_node(node).access_model == AccessModel::Whitelist
     }
@@ -378,6 +415,7 @@ impl NodeConfig {
     /// `notify_retract` / `notify_delete` are `false` because the
     /// server does not emit those events for this node; read-state
     /// changes are always republishes of the `current` item.
+    #[must_use]
     pub fn waddle_story_reads_defaults() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -409,6 +447,7 @@ impl NodeConfig {
     /// on the wire — advertising them as `true` would lie to subscribers,
     /// and reset is published as an explicit `mode='automatic'` item
     /// rather than a retract precisely so it fans out as a publish.
+    #[must_use]
     pub fn waddle_status_preference_defaults() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -445,6 +484,7 @@ impl NodeConfig {
     /// retract/delete events on the wire — advertising them as `true`
     /// would lie to subscribers. The user's other resources resync via
     /// `<items/>` GET on resume, not via retract fanout.
+    #[must_use]
     pub fn waddle_dm_bookmarks_defaults() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -476,6 +516,7 @@ impl NodeConfig {
     /// as `true` would lie to subscribers. Bob's other resources
     /// resync DND state via `<items/>` GET on resume, not via
     /// retract fanout. See PR #759 / round-6 XMPP-conformance review.
+    #[must_use]
     pub fn waddle_dnd_defaults() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -510,6 +551,7 @@ impl NodeConfig {
     /// XEP-0060 §7.2.2 / §9.1.5 retract/delete events on the wire —
     /// advertising them as `true` would lie to subscribers; the user's
     /// other resources resync packs via `<items/>` GET.
+    #[must_use]
     pub fn stickers_defaults() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -532,6 +574,7 @@ impl NodeConfig {
     /// node single-slot so each publish replaces the prior one rather
     /// than growing an unbounded item history — matching the
     /// OIDC-managed publisher in `waddle-server::profile::publish`.
+    #[must_use]
     pub fn vcard4_defaults() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -548,6 +591,7 @@ impl NodeConfig {
     /// Publish arm does not enforce), because peers who share only a room
     /// with the owner must resolve the avatar. `max_items = 1` so a new
     /// avatar replaces the previous one.
+    #[must_use]
     pub fn avatar_defaults() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -562,6 +606,7 @@ impl NodeConfig {
     /// Never for avatar nodes: they are created canonical, and legacy
     /// Presence avatar nodes are repaired by the storage's atomic
     /// `repair_legacy_avatar_node`, which respects owner choices.
+    #[must_use]
     pub fn needs_reconcile(node: &str, existing: &Self) -> bool {
         if node == super::pep::PEP_NODE_AVATAR_DATA || node == super::pep::PEP_NODE_AVATAR_METADATA
         {
@@ -582,6 +627,7 @@ impl NodeConfig {
     /// We bake these into the well-known node defaults so auto-create
     /// matches the spec without depending on the (currently unenforced)
     /// publish-options precondition path. `max=max` maps to `u32::MAX`.
+    #[must_use]
     pub fn mds_displayed() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -597,6 +643,7 @@ impl NodeConfig {
     }
 
     /// Force XEP-0402 bookmark privacy and durability invariants onto a config.
+    #[must_use]
     pub fn normalize_xep0402_bookmarks(mut self) -> Self {
         self.access_model = AccessModel::Whitelist;
         self.publish_model = PublishModel::Publishers;
@@ -618,6 +665,7 @@ impl NodeConfig {
     /// MUC node. Without this, an owner could set `max_items=max`,
     /// re-disabling eviction, or `access_model=open`, leaking which
     /// contacts they have muted.
+    #[must_use]
     pub fn normalize_waddle_dm_bookmarks(mut self) -> Self {
         self.access_model = AccessModel::Whitelist;
         self.publish_model = PublishModel::Publishers;
@@ -630,6 +678,7 @@ impl NodeConfig {
     }
 
     /// Configuration for a public node.
+    #[must_use]
     pub fn public() -> Self {
         Self {
             access_model: AccessModel::Open,
@@ -645,6 +694,7 @@ impl NodeConfig {
     }
 
     /// Configuration for a whitelist-only node.
+    #[must_use]
     pub fn whitelist() -> Self {
         Self {
             access_model: AccessModel::Whitelist,
@@ -665,6 +715,7 @@ impl NodeConfig {
     /// use the XEP-0357 recommended whitelist access model and publisher-gated
     /// writes, keep only a bounded durable item trail, and never replay the last
     /// push notification to subscribers.
+    #[must_use]
     pub fn push_service() -> Self {
         Self {
             access_model: AccessModel::Whitelist,

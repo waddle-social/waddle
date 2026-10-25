@@ -1,4 +1,20 @@
-use super::*;
+use super::{
+    assert_sample_payload, build_interpret_deps, create_test_server_owner_session,
+    create_test_session, create_test_websocket_state, drive_interpret_loop,
+    get_or_create_room_actor, handle_iq, handle_iq_with_conn_state, handle_message_for_test,
+    handle_muc_join, handle_xmpp_frame, handlers, iq_set_frame, mpsc, parse_iq_for_test,
+    parse_message_for_test, ready_phase, register_test_connection, register_test_native_user,
+    seed_local_account, stanza_to_xml, Affiliation, Arc, BareJid, Blocklist, ChangeAffiliation,
+    ConnectionPhase, DeliveryKind, Element, FromStr, FullJid, GetSnapshot, InboundEvent,
+    IqConnState, JoinAffiliationGrant, JoinWithAffiliation, RoomConfig, Session, Stanza,
+    WebSocketState, WsConnState, XmppMessageType, XmppStateMachine,
+};
+use super::{
+    create_test_websocket_state_with_db_pool_and_ingress,
+    create_test_websocket_state_with_extension_manager,
+    create_test_websocket_state_with_fixture_bot, empty_extension_manager, get_room_actor,
+    TestStateOverrides, FIXTURE_BOT_PLUGIN,
+};
 
 #[path = "messages_offline.rs"]
 mod messages_offline;
@@ -823,7 +839,7 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
             .deps
             .protocol
             .pubsub_storage
-            .get_affiliation(&push_service_jid, node.node(), &recipient)
+            .affiliation(&push_service_jid, node.node(), &recipient)
             .await
             .expect("pubsub affiliation"),
         waddle_xmpp::pubsub::Affiliation::PublishOnly
@@ -3954,7 +3970,7 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -3964,7 +3980,7 @@ async fn muc_private_message_routes_from_sender_room_nick_to_target_session() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4180,7 +4196,7 @@ async fn muc_private_message_to_own_nick_archives_one_delivered_tuple() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -4245,7 +4261,7 @@ async fn muc_private_message_routes_normal_type_to_target_session() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -4255,7 +4271,7 @@ async fn muc_private_message_routes_normal_type_to_target_session() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4322,7 +4338,7 @@ async fn muc_groupchat_to_occupant_jid_is_rejected_with_bad_request() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -4332,7 +4348,7 @@ async fn muc_groupchat_to_occupant_jid_is_rejected_with_bad_request() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4390,7 +4406,7 @@ async fn muc_private_message_rejects_non_occupant_sender() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -4400,7 +4416,7 @@ async fn muc_private_message_rejects_non_occupant_sender() {
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4450,7 +4466,7 @@ async fn muc_private_message_rejects_client_authored_inbox_payload_before_routin
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let _ = handle_muc_join(
@@ -4460,7 +4476,7 @@ async fn muc_private_message_rejects_client_authored_inbox_payload_before_routin
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session),
+        Some(&bob_session),
     )
     .await;
     while bob_rx.try_recv().is_ok() {}
@@ -4513,7 +4529,7 @@ async fn muc_mediated_decline_is_forwarded_from_room_to_inviter() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -4624,7 +4640,7 @@ async fn muc_mediated_decline_routes_to_ledger_inviter_not_client_supplied_targe
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -4709,7 +4725,7 @@ async fn muc_mediated_decline_without_outstanding_invite_is_refused() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
     while alice_rx.try_recv().is_ok() {}
@@ -4860,7 +4876,7 @@ async fn handle_message_direct_chat_to_bare_jid_fans_out_to_all_connected_resour
             .deps
             .protocol
             .connection_registry
-            .get_entry(jid)
+            .entry(jid)
             .expect("entry registered above");
         let registered = crate::server::dual_registration::mirror_register(
             &state.deps.protocol.user_registry,
@@ -4946,7 +4962,7 @@ async fn handle_message_direct_chat_sends_sent_carbon_to_opted_in_sibling_resour
                     .deps
                     .protocol
                     .connection_registry
-                    .get_entry(resource)
+                    .entry(resource)
                     .expect("registered test resource"),
             )
             .await
@@ -5001,7 +5017,7 @@ async fn handle_message_direct_chat_sends_received_carbon_to_opted_in_sibling_re
         .deps
         .protocol
         .connection_registry
-        .get_entry(&sibling_jid)
+        .entry(&sibling_jid)
         .expect("sibling entry")
         .carbons_enabled
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5109,7 +5125,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
         &ready_phase(&bob_jid),
     )
     .await;
@@ -5148,7 +5164,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
         &ready_phase(&bob_jid),
     )
     .await;
@@ -5169,7 +5185,7 @@ async fn direct_messages_round_trip_through_inbox_query_and_mark_read() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready_phase(&bob_jid),
     )
     .await;
@@ -5212,7 +5228,7 @@ async fn inbox_query_requires_ready_phase() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ConnectionPhase::authenticated(&pending_jid),
         &mut conn_state,
     )
@@ -5277,7 +5293,7 @@ async fn encrypted_sfs_messages_without_bodies_still_project_into_inbox() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob_session),
+        Some(&bob_session),
         &ready_phase(&bob_jid),
     )
     .await;
@@ -5370,7 +5386,7 @@ async fn groupchat_messages_are_archived_and_returned_via_mam() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&sender_jid),
     )
     .await;
@@ -5514,7 +5530,7 @@ async fn groupchat_preview_request_is_stamped_and_archived_without_private_paylo
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&sender_jid),
     )
     .await;
@@ -5579,7 +5595,7 @@ async fn personal_mam_query_uses_ready_phase_when_sidecar_session_is_missing() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -5827,7 +5843,7 @@ async fn xep0045_mediated_invite_relayed_from_room_to_invitee() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -5903,7 +5919,7 @@ async fn xep0045_mediated_invite_from_non_occupant_rejected() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session),
+        Some(&alice_session),
     )
     .await;
 
@@ -5936,7 +5952,7 @@ async fn xep0045_mediated_invite_nonexistent_invitee_item_not_found() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 
@@ -5976,7 +5992,7 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
     let room_actor = state
@@ -6023,7 +6039,7 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         &bob_jid,
         "bob",
         None,
-        &Some(bob_session.clone()),
+        Some(&bob_session.clone()),
     )
     .await;
 
@@ -6055,7 +6071,7 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         .await
         .expect("snapshot");
     assert_eq!(
-        snapshot.room.get_affiliation(&invitee),
+        snapshot.room.affiliation(&invitee),
         Affiliation::Member,
         "§7.8.2: members-only invite must add the invitee to the member list"
     );
@@ -6081,7 +6097,7 @@ async fn xep0045_mediated_invite_offline_invitee_queued_durably() {
         &alice_jid,
         "alice",
         None,
-        &Some(alice_session.clone()),
+        Some(&alice_session.clone()),
     )
     .await;
 

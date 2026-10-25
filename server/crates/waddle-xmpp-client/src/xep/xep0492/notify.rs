@@ -14,6 +14,7 @@
 //! so a Waddle client never destroys settings another client wrote
 //! (XEP-0492 §3 first paragraph).
 
+use crate::pep::NS_BOOKMARKS;
 use minidom::Element;
 
 /// XEP-0492 namespace.
@@ -31,7 +32,6 @@ pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
 /// helpers here MUST stay byte-compatible with the server-side
 /// `parse_rich_payload_opt_in`.
 pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
-
 /// Read the Waddle rich-payload opt-in from a XEP-0492 `<notify/>`.
 ///
 /// Returns `true` when any setting child (fallback or identity-scoped)
@@ -40,6 +40,7 @@ pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
 /// server-side `parse_rich_payload_opt_in` so the write side here and
 /// the read side there agree on one wire shape (#719). Absence of the
 /// element is opt-out — the minimal XEP-0357 summary payload.
+#[must_use]
 pub fn read_rich_payload_opt_in(notify: &Element) -> bool {
     notify
         .children()
@@ -76,6 +77,7 @@ pub struct NotifySettingsSurface {
 /// sibling carries the rich-payload marker — matching how both
 /// [`read_fallback_mode`] and the server's `parse_rich_payload_opt_in`
 /// resolve across siblings. Round-2 PR #804 review (Codex P2). Pure.
+#[must_use]
 pub fn surface_bookmark_notify(extensions: &[Element]) -> NotifySettingsSurface {
     let notifies = || {
         extensions
@@ -91,6 +93,7 @@ pub fn surface_bookmark_notify(extensions: &[Element]) -> NotifySettingsSurface 
 /// Surface the XEP-0492 notification state from a single hosted
 /// `<notify/>` — the DM-bookmark carrier shape (issue #720), which
 /// hosts exactly one `<notify/>` per contact. Pure.
+#[must_use]
 pub fn surface_dm_notify(notify: &Element) -> NotifySettingsSurface {
     NotifySettingsSurface {
         fallback_mode: read_fallback_mode(notify),
@@ -116,6 +119,7 @@ pub enum NotifyMode {
 
 impl NotifyMode {
     /// Wire element name for this setting.
+    #[must_use]
     pub fn as_wire_name(self) -> &'static str {
         match self {
             Self::Always => "always",
@@ -125,6 +129,7 @@ impl NotifyMode {
     }
 
     /// Parse a wire element name back into a typed mode.
+    #[must_use]
     pub fn from_wire_name(name: &str) -> Option<Self> {
         match name {
             "always" => Some(Self::Always),
@@ -150,6 +155,7 @@ impl NotifyMode {
 /// absence of any `<notify/>` element, `always` for direct chats and
 /// private group chats, `on-mention` for public group chats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConversationKind {
     /// One-to-one chat (RFC 6121 §5).
     DirectChat,
@@ -162,6 +168,7 @@ pub enum ConversationKind {
 impl ConversationKind {
     /// Resolve the XEP-0492 §3 default when no fallback child is
     /// present.
+    #[must_use]
     pub fn default_notify_mode(self) -> NotifyMode {
         match self {
             Self::DirectChat | Self::PrivateGroup => NotifyMode::Always,
@@ -176,6 +183,7 @@ impl ConversationKind {
 /// Returns `None` when no fallback child is present (a `<notify/>`
 /// carrying only identity-scoped siblings written by another client).
 /// Caller resolves `None` against [`ConversationKind::default_notify_mode`].
+#[must_use]
 pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
     notify.children().find_map(|child| {
         if child.ns() != NS_NOTIFICATION_SETTINGS
@@ -186,6 +194,25 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
         }
         NotifyMode::from_wire_name(child.name())
     })
+}
+
+/// Whether the merged XEP-0492 fallback includes Waddle's rich push summary.
+///
+/// Intentionally exhaustive: the two variants replace a bare opt-in boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichPushSummary {
+    /// Ensure exactly one `<rich-payload/>` inside the fallback's `<advanced/>`.
+    OptIn,
+    /// Remove Waddle's `<rich-payload/>` marker.
+    OptOut,
+}
+
+impl RichPushSummary {
+    /// Whether the rich push summary is requested.
+    #[must_use]
+    pub const fn is_opt_in(self) -> bool {
+        matches!(self, Self::OptIn)
+    }
 }
 
 /// Merge a desired [`NotifyMode`] into an existing XEP-0402
@@ -228,9 +255,10 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///
 /// * The Waddle rich XEP-0357 push-summary opt-in
 ///   (`<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/></advanced>`,
-///   #719) is **ours** to manage, so `rich_payload_opt_in` toggles it
-///   on the new fallback: `true` ensures exactly one `<rich-payload/>`
-///   inside the fallback's `<advanced/>`; `false` removes it. Foreign
+///   #719) is **ours** to manage, so [`RichPushSummary`] toggles it
+///   on the new fallback: [`RichPushSummary::OptIn`] ensures exactly one
+///   `<rich-payload/>` inside the fallback's `<advanced/>`;
+///   [`RichPushSummary::OptOut`] removes it. Foreign
 ///   `<advanced/>` children are preserved either way (§3 ¶1 MUST NOT
 ///   delete/alter unsupported advanced settings); if removing our
 ///   `<rich-payload/>` leaves the `<advanced/>` empty it is dropped
@@ -238,19 +266,20 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///
 /// The function is pure — it takes a borrowed `extensions` element
 /// and returns an owned new element.
+#[must_use]
 pub fn merge_notify_into_extensions(
     extensions: Option<&Element>,
     mode: NotifyMode,
-    rich_payload_opt_in: bool,
+    rich_payload: RichPushSummary,
 ) -> Element {
-    let mut builder = Element::builder("extensions", crate::pep::NS_BOOKMARKS);
+    let mut builder = Element::builder("extensions", NS_BOOKMARKS);
     let mut notify_setting_children: Vec<Element> = Vec::new();
 
     if let Some(existing) = extensions {
         for child in existing.children() {
             if child.is("notify", NS_NOTIFICATION_SETTINGS) {
                 gather_notify_settings(child, &mut notify_setting_children);
-            } else if child.ns() == crate::pep::NS_BOOKMARKS {
+            } else if child.ns() == NS_BOOKMARKS {
                 // XEP-0402 XSD `<extensions/>` content is
                 // `<xs:any namespace='##other'>` — drop any
                 // malformed same-namespace child so the republish
@@ -265,7 +294,7 @@ pub fn merge_notify_into_extensions(
         .append(build_merged_notify_element(
             notify_setting_children,
             mode,
-            rich_payload_opt_in,
+            rich_payload.is_opt_in(),
         ))
         .build()
 }
@@ -302,18 +331,19 @@ fn gather_notify_settings(notify: &Element, out: &mut Vec<Element>) {
 /// siblings and foreign `<advanced/>` children are preserved verbatim
 /// (XEP-0492 §3 ¶1); multiple `<notify/>` settings are de-duplicated
 /// and folded; the Waddle `<rich-payload/>` opt-in (#719) is toggled
-/// by `rich_payload_opt_in`. Pure — borrows the input, returns an
+/// by [`RichPushSummary`]. Pure — borrows the input, returns an
 /// owned `<notify/>`.
+#[must_use]
 pub fn merge_notify(
     existing_notify: Option<&Element>,
     mode: NotifyMode,
-    rich_payload_opt_in: bool,
+    rich_payload: RichPushSummary,
 ) -> Element {
     let mut notify_setting_children: Vec<Element> = Vec::new();
     if let Some(existing) = existing_notify {
         gather_notify_settings(existing, &mut notify_setting_children);
     }
-    build_merged_notify_element(notify_setting_children, mode, rich_payload_opt_in)
+    build_merged_notify_element(notify_setting_children, mode, rich_payload.is_opt_in())
 }
 
 /// Build the single `<notify/>` output element from the deduplicated

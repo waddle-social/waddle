@@ -1,8 +1,12 @@
-use super::*;
-use crate::{
-    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
-    ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository},
+use super::{
+    ArchiveDispatchObligation, ArchiveDispatchRepository, ArchiveOrdinal, DispatchReadiness,
+    DispatchTarget, EffectReceiptKey, EffectReceiptRepository, FullJid, IngressUowError,
+    MessageKey, PendingRowId,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::receipt_key;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 
 async fn message(
@@ -483,10 +487,9 @@ async fn pending_resource_order(fixture: IngressFixture) {
 }
 
 async fn independent_pending(fixture: IngressFixture) {
-    use waddle_xmpp::{
-        mam::{ArchivedMessage, MamStorage, SqlxMamStorage},
-        pending_delivery::{storage::PendingDeliveryStorage, QuotaPolicy},
-    };
+    use waddle_xmpp::mam::{ArchivedMessage, MamStorage, SqlxMamStorage};
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::QuotaPolicy;
     let resource: FullJid = "juliet@example.com/one"
         .parse()
         .expect("valid recipient resource JID");

@@ -9,6 +9,7 @@
 //! preservation of all vCard fields without needing to parse/reconstruct
 //! the XML on every request.
 
+use crate::db::ConnectionGuard;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -43,7 +44,7 @@ impl VCardStore {
     ///
     /// For in-memory databases, this returns a guard from the shared pool so the
     /// store reads and writes through the same logical database handle.
-    async fn get_connection(&self) -> Result<crate::db::ConnectionGuard, VCardError> {
+    async fn get_connection(&self) -> Result<ConnectionGuard, VCardError> {
         self.db
             .guard()
             .await

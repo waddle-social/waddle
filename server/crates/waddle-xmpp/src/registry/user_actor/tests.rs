@@ -1,7 +1,14 @@
 use super::delivery::{
     GetConnectionEntry, SelectRoutableResources, TrySendDirect, TrySendPeer, TrySendPendingFlush,
 };
-use super::*;
+use super::{
+    health_check_or_wedge_kill, BareJid, ClearPresenceState, ConflictCloseAllResources, Context,
+    DrainPendingSubscriptions, FullJid, GetAvailableResources, GetOtherResources, GetPresenceState,
+    GetResources, HealthCheck, IsCarbonsEnabled, IsConnected, PresenceState,
+    QueuePendingSubscription, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
+    SetCarbonsEnabled, Stanza, UnregisterConnection, UnregisterConnectionAndReportEmpty,
+    UnregisterConnectionOutcome, UpdatePresence, UpdatePresenceState, UserActor,
+};
 use crate::pending_delivery::PendingRowId;
 use crate::registry::connection_registry::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, OutboundStanza,

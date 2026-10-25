@@ -26,7 +26,11 @@ fn scram_failure_counted(failure: AuthFailure<'_>, bare_identifier: Option<&Bare
     record_scram_failure(failure, bare_identifier);
     sasl_failure_element("not-authorized")
 }
-use super::*;
+use super::{
+    debug, info, localpart_to_jid, parse_oauthbearer, warn, BareJid, ConnectionPhase, Element,
+    Engine, FullJid, NativeUserStore, OAuthBearerResult, ScramPendingState, ScramServer, Session,
+    WebSocketState, BASE64_STANDARD,
+};
 
 /// Handle SASL OAUTHBEARER authentication.
 pub(super) async fn handle_sasl_oauthbearer(

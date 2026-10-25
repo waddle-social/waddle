@@ -1,3 +1,5 @@
+//! Validation of service discovery, upload, roster, and search IQ payloads.
+
 use jid::BareJid;
 use minidom::Element;
 
@@ -13,6 +15,7 @@ use super::{
 // ── Parse helpers ─────────────────────────────────────────────────────────────
 
 /// Parse a disco#info result IQ into a [`DiscoInfoResult`].
+#[must_use]
 pub fn parse_disco_info_result(iq: &Element, queried_jid: &str) -> Option<DiscoInfoResult> {
     let query = iq.get_child("query", DISCO_INFO_NS)?;
     let node = query.attr("node").map(str::to_string);
@@ -102,6 +105,7 @@ fn parse_disco_data_form(form: &Element) -> Option<DiscoDataForm> {
 }
 
 /// Parse a disco#items result IQ into a list of [`DiscoItem`]s.
+#[must_use]
 pub fn parse_disco_items_result(iq: &Element) -> Option<Vec<DiscoItem>> {
     let query = iq.get_child("query", DISCO_ITEMS_NS)?;
 
@@ -123,6 +127,7 @@ pub fn parse_disco_items_result(iq: &Element) -> Option<Vec<DiscoItem>> {
 
 /// The bots a room lists on its bots node. An item that is not a bare JID
 /// (or names a node) is not a bot and is skipped.
+#[must_use]
 pub fn room_bots_from_disco_items(items: Vec<DiscoItem>) -> Vec<RoomBot> {
     items
         .into_iter()
@@ -160,6 +165,7 @@ pub fn room_bots_from_disco_items(items: Vec<DiscoItem>) -> Vec<RoomBot> {
 /// so the function would otherwise be dead in the wasm crate's
 /// dependency closure and trip the rustc `dead_code` warning.
 #[cfg(any(all(feature = "native", not(target_arch = "wasm32")), test,))]
+#[must_use]
 pub fn resolve_component_services(
     items: &[(jid::BareJid, Option<DiscoInfoResult>)],
     fallback_muc: jid::BareJid,
@@ -192,6 +198,8 @@ pub fn resolve_component_services(
     }
 }
 
+/// Build a space only when the service, node, and discovery metadata consistently identify a Waddle space.
+#[must_use]
 pub fn space_from_disco_item(
     spaces_jid: &BareJid,
     item: DiscoItem,
@@ -200,7 +208,7 @@ pub fn space_from_disco_item(
     if item.jid != spaces_jid.to_string() {
         return None;
     }
-    let id = SpaceNode::new(item.node?)?;
+    let id = SpaceNode::try_new(item.node?)?;
     if info.node.as_deref() != Some(id.as_str()) {
         return None;
     }
@@ -225,6 +233,8 @@ pub fn space_from_disco_item(
     })
 }
 
+/// Read channel bookmarks and their metadata from the selected space response.
+#[must_use]
 pub fn parse_space_channels_result(
     iq: &Element,
     space_id: &SpaceNode,
@@ -280,6 +290,7 @@ pub fn parse_space_channels_result(
 }
 
 /// Parse an HTTP upload slot result IQ into an [`UploadSlot`].
+#[must_use]
 pub fn parse_upload_slot(iq: &Element) -> Option<UploadSlot> {
     let slot = iq.get_child("slot", UPLOAD_NS)?;
     let put_el = slot.get_child("put", UPLOAD_NS)?;

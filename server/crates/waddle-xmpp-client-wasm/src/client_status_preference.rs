@@ -21,7 +21,7 @@ use waddle_xmpp_core::waddle_status_preference::{
     StatusPreference, NS_WADDLE_STATUS_PREFERENCE, PEP_ITEM_WADDLE_STATUS_PREFERENCE,
     PEP_NODE_WADDLE_STATUS_PREFERENCE,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, to_js_value, WaddleClient};
 use crate::NS_CLIENT;

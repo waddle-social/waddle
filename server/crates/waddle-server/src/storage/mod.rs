@@ -139,7 +139,7 @@ pub struct S3Storage {
 }
 
 impl S3Storage {
-    pub fn new(
+    pub fn try_new(
         endpoint: String,
         bucket: String,
         access_key: String,
@@ -252,7 +252,7 @@ pub fn build_blob_storage() -> Result<Arc<dyn BlobStorage>, StorageError> {
             bucket = %bucket,
             "Using S3-compatible blob storage"
         );
-        Ok(Arc::new(S3Storage::new(
+        Ok(Arc::new(S3Storage::try_new(
             endpoint, bucket, access_key, secret_key,
         )?))
     } else {

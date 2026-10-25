@@ -7,11 +7,9 @@ use waddle_ws_test_support as ws_common;
 use jid::Jid;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
-use waddle_server::{
-    config::LineageConfig,
-    db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_uow::{IngressUnitOfWork, MamArchiveRepository},
-};
+use waddle_server::config::LineageConfig;
+use waddle_server::db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress_uow::{IngressUnitOfWork, MamArchiveRepository};
 use waddle_xmpp::mam::{
     ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, MamTxStoreOutcome,
     SqlxMamStorage,

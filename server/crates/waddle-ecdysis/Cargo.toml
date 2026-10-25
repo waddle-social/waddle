@@ -17,3 +17,13 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+# An ordinary libtest worker starts after the harness has created threads.
+# This fixture needs a synchronous main to exercise pre-runtime fd adoption.
+[[test]]
+name = "listener_inheritance"
+path = "tests/listener_inheritance.rs"
+harness = false
+
+[lints]
+workspace = true

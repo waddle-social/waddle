@@ -1,6 +1,9 @@
 //! Periodic ingress maintenance scheduling and bounded retention collection.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use futures::FutureExt;
@@ -424,7 +427,7 @@ mod tests {
             ),
             action: None,
         };
-        let authority = crate::ingress::IngressAuthority::new(
+        let authority = crate::ingress::IngressAuthority::try_new(
             crate::ingress::IngressConfig::default(),
             database.clone(),
             wrong_lineage,

@@ -1,6 +1,14 @@
 //! Retention pruning of published/failed jobs and outboxed candidates.
 
-use super::*;
+use super::{
+    NotificationOutboxError, NotificationOutboxPruneOutcome, NotificationOutboxStore, Row,
+    STATUS_FAILED, STATUS_PUBLISHED,
+};
+use crate::db::DatabaseDriver;
+use crate::db::Transaction;
+use crate::ingress_substrate::ALIAS_RETENTION;
+use crate::ingress_uow::EffectDescendantRepository;
+use crate::ingress_uow::IngressUowError;
 
 impl NotificationOutboxStore {
     pub async fn prune_completed_before(
@@ -9,10 +17,8 @@ impl NotificationOutboxStore {
         batch_size: usize,
     ) -> Result<NotificationOutboxPruneOutcome, NotificationOutboxError> {
         let batch_size = batch_size.clamp(1, 10_000);
-        let tail_cutoff = cutoff_ms.min(
-            crate::time::now_ms()
-                .saturating_sub(crate::ingress_substrate::ALIAS_RETENTION.num_milliseconds()),
-        );
+        let tail_cutoff =
+            cutoff_ms.min(crate::time::now_ms().saturating_sub(ALIAS_RETENTION.num_milliseconds()));
         let has_foundation = self.has_canonical_descendants().await?;
         let candidates_deleted = self
             .prune_outboxed_candidates_before(cutoff_ms, tail_cutoff, batch_size, has_foundation)
@@ -209,13 +215,11 @@ impl NotificationOutboxStore {
         Ok(deleted)
     }
 
-    async fn begin_prune_transaction(
-        &self,
-    ) -> Result<crate::db::Transaction<'_>, NotificationOutboxError> {
+    async fn begin_prune_transaction(&self) -> Result<Transaction<'_>, NotificationOutboxError> {
         let timeout = std::time::Duration::from_millis(100);
         tokio::time::timeout(timeout, async {
             let mut tx = self.db.begin_immediate().await?;
-            if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            if tx.driver() == DatabaseDriver::Postgres {
                 // Every guard reread needs a fresh snapshot, even when the
                 // connection's configured default is REPEATABLE READ.
                 tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -228,17 +232,17 @@ impl NotificationOutboxStore {
             )
             .await?
             {
-                return Err(crate::ingress_uow::IngressUowError::TransactionBoundsUnproven.into());
+                return Err(IngressUowError::TransactionBoundsUnproven.into());
             }
             Ok::<_, NotificationOutboxError>(tx)
         })
         .await
-        .map_err(|_| crate::ingress_uow::IngressUowError::Timeout)?
+        .map_err(|_| IngressUowError::Timeout)?
     }
 
     async fn has_canonical_descendants(&self) -> Result<bool, NotificationOutboxError> {
         let mut tx = self.begin_prune_transaction().await?;
-        let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL"
         } else {
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants'"
@@ -251,8 +255,8 @@ impl NotificationOutboxStore {
     }
 }
 
-fn prune_row_lock(driver: crate::db::DatabaseDriver) -> &'static str {
-    if driver == crate::db::DatabaseDriver::Postgres {
+fn prune_row_lock(driver: DatabaseDriver) -> &'static str {
+    if driver == DatabaseDriver::Postgres {
         " FOR UPDATE SKIP LOCKED"
     } else {
         ""
@@ -260,13 +264,13 @@ fn prune_row_lock(driver: crate::db::DatabaseDriver) -> &'static str {
 }
 
 async fn prelock_prune_ancestry(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     identity: Option<&str>,
     has_foundation: bool,
 ) -> Result<(), NotificationOutboxError> {
     if has_foundation {
         if let Some(id) = identity.and_then(|value| uuid::Uuid::parse_str(value).ok()) {
-            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+            EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
         }
     }
     Ok(())

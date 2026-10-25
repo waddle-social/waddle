@@ -1,8 +1,10 @@
-use super::*;
+use super::{BareJid, ConversationKind, InboxDecodeError, InboxEntry};
+use crate::db::Row;
+use crate::db::Value;
 use chrono::{DateTime, TimeZone, Utc};
 use waddle_xmpp::xep::{CallThreadDuration, CallThreadKind, CallThreadMedia};
 
-pub(super) fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxDecodeError> {
+pub(super) fn decode_row(row: &Row) -> Result<InboxEntry, InboxDecodeError> {
     let partner_raw: String = row.get(0)?;
     let partner: BareJid = partner_raw
         .parse()
@@ -79,7 +81,7 @@ pub(super) fn decode_row(row: &crate::db::Row) -> Result<InboxEntry, InboxDecode
 /// write NULL for BOTH `call_thread_kind` AND `call_thread_media`. The
 /// encoded pair is therefore always either `(Some kind, non-empty media)`
 /// or `(NULL, NULL)`.
-pub(super) fn encode_call_thread_columns(entry: &InboxEntry) -> [crate::db::Value; 4] {
+pub(super) fn encode_call_thread_columns(entry: &InboxEntry) -> [Value; 4] {
     let media_tokens = entry
         .call_thread_media
         .map(|media| media.as_tokens())
@@ -95,10 +97,10 @@ pub(super) fn encode_call_thread_columns(entry: &InboxEntry) -> [crate::db::Valu
         _ => (None, None),
     };
     [
-        crate::db::Value::from(kind_token),
-        crate::db::Value::from(media_tokens),
-        crate::db::Value::from(entry.call_ended_at.map(|ended| ended.timestamp())),
-        crate::db::Value::from(
+        Value::from(kind_token),
+        Value::from(media_tokens),
+        Value::from(entry.call_ended_at.map(|ended| ended.timestamp())),
+        Value::from(
             entry
                 .call_duration
                 .as_ref()

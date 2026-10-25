@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_disco_info_response, community_service_features, is_disco_info_query, muc_room_features,
+    muc_service_features, parse_disco_info_query, parse_disco_info_response, push_service_features,
+    server_features, spaces_service_features, Element, Feature, Identity, Iq, DISCO_INFO_NS,
+    NS_CHATSTATES, NS_DATA_FORMS, NS_MUC_SELF_PING_OPTIMIZATION,
+};
 
 fn form_type_field(values: &[&str]) -> Element {
     let mut field = Element::builder("field", NS_DATA_FORMS)
@@ -248,7 +253,12 @@ fn test_server_features_exclude_unimplemented_advertisements() {
 
 #[test]
 fn test_muc_room_features_forum_room() {
-    let features = muc_room_features(true, true, false, false, true);
+    let features = muc_room_features(
+        crate::disco::info::RoomPersistence::Persistent,
+        crate::disco::info::RoomMembership::MembersOnly,
+        crate::disco::info::RoomVisibility::Hidden,
+        crate::types::Moderation::Unmoderated,
+    );
     assert!(!features.contains(&Feature::new("urn:xmpp:forums:0")));
     assert!(features.contains(&Feature::muc_persistent()));
     assert!(features.contains(&Feature::muc_membersonly()));
@@ -263,7 +273,12 @@ fn test_muc_room_features_forum_room() {
 
 #[test]
 fn test_muc_room_features_public_open_room() {
-    let features = muc_room_features(true, false, true, false, false);
+    let features = muc_room_features(
+        crate::disco::info::RoomPersistence::Persistent,
+        crate::disco::info::RoomMembership::Open,
+        crate::disco::info::RoomVisibility::Public,
+        crate::types::Moderation::Unmoderated,
+    );
     assert!(features.contains(&Feature::muc_open()));
     assert!(features.contains(&Feature::muc_public()));
     assert!(!features.contains(&Feature::muc_membersonly()));
@@ -276,7 +291,12 @@ fn test_muc_room_features_public_open_room() {
 /// preserved by the room dispatch path).
 #[test]
 fn test_muc_room_features_advertise_unsecured_stable_id_and_lifespan() {
-    let persistent = muc_room_features(true, false, true, false, false);
+    let persistent = muc_room_features(
+        crate::disco::info::RoomPersistence::Persistent,
+        crate::disco::info::RoomMembership::Open,
+        crate::disco::info::RoomVisibility::Public,
+        crate::types::Moderation::Unmoderated,
+    );
     assert!(persistent.contains(&Feature::muc_unsecured()));
     assert!(persistent.contains(&Feature::muc_stable_id()));
     assert!(persistent.contains(&Feature::muc_persistent()));
@@ -284,7 +304,12 @@ fn test_muc_room_features_advertise_unsecured_stable_id_and_lifespan() {
     // No password support anywhere: never claim muc_passwordprotected.
     assert!(!persistent.contains(&Feature::new("muc_passwordprotected")));
 
-    let temporary = muc_room_features(false, false, true, false, false);
+    let temporary = muc_room_features(
+        crate::disco::info::RoomPersistence::Temporary,
+        crate::disco::info::RoomMembership::Open,
+        crate::disco::info::RoomVisibility::Public,
+        crate::types::Moderation::Unmoderated,
+    );
     assert!(temporary.contains(&Feature::muc_temporary()));
     assert!(!temporary.contains(&Feature::muc_persistent()));
     assert_eq!(

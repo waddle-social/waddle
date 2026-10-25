@@ -1,20 +1,17 @@
 //! XEP-0280: each frozen carbon destination completes independently.
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
-    IngressSubmission,
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, ExternalOutcome, ImmediateSink,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressEffectCapture, IngressSubmission};
+use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::interpret;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::server::routes::interpret::{
-    effects::{EffectSink, PlanSink},
-    interpret,
-};
 use kameo::actor::{ActorRef, Spawn};
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    protocol::{CarbonKind, OutboundEvent},
-    registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::protocol::{CarbonKind, OutboundEvent};
+use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
 
 async fn plan_carbons(
     submission: &mut IngressSubmission,
@@ -85,7 +82,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: resource.clone(),
-                entry: registry.get_entry(resource).expect("registered resource"),
+                entry: registry.entry(resource).expect("registered resource"),
             })
             .await
             .expect("register actor resource");
@@ -157,9 +154,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: resources[1].clone(),
-                entry: registry
-                    .get_entry(&resources[1])
-                    .expect("reconnected resource"),
+                entry: registry.entry(&resources[1]).expect("reconnected resource"),
             })
             .await
             .expect("register reconnected actor resource");
@@ -175,7 +170,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: late.clone(),
-                entry: registry.get_entry(&late).expect("late resource"),
+                entry: registry.entry(&late).expect("late resource"),
             })
             .await
             .expect("register late actor resource");
@@ -311,7 +306,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
         .ask(RegisterUserResource {
             jid: target.clone(),
             entry: registry
-                .get_entry(&target)
+                .entry(&target)
                 .expect("registered carbon recipient"),
         })
         .await
@@ -328,7 +323,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
             .ask(RegisterUserResource {
                 jid: target.clone(),
                 entry: registry
-                    .get_entry(&target)
+                    .entry(&target)
                     .expect("registered replacement recipient"),
             })
             .await

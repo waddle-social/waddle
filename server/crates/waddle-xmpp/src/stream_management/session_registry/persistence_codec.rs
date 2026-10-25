@@ -1,3 +1,6 @@
+use crate::pending_delivery::SmSessionId;
+use crate::stream_management::PromotionCaptureCustody;
+use crate::Stanza;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -12,7 +15,7 @@ pub(super) fn detached_to_persisted(
 ) -> Result<super::super::persistence::PersistedSession, SmRegistryError> {
     use super::super::persistence::PersistedSession;
     Ok(PersistedSession {
-        stream_id: crate::pending_delivery::SmSessionId::new(session.stream_id.clone()),
+        stream_id: SmSessionId::new(session.stream_id.clone()),
         user_id: session.user_id.clone(),
         jid: session.jid.clone(),
         occupancy_session: session.occupancy_session,
@@ -59,15 +62,15 @@ pub(super) fn parse_xml_to_persisted_unacked(
         SmRegistryError::Internal(format!("parse unacked stanza for persistence: {e}"))
     })?;
     let stanza = match element.name() {
-        "message" => crate::Stanza::Message(
+        "message" => Stanza::Message(
             xmpp_parsers::message::Message::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
         ),
-        "iq" => crate::Stanza::Iq(Box::new(
+        "iq" => Stanza::Iq(Box::new(
             xmpp_parsers::iq::Iq::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
         )),
-        "presence" => crate::Stanza::Presence(
+        "presence" => Stanza::Presence(
             xmpp_parsers::presence::Presence::try_from(element)
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?,
         ),
@@ -79,7 +82,7 @@ pub(super) fn parse_xml_to_persisted_unacked(
     };
     Ok(super::super::persistence::PersistedUnackedStanza {
         ingress_receipts,
-        stream_id: crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
+        stream_id: SmSessionId::new(stream_id.to_string()),
         sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
@@ -153,7 +156,7 @@ pub(super) fn persisted_to_detached(
     unacked_stanzas.sort_by_key(|entry| entry.sequence.wrapping_sub(persisted.last_acked));
 
     Ok(DetachedSession {
-        promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
+        promotion_custody: PromotionCaptureCustody::unproven(),
         stream_id: persisted.stream_id.as_str().to_string(),
         user_id: persisted.user_id.clone(),
         jid: persisted.jid.clone(),

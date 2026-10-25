@@ -33,7 +33,7 @@ fn xep0108_general_only_round_trip() {
 #[test]
 fn xep0108_general_specific_text_round_trip() {
     let a = Activity::new(GeneralActivity::Working)
-        .with_specific(SpecificActivity::new("coding").unwrap())
+        .with_specific(SpecificActivity::try_new("coding").unwrap())
         .with_text("Hacking on Waddle");
     let elem = build_activity_element(&a);
     let parsed = parse_activity_element(&elem).unwrap().unwrap();
@@ -68,8 +68,8 @@ fn xep0108_unknown_general_rejected() {
 
 #[test]
 fn xep0108_specific_rejects_invalid_identifiers() {
-    assert!(SpecificActivity::new("").is_none());
-    assert!(SpecificActivity::new("Bad Name").is_none());
-    assert!(SpecificActivity::new("UPPER").is_none());
-    assert!(SpecificActivity::new("lower_ok").is_some());
+    assert!(SpecificActivity::try_new("").is_none());
+    assert!(SpecificActivity::try_new("Bad Name").is_none());
+    assert!(SpecificActivity::try_new("UPPER").is_none());
+    assert!(SpecificActivity::try_new("lower_ok").is_some());
 }

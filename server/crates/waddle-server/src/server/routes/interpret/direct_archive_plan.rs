@@ -1,6 +1,9 @@
 //! Read-only call-state overlay shared by the sender and recipient archive passes.
 use super::effects::direct::{PlannedActiveDmCall, PlannedDmCallState};
-use super::*;
+use super::{
+    external, format_call_thread_duration, jmi_propose, jmi_sid, BareJid, Deps,
+    ExternalDirectEffect, Message, StanzaId, DM_CALL_ACTIVE_TTL_SECS, DM_CALL_PENDING_TTL_SECS,
+};
 use crate::server::routes::websocket::{ActiveCallThread, DmCallThreadKey, PendingDmCallOffer};
 
 fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState> {
@@ -48,7 +51,7 @@ fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState>
                 initiator: entry.initiator.clone(),
                 media: entry.media,
                 started: entry.started,
-                thread: waddle_xmpp_core::mam::ThreadId::new(entry.thread_id.clone())?,
+                thread: waddle_xmpp_core::mam::ThreadId::try_new(entry.thread_id.clone())?,
             })
         });
     let projected = if active.is_some() {
@@ -127,7 +130,7 @@ pub(super) fn prepare(
             initiator: offer.initiator.clone(),
             media: offer.media,
             started: chrono::Utc::now(),
-            thread: waddle_xmpp_core::mam::ThreadId::new(state.key.sid.0.clone())?,
+            thread: waddle_xmpp_core::mam::ThreadId::try_new(state.key.sid.0.clone())?,
         });
         record(deps, state.clone());
     }
@@ -229,13 +232,17 @@ pub(super) async fn project(
 
 #[cfg(test)]
 mod tests {
-    use super::super::effects::{direct::DurableDirectEffect, DurableEffect, Effect, PlanSink};
+    use crate::server::routes::interpret::direct_archive::DM_CALL_STATE_MAX_KEYS;
+    use minidom::Element;
+    use std::sync::Arc;
+
+    use super::super::effects::direct::DurableDirectEffect;
+    use super::super::effects::{DurableEffect, Effect, PlanSink};
     use super::*;
-    use waddle_xmpp::{
-        inbox::storage::{InMemoryInboxStorage, InboxStorage},
-        mam::{storage::InMemoryMamStorage, MamStorage},
-        registry::ConnectionRegistry,
-    };
+    use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
+    use waddle_xmpp::mam::storage::InMemoryMamStorage;
+    use waddle_xmpp::mam::MamStorage;
+    use waddle_xmpp::registry::ConnectionRegistry;
 
     #[tokio::test]
     async fn stored_jmi_propose_captures_frozen_call_state_before_execution() {
@@ -317,7 +324,7 @@ mod tests {
                     initiator: alice.clone(),
                     media: waddle_xmpp::xep::CallThreadMedia::audio_video(),
                     started: chrono::Utc::now(),
-                    thread: waddle_xmpp_core::mam::ThreadId::new("call-1").expect("thread"),
+                    thread: waddle_xmpp_core::mam::ThreadId::try_new("call-1").expect("thread"),
                 }),
                 projected: [alice.clone(), bob.clone()].into_iter().collect(),
             },
@@ -372,7 +379,7 @@ mod tests {
                 initiator: alice.clone(),
                 media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
                 started,
-                thread: waddle_xmpp_core::mam::ThreadId::new(sid).expect("thread"),
+                thread: waddle_xmpp_core::mam::ThreadId::try_new(sid).expect("thread"),
             }),
             projected: [alice, bob].into_iter().collect(),
         }

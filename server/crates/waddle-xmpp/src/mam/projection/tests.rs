@@ -1,4 +1,4 @@
-use super::*;
+use super::{build_direct_archived_message, ArchivedRichPayload, Jid, Message};
 use xmpp_parsers::message::MessageType;
 
 fn jid(value: &str) -> Jid {

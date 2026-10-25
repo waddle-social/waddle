@@ -190,7 +190,7 @@ mod tests {
         let message = MessageKey::new();
         let owner: BareJid = "alice@example.com".parse().expect("owner");
         let peer: BareJid = "bob@example.com".parse().expect("peer");
-        let thread = ThreadId::new("thread-1").expect("thread");
+        let thread = ThreadId::try_new("thread-1").expect("thread");
         let key = DeliveryKey::inbox_projection(message, &owner, (&peer, None));
         assert_eq!(
             key,

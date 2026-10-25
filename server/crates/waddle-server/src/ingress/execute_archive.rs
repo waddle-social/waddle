@@ -1,14 +1,15 @@
 //! Store a frozen system archive only after its authorizing room mutation.
 use crate::ingress::decision::IngressDecision;
-use crate::{
-    ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, EffectIntentRepository, IngressUnitOfWork,
-        IngressUowError, MamArchiveRepository,
-    },
-    server::routes::interpret::effects::{
-        room::ExternalRoomEffect, EffectOutcome, SettledCompletion, SettledOutcome,
-    },
+#[cfg(feature = "clustering")]
+use crate::ingress_uow::ClaimRepository;
+use crate::ingress_uow::{
+    settle_recorded, CanonicalMessageRepository, EffectIntentRepository, IngressUnitOfWork,
+    IngressUowError, MamArchiveRepository,
 };
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+#[cfg(feature = "clustering")]
+use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
 use waddle_xmpp::mam::MamTxStoreOutcome;
 
 pub(super) async fn execute(
@@ -99,13 +100,9 @@ async fn store(
             {
                 return Err(IngressUowError::RoomGenerationStale);
             }
-            let proof = crate::ingress_uow::ClaimRepository::assert_room_claim(
-                &mut tx,
-                room,
-                &context.owner,
-                context.epoch,
-            )
-            .await?;
+            let proof =
+                ClaimRepository::assert_room_claim(&mut tx, room, &context.owner, context.epoch)
+                    .await?;
             MamArchiveRepository::store_fenced(
                 &mut tx,
                 &proof,
@@ -115,7 +112,7 @@ async fn store(
             )
             .await?
         }
-        crate::server::routes::interpret::effects::room::RoomFenceRequirement::Unfenced => {
+        RoomFenceRequirement::Unfenced => {
             if matches!(
                 tx.fencing(),
                 crate::ingress_uow::IngressFencing::Clustered(_)

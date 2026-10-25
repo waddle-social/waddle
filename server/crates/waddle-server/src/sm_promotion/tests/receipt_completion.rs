@@ -1,5 +1,9 @@
 //! Each actual promote -> canonical-confirm path releases portable receipts.
-use super::*;
+use super::{
+    bare, detached_session_with_unacked, dm_xml, full, promote_displaced_sessions,
+    run_test_shutdown_drain, test_user_registry, Arc, ConnectionRegistry, DisplacedPromotionDeps,
+    Instant, PendingDeliveryStorage, QuotaPolicy,
+};
 use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use crate::sm_persistence::DatabaseSmPersistence;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};

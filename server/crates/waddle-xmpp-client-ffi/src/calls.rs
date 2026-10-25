@@ -3,7 +3,7 @@ use waddle_xmpp_client::messaging::{
     build_finish, build_finish_migrated, build_finish_with_reason, build_proceed, build_propose,
     build_reject, build_reject_with_options, build_retract, build_retract_with_options,
     build_ringing, build_session_accept, build_session_initiate, build_session_terminate,
-    CallMedia, JingleReason, SessionId,
+    CallMedia, JingleReason, SessionId, TieBreak,
 };
 use waddle_xmpp_client::xep::xep0215::{
     build_extdisco_services_iq, parse_external_services, ExternalService, ExternalServiceTransport,
@@ -79,13 +79,15 @@ pub(crate) fn extdisco_reply_from_own_server(reply: &Element, server_domain: &st
 /// Map a typed core [`ExternalService`] to the FFI record. `expires`
 /// crosses the boundary as an RFC 3339 string, the same transit shape
 /// the wasm client hands to JavaScript.
-pub(crate) fn external_service_to_ffi(service: ExternalService) -> WaddleExternalService {
-    WaddleExternalService {
-        service_type: match service.service_type {
-            ExternalServiceType::Stun => WaddleExternalServiceType::Stun,
-            ExternalServiceType::Turn => WaddleExternalServiceType::Turn,
-            ExternalServiceType::Turns => WaddleExternalServiceType::Turns,
-        },
+pub(crate) fn external_service_to_ffi(service: ExternalService) -> Option<WaddleExternalService> {
+    let service_type = match service.service_type {
+        ExternalServiceType::Stun => WaddleExternalServiceType::Stun,
+        ExternalServiceType::Turn => WaddleExternalServiceType::Turn,
+        ExternalServiceType::Turns => WaddleExternalServiceType::Turns,
+        _ => return None,
+    };
+    Some(WaddleExternalService {
+        service_type,
         host: service.host,
         port: service.port,
         transport: service.transport.map(|transport| match transport {
@@ -96,7 +98,7 @@ pub(crate) fn external_service_to_ffi(service: ExternalService) -> WaddleExterna
         password: service.password,
         expires: service.expires.map(|expires| expires.to_rfc3339()),
         restricted: service.restricted,
-    }
+    })
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -176,7 +178,7 @@ impl WaddleClient {
         };
         let stanza = message_with_jmi(
             &peer.into(),
-            build_reject_with_options(&sid, Some(JingleReason::Expired), true),
+            build_reject_with_options(&sid, Some(JingleReason::Expired), TieBreak::Marked),
         );
         self.send_stanza_or_error(stanza, "send_call_reject_tie_break")
             .await
@@ -209,7 +211,7 @@ impl WaddleClient {
         };
         let stanza = message_with_jmi(
             &peer.into(),
-            build_retract_with_options(&sid, Some(JingleReason::Expired), true),
+            build_retract_with_options(&sid, Some(JingleReason::Expired), TieBreak::Marked),
         );
         self.send_stanza_or_error(stanza, "send_call_retract_tie_break")
             .await
@@ -408,7 +410,7 @@ impl WaddleClient {
                 }
                 Ok(parse_external_services(&reply)
                     .into_iter()
-                    .map(external_service_to_ffi)
+                    .filter_map(external_service_to_ffi)
                     .collect())
             }
             Err(e) => Err(client_error_to_waddle(&e)),

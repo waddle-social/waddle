@@ -1,7 +1,17 @@
 //! Outbox claim/publish lifecycle: claiming due jobs, XEP-0357 publish
 //! of claimed jobs, retry backoff, and terminal failure.
 
-use super::*;
+use super::{
+    decode_outbox_job, xep0191_blocks_notification_job, BareJid, BlockingStorage, Element, Error,
+    InboxStorage, NotificationOutboxError, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxStore, PubSubItem, PushSubscriptionStore, Row,
+    SuppressedReason, STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_PUBLISHED, STATUS_QUEUED,
+};
+use crate::db::DatabaseDriver;
+use crate::db::Transaction;
+use crate::ingress_uow::EffectDescendantRepository;
+use crate::push_service::CanonicalNotificationTerminalProof;
+use crate::push_service::DatabasePushServiceStore;
 
 const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
@@ -315,12 +325,12 @@ impl NotificationOutboxStore {
         let selected_status: String = selected.get(11)?;
         let selected_token: Option<String> = selected.get(14)?;
         let mut tx = self.db.begin_immediate().await?;
-        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        if tx.driver() == DatabaseDriver::Postgres {
             tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
                 .await?;
         }
         lock_outbox_ancestry_tx(&mut tx, &job_id).await?;
-        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
         } else {
             ""
@@ -361,8 +371,7 @@ impl NotificationOutboxStore {
         // Any parent discovered after acquiring the child lock is taken NOWAIT.
         // A conflicting late attachment aborts this disposition without settling.
         if let Ok(id) = uuid::Uuid::parse_str(&job_id) {
-            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id)
-                .await?;
+            EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id).await?;
         }
         let changed = tx.execute(
             "UPDATE notification_outbox SET status = ?, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND (claim_token = ? OR (claim_token IS NULL AND ? = 0))",
@@ -388,7 +397,7 @@ impl NotificationOutboxStore {
 
     pub async fn drain_due_outbox_jobs(
         &self,
-        push_service: &crate::push_service::DatabasePushServiceStore,
+        push_service: &DatabasePushServiceStore,
         push_store: &dyn PushSubscriptionStore,
         inbox_storage: &dyn InboxStorage,
         blocking_storage: &dyn BlockingStorage,
@@ -466,7 +475,7 @@ impl NotificationOutboxStore {
     pub async fn publish_claimed_job(
         &self,
         job: &NotificationOutboxJob,
-        push_service: &crate::push_service::DatabasePushServiceStore,
+        push_service: &DatabasePushServiceStore,
         push_store: &dyn PushSubscriptionStore,
         inbox_storage: &dyn InboxStorage,
         blocking_storage: &dyn BlockingStorage,
@@ -513,8 +522,17 @@ impl NotificationOutboxStore {
                     )
                     .await;
                     return Ok(match proof {
-                        crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted => NotificationOutboxPublishOutcome::Published { job_id: job.job_id.clone(), item_id: job.job_id.as_str().to_string() },
-                        crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked => NotificationOutboxPublishOutcome::Failed { job_id: job.job_id.clone() },
+                        CanonicalNotificationTerminalProof::ProviderCompleted => {
+                            NotificationOutboxPublishOutcome::Published {
+                                job_id: job.job_id.clone(),
+                                item_id: job.job_id.as_str().to_string(),
+                            }
+                        }
+                        CanonicalNotificationTerminalProof::RegistrationRevoked => {
+                            NotificationOutboxPublishOutcome::Failed {
+                                job_id: job.job_id.clone(),
+                            }
+                        }
                     });
                 }
                 return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
@@ -710,7 +728,7 @@ impl NotificationOutboxStore {
     /// still close upstream custody. This path never invokes queue acceptance.
     async fn reconcile_parked_outbox_jobs(
         &self,
-        push_service: &crate::push_service::DatabasePushServiceStore,
+        push_service: &DatabasePushServiceStore,
         batch_size: usize,
     ) -> Result<Vec<NotificationOutboxPublishOutcome>, NotificationOutboxError> {
         // Failed jobs never re-enter the send scheduler. Reuse their otherwise
@@ -718,7 +736,7 @@ impl NotificationOutboxStore {
         // to the back even when no proof is available or completion contends.
         // Row locks are released before provider lookups and parent NOWAIT locks.
         let mut tx = self.db.begin_immediate().await?;
-        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE SKIP LOCKED"
         } else {
             ""
@@ -786,9 +804,7 @@ impl NotificationOutboxStore {
                 }
             };
             if completed_owner {
-                if proof
-                    == crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted
-                {
+                if proof == CanonicalNotificationTerminalProof::ProviderCompleted {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
                     tracing::info!(
                         job_id = job.job_id.as_str(),
@@ -806,8 +822,17 @@ impl NotificationOutboxStore {
                 )
                 .await;
                 completed.push(match proof {
-                    crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted => NotificationOutboxPublishOutcome::Published { job_id: job.job_id.clone(), item_id: job.job_id.as_str().to_string() },
-                    crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked => NotificationOutboxPublishOutcome::Failed { job_id: job.job_id.clone() },
+                    CanonicalNotificationTerminalProof::ProviderCompleted => {
+                        NotificationOutboxPublishOutcome::Published {
+                            job_id: job.job_id.clone(),
+                            item_id: job.job_id.as_str().to_string(),
+                        }
+                    }
+                    CanonicalNotificationTerminalProof::RegistrationRevoked => {
+                        NotificationOutboxPublishOutcome::Failed {
+                            job_id: job.job_id.clone(),
+                        }
+                    }
                 });
             }
         }
@@ -817,13 +842,12 @@ impl NotificationOutboxStore {
     async fn complete_claimed_job_from_terminal_proof(
         &self,
         job: &NotificationOutboxJob,
-        proof: crate::push_service::CanonicalNotificationTerminalProof,
+        proof: CanonicalNotificationTerminalProof,
     ) -> Result<bool, NotificationOutboxError> {
         let Some(payload) = job.approved_payload.as_ref() else {
             return Ok(false);
         };
-        let cancelled =
-            proof == crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked;
+        let cancelled = proof == CanonicalNotificationTerminalProof::RegistrationRevoked;
         let status = if cancelled {
             STATUS_FAILED
         } else {
@@ -859,7 +883,7 @@ impl NotificationOutboxStore {
     /// reopen its owner; unresolved provider proof remains conservatively retained.
     async fn acknowledge_provider_owner_completion(
         &self,
-        push_service: &crate::push_service::DatabasePushServiceStore,
+        push_service: &DatabasePushServiceStore,
         job: &NotificationOutboxJob,
         item: &PubSubItem,
         options: Option<&Element>,
@@ -947,7 +971,7 @@ impl NotificationOutboxStore {
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
-        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
         } else {
             ""
@@ -1098,7 +1122,7 @@ impl NotificationOutboxStore {
         };
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
-        let row_lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let row_lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
         } else {
             ""
@@ -1305,7 +1329,7 @@ impl NotificationOutboxStore {
         let next_attempt_count = job.attempt_count.saturating_add(1);
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
-        let row_lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let row_lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
         } else {
             ""
@@ -1455,30 +1479,29 @@ pub(super) fn apply_retry_jitter(delay_ms: i64) -> i64 {
 }
 
 pub(super) async fn lock_outbox_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
-        let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
         } else {
             "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
         };
         let mut rows = tx.query(sql, crate::db_params![job_id]).await?;
         while rows.next().await?.is_some() {}
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
     }
     Ok(())
 }
 
 pub(super) async fn settle_outbox_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
     if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
-            .await?;
+        EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now()).await?;
         tx.execute("UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ? AND settled_at_ms IS NULL",
             crate::db_params![crate::time::now_ms(), job_id]).await?;
     }
@@ -1489,12 +1512,12 @@ pub(super) async fn settle_outbox_ancestry_tx(
 /// crash left an uncertain outbox boundary without any provider queue row.
 /// Call after cancelling provider-owned work in the same transaction.
 pub(crate) async fn retire_registration_outbox_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
     service: Option<&BareJid>,
     node: Option<&str>,
 ) -> Result<u64, NotificationOutboxError> {
-    let exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let exists = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT 1 WHERE to_regclass('notification_outbox') IS NOT NULL"
     } else {
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox'"
@@ -1505,7 +1528,7 @@ pub(crate) async fn retire_registration_outbox_tx(
     if !initialized {
         return Ok(0);
     }
-    let foundation_exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let foundation_exists = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL"
     } else {
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants'"
@@ -1552,10 +1575,10 @@ pub(crate) async fn retire_registration_outbox_tx(
 /// An upstream refusal cannot release a descendant already owned by the
 /// durable provider queue. The provider worker settles that remaining custody.
 pub(super) async fn settle_outbox_if_unowned_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<(), NotificationOutboxError> {
-    let has_queue = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let has_queue = if tx.driver() == DatabaseDriver::Postgres {
         let mut rows = tx
             .query("SELECT to_regclass('push_publish_jobs')::text", ())
             .await?;
@@ -1583,8 +1606,12 @@ pub(super) async fn settle_outbox_if_unowned_tx(
 
 #[cfg(test)]
 mod tests {
+    use waddle_xmpp::xep::NS_DATA_FORMS;
+
     use super::*;
-    use crate::notification_outbox::test_support::*;
+    use crate::notification_outbox::test_support::{
+        bare, candidate, enqueue_jobs_for_test, inbox_with_unread, reclaim_stale_job, store, target,
+    };
 
     // #1126: exponential backoff carries ±25% jitter so retries after
     // an outage do not drain in synchronized waves.

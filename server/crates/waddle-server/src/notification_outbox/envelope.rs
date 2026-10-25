@@ -1,7 +1,10 @@
 //! Build candidates from canonical messages and frozen recovery identity, without policy reads.
-use super::{
-    groupchat_class::*, NotificationCandidate, NotificationOutboxError, NotificationThreadId,
+use super::groupchat_class::{
+    groupchat_mentions_carry_owner_noping, groupchat_notification_class,
+    GroupchatNotificationClassDecision, GroupchatNotificationClassOutcome,
 };
+use super::{NotificationCandidate, NotificationOutboxError, NotificationThreadId};
+use crate::notification_outbox::NotificationMessageHints;
 use jid::{BareJid, Jid};
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -82,7 +85,7 @@ pub fn candidate_from_envelope(
     // the per-recipient `<noping/>` suppression survives the cap.
     let recipient_noping =
         groupchat_mentions_carry_owner_noping(mentions_slice, owner, owner_occupant_id.as_str());
-    let hints = crate::notification_outbox::NotificationMessageHints::none()
+    let hints = NotificationMessageHints::none()
         .with_noping(recipient_noping)
         .with_xep0334(
             waddle_xmpp::xep::xep0334::has_hint(message, waddle_xmpp::xep::xep0334::Hint::NoStore),

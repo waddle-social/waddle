@@ -1,3 +1,9 @@
+use crate::metrics::MucOccupancyHandlerTimer;
+use crate::muc::durable::AffiliationEntry;
+use crate::muc::room::Occupant;
+use crate::muc::RoomMutationEffects;
+use crate::xep::xep0272::Muji;
+use crate::xep::InCallPresenceState;
 use std::convert::Infallible;
 
 use jid::{BareJid, FullJid};
@@ -9,13 +15,11 @@ use super::{
     LeaveOutcome, OccupancyWatermark, PresenceUpdateOutcome, ProjectionGate, RoomActor,
     RoomActorError,
 };
-use crate::muc::{
-    durable::{
-        ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
-        WaddleId,
-    },
-    RoomConfig,
+use crate::muc::durable::{
+    ChannelId, OccupancyLeaveCause, RoomDurableMutation, RoomProjection, RoomProjectionKind,
+    WaddleId,
 };
+use crate::muc::RoomConfig;
 use crate::types::{Affiliation, Role};
 
 /// The affiliation a join request carries into the room, typed by
@@ -62,7 +66,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         msg: JoinWithAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("join");
+        let _handler_timer = MucOccupancyHandlerTimer::start("join");
         // #1108: a caller holding a stale ActorRef must retry through the
         // registry. For an inactivity seal this also re-checks ownership so
         // the seal can strengthen to OwnershipLost before the reaper runs.
@@ -121,13 +125,11 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 // exactly one of them the owner.
                 if !self.room.has_owner() {
                     self.commit_durable(
-                        RoomDurableMutation::Affiliation(
-                            crate::muc::durable::AffiliationEntry::new(
-                                msg.sender_jid.to_bare(),
-                                Some(Affiliation::Owner),
-                            ),
-                        ),
-                        crate::muc::RoomMutationEffects::none(),
+                        RoomDurableMutation::Affiliation(AffiliationEntry::new(
+                            msg.sender_jid.to_bare(),
+                            Some(Affiliation::Owner),
+                        )),
+                        RoomMutationEffects::none(),
                     )
                     .await
                     .map_err(|error| match error {
@@ -151,7 +153,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let admitted = match msg.affiliation_grant {
             JoinAffiliationGrant::HostOwned => {
                 !self.room.config.group_dm
-                    && self.room.get_affiliation(&joining_bare_jid) != Affiliation::Outcast
+                    && self.room.affiliation(&joining_bare_jid) != Affiliation::Outcast
             }
             _ => self.room.can_user_join(&joining_bare_jid),
         };
@@ -160,12 +162,12 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             // members-only room — never <registration-required/>, which
             // would invite the banned user to apply for membership
             // (#1265 item 1).
-            let reason =
-                if self.room.get_affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast {
-                    JoinDenialReason::Banned
-                } else {
-                    JoinDenialReason::MembersOnly
-                };
+            let reason = if self.room.affiliation(&msg.sender_jid.to_bare()) == Affiliation::Outcast
+            {
+                JoinDenialReason::Banned
+            } else {
+                JoinDenialReason::MembersOnly
+            };
             return Err(RoomActorError::JoinForbidden { reason });
         }
         // #1107: the same FULL JID must never hold two occupancies.
@@ -185,10 +187,10 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
         let mut is_same_bare_multi_session_join = false;
         let is_existing_session_rejoin = self
             .room
-            .get_occupant_sessions(&msg.nick)
+            .occupant_sessions(&msg.nick)
             .iter()
             .any(|session| session == &msg.sender_jid);
-        if let Some(existing) = self.room.get_occupant(&msg.nick) {
+        if let Some(existing) = self.room.occupant(&msg.nick) {
             if existing.real_jid != msg.sender_jid {
                 if existing.real_jid.to_bare() == msg.sender_jid.to_bare() {
                     is_same_bare_multi_session_join = true;
@@ -197,7 +199,7 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                 }
             }
         }
-        let joining_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
+        let joining_affiliation = self.room.affiliation(&msg.sender_jid.to_bare());
         if self.room.is_full()
             && !is_existing_session_rejoin
             && !is_same_bare_multi_session_join
@@ -217,34 +219,32 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
             .occupants
             .values()
             .flat_map(|o| {
-                self.room
-                    .get_occupant_sessions(&o.nick)
-                    .into_iter()
-                    .map(|jid| {
-                        let displaced = displaces_session && jid == msg.sender_jid;
-                        let muji = (!displaced)
-                            .then(|| self.room.muji_for_session(&o.nick, &jid))
-                            .flatten();
-                        let in_call = if displaced {
-                            Default::default()
-                        } else {
-                            self.room.in_call_state_for_session(&o.nick, &jid)
-                        };
-                        JoinExistingOccupant {
-                            jid,
-                            nick: o.nick.clone(),
-                            affiliation: o.affiliation,
-                            role: o.role,
-                            muji,
-                            in_call,
-                        }
-                    })
+                self.room.occupant_sessions(&o.nick).into_iter().map(|jid| {
+                    let displaced = displaces_session && jid == msg.sender_jid;
+                    let muji = (!displaced)
+                        .then(|| self.room.muji_for_session(&o.nick, &jid))
+                        .flatten();
+                    let in_call = if displaced {
+                        Default::default()
+                    } else {
+                        self.room.in_call_state_for_session(&o.nick, &jid)
+                    };
+                    JoinExistingOccupant {
+                        jid,
+                        nick: o.nick.clone(),
+                        affiliation: o.affiliation,
+                        role: o.role,
+                        muji,
+                        in_call,
+                    }
+                })
             })
             .collect();
 
         // Resolver cache updates deliberately precede this commit so a
         // revocation is visible to the admission checks even during outage.
-        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(msg.nick.clone()) else {
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::try_new(msg.nick.clone())
+        else {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         };
         // The session's occupancy order is minted BEFORE the durable commit
@@ -419,7 +419,7 @@ pub enum LeaveDisposition {
     /// XEP-0045 §7.14 self-presence echo can report it.
     Suppressed {
         nick: crate::muc::MucOccupantNick,
-        affiliation: crate::types::Affiliation,
+        affiliation: Affiliation,
         /// The attempt to acknowledge (see [`super::LeaveOutcome::acknowledge`]).
         attempt: LeaveAttemptId,
     },
@@ -433,7 +433,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
         msg: LeaveByRealJid,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _handler_timer = crate::metrics::MucOccupancyHandlerTimer::start("leave");
+        let _handler_timer = MucOccupancyHandlerTimer::start("leave");
         // A tombstoned attempt never processes a fresh leave (it must not
         // evict a session that displaced it), but a RETAINED RETRY still
         // falls through to the JID fallback below: the tombstone only says
@@ -494,7 +494,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .values()
             .filter(|occupant| {
                 self.room
-                    .get_occupant_sessions(&occupant.nick)
+                    .occupant_sessions(&occupant.nick)
                     .iter()
                     .any(|session| session == &msg.sender_jid)
             })
@@ -546,7 +546,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 current_generation: self.room.session_generation(&msg.sender_jid),
             });
         }
-        let Some(occupant) = self.room.get_occupant(&nick) else {
+        let Some(occupant) = self.room.occupant(&nick) else {
             return Ok(LeaveDisposition::NotOccupant);
         };
         // A session that joined after this attempt was minted is not the
@@ -612,7 +612,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .room
             .occupants
             .values()
-            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .flat_map(|o| self.room.occupant_sessions(&o.nick))
             .filter(|jid| *jid != msg.sender_jid)
             .collect();
         let cleared_muji_state = self
@@ -620,7 +620,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             .muji_state
             .get(&nick)
             .is_some_and(|entries| entries.contains_key(&msg.sender_jid));
-        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::new(nick.clone()) else {
+        let Some(durable_nick) = crate::muc::durable::MucOccupantNick::try_new(nick.clone()) else {
             tracing::warn!(room = %self.room.room_jid, %nick, "occupant state contains a non-durable nickname");
             return Ok(LeaveDisposition::NotOccupant);
         };
@@ -678,7 +678,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
             } else {
                 actor
                     .room
-                    .get_occupant(&nick)
+                    .occupant(&nick)
                     .map(|occupant| occupant.real_jid.clone())
             };
             let occupant_count = actor.room.occupant_count();
@@ -692,7 +692,7 @@ impl kameo::message::Message<LeaveByRealJid> for RoomActor {
                 // Infallible: the join path refuses a nick that does not
                 // validate as a `MucOccupantNick`, so every occupant nick is
                 // re-wrappable.
-                nick: crate::muc::MucOccupantNick::new(nick.clone())
+                nick: crate::muc::MucOccupantNick::try_new(nick.clone())
                     .expect("occupant nicks are validated at join"),
                 affiliation,
                 role,
@@ -771,7 +771,7 @@ impl kameo::message::Message<PresenceUpdateData> for RoomActor {
             .room
             .occupants
             .values()
-            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .flat_map(|o| self.room.occupant_sessions(&o.nick))
             .collect();
         Ok(Some(PresenceUpdateOutcome {
             sender_nick,
@@ -811,7 +811,7 @@ impl RoomActor {
 
 pub struct UpsertMujiPresence {
     pub sender_jid: FullJid,
-    pub muji: crate::xep::xep0272::Muji,
+    pub muji: Muji,
     /// The connection's occupancy generation (#1703): the update applies
     /// only while the session still belongs to it (`None` = server-side
     /// callers that carry no connection).
@@ -835,14 +835,14 @@ pub struct MujiPresenceUpdateOutcome {
     /// Exact Muji payload to reflect to the sending session. This
     /// preserves the XEP-0272 preparing echo even when another
     /// same-nick resource already has active contents.
-    pub sender_muji: Option<crate::xep::xep0272::Muji>,
+    pub sender_muji: Option<Muji>,
     /// Aggregate Muji payload for the occupant nick. Other occupants
     /// receive this authoritative state so one resource's preparing
     /// update cannot hide a sibling resource's active call.
-    pub active_muji: Option<crate::xep::xep0272::Muji>,
+    pub active_muji: Option<Muji>,
     /// Exact per-session Muji payloads still advertised for this nick
     /// after the update.
-    pub session_mujis: Vec<(FullJid, crate::xep::xep0272::Muji)>,
+    pub session_mujis: Vec<(FullJid, Muji)>,
     /// True when this update starts the room's active call state.
     pub active_call_started: bool,
 }
@@ -879,7 +879,7 @@ impl kameo::message::Message<UpsertMujiPresence> for RoomActor {
             .room
             .occupants
             .values()
-            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .flat_map(|o| self.room.occupant_sessions(&o.nick))
             .collect();
         // Bind the call advertisement to the specific session that
         // emitted it so a partial-session leave (one resource of a
@@ -932,7 +932,7 @@ impl kameo::message::Message<ClearMujiPresence> for RoomActor {
             .room
             .occupants
             .values()
-            .flat_map(|o| self.room.get_occupant_sessions(&o.nick))
+            .flat_map(|o| self.room.occupant_sessions(&o.nick))
             .collect();
         Ok(Some(ClearMujiPresenceOutcome::Updated(Box::new(
             MujiPresenceUpdateOutcome {
@@ -983,7 +983,7 @@ impl kameo::message::Message<GetActiveMujiSessions> for RoomActor {
 /// to the join path.
 pub struct UpsertInCallState {
     pub sender_jid: FullJid,
-    pub state: crate::xep::InCallPresenceState,
+    pub state: InCallPresenceState,
     /// See [`UpsertMujiPresence::occupant`].
     pub occupant: Option<OccupancySessionGeneration>,
 }
@@ -996,7 +996,7 @@ pub struct InCallPresenceUpdateOutcome {
     /// sessions advertising a non-empty state). The presence broadcaster
     /// decorates each reflected per-session presence with its owner's
     /// state from this list.
-    pub in_call_sessions: Vec<(FullJid, crate::xep::InCallPresenceState)>,
+    pub in_call_sessions: Vec<(FullJid, InCallPresenceState)>,
 }
 
 impl kameo::message::Message<UpsertInCallState> for RoomActor {
@@ -1040,7 +1040,7 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
         msg: PingSelfCheck,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.room.get_occupant(&msg.nick).is_none() {
+        if self.room.occupant(&msg.nick).is_none() {
             return Err(RoomActorError::OccupantNotFound(msg.nick.clone()));
         }
         // XEP-0410 server optimization: the self-ping succeeds iff THIS
@@ -1053,7 +1053,7 @@ impl kameo::message::Message<PingSelfCheck> for RoomActor {
         // (#1253).
         if !self
             .room
-            .get_occupant_sessions(&msg.nick)
+            .occupant_sessions(&msg.nick)
             .iter()
             .any(|session| session == &msg.sender_jid)
         {
@@ -1103,7 +1103,7 @@ impl kameo::message::Message<ReconcileChannelBackedRoom> for RoomActor {
                 waddle_id: waddle_id.clone(),
                 channel_id: channel_id.clone(),
             },
-            crate::muc::RoomMutationEffects::none(),
+            RoomMutationEffects::none(),
         )
         .await?;
         self.room.waddle_id = waddle_id.into_string();
@@ -1214,8 +1214,8 @@ impl RoomActor {
     /// (even by the same account), the captured roster/Muji state is stale.
     fn nick_retaken(&self, receipt: &super::DepartureReceipt) -> bool {
         let nick = receipt_nick(receipt);
-        let holder = self.room.get_occupant(nick);
-        let same_generation_and_account = |occupant: &crate::muc::room::Occupant| {
+        let holder = self.room.occupant(nick);
+        let same_generation_and_account = |occupant: &Occupant| {
             occupant.real_jid.to_bare() == receipt.jid.to_bare()
                 && self.room.current_nickname_generation(nick) == receipt.nick_generation
         };

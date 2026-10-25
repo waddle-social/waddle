@@ -49,11 +49,13 @@ pub struct VCard4 {
 
 impl VCard4 {
     /// Create an empty vCard4.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Returns `true` if every property is `None`.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.full_name.is_none()
             && self.nickname.is_none()
@@ -88,6 +90,7 @@ fn uri_or_text_prop(parent: &Element, name: &str) -> Option<String> {
 }
 
 /// Parse a `<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>` element.
+#[must_use]
 pub fn parse_vcard4_element(elem: &Element) -> VCard4 {
     VCard4 {
         full_name: text_prop(elem, "fn"),
@@ -117,6 +120,7 @@ fn append_uri_prop(parent: &mut Element, name: &str, value: &str) {
 
 /// Build a `<vcard xmlns='urn:ietf:params:xml:ns:vcard-4.0'>` element. Empty
 /// properties are omitted entirely.
+#[must_use]
 pub fn build_vcard4_element(vcard: &VCard4) -> Element {
     let mut elem = Element::builder("vcard", NS_VCARD4).build();
     if let Some(ref v) = vcard.full_name {
@@ -139,11 +143,11 @@ pub fn build_vcard4_element(vcard: &VCard4) -> Element {
     }
     elem
 }
-
 // ── IQ shape ────────────────────────────────────────────────────────────────
 
 /// Build a `get` IQ requesting the latest item from the target's
 /// `urn:xmpp:vcard4` PEP node (XEP-0163).
+#[must_use]
 pub fn build_fetch_vcard4_iq(target_jid: &str, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -166,6 +170,7 @@ pub fn build_fetch_vcard4_iq(target_jid: &str, request_id: &str) -> Element {
 
 /// Build a `set` IQ that publishes `vcard` to the user's own
 /// `urn:xmpp:vcard4` PEP node, using the canonical item id `current`.
+#[must_use]
 pub fn build_publish_vcard4_iq(vcard: &VCard4, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
@@ -193,6 +198,7 @@ pub fn build_publish_vcard4_iq(vcard: &VCard4, request_id: &str) -> Element {
 
 /// Extract the vCard4 payload from a successful XEP-0060 items response.
 /// Returns `None` when the node has no current item or the payload is missing.
+#[must_use]
 pub fn parse_pep_vcard4(iq: &Element) -> Option<VCard4> {
     let payload = iq
         .get_child("pubsub", NS_PUBSUB)?

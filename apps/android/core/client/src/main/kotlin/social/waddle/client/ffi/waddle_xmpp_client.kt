@@ -994,13 +994,13 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_extensi
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_create_group_dm(`ptr`: Long,`name`: RustBuffer.ByValue,`memberJids`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviteeJid`: RustBuffer.ByValue,`fullHistory`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`inviteeJid`: RustBuffer.ByValue,`history`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_leave_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_rename_group_dm(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(`ptr`: Long,`onlyUnread`: Byte,`noMessages`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(`ptr`: Long,`readFilter`: RustBuffer.ByValue,`messageContent`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_mark_inbox_read(`ptr`: Long,`partnerJid`: RustBuffer.ByValue,`threadId`: RustBuffer.ByValue,
 ): Long
@@ -1044,17 +1044,17 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_pin_message(`p
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_publish_mds_displayed(`ptr`: Long,`chatJid`: RustBuffer.ByValue,`stanzaId`: RustBuffer.ByValue,`stanzaIdBy`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_state(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`isMuc`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_state(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`audience`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_correction(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetId`: RustBuffer.ByValue,`newBody`: RustBuffer.ByValue,`isMuc`: Byte,`options`: RustBuffer.ByValue,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_correction(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetId`: RustBuffer.ByValue,`newBody`: RustBuffer.ByValue,`audience`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_displayed(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`stanzaId`: RustBuffer.ByValue,`isMuc`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_displayed(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`stanzaId`: RustBuffer.ByValue,`audience`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_moderation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_reaction(`ptr`: Long,`targetJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,`emojis`: RustBuffer.ByValue,`isMuc`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_reaction(`ptr`: Long,`targetJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,`emojis`: RustBuffer.ByValue,`audience`: RustBuffer.ByValue,
 ): Long
-external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_retraction(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,`isMuc`: Byte,
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_retraction(`ptr`: Long,`peerJid`: RustBuffer.ByValue,`targetStanzaId`: RustBuffer.ByValue,`audience`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_subscribe_mds_displayed(`ptr`: Long,
 ): Long
@@ -1382,7 +1382,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 30554) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 61498) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm() != 31049) {
@@ -1391,7 +1391,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm() != 3394) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 54568) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read() != 3970) {
@@ -1457,22 +1457,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed() != 38895) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state() != 32445) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state() != 38740) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction() != 59489) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction() != 47928) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed() != 54513) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed() != 38488) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation() != 18691) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction() != 34917) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction() != 458) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction() != 65449) {
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction() != 30240) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed() != 23876) {
@@ -2440,13 +2440,14 @@ public interface WaddleClientInterface {
 
     /**
      * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
-     * group DM. `full_history` requests the full-archive grant via
-     * the Waddle history-access extension; `false` omits the child
-     * and the server applies its from-join default. Fire-and-forget
-     * at the stanza level: the server answers refusals with a typed
+     * group DM. [`WaddleGroupDmHistoryAccess::Full`] requests the
+     * full-archive grant via the Waddle history-access extension.
+     * [`WaddleGroupDmHistoryAccess::FromJoin`] omits the child and
+     * the server applies its from-join default. Fire-and-forget at
+     * the stanza level: the server answers refusals with a typed
      * message error, delivered through the regular event stream.
      */
-    suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean)
+    suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `history`: WaddleGroupDmHistoryAccess)
 
     /**
      * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
@@ -2466,12 +2467,11 @@ public interface WaddleClientInterface {
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
      * resolve once the server's closing `<fin/>` arrives.
      *
-     * `only_unread` maps to `unread-only='true'`; `no_messages`
-     * inverts the XEP's `messages` attribute (pass `true` to elide
-     * the embedded MAM `<result/>` bodies — the cheap hydration
-     * shape the clients use on session-ready).
+     * `read_filter` selects `unread-only`. `message_content` selects
+     * whether the page embeds MAM `<result/>` bodies; [`WaddleInboxMessageContent::Omit`]
+     * is the cheap hydration shape the clients use on session-ready.
      */
-    suspend fun `fetchInbox`(`onlyUnread`: kotlin.Boolean, `noMessages`: kotlin.Boolean): WaddleInboxResult
+    suspend fun `fetchInbox`(`readFilter`: WaddleInboxReadFilter, `messageContent`: WaddleInboxMessageContent): WaddleInboxResult
 
     /**
      * Mark one conversation (optionally one thread of it) read via
@@ -2591,7 +2591,7 @@ public interface WaddleClientInterface {
      * XEP-0085: send a standalone chat state notification
      * (typing indicator) to a DM peer or room.
      */
-    suspend fun `sendChatState`(`peerJid`: kotlin.String, `state`: WaddleChatState, `isMuc`: kotlin.Boolean): kotlin.Boolean
+    suspend fun `sendChatState`(`peerJid`: kotlin.String, `state`: WaddleChatState, `audience`: WaddleMessageAudience): kotlin.Boolean
 
     /**
      * XEP-0308: replace the body of the message identified by
@@ -2599,13 +2599,13 @@ public interface WaddleClientInterface {
      * send; on success `stanza_id` is the id of the *correction*
      * message (the wasm client's `send_correction` return value).
      */
-    suspend fun `sendCorrection`(`peerJid`: kotlin.String, `targetId`: kotlin.String, `newBody`: kotlin.String, `isMuc`: kotlin.Boolean, `options`: WaddleSendOptions?): WaddleSendMessageOutcome
+    suspend fun `sendCorrection`(`peerJid`: kotlin.String, `targetId`: kotlin.String, `newBody`: kotlin.String, `audience`: WaddleMessageAudience, `options`: WaddleSendOptions?): WaddleSendMessageOutcome
 
     /**
      * XEP-0333: send a `<displayed id='…'/>` marker acknowledging
      * the message identified by `stanza_id` as read.
      */
-    suspend fun `sendDisplayed`(`peerJid`: kotlin.String, `stanzaId`: kotlin.String, `isMuc`: kotlin.Boolean): kotlin.Boolean
+    suspend fun `sendDisplayed`(`peerJid`: kotlin.String, `stanzaId`: kotlin.String, `audience`: WaddleMessageAudience): kotlin.Boolean
 
     /**
      * XEP-0425: ask the room to moderate (retract) the message
@@ -2622,7 +2622,7 @@ public interface WaddleClientInterface {
      * stanza carries the *complete* reaction state of this user for
      * that message — send an empty `emojis` to clear all reactions.
      */
-    suspend fun `sendReaction`(`targetJid`: kotlin.String, `targetStanzaId`: kotlin.String, `emojis`: List<kotlin.String>, `isMuc`: kotlin.Boolean): kotlin.Boolean
+    suspend fun `sendReaction`(`targetJid`: kotlin.String, `targetStanzaId`: kotlin.String, `emojis`: List<kotlin.String>, `audience`: WaddleMessageAudience): kotlin.Boolean
 
     /**
      * XEP-0424: retract the sender's own message identified by
@@ -2630,7 +2630,7 @@ public interface WaddleClientInterface {
      * marked with a XEP-0428 `<fallback/>` so supporting receivers
      * never render it.
      */
-    suspend fun `sendRetraction`(`peerJid`: kotlin.String, `targetStanzaId`: kotlin.String, `isMuc`: kotlin.Boolean): kotlin.Boolean
+    suspend fun `sendRetraction`(`peerJid`: kotlin.String, `targetStanzaId`: kotlin.String, `audience`: WaddleMessageAudience): kotlin.Boolean
 
     /**
      * XEP-0060 explicit subscribe to the user's own MDS node — the
@@ -4022,20 +4022,21 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
     /**
      * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
-     * group DM. `full_history` requests the full-archive grant via
-     * the Waddle history-access extension; `false` omits the child
-     * and the server applies its from-join default. Fire-and-forget
-     * at the stanza level: the server answers refusals with a typed
+     * group DM. [`WaddleGroupDmHistoryAccess::Full`] requests the
+     * full-archive grant via the Waddle history-access extension.
+     * [`WaddleGroupDmHistoryAccess::FromJoin`] omits the child and
+     * the server applies its from-join default. Fire-and-forget at
+     * the stanza level: the server answers refusals with a typed
      * message error, delivered through the regular event stream.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `fullHistory`: kotlin.Boolean) {
+    override suspend fun `inviteToGroupDm`(`roomJid`: kotlin.String, `inviteeJid`: kotlin.String, `history`: WaddleGroupDmHistoryAccess) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(
                 uniffiHandle,
-                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviteeJid`),FfiConverterBoolean.lower(`fullHistory`),
+                FfiConverterString.lower(`roomJid`),FfiConverterString.lower(`inviteeJid`),FfiConverterTypeWaddleGroupDmHistoryAccess.lower(`history`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_void(future, callback, continuation) },
@@ -4108,19 +4109,18 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
      * resolve once the server's closing `<fin/>` arrives.
      *
-     * `only_unread` maps to `unread-only='true'`; `no_messages`
-     * inverts the XEP's `messages` attribute (pass `true` to elide
-     * the embedded MAM `<result/>` bodies — the cheap hydration
-     * shape the clients use on session-ready).
+     * `read_filter` selects `unread-only`. `message_content` selects
+     * whether the page embeds MAM `<result/>` bodies; [`WaddleInboxMessageContent::Omit`]
+     * is the cheap hydration shape the clients use on session-ready.
      */
     @Throws(WaddleException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `fetchInbox`(`onlyUnread`: kotlin.Boolean, `noMessages`: kotlin.Boolean) : WaddleInboxResult {
+    override suspend fun `fetchInbox`(`readFilter`: WaddleInboxReadFilter, `messageContent`: WaddleInboxMessageContent) : WaddleInboxResult {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(
                 uniffiHandle,
-                FfiConverterBoolean.lower(`onlyUnread`),FfiConverterBoolean.lower(`noMessages`),
+                FfiConverterTypeWaddleInboxReadFilter.lower(`readFilter`),FfiConverterTypeWaddleInboxMessageContent.lower(`messageContent`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4641,12 +4641,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * (typing indicator) to a DM peer or room.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendChatState`(`peerJid`: kotlin.String, `state`: WaddleChatState, `isMuc`: kotlin.Boolean) : kotlin.Boolean {
+    override suspend fun `sendChatState`(`peerJid`: kotlin.String, `state`: WaddleChatState, `audience`: WaddleMessageAudience) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_state(
                 uniffiHandle,
-                FfiConverterString.lower(`peerJid`),FfiConverterTypeWaddleChatState.lower(`state`),FfiConverterBoolean.lower(`isMuc`),
+                FfiConverterString.lower(`peerJid`),FfiConverterTypeWaddleChatState.lower(`state`),FfiConverterTypeWaddleMessageAudience.lower(`audience`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -4667,12 +4667,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * message (the wasm client's `send_correction` return value).
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendCorrection`(`peerJid`: kotlin.String, `targetId`: kotlin.String, `newBody`: kotlin.String, `isMuc`: kotlin.Boolean, `options`: WaddleSendOptions?) : WaddleSendMessageOutcome {
+    override suspend fun `sendCorrection`(`peerJid`: kotlin.String, `targetId`: kotlin.String, `newBody`: kotlin.String, `audience`: WaddleMessageAudience, `options`: WaddleSendOptions?) : WaddleSendMessageOutcome {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_correction(
                 uniffiHandle,
-                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`targetId`),FfiConverterString.lower(`newBody`),FfiConverterBoolean.lower(`isMuc`),FfiConverterOptionalTypeWaddleSendOptions.lower(`options`),
+                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`targetId`),FfiConverterString.lower(`newBody`),FfiConverterTypeWaddleMessageAudience.lower(`audience`),FfiConverterOptionalTypeWaddleSendOptions.lower(`options`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
@@ -4691,12 +4691,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * the message identified by `stanza_id` as read.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendDisplayed`(`peerJid`: kotlin.String, `stanzaId`: kotlin.String, `isMuc`: kotlin.Boolean) : kotlin.Boolean {
+    override suspend fun `sendDisplayed`(`peerJid`: kotlin.String, `stanzaId`: kotlin.String, `audience`: WaddleMessageAudience) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_displayed(
                 uniffiHandle,
-                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`stanzaId`),FfiConverterBoolean.lower(`isMuc`),
+                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`stanzaId`),FfiConverterTypeWaddleMessageAudience.lower(`audience`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -4744,12 +4744,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * that message — send an empty `emojis` to clear all reactions.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendReaction`(`targetJid`: kotlin.String, `targetStanzaId`: kotlin.String, `emojis`: List<kotlin.String>, `isMuc`: kotlin.Boolean) : kotlin.Boolean {
+    override suspend fun `sendReaction`(`targetJid`: kotlin.String, `targetStanzaId`: kotlin.String, `emojis`: List<kotlin.String>, `audience`: WaddleMessageAudience) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_reaction(
                 uniffiHandle,
-                FfiConverterString.lower(`targetJid`),FfiConverterString.lower(`targetStanzaId`),FfiConverterSequenceString.lower(`emojis`),FfiConverterBoolean.lower(`isMuc`),
+                FfiConverterString.lower(`targetJid`),FfiConverterString.lower(`targetStanzaId`),FfiConverterSequenceString.lower(`emojis`),FfiConverterTypeWaddleMessageAudience.lower(`audience`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -4770,12 +4770,12 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
      * never render it.
      */
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `sendRetraction`(`peerJid`: kotlin.String, `targetStanzaId`: kotlin.String, `isMuc`: kotlin.Boolean) : kotlin.Boolean {
+    override suspend fun `sendRetraction`(`peerJid`: kotlin.String, `targetStanzaId`: kotlin.String, `audience`: WaddleMessageAudience) : kotlin.Boolean {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_retraction(
                 uniffiHandle,
-                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`targetStanzaId`),FfiConverterBoolean.lower(`isMuc`),
+                FfiConverterString.lower(`peerJid`),FfiConverterString.lower(`targetStanzaId`),FfiConverterTypeWaddleMessageAudience.lower(`audience`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_i8(future, callback, continuation) },
@@ -13491,6 +13491,142 @@ public object FfiConverterTypeWaddleForumPostKind: FfiConverterRustBuffer<Waddle
 
 
 /**
+ * History a newly invited group-DM member may read.
+ *
+ * `Full` sends the Waddle history-access extension. `FromJoin` omits
+ * that child and the server applies its from-join default.
+ */
+
+enum class WaddleGroupDmHistoryAccess {
+
+    /**
+     * New member may only see archive rows from their add boundary.
+     */
+    FROM_JOIN,
+    /**
+     * New member may query the full group-DM archive.
+     */
+    FULL;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleGroupDmHistoryAccess: FfiConverterRustBuffer<WaddleGroupDmHistoryAccess> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleGroupDmHistoryAccess.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleGroupDmHistoryAccess) = 4UL
+
+    override fun write(value: WaddleGroupDmHistoryAccess, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Whether a XEP-0430 inbox query embeds each conversation's latest message.
+ *
+ * `Omit` is the XEP `messages='false'` form. `Include` asks for the bodies.
+ */
+
+enum class WaddleInboxMessageContent {
+
+    /**
+     * Include the latest archived message for each entry.
+     */
+    INCLUDE,
+    /**
+     * Request entries and counts without archived message payloads.
+     */
+    OMIT;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleInboxMessageContent: FfiConverterRustBuffer<WaddleInboxMessageContent> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleInboxMessageContent.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleInboxMessageContent) = 4UL
+
+    override fun write(value: WaddleInboxMessageContent, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Conversations included in a XEP-0430 inbox query.
+ *
+ * `UnreadOnly` is `unread-only='true'`. `All` asks for every conversation.
+ */
+
+enum class WaddleInboxReadFilter {
+
+    /**
+     * Include both read and unread conversations.
+     */
+    ALL,
+    /**
+     * Include only conversations with unread messages.
+     */
+    UNREAD_ONLY;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleInboxReadFilter: FfiConverterRustBuffer<WaddleInboxReadFilter> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleInboxReadFilter.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleInboxReadFilter) = 4UL
+
+    override fun write(value: WaddleInboxReadFilter, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * XEP-0166 §7.4 session-terminate reason conditions. Mirrors the
  * 17 variants in `xmpp_parsers::jingle::Reason` so the wire
  * parser's enum is the single source of truth — outbound calls
@@ -13678,6 +13814,52 @@ public object FfiConverterTypeWaddleMarkupSpanType: FfiConverterRustBuffer<Waddl
     override fun allocationSize(value: WaddleMarkupSpanType) = 4UL
 
     override fun write(value: WaddleMarkupSpanType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Direct chat versus multi-user chat for a messaging verb.
+ *
+ * `Muc` selects `type='groupchat'` and requires a bare room JID.
+ * `Direct` selects `type='chat'` and accepts a bare or full JID.
+ */
+
+enum class WaddleMessageAudience {
+
+    /**
+     * One-to-one chat (`type='chat'`).
+     */
+    DIRECT,
+    /**
+     * Multi-user chat (`type='groupchat'`).
+     */
+    MUC;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMessageAudience: FfiConverterRustBuffer<WaddleMessageAudience> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleMessageAudience.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleMessageAudience) = 4UL
+
+    override fun write(value: WaddleMessageAudience, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

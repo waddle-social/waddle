@@ -1,23 +1,34 @@
+use super::frame::handle_xmpp_frame;
+use super::interpret_loop::build_interpret_deps;
+use super::replay::drive_interpret_loop;
+use super::session_init::build_internal_server_error_stream_error;
+use super::state::WsConnState;
 pub(crate) use super::test_state::{
     create_test_session, create_test_websocket_state_with_extension_manager,
     empty_extension_manager, register_test_connection, seed_local_account, TestStateOverrides,
 };
-use super::*;
+use super::transport_xml::{
+    build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
+};
+#[cfg(feature = "clustering")]
+use super::StreamManagementState;
 use super::{
-    frame::handle_xmpp_frame,
-    interpret_loop::build_interpret_deps,
-    replay::drive_interpret_loop,
-    session_init::build_internal_server_error_stream_error,
-    state::WsConnState,
-    transport_xml::{
-        build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
-    },
+    build_iq_error_xml_typed, cleanup, element_to_xml, get_or_create_room_actor, handlers,
+    localpart_to_jid, not_authorized_iq_error, ConnectionRegistry, DeliveryKind, FromStr,
+    InboundEvent, Message, OutboundStanza, ResolvedPrincipal, RoomConfig, XmppServiceDomains,
+    BASE64_STANDARD,
+};
+
+use super::{
+    get_room_actor, parse_frame, stanza_to_xml, BareJid, Blocklist, ConnectionPhase, Element,
+    Engine, ExtensionManager, FullJid, InMemorySmSessionRegistry, InboundFrame, NativeUserStore,
+    Session, Stanza, WebSocketState, XmppStateMachine,
 };
 use crate::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use hmac::{Hmac, KeyInit, Mac};
-use pbkdf2::pbkdf2_hmac;
+use pbkdf2::pbkdf2_hmac_array;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -125,7 +136,7 @@ async fn handle_muc_join(
     sender_jid: &jid::FullJid,
     nick: &str,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    authenticated_session: &Option<crate::auth::Session>,
+    authenticated_session: Option<&crate::auth::Session>,
 ) -> Vec<String> {
     handle_muc_join_with_occupancy_session(
         state,
@@ -151,7 +162,7 @@ async fn handle_muc_join_with_occupancy_session(
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     connection: (
         waddle_xmpp_core::OccupancySessionGeneration,
-        &Option<crate::auth::Session>,
+        Option<&crate::auth::Session>,
     ),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;
@@ -246,7 +257,7 @@ pub(crate) async fn create_test_websocket_state_with_durable_ingress(
     fixture: &crate::ingress::test_support::IngressFixture,
 ) -> Arc<WebSocketState> {
     let db_pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )
@@ -816,7 +827,7 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
             .expect("test api secret meets min length"),
         webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test webhook secret meets min length"),
-        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("ws url"))
+        ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("ws url"))
             .expect("ws url valid"),
         turn_host: waddle_sfu::TurnHost::new("turn.test"),
         turn_tls_port: 443,
@@ -825,7 +836,7 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
         token_ttl: chrono::Duration::seconds(3600),
         turn_ttl: chrono::Duration::seconds(3600),
     };
-    Arc::new(waddle_sfu::LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(waddle_sfu::LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 /// Build a test [`WebSocketState`] whose dispatcher has the XEP-0166
@@ -862,7 +873,7 @@ pub(crate) async fn create_test_websocket_state_with_fixture_bot() -> Arc<WebSoc
 pub(crate) async fn create_test_websocket_state_with_fixture_bot_avatar(
     avatar: waddle_extensions::ArtifactReference,
 ) -> Arc<WebSocketState> {
-    let plugin = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin id");
+    let plugin = waddle_extensions::PluginId::try_new(FIXTURE_BOT_PLUGIN).expect("plugin id");
     create_test_websocket_state_with_extension_manager(
         Arc::new(
             fixture_bot_extension_manager()
@@ -1027,8 +1038,7 @@ fn scram_client_final_from_challenge(
         .expect("salt base64");
     let iterations = iterations.expect("iterations");
 
-    let mut salted_password = vec![0u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut salted_password);
+    let salted_password = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), &salt, iterations);
     let client_key = hmac_sha256(&salted_password, b"Client Key");
     let stored_key = sha256(&client_key);
     let channel_binding = BASE64_STANDARD.encode("n,,");

@@ -1,10 +1,8 @@
 use jid::{BareJid, Jid};
-use waddle_xmpp_client::{
-    avatar::AvatarExt,
-    discovery::DiscoveryExt,
-    mam::{ArchivedMessageId, MamExt},
-    messaging::MessagingExt,
-};
+use waddle_xmpp_client::avatar::AvatarExt;
+use waddle_xmpp_client::discovery::DiscoveryExt;
+use waddle_xmpp_client::mam::{ArchivedMessageId, MamExt};
+use waddle_xmpp_client::messaging::MessagingExt;
 use waddle_xmpp_core::mam::ThreadId;
 
 use crate::boundary_convert::{
@@ -55,9 +53,9 @@ impl WaddleClient {
         before_id: Option<String>,
     ) -> Result<WaddleMamPage, WaddleError> {
         let room: BareJid = room_jid.parse().map_err(|_| WaddleError::InvalidJid)?;
-        let thread = ThreadId::new(thread_id).ok_or(WaddleError::InvalidArgument)?;
+        let thread = ThreadId::try_new(thread_id).ok_or(WaddleError::InvalidArgument)?;
         let before = match before_id {
-            Some(id) => Some(ArchivedMessageId::new(id).ok_or(WaddleError::InvalidArgument)?),
+            Some(id) => Some(ArchivedMessageId::try_new(id).ok_or(WaddleError::InvalidArgument)?),
             None => None,
         };
         let Some(handle) = self.clone_handle().await else {
@@ -294,7 +292,7 @@ impl WaddleClient {
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
         let known_ids: Vec<_> = known_ids
             .into_iter()
-            .filter_map(waddle_xmpp_client::AvatarItemId::new)
+            .filter_map(waddle_xmpp_client::AvatarItemId::try_new)
             .collect();
         let fetch = handle
             .request_avatar(&bare, &known_ids)

@@ -2,24 +2,27 @@
 //!
 //! Unknown starts suppress retry for a bounded grace interval. The completion
 //! row is delivery evidence even when the subsequent effect receipt is lost.
-use std::{future::Future, time::Duration};
+use crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation;
+use crate::server::routes::websocket::DmPairKey;
+use std::future::Future;
+use std::time::Duration;
 
 use jid::FullJid;
 use tokio_util::sync::CancellationToken;
-use waddle_xmpp::{
-    ingress::IngressEffectIntent, ownership::NodeIdentity, registry::BroadcastOutcome, Stanza,
-};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ownership::NodeIdentity;
+use waddle_xmpp::registry::BroadcastOutcome;
+use waddle_xmpp::Stanza;
 
-use super::{identity::IngressAppendObligationRef, IngressAuthority};
-use crate::{
-    ingress_uow::{
-        ArchiveDispatchRepository, CanonicalMessageRepository, DeliveryProgressRepository,
-        EffectIntentRepository, EffectReceiptRepository, IngressFencing, IngressUnitOfWork,
-        IngressUowError, IngressUowTransaction, SendAttemptRepository, SendAttemptStatus,
-        SendClaim, SendObligation,
-    },
-    server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext},
+use super::identity::IngressAppendObligationRef;
+use super::IngressAuthority;
+use crate::ingress_uow::{
+    ArchiveDispatchRepository, CanonicalMessageRepository, DeliveryProgressRepository,
+    EffectIntentRepository, EffectReceiptRepository, IngressFencing, IngressUnitOfWork,
+    IngressUowError, IngressUowTransaction, SendAttemptRepository, SendAttemptStatus, SendClaim,
+    SendObligation,
 };
+use crate::server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(1);
 const LEASE_DURATION: Duration = Duration::from_secs(5);
@@ -485,15 +488,11 @@ async fn authorize_direct_stanza(
                 continue;
             };
             pin_owned = true;
-            let mutation =
-                crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation {
-                    pair: crate::server::routes::websocket::DmPairKey::new(
-                        pair.0.clone(),
-                        pair.1.clone(),
-                    ),
-                    target_stanza_id: target_stanza_id.clone(),
-                    action: action.clone(),
-                };
+            let mutation = DmPinMutation {
+                pair: DmPairKey::new(pair.0.clone(), pair.1.clone()),
+                target_stanza_id: target_stanza_id.clone(),
+                action: action.clone(),
+            };
             let expected =
                 crate::server::routes::websocket::handlers::message::dm_pin::recorded_pin_message(
                     &envelope, &mutation, stanza_id,

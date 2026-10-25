@@ -54,7 +54,7 @@ pub(crate) async fn request_validated_local_resume(
     let Some(jid) = registry.sm_stream_owner(stream_id) else {
         return Ok(LocalForcedDetachOutcome::NotLiveLocally);
     };
-    let Some(entry) = registry.get_entry(&jid) else {
+    let Some(entry) = registry.entry(&jid) else {
         return Ok(LocalForcedDetachOutcome::NotLiveLocally);
     };
     if !entry.is_locally_hosted() || entry.sm_stream_id().as_ref() != Some(stream_id) {
@@ -155,7 +155,7 @@ pub(crate) async fn request_local_forced_detach(
     let Some(jid) = registry.sm_stream_owner(stream_id) else {
         return LocalForcedDetachOutcome::NotLiveLocally;
     };
-    let Some(entry) = registry.get_entry(&jid) else {
+    let Some(entry) = registry.entry(&jid) else {
         return LocalForcedDetachOutcome::NotLiveLocally;
     };
     // The reverse index is best-effort (see `ConnectionRegistry::sm_stream_owner`'s
@@ -298,7 +298,7 @@ mod tests {
         ));
         assert_eq!(
             registry
-                .get_entry(&jid)
+                .entry(&jid)
                 .expect("replacement registered")
                 .sm_stream_id(),
             Some(replacement_stream_id)
@@ -354,7 +354,7 @@ mod tests {
         // Mutate the entry directly to simulate the documented best-effort
         // reverse index lagging behind the authoritative connection state.
         registry
-            .get_entry(&jid)
+            .entry(&jid)
             .expect("connection registered")
             .set_sm_stream_id(Some(SmSessionId::new("current-stream")));
         assert_eq!(

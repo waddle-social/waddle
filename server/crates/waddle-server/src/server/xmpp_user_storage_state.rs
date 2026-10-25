@@ -1,6 +1,7 @@
 use kameo::actor::ActorRef;
 use tracing::{debug, warn};
-use waddle_xmpp::inbox::{storage::InboxStorage, InboxEntry};
+use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::XmppError;
 
 use crate::db::actor::{DbActor, DbExecute, DbQueryOne};

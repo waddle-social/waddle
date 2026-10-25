@@ -1,11 +1,29 @@
 //! Service Discovery: disco#info handling.
 
+use crate::admin::NS_ADMIN_CHANNELS_AFFILIATIONS;
+use crate::admin::NS_ADMIN_CHANNELS_CREATE;
+use crate::admin::NS_ADMIN_CHANNELS_DELETE;
+use crate::admin::NS_ADMIN_CHANNELS_KICK;
+use crate::admin::NS_ADMIN_CHANNELS_LIST;
+use crate::admin::NS_ADMIN_CHANNELS_OCCUPANTS;
+use crate::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION;
+use crate::admin::NS_ADMIN_CHANNELS_UPDATE;
+use crate::admin::NS_ADMIN_SPACES_CREATE;
+use crate::admin::NS_ADMIN_SPACES_DELETE;
+use crate::admin::NS_ADMIN_SPACES_LIST;
+use crate::admin::NS_ADMIN_SPACES_MEMBERS;
+use crate::admin::NS_ADMIN_SPACES_SET_ROLE;
+use crate::admin::NS_ADMIN_SPACES_UPDATE;
+use crate::admin::NS_ADMIN_USERS_LIST;
+use crate::admin::NS_GROUP_DM_CREATE;
+use crate::admin::NS_GROUP_DM_LEAVE;
+use crate::xep::xep0430::NS_INBOX;
 pub use waddle_xmpp_core::disco::info::{
     build_disco_info_response, build_disco_info_response_with_extensions,
     community_service_features, is_disco_info_query, muc_room_features, muc_service_features,
     parse_disco_info_response, pubsub_service_features, push_service_features,
     spaces_service_features, upload_service_features, DiscoInfoQuery, DiscoInfoResponse, Feature,
-    Identity, DISCO_INFO_NS,
+    Identity, RoomMembership, RoomPersistence, RoomVisibility, DISCO_INFO_NS,
 };
 use xmpp_parsers::iq::Iq;
 
@@ -20,37 +38,35 @@ pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, XmppError> {
 /// advertisement (canonical `urn:xmpp:inbox:1` namespace).
 pub fn server_features() -> Vec<Feature> {
     let mut features = waddle_xmpp_core::disco::info::server_features();
-    features.push(Feature::new(crate::xep::xep0430::NS_INBOX));
+    features.push(Feature::new(NS_INBOX));
     // Admin V1 — XEP-0050 ad-hoc command for listing users with a
     // prefix filter (owner-gated). The XEP-0050 node identifier
     // doubles as the disco feature URI so clients can detect support
     // without enumerating commands first; if the server doesn't ship
     // admin, this advert is absent and the chat client's admin panel
     // can fall back to the "Admin only" empty state.
-    features.push(Feature::new(crate::admin::NS_ADMIN_USERS_LIST));
+    features.push(Feature::new(NS_ADMIN_USERS_LIST));
     // Admin V2 — XEP-0050 ad-hoc commands for Spaces + Channels CRUD.
     // Each node identifier is an owner-gated `<command/>` URI plus the
     // disco feature URI so clients can detect support without enumerating
     // commands first. The handlers are registered alongside admin V1's
     // `users:list` in the WebSocket command registry.
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_LIST));
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_CREATE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_UPDATE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_DELETE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_MEMBERS));
-    features.push(Feature::new(crate::admin::NS_ADMIN_SPACES_SET_ROLE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_LIST));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_CREATE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_UPDATE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_DELETE));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_OCCUPANTS));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_AFFILIATIONS));
-    features.push(Feature::new(
-        crate::admin::NS_ADMIN_CHANNELS_SET_AFFILIATION,
-    ));
-    features.push(Feature::new(crate::admin::NS_ADMIN_CHANNELS_KICK));
-    features.push(Feature::new(crate::admin::NS_GROUP_DM_CREATE));
-    features.push(Feature::new(crate::admin::NS_GROUP_DM_LEAVE));
+    features.push(Feature::new(NS_ADMIN_SPACES_LIST));
+    features.push(Feature::new(NS_ADMIN_SPACES_CREATE));
+    features.push(Feature::new(NS_ADMIN_SPACES_UPDATE));
+    features.push(Feature::new(NS_ADMIN_SPACES_DELETE));
+    features.push(Feature::new(NS_ADMIN_SPACES_MEMBERS));
+    features.push(Feature::new(NS_ADMIN_SPACES_SET_ROLE));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_LIST));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_CREATE));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_UPDATE));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_DELETE));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_OCCUPANTS));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_AFFILIATIONS));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_SET_AFFILIATION));
+    features.push(Feature::new(NS_ADMIN_CHANNELS_KICK));
+    features.push(Feature::new(NS_GROUP_DM_CREATE));
+    features.push(Feature::new(NS_GROUP_DM_LEAVE));
     features
 }
 

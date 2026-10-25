@@ -83,7 +83,7 @@ async fn xep_0421_groupchat_reflection_carries_occupant_id_keyed_by_env_secret()
     let stamped = extract_occupant_id_attr(&echo)
         .unwrap_or_else(|| panic!("reflected message must carry <occupant-id/>; got: {echo}"));
 
-    let secret = OccupantIdSecret::new(HARNESS_SECRET.as_bytes().to_vec())
+    let secret = OccupantIdSecret::try_new(HARNESS_SECRET.as_bytes().to_vec())
         .expect("harness secret meets length floor");
     let room_bare: jid::BareJid = room.parse().expect("room bare jid");
     let user_bare: jid::BareJid = format!("{USERNAME}@{DOMAIN}")

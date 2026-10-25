@@ -17,10 +17,13 @@
 //! is narrower and server-side: one durable queue allocation per obligation and resource,
 //! with no retry-induced duplicate.
 
+use crate::mam::ArchiveOrdinal;
+use crate::Stanza;
 use jid::FullJid;
 
 use super::SmIngressReceiptKind;
-use crate::{ingress::MessageKey, pending_delivery::SmSessionId};
+use crate::ingress::MessageKey;
+use crate::pending_delivery::SmSessionId;
 
 /// The obligation and resource an ingress-driven append discharges.
 ///
@@ -51,13 +54,13 @@ pub struct SmRelayedAppendObligation {
     /// Canonical archive positions governing this exact delivery receipt.
     pub archive_positions: Vec<ArchiveDispatchPosition>,
     /// A same-session pending exemption is valid only on this live stream.
-    pub dispatch_stream: Option<crate::pending_delivery::SmSessionId>,
+    pub dispatch_stream: Option<SmSessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArchiveDispatchPosition {
     pub archive: jid::BareJid,
-    pub ordinal: crate::mam::ArchiveOrdinal,
+    pub ordinal: ArchiveOrdinal,
 }
 
 /// An obligation the ledger reported unallocated while a socket's queue was being
@@ -76,7 +79,7 @@ impl SmDrainedAppendTicket {
     pub fn at(
         self,
         sequence: u32,
-        payload: crate::Stanza,
+        payload: Stanza,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SmDrainedIngressAppend {
         SmDrainedIngressAppend {
@@ -93,7 +96,7 @@ impl SmDrainedAppendTicket {
 pub struct SmDrainedIngressAppend {
     pub(crate) ticket: SmDrainedAppendTicket,
     pub(crate) sequence: u32,
-    pub(crate) payload: crate::Stanza,
+    pub(crate) payload: Stanza,
     pub(crate) original_receipt_at: chrono::DateTime<chrono::Utc>,
 }
 

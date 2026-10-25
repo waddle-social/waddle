@@ -56,6 +56,7 @@ pub struct FeedEntry {
 
 impl FeedEntry {
     /// Create a new feed entry.
+    #[must_use]
     pub fn new(id: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -68,36 +69,42 @@ impl FeedEntry {
     }
 
     /// Set the title.
+    #[must_use]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
     }
 
     /// Set the author.
+    #[must_use]
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
         self
     }
 
     /// Set publication time to now.
+    #[must_use]
     pub fn with_published_now(mut self) -> Self {
         self.published = Some(Utc::now());
         self
     }
 
     /// Set a specific publication time.
+    #[must_use]
     pub fn with_published(mut self, ts: DateTime<Utc>) -> Self {
         self.published = Some(ts);
         self
     }
 
     /// Set a link.
+    #[must_use]
     pub fn with_link(mut self, link: impl Into<String>) -> Self {
         self.link = Some(link.into());
         self
     }
 
     /// A short preview of the body (first N chars).
+    #[must_use]
     pub fn preview(&self, max_len: usize) -> &str {
         if self.body.len() <= max_len {
             &self.body
@@ -112,10 +119,10 @@ impl FeedEntry {
         }
     }
 }
-
 // ── Detection ────────────────────────────────────────────────────────
 
 /// Check if an element is a feed entry element.
+#[must_use]
 pub fn is_feed_entry(elem: &Element) -> bool {
     elem.ns() == NS_ATOM && elem.name() == "entry"
 }
@@ -123,6 +130,7 @@ pub fn is_feed_entry(elem: &Element) -> bool {
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Parse a feed entry from an `<entry/>` element.
+#[must_use]
 pub fn parse_feed_entry(item_id: &str, elem: &Element) -> Option<FeedEntry> {
     if !is_feed_entry(elem) {
         return None;
@@ -149,10 +157,10 @@ pub fn parse_feed_entry(item_id: &str, elem: &Element) -> Option<FeedEntry> {
         link: atom_link_href(elem, None),
     })
 }
-
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build an `<entry/>` element for PubSub publication.
+#[must_use]
 pub fn build_feed_entry_element(entry: &FeedEntry) -> Element {
     let mut elem = Element::builder("entry", NS_ATOM).build();
     let title = entry
@@ -191,6 +199,7 @@ pub fn build_feed_entry_element(entry: &FeedEntry) -> Element {
 /// feed the service stamps the authenticated publisher here so a member
 /// cannot impersonate another user through the displayed payload author.
 /// All other children are preserved.
+#[must_use]
 pub fn stamp_feed_entry_author(elem: &Element, author: &str) -> Element {
     let mut stamped = elem.clone();
     let author_children: Vec<(String, String)> = stamped

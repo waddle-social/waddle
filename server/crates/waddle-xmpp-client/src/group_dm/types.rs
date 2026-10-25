@@ -21,13 +21,16 @@ pub struct GroupDmCreated {
     /// XEP-0045 room visibility flags echoed by the server when
     /// present (a group DM is hidden + members-only + persistent).
     pub is_public: Option<bool>,
+    /// Whether the room requires membership before joining.
     pub members_only: Option<bool>,
+    /// Whether the room persists after its last occupant leaves.
     pub persistent: Option<bool>,
 }
 
 /// Completed `urn:waddle:group-dm:rename:0` result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDmRenamed {
+    /// Bare JID of the room in scope.
     pub room_jid: BareJid,
     /// `None` when the rename cleared the custom name (the server
     /// echoes an empty `name` value in that case).
@@ -37,7 +40,9 @@ pub struct GroupDmRenamed {
 /// Completed `urn:waddle:group-dm:leave:0` result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDmLeft {
+    /// Bare JID of the room in scope.
     pub room_jid: BareJid,
+    /// Whether the user has left the group direct-message room.
     pub left: bool,
 }
 
@@ -54,6 +59,8 @@ pub enum GroupDmHistoryAccess {
 }
 
 impl GroupDmHistoryAccess {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FromJoin => "from-join",

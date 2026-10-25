@@ -18,10 +18,8 @@ use waddle_xmpp::xep::xep0410::{
     build_self_ping, interpret_self_ping_response, is_self_ping, SelfPingResult,
     FEATURE_MUC_SELFPING, PING_TIMEOUT_SECS, RECOMMENDED_INTERVAL_SECS,
 };
-use xmpp_parsers::{
-    iq::Iq,
-    stanza_error::{DefinedCondition, ErrorType, StanzaError},
-};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
 const NS_PING: &str = "urn:xmpp:ping";
 
@@ -289,7 +287,7 @@ fn spawn_room() -> ActorRef<RoomActor> {
         RoomConfig::default(),
     );
     let secret =
-        OccupantIdSecret::new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
+        OccupantIdSecret::try_new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
     RoomActor::spawn(RoomActor::new(room, secret))
 }
 

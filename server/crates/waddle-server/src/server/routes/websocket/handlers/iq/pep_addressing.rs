@@ -1,4 +1,4 @@
-use super::*;
+use super::{is_pep_request, is_pep_request_to, BareJid};
 
 /// PEP self-or-to check (XEP-0163 §3).
 ///

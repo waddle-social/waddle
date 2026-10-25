@@ -1,3 +1,5 @@
+use crate::xep::xep0357::NS_PUSH;
+use crate::XmppError;
 use jid::BareJid;
 
 use crate::pubsub::node::NodeConfig;
@@ -81,7 +83,7 @@ pub struct PublishResult {
 pub struct PublicationNode(String);
 
 impl PublicationNode {
-    pub fn new(value: impl Into<String>) -> Result<Self, PublicationError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, PublicationError> {
         let value = value.into();
         if value.trim().is_empty() {
             return Err(PublicationError::InvalidPublication);
@@ -102,7 +104,7 @@ pub struct PublicationVersion {
 }
 
 impl PublicationVersion {
-    pub fn new(revision: u64, job_token: uuid::Uuid) -> Result<Self, PublicationError> {
+    pub fn try_new(revision: u64, job_token: uuid::Uuid) -> Result<Self, PublicationError> {
         if revision == 0 || revision > i64::MAX as u64 || job_token.is_nil() {
             return Err(PublicationError::InvalidPublication);
         }
@@ -180,18 +182,18 @@ pub enum PublicationError {
     #[error("versioned push publication integrity conflict")]
     IntegrityConflict,
     #[error("versioned push publication storage failure: {0}")]
-    Storage(#[from] crate::XmppError),
+    Storage(#[from] XmppError),
 }
 
 impl PublicationError {
-    pub fn into_xmpp_error(self) -> crate::XmppError {
+    pub fn into_xmpp_error(self) -> XmppError {
         match self {
             Self::Storage(error) => error,
             Self::InvalidPublication => {
-                crate::XmppError::bad_request(Some("invalid versioned push publication".to_owned()))
+                XmppError::bad_request(Some("invalid versioned push publication".to_owned()))
             }
             Self::IntegrityConflict => {
-                crate::XmppError::internal("versioned push publication integrity conflict")
+                XmppError::internal("versioned push publication integrity conflict")
             }
         }
     }
@@ -206,10 +208,7 @@ pub(super) fn validate_push_publication(item: &PubSubItem) -> Result<(), Publica
     let Some(payload) = item.payload.as_ref() else {
         return Err(PublicationError::InvalidPublication);
     };
-    if id.trim().is_empty()
-        || payload.name() != "notification"
-        || payload.ns() != crate::xep::xep0357::NS_PUSH
-    {
+    if id.trim().is_empty() || payload.name() != "notification" || payload.ns() != NS_PUSH {
         return Err(PublicationError::InvalidPublication);
     }
     Ok(())

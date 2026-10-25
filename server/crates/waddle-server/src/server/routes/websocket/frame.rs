@@ -1,25 +1,40 @@
-use super::*;
-use super::{
-    frame_backstop::{
-        run_with_backstop, run_with_backstop_and_admission, InboundDisposition, StanzaBackstop,
-        StanzaTimeout,
-    },
-    parse_errors::{is_sasl_parse_failure, parse_error_responses},
-    resource_binding::handle_resource_binding,
-    sasl::{
-        handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
-        record_scram_failure,
-    },
-    state::{InboundFrameTerminal, WsConnState},
-    stream_management::{handle_sm_stanza, SmCtx},
-    transport_xml::{
-        build_handled_count_too_high_stream_error, build_stream_features_for_phase_element,
-        element_to_xml, sasl_failure_element, stanza_to_xml, websocket_stream_close_element,
-        websocket_stream_open_element,
-    },
+use super::frame_backstop::{
+    run_with_backstop, run_with_backstop_and_admission, InboundDisposition, StanzaBackstop,
+    StanzaTimeout,
 };
+use super::parse_errors::{is_sasl_parse_failure, parse_error_responses};
+use super::resource_binding::handle_resource_binding;
+use super::sasl::{
+    handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
+    record_scram_failure,
+};
+use super::state::{InboundFrameTerminal, WsConnState};
+use super::stream_management::{handle_sm_stanza, SmCtx};
+use super::transport_xml::{
+    build_handled_count_too_high_stream_error, build_stream_features_for_phase_element,
+    element_to_xml, sasl_failure_element, stanza_to_xml, websocket_stream_close_element,
+    websocket_stream_open_element,
+};
+use super::{
+    debug, handlers, info, warn, ConnectionPhase, InboundFrame, ParseError, ResolvedPrincipal,
+    SmStanza, Stanza, WebSocketState, MAX_FRAME_SIZE,
+};
+use crate::clustering::NodeAdmissionPermit;
+use crate::ingress::ExecutionReport;
+use crate::ingress::ImmediateSink;
+use crate::ingress::IngressDecisionClass;
+use crate::ingress::IngressPrincipal;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
+use crate::server::routes::interpret::effects::IngressPlan;
+use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+#[cfg(feature = "clustering")]
+use crate::server::routes::interpret::OrderedRelayHandoffHandle;
+use crate::server::routes::interpret::OrderedRelayInboundSequence;
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
+use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
 use xmpp_parsers::minidom::Element;
 
@@ -166,7 +181,7 @@ pub(crate) struct ResponseBatch {
     pub(super) frames: Vec<ResponseFrame>,
     pub(super) completions: Vec<RoomEffectCompletion>,
     pub(super) completion_frame_indices: Vec<usize>,
-    pub(super) ingress_reports: Vec<crate::ingress::ExecutionReport>,
+    pub(super) ingress_reports: Vec<ExecutionReport>,
 }
 
 impl ResponseBatch {
@@ -285,7 +300,7 @@ pub(super) async fn handle_xmpp_frame_with_admission(
     domain: &str,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> ResponseBatch {
     Box::pin(handle_xmpp_frame_impl(
@@ -299,10 +314,7 @@ pub(super) async fn handle_xmpp_frame_with_admission(
 }
 
 async fn await_control_stage<T>(
-    admission: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    admission: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
     work: impl std::future::Future<Output = T>,
 ) -> Result<T, InboundFrameTerminal> {
     // Claim-owning control futures must reach their typed completion boundary;
@@ -322,10 +334,7 @@ async fn handle_xmpp_frame_impl(
     domain: &str,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    admission: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    admission: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> ResponseBatch {
     if frame.len() > MAX_FRAME_SIZE {
         warn!(len = frame.len(), "Dropping oversized XMPP frame");
@@ -542,9 +551,7 @@ async fn handle_xmpp_frame_impl(
                     if matches!(stanza.as_ref(), Stanza::Message(_)) && !sm_state.is_resumable() {
                         *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
                         return ResponseBatch::from_frames([
-                            ingress_failure_stream_error(
-                                crate::ingress::IngressDecisionClass::ClaimFenceMissing,
-                            ),
+                            ingress_failure_stream_error(IngressDecisionClass::ClaimFenceMissing),
                             websocket_stream_close_element(),
                         ]);
                     }
@@ -638,7 +645,7 @@ async fn handle_xmpp_frame_impl(
                             domain,
                             &muc_domain,
                             state,
-                            authenticated_session,
+                            authenticated_session.as_ref(),
                             phase,
                             &mut iq_conn_state,
                         )
@@ -653,7 +660,7 @@ async fn handle_xmpp_frame_impl(
                                 muc_domain: &muc_domain,
                                 state,
                                 phase,
-                                authenticated_session,
+                                authenticated_session: authenticated_session.as_ref(),
                                 occupancy_session,
                                 registry_owner: registry_owner.as_ref(),
                                 ordered_relay_origin: ordered_relay_origin.clone(),
@@ -703,7 +710,7 @@ async fn handle_xmpp_frame_impl(
             };
             settle_inbound_dispatch(
                 disposition,
-                ordered_relay_origin_was_deferred(&ordered_relay_origin),
+                ordered_relay_origin_was_deferred(ordered_relay_origin.as_ref()),
                 reserved_inbound_for_sm,
                 sm_inbound_completion,
                 sm_state,
@@ -716,8 +723,8 @@ async fn handle_xmpp_frame_impl(
 pub(super) fn settle_inbound_dispatch(
     disposition: InboundDisposition,
     ordered_relay_deferred: bool,
-    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
-    completion: &mut crate::server::routes::interpret::SmInboundCompletionTracker,
+    inbound_sequence: Option<OrderedRelayInboundSequence>,
+    completion: &mut SmInboundCompletionTracker,
     sm_state: &mut waddle_xmpp::stream_management::StreamManagementState,
 ) {
     let Some(inbound_sequence) = inbound_sequence else {
@@ -745,13 +752,9 @@ async fn ordered_relay_origin_for_inbound_stanza(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
     registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
-    handoff_tx: Option<
-        &tokio::sync::mpsc::UnboundedSender<
-            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-        >,
-    >,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    inbound_sequence: Option<OrderedRelayInboundSequence>,
+    handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
+) -> Option<OrderedRelayRouteOrigin> {
     let sender_entity = bound_jid.map(|jid| {
         waddle_xmpp::ownership::Entity::new(
             waddle_xmpp::ownership::EntityType::UserActor,
@@ -769,20 +772,13 @@ async fn ordered_relay_origin_for_inbound_stanza(
             .as_ref(),
     ) {
         if let Some(remote) = bridge.remote_resource_origin_if_owner(jid, owner).await {
-            return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-                kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::RemoteResource(
-                    remote,
-                ),
+            return Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::RemoteResource(remote),
                 sender_entity,
                 inbound_sequence: inbound_sequence.map(|sequence| sequence.0).unwrap_or(0),
                 handoff: if sm_state.enabled {
                     inbound_sequence.and_then(|sequence| {
-                        handoff_tx.map(|tx| {
-                            crate::server::routes::interpret::OrderedRelayHandoffHandle::new(
-                                sequence,
-                                tx.clone(),
-                            )
-                        })
+                        handoff_tx.map(|tx| OrderedRelayHandoffHandle::new(sequence, tx.clone()))
                     })
                 } else {
                     None
@@ -793,24 +789,18 @@ async fn ordered_relay_origin_for_inbound_stanza(
     if sm_state.enabled {
         let stream_id = sm_state.stream_id.as_ref()?;
         let inbound_sequence = inbound_sequence?;
-        return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+        return Some(OrderedRelayRouteOrigin {
+            kind: OrderedRelayRouteOriginKind::SmSession(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
             ),
             sender_entity,
             inbound_sequence: inbound_sequence.0,
-            handoff: handoff_tx.map(|tx| {
-                crate::server::routes::interpret::OrderedRelayHandoffHandle::new(
-                    inbound_sequence,
-                    tx.clone(),
-                )
-            }),
+            handoff: handoff_tx
+                .map(|tx| OrderedRelayHandoffHandle::new(inbound_sequence, tx.clone())),
         });
     }
-    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-            sender_entity.clone(),
-        ),
+    Some(OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
         sender_entity,
         inbound_sequence: 0,
         handoff: None,
@@ -823,13 +813,9 @@ async fn ordered_relay_origin_for_inbound_stanza(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
     registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    inbound_sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
-    handoff_tx: Option<
-        &tokio::sync::mpsc::UnboundedSender<
-            crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-        >,
-    >,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+    inbound_sequence: Option<OrderedRelayInboundSequence>,
+    handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
+) -> Option<OrderedRelayRouteOrigin> {
     let _ = (
         state,
         sm_state,
@@ -842,19 +828,14 @@ async fn ordered_relay_origin_for_inbound_stanza(
 }
 
 #[cfg(feature = "clustering")]
-fn ordered_relay_origin_was_deferred(
-    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-) -> bool {
+fn ordered_relay_origin_was_deferred(origin: Option<&OrderedRelayRouteOrigin>) -> bool {
     origin
-        .as_ref()
         .and_then(|origin| origin.handoff.as_ref())
         .is_some_and(|handoff| handoff.was_deferred())
 }
 
 #[cfg(not(feature = "clustering"))]
-fn ordered_relay_origin_was_deferred(
-    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
-) -> bool {
+fn ordered_relay_origin_was_deferred(origin: Option<&OrderedRelayRouteOrigin>) -> bool {
     let _ = origin;
     false
 }
@@ -863,7 +844,7 @@ fn ordered_relay_origin_was_deferred(
 pub(super) fn ordered_relay_origin_from_sm(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+) -> Option<OrderedRelayRouteOrigin> {
     let sender_entity = bound_jid.map(|jid| {
         waddle_xmpp::ownership::Entity::new(
             waddle_xmpp::ownership::EntityType::UserActor,
@@ -872,19 +853,17 @@ pub(super) fn ordered_relay_origin_from_sm(
     })?;
     if sm_state.enabled {
         let stream_id = sm_state.stream_id.as_ref()?;
-        return Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-            kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::SmSession(
+        return Some(OrderedRelayRouteOrigin {
+            kind: OrderedRelayRouteOriginKind::SmSession(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
             ),
             sender_entity,
-            inbound_sequence: sm_state.get_inbound_count(),
+            inbound_sequence: sm_state.inbound_count(),
             handoff: None,
         });
     }
-    Some(crate::server::routes::interpret::OrderedRelayRouteOrigin {
-        kind: crate::server::routes::interpret::OrderedRelayRouteOriginKind::Entity(
-            sender_entity.clone(),
-        ),
+    Some(OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
         sender_entity,
         inbound_sequence: 0,
         handoff: None,
@@ -895,7 +874,7 @@ pub(super) fn ordered_relay_origin_from_sm(
 pub(super) fn ordered_relay_origin_from_sm(
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-) -> Option<crate::server::routes::interpret::OrderedRelayRouteOrigin> {
+) -> Option<OrderedRelayRouteOrigin> {
     let _ = (sm_state, bound_jid);
     None
 }
@@ -934,8 +913,8 @@ struct MessageIngressDispatch {
     message: xmpp_parsers::message::Message,
     stanza_lang: Option<xmpp_parsers::message::Lang>,
     principal: waddle_xmpp::auth::AuthenticatedPrincipalRef,
-    sequence: Option<crate::server::routes::interpret::OrderedRelayInboundSequence>,
-    origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    sequence: Option<OrderedRelayInboundSequence>,
+    origin: Option<OrderedRelayRouteOrigin>,
     backstop: StanzaBackstop,
 }
 
@@ -943,10 +922,7 @@ async fn dispatch_authoritative_message(
     request: MessageIngressDispatch,
     state: &WebSocketState,
     conn: &mut WsConnState,
-    admission: Option<(
-        &crate::clustering::NodeAdmissionPermit,
-        &tokio_util::sync::CancellationToken,
-    )>,
+    admission: Option<(&NodeAdmissionPermit, &tokio_util::sync::CancellationToken)>,
 ) -> ResponseBatch {
     use crate::ingress::{IngressDecisionClass, IngressStreamIdentity, IngressSubmission};
     use waddle_xmpp::ingress::{DigestContext, NormalizedTarget, WireHandledCount};
@@ -1078,7 +1054,7 @@ async fn dispatch_authoritative_message(
         let submission = IngressSubmission {
             sender,
             identity,
-            principal: crate::ingress::IngressPrincipal::Authenticated(principal),
+            principal: IngressPrincipal::Authenticated(principal),
             target,
             plan,
             digest_input,
@@ -1176,14 +1152,14 @@ async fn dispatch_authoritative_message(
             .deps
             .protocol
             .ingress
-            .execute(&decision, &crate::ingress::ImmediateSink, &deps),
+            .execute(&decision, &ImmediateSink, &deps),
         std::time::Duration::from_secs(5),
     )
     .await
 }
 
 pub(super) async fn execute_committed_message(
-    execution: impl std::future::Future<Output = crate::ingress::ExecutionReport>,
+    execution: impl std::future::Future<Output = ExecutionReport>,
     budget: std::time::Duration,
 ) -> ResponseBatch {
     match tokio::time::timeout(budget, execution).await {
@@ -1209,7 +1185,7 @@ pub(super) async fn execute_committed_message(
     }
 }
 
-fn ingress_failure_stream_error(class: crate::ingress::IngressDecisionClass) -> Element {
+fn ingress_failure_stream_error(class: IngressDecisionClass) -> Element {
     use crate::ingress::IngressDecisionClass;
     use xmpp_parsers::stream_error::{DefinedCondition, StreamError};
     let condition = match class {
@@ -1233,7 +1209,7 @@ fn ingress_failure_stream_error(class: crate::ingress::IngressDecisionClass) -> 
 fn resource_rejection_digest(
     message: &xmpp_parsers::message::Message,
     context: &waddle_xmpp::ingress::DigestContext,
-) -> Result<waddle_xmpp::ingress::DigestInput, crate::ingress::IngressDecisionClass> {
+) -> Result<waddle_xmpp::ingress::DigestInput, IngressDecisionClass> {
     use sha2::Digest;
     struct DigestWriter(sha2::Sha256);
     impl std::io::Write for DigestWriter {
@@ -1256,7 +1232,7 @@ fn resource_rejection_digest(
     writer.0.update(lang.as_bytes());
     Element::from(message.clone())
         .write_to(&mut writer)
-        .map_err(|_| crate::ingress::IngressDecisionClass::Storage)?;
+        .map_err(|_| IngressDecisionClass::Storage)?;
     let mut surrogate = xmpp_parsers::message::Message::new(None);
     surrogate
         .bodies
@@ -1267,13 +1243,13 @@ fn resource_rejection_digest(
         stanza_lang: None,
     };
     waddle_xmpp::ingress::DigestInput::from_rejected_parsed(&surrogate, &context)
-        .map_err(|_| crate::ingress::IngressDecisionClass::Storage)
+        .map_err(|_| IngressDecisionClass::Storage)
 }
 
 fn reject_resource_message(
     message: xmpp_parsers::message::Message,
     sender: &jid::FullJid,
-) -> crate::server::routes::interpret::effects::IngressPlan {
+) -> IngressPlan {
     use crate::server::routes::interpret::effects::{
         Effect, ExternalEffect, PlanRejection, PlannedEffect, PolicyDeniedReason,
     };

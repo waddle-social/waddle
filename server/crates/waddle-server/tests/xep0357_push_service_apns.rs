@@ -217,7 +217,7 @@ async fn store_with_apns(
     );
     // The user server's XEP-0357 registration table lives in the same
     // database; creating its store creates the table.
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store");
     store
@@ -372,7 +372,7 @@ async fn attempt_statuses(store: &DatabasePushServiceStore, node: &str) -> Vec<(
 
 async fn enabled_registrations(store: &DatabasePushServiceStore, owner: &BareJid) -> usize {
     use waddle_xmpp::push::PushSubscriptionStore as _;
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store")
         .get_for_user(owner.to_string().as_str())

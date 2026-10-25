@@ -1,6 +1,10 @@
 //! Durable rediscovery distinguishes an interrupted claim from offered custody.
 
-use super::*;
+use super::{
+    bare, create_postgres_test_schema, drop_postgres_test_schema, transient_row,
+    DatabasePendingDeliveryStorage, PendingClaimToken, PendingDeliveryStorage, QuotaPolicy,
+    SmSessionId,
+};
 use waddle_xmpp::pending_delivery::storage::PendingClaim;
 
 async fn restart_preserves_recovery_and_offer_fences(database_url: &str) {

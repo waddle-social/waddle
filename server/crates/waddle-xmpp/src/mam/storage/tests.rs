@@ -1,11 +1,13 @@
-use super::*;
+use super::{
+    InMemoryMamStorage, MamArchiveKind, MamStorage, MamStorageError, SqlxMamStorage, StoreOutcome,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jid::{BareJid, Jid};
 use std::path::PathBuf;
 use waddle_xmpp_core::mam::{ArchivedMessage, MamFilterStanzaId, MamQuery, MamResult};
 
 fn filter_id(s: &str) -> MamFilterStanzaId {
-    MamFilterStanzaId::new(s).expect("valid test fixture id")
+    MamFilterStanzaId::try_new(s).expect("valid test fixture id")
 }
 
 async fn create_test_storage() -> SqlxMamStorage {
@@ -328,10 +330,10 @@ async fn test_store_and_retrieve_reply_thread_metadata() {
                 jid("room@conference.example.com"),
             )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
-                waddle_xmpp_core::mam::ThreadId::new("thread-root-1").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("thread-root-1").expect("thread id"),
             )),
             reply: Some(waddle_xmpp_core::mam::ArchivedReply {
-                id: waddle_xmpp_core::mam::RichMessageId::new("parent-message-1")
+                id: waddle_xmpp_core::mam::RichMessageId::try_new("parent-message-1")
                     .expect("non-empty reply id"),
                 to: Some(jid("bob@example.com")),
             }),
@@ -393,8 +395,8 @@ async fn xep_0201_parent_thread_id_round_trips_through_storage() {
             jid("room@conference.example.com"),
         )),
         thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
-            waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
-            waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+            waddle_xmpp_core::mam::ThreadId::try_new("child-thread").expect("thread id"),
+            waddle_xmpp_core::mam::ThreadId::try_new("root-thread").expect("parent id"),
         )),
         message_type: xmpp_parsers::message::MessageType::Groupchat,
         ..ArchivedMessage::for_test(
@@ -1329,7 +1331,7 @@ async fn test_thread_query_filters_before_pagination_and_count() {
         ArchivedMessage {
             id: "b-thread-reply".to_string(),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
-                waddle_xmpp_core::mam::ThreadId::new("a-thread-root").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("a-thread-root").expect("thread id"),
             )),
             body: Some("reply".to_string()),
             ..archived_groupchat(&archive)
@@ -1337,7 +1339,7 @@ async fn test_thread_query_filters_before_pagination_and_count() {
         ArchivedMessage {
             id: "c-legacy-reply".to_string(),
             reply: Some(waddle_xmpp_core::mam::ArchivedReply {
-                id: waddle_xmpp_core::mam::RichMessageId::new("a-thread-root")
+                id: waddle_xmpp_core::mam::RichMessageId::try_new("a-thread-root")
                     .expect("non-empty reply id"),
                 to: None,
             }),
@@ -1347,7 +1349,7 @@ async fn test_thread_query_filters_before_pagination_and_count() {
         ArchivedMessage {
             id: "unrelated".to_string(),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
-                waddle_xmpp_core::mam::ThreadId::new("other-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("other-thread").expect("thread id"),
             )),
             body: Some("unrelated".to_string()),
             ..archived_groupchat(&archive)
@@ -1361,7 +1363,7 @@ async fn test_thread_query_filters_before_pagination_and_count() {
             &archive,
             MamArchiveKind::Room,
             &MamQuery {
-                thread_id: waddle_xmpp_core::mam::ThreadId::new("a-thread-root"),
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new("a-thread-root"),
                 max: Some(2),
                 ..Default::default()
             },
@@ -1409,7 +1411,7 @@ async fn test_fulltext_query_filters_before_pagination_and_count() {
             &archive,
             MamArchiveKind::Room,
             &MamQuery {
-                fulltext: waddle_xmpp_core::mam::RichText::new("release notes"),
+                fulltext: waddle_xmpp_core::mam::RichText::try_new("release notes"),
                 max: Some(1),
                 ..Default::default()
             },
@@ -1471,9 +1473,10 @@ async fn reaction_round_trips_through_in_memory_storage() {
     let archive = bare("room@conference.example.com");
     let archive_jid = jid("room@conference.example.com");
 
-    let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+    let target_id = waddle_xmpp_core::mam::RichMessageId::try_new("room-stanza-original")
         .expect("non-empty target id");
-    let thumbs_up = waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+    let thumbs_up =
+        waddle_xmpp_core::mam::RichText::try_new("👍").expect("non-empty emoji literal");
     let reactions = waddle_xmpp_core::mam::ArchivedReactionSet {
         target_id: target_id.clone(),
         emojis: vec![thumbs_up.clone()],
@@ -1531,9 +1534,10 @@ async fn reaction_round_trips_through_persistent_sqlite() {
     let archive = bare("room@conference.example.com");
     let archive_jid = jid("room@conference.example.com");
 
-    let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+    let target_id = waddle_xmpp_core::mam::RichMessageId::try_new("room-stanza-original")
         .expect("non-empty target id");
-    let thumbs_up = waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+    let thumbs_up =
+        waddle_xmpp_core::mam::RichText::try_new("👍").expect("non-empty emoji literal");
 
     {
         let storage = SqlxMamStorage::open(&database_url).await.expect("storage");
@@ -1668,9 +1672,10 @@ async fn reaction_lands_after_legacy_body_not_null_schema_migrated() {
 
     // 3. Write a body-less reaction. Pre-fix this would fail with
     //    `NOT NULL constraint failed: mam_messages.body`.
-    let target_id = waddle_xmpp_core::mam::RichMessageId::new("room-stanza-original")
+    let target_id = waddle_xmpp_core::mam::RichMessageId::try_new("room-stanza-original")
         .expect("non-empty target id");
-    let thumbs_up = waddle_xmpp_core::mam::RichText::new("👍").expect("non-empty emoji literal");
+    let thumbs_up =
+        waddle_xmpp_core::mam::RichText::try_new("👍").expect("non-empty emoji literal");
     let msg = ArchivedMessage {
         body: None,
         stanza_id: Some(waddle_xmpp_core::xep0359::StanzaId::new(
@@ -1798,8 +1803,8 @@ async fn xep_0424_tombstone_scrubs_parent_thread_id() {
                 archive_jid.clone(),
             )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
-                waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
-                waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("child-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("root-thread").expect("parent id"),
             )),
             message_type: xmpp_parsers::message::MessageType::Groupchat,
             stanza_xml: Some(
@@ -1810,7 +1815,7 @@ async fn xep_0424_tombstone_scrubs_parent_thread_id() {
     let archive_id = expect_stored(storage.store_message(&archive, &msg).await.unwrap());
 
     let tombstone = ArchivedTombstone {
-        retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
+        retraction_id: Some(RichMessageId::try_new("retract-1").expect("rich id")),
         stamp: Utc::now(),
         moderation: None,
         sender_scope: None,
@@ -1874,8 +1879,8 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
                 archive_jid.clone(),
             )),
             thread: Some(waddle_xmpp_core::xep0201::ThreadInfo::child(
-                waddle_xmpp_core::mam::ThreadId::new("child-thread").expect("thread id"),
-                waddle_xmpp_core::mam::ThreadId::new("root-thread").expect("parent id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("child-thread").expect("thread id"),
+                waddle_xmpp_core::mam::ThreadId::try_new("root-thread").expect("parent id"),
             )),
             message_type: xmpp_parsers::message::MessageType::Groupchat,
             stanza_xml: Some(
@@ -1890,7 +1895,7 @@ async fn xep_0425_moderation_tombstone_scrubs_parent_thread_id() {
         retraction_id: None,
         stamp: Utc::now(),
         moderation: Some(ArchivedModeration {
-            target_id: RichMessageId::new("wire-id-2").expect("rich id"),
+            target_id: RichMessageId::try_new("wire-id-2").expect("rich id"),
             moderated_by: moderator,
             stamp: Some(Utc::now()),
             reason: None,

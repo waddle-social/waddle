@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    chat_msg, interpret, jid, offline_pass_deps, pipelined_dispatcher, Arc, BlockingStorage,
+    ConnectionRegistry, DefinedCondition, Deps, Element, ErrorType, InboxStorage,
+    IngressEffectIntent, MamStorage, OutboundEvent, Stanza, StanzaError,
+};
 use crate::ingress::IngressEffectCapture;
 
 #[tokio::test]

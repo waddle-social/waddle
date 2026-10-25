@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_roster_push, build_subscription_presence, chrono, roster_item_to_row, roster_row_to_item,
+    warn, BareJid, BroadcastOutcome, DatabaseRosterStorage, FullJid, RosterItem, RosterRowChange,
+    RosterVersion, Stanza, Subscription, SubscriptionStateMachine, SubscriptionType,
+    WebSocketState,
+};
 
 // Everything in this module runs after the primary roster mutation has
 // succeeded and the client's IQ result is already determined: contact-side
@@ -95,7 +100,7 @@ async fn send_roster_remove_subscription_stanza(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(to);
+        .roster_interested_resources_for_user(to);
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
         if try_deliver_registered_remote_resource(state, resource, &stanza).await {
@@ -171,7 +176,7 @@ async fn send_roster_push_to_all_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid);
+        .roster_interested_resources_for_user(user_jid);
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
         let push = build_roster_push(
@@ -254,7 +259,7 @@ async fn send_roster_push_to_all_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid)
+        .roster_interested_resources_for_user(user_jid)
         .into_iter()
         .filter(|resource| !delivered_resources.contains(resource))
     {
@@ -321,7 +326,7 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid)
+        .roster_interested_resources_for_user(user_jid)
         .into_iter()
         .filter(|resource| resource != source_jid)
         .collect();
@@ -415,7 +420,7 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid)
+        .roster_interested_resources_for_user(user_jid)
         .into_iter()
         .filter(|resource| resource != source_jid)
         .filter(|resource| !delivered_resources.contains(resource))

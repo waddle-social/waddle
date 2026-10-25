@@ -5,14 +5,12 @@ use std::time::Duration;
 use tokio::time::Instant;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
-use crate::{
-    ingress::{receipt_key, RouteProgress},
-    ingress_substrate::RecoveryEvidence,
-    ingress_uow::{
-        CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUnitOfWork, IngressUowError, SendAttemptRepository,
-        SendAttemptStatus, SendObligation,
-    },
+use crate::ingress::{receipt_key, RouteProgress};
+use crate::ingress_substrate::RecoveryEvidence;
+use crate::ingress_uow::{
+    CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
+    EffectReceiptRepository, IngressUnitOfWork, IngressUowError, SendAttemptRepository,
+    SendAttemptStatus, SendObligation,
 };
 
 pub(super) async fn known_wait(

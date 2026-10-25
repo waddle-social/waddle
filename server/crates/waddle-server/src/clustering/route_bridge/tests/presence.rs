@@ -1,5 +1,10 @@
 //! #1803 receiver side: every node answers for its OWN sockets and sessions.
-use super::*;
+use super::{
+    mpsc, origin_identity, receiver_identity, remote_registration_request, services_with_claims,
+    target_full, test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig, Duration,
+    LocalResourcePresence, NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    RelayRemoteResourceRegistrationStatus,
+};
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};
 
 /// Install `jid` in BOTH the connection registry and the actor tree, exactly
@@ -15,7 +20,7 @@ async fn register_local_resource(
     let _owner = services.connection_registry.register(jid.clone(), tx);
     let entry = services
         .connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("connection entry exists immediately after register");
     assert!(
         crate::server::dual_registration::mirror_register(

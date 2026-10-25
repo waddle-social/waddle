@@ -6,18 +6,19 @@ pub mod ingress_support;
 
 use ingress_support::IngressFixture;
 use sha2::{Digest, Sha256};
-use std::{sync::Arc, time::Duration};
-use waddle_server::{
-    db::{DatabaseConfig, DatabasePool, PoolConfig},
-    ingress::{commit::commit_submission, RecoveryEnvironment},
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-    test_support::{
-        claim_invite, create_test_session, list_invites, record_invite_at,
-        register_test_connection, websocket_state_with_ingress, OutstandingInvite, RecordOutcome,
-    },
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_server::db::{DatabaseConfig, DatabasePool, PoolConfig};
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::RecoveryEnvironment;
+use waddle_server::ingress_substrate::EffectReceiptKind;
+use waddle_server::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+use waddle_server::test_support::{
+    claim_invite, create_test_session, list_invites, record_invite_at, register_test_connection,
+    websocket_state_with_ingress_factory, OutstandingInvite, RecordOutcome,
 };
-use waddle_xmpp::{ingress::IngressEffectIntent, Stanza};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::Stanza;
 
 #[derive(Clone, Copy)]
 enum PartialDeclineReceipt {
@@ -106,7 +107,7 @@ async fn muc_decline_recovery(
     reinvited: bool,
 ) {
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )
@@ -114,8 +115,8 @@ async fn muc_decline_recovery(
         .expect("shared database pool"),
     );
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let authority = Arc::new(fixture.authority().await);
-    let state = websocket_state_with_ingress(pool, Arc::clone(&authority)).await;
+    let (state, authority) =
+        websocket_state_with_ingress_factory(pool, || fixture.authority()).await;
     let environment: Arc<dyn RecoveryEnvironment> = state.clone();
     authority.bind_recovery_environment(Arc::downgrade(&environment));
     create_test_session(state.as_ref(), "romeo").await;

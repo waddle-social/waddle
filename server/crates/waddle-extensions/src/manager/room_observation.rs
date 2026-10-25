@@ -1,10 +1,17 @@
-use super::*;
+//! Room-message observer selection, invocation, and outcome classification.
+
+use super::{Arc, BareJid, Digest, DisplayText, ExtensionEffect, ExtensionManager, Sha256};
+use crate::actor::ObservationInvocationError;
+use crate::types::ExtensionResponse;
 use crate::types::{
     ConfiguredRoomObserver, ObservationFailure, ObservationSkip, RoomMessageObserve,
     RoomMessageSource, RoomObservationOutcome, RoomObservationResult, RoomObservationSubscription,
 };
 
 impl ExtensionManager {
+    /// Clone the loaded observers' frozen configuration identities, scopes, generations,
+    /// and concurrency limits.
+    #[must_use]
     pub fn configured_room_observers(&self) -> Vec<ConfiguredRoomObserver> {
         self.actors
             .iter()
@@ -13,6 +20,7 @@ impl ExtensionManager {
     }
 
     /// The caller supplies an authoritative hosted room, never an untrusted tenant label.
+    #[must_use]
     pub fn room_observation_subscriptions(
         &self,
         room: &BareJid,
@@ -29,6 +37,8 @@ impl ExtensionManager {
             .collect()
     }
 
+    /// Validate the subscription, source room, body digest, timestamp, and origin ID,
+    /// then invoke a durable observer and classify its completion or retry outcome.
     pub async fn observe_room_message(
         &self,
         subscription: &RoomObservationSubscription,
@@ -39,6 +49,8 @@ impl ExtensionManager {
             .await
     }
 
+    /// Validate and invoke a durable observer with server-owned delivery authority kept
+    /// outside the guest event payload.
     pub async fn observe_room_message_with_delivery(
         &self,
         subscription: &RoomObservationSubscription,
@@ -92,7 +104,7 @@ impl ExtensionManager {
     }
 }
 
-fn invocation_failure(error: crate::actor::ObservationInvocationError) -> RoomObservationOutcome {
+fn invocation_failure(error: ObservationInvocationError) -> RoomObservationOutcome {
     use crate::actor::ObservationInvocationError;
     match error {
         ObservationInvocationError::NotInvoked => RoomObservationOutcome::NotInvoked,
@@ -109,7 +121,7 @@ fn invocation_failure(error: crate::actor::ObservationInvocationError) -> RoomOb
 }
 
 fn validated_observation_result(
-    response: crate::types::ExtensionResponse,
+    response: ExtensionResponse,
     validate: impl Fn(&ExtensionEffect) -> bool,
 ) -> RoomObservationOutcome {
     let mut payloads = Vec::new();
@@ -165,11 +177,11 @@ mod tests {
     }
 
     fn result_effect() -> ExtensionEffect {
-        let namespace = PayloadNamespace::new("urn:test:room-result").expect("namespace");
+        let namespace = PayloadNamespace::try_new("urn:test:room-result").expect("namespace");
         ExtensionEffect::PublishRoomResult(
-            ExtensionPayload::new(
+            ExtensionPayload::try_new(
                 namespace.clone(),
-                XmlElement::new(namespace, "result", vec![], vec![]).expect("element"),
+                XmlElement::try_new(namespace, "result", vec![], vec![]).expect("element"),
             )
             .expect("payload"),
         )
@@ -188,7 +200,7 @@ mod tests {
         assert_eq!(
             validated_observation_result(
                 response(vec![ExtensionEffect::HostWarning(
-                    DisplayText::new("guest error").expect("text")
+                    DisplayText::try_new("guest error").expect("text")
                 )]),
                 |_| true
             ),

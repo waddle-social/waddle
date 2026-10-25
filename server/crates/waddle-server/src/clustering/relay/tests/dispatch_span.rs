@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    relay_dispatch_span, spawn_test_relay_actor, Demote, DemoteReply, Deserialize,
+    RelayDispatchKind, RelayReassertMediaGrants, RelayReassertMediaGrantsReply, RelayResumeSteal,
+    RelayResumeStealReply, RelayTraceContext, Serialize,
+};
 use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 
 /// #1485: when the sending node propagated its W3C trace context, the
@@ -123,7 +127,7 @@ fn an_older_decoder_ignores_the_added_trace_field() {
 /// failures.
 #[test]
 fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
-    let source = include_str!("../../relay.rs");
+    let source = include_str!("../implementation.rs");
     let production = source
         .split("#[cfg(test)]")
         .next()

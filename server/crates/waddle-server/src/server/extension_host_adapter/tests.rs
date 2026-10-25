@@ -1,4 +1,8 @@
-use super::*;
+use super::conversions::{host_presence_show, host_roster_item};
+use super::{
+    envelope_has_cross_room_launch, envelope_has_roomless_launch, BareJid, HostPresenceShow,
+    HostRosterAsk, HostRosterSubscription,
+};
 use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
 use xmpp_parsers::presence::Show;
 
@@ -46,26 +50,29 @@ fn detects_roomless_and_cross_room_launches_in_host_sent_envelopes() {
 }
 
 fn envelope_with_launch_room(room: Option<&str>) -> waddle_extensions::ExtensionEnvelope {
-    let namespace = waddle_extensions::types::PayloadNamespace::new("urn:waddle:decision-polls:1")
-        .expect("namespace");
+    let namespace =
+        waddle_extensions::types::PayloadNamespace::try_new("urn:waddle:decision-polls:1")
+            .expect("namespace");
     waddle_extensions::ExtensionEnvelope::new(vec![waddle_extensions::MessageEnrichment {
-        id: waddle_extensions::types::EnrichmentId::new("enrichment-1").expect("enrichment id"),
-        plugin: waddle_extensions::PluginId::new("decision-polls").expect("plugin id"),
+        id: waddle_extensions::types::EnrichmentId::try_new("enrichment-1").expect("enrichment id"),
+        plugin: waddle_extensions::PluginId::try_new("decision-polls").expect("plugin id"),
         capability: waddle_extensions::ExtensionCapability::MessageEnrich,
         payload_namespace: namespace,
-        created_at: waddle_extensions::Timestamp::new("2026-04-27T12:00:00Z").expect("timestamp"),
+        created_at: waddle_extensions::Timestamp::try_new("2026-04-27T12:00:00Z")
+            .expect("timestamp"),
         source: None,
         ui: Vec::new(),
         payloads: Vec::new(),
         launches: vec![waddle_extensions::LaunchDescriptor {
-            id: waddle_extensions::LaunchId::new("vote-yes").expect("launch id"),
-            plugin: waddle_extensions::PluginId::new("decision-polls").expect("plugin id"),
-            action: waddle_extensions::types::ActionId::new("vote").expect("action id"),
+            id: waddle_extensions::LaunchId::try_new("vote-yes").expect("launch id"),
+            plugin: waddle_extensions::PluginId::try_new("decision-polls").expect("plugin id"),
+            action: waddle_extensions::types::ActionId::try_new("vote").expect("action id"),
             command_node: waddle_extensions::types::CommandNode::invoke(),
-            label: waddle_extensions::DisplayText::new("Vote yes").expect("label"),
+            label: waddle_extensions::DisplayText::try_new("Vote yes").expect("label"),
             context: waddle_extensions::LaunchContext {
-                waddle_id: waddle_extensions::WaddleId::new("waddle-1").expect("waddle id"),
-                room: room.map(|value| waddle_extensions::RoomJid::new(value).expect("room jid")),
+                waddle_id: waddle_extensions::WaddleId::try_new("waddle-1").expect("waddle id"),
+                room: room
+                    .map(|value| waddle_extensions::RoomJid::try_new(value).expect("room jid")),
                 source_stanza_id: None,
             },
             payloads: Vec::new(),

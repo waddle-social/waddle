@@ -3,7 +3,7 @@ use waddle_xmpp::xep::xep0428::{build_fallback_element, FallbackIndication};
 use waddle_xmpp::xep::xep0461::{build_reply_element, ReplyReference};
 use xmpp_parsers::message::Lang;
 
-use super::*;
+use super::{observation_body, DisplayText, FallbackRange, Message, NS_FALLBACK, NS_REPLY};
 
 fn reply(body: &str) -> Message {
     let mut message = Message::new(None::<jid::Jid>);

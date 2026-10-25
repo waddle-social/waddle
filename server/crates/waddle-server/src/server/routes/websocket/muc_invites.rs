@@ -23,6 +23,9 @@
 //! was genuinely invited, so a late decline from them is authentic
 //! (if unusual).
 
+use crate::db::actor::GetDatabase;
+use crate::db::DatabaseDriver;
+use crate::db::Value;
 use jid::BareJid;
 
 use crate::db::actor::{DbActor, DbExecute, DbQuery};
@@ -199,13 +202,13 @@ pub(crate) async fn claim_invite_for_message(
     not_after: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<bool, InviteStorageError> {
     let database = actor
-        .ask(crate::db::actor::GetDatabase)
+        .ask(GetDatabase)
         .await
         .map_err(|_| InviteStorageError::ActorUnavailable)?;
     let mut transaction = database.begin_immediate().await?;
     let lock = match database.driver() {
-        crate::db::DatabaseDriver::Postgres => "SELECT message_key FROM ingress_messages WHERE message_key = CAST(? AS UUID) FOR UPDATE",
-        crate::db::DatabaseDriver::Sqlite => "SELECT message_key FROM ingress_messages WHERE message_key = ?",
+        DatabaseDriver::Postgres => "SELECT message_key FROM ingress_messages WHERE message_key = CAST(? AS UUID) FOR UPDATE",
+        DatabaseDriver::Sqlite => "SELECT message_key FROM ingress_messages WHERE message_key = ?",
     };
     if transaction
         .query(
@@ -219,7 +222,7 @@ pub(crate) async fn claim_invite_for_message(
     {
         return Err(InviteStorageError::CanonicalMissing);
     }
-    let identity = || -> Vec<crate::db::Value> {
+    let identity = || -> Vec<Value> {
         vec![
             message_key.to_storage().to_string().into(),
             invite.room.to_string().into(),
@@ -228,8 +231,8 @@ pub(crate) async fn claim_invite_for_message(
         ]
     };
     let select = match database.driver() {
-        crate::db::DatabaseDriver::Postgres => "SELECT claimed FROM muc_invite_claims WHERE message_key = CAST(? AS UUID) AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
-        crate::db::DatabaseDriver::Sqlite => "SELECT claimed FROM muc_invite_claims WHERE message_key = ? AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
+        DatabaseDriver::Postgres => "SELECT claimed FROM muc_invite_claims WHERE message_key = CAST(? AS UUID) AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
+        DatabaseDriver::Sqlite => "SELECT claimed FROM muc_invite_claims WHERE message_key = ? AND room_jid = ? AND invitee_jid = ? AND inviter_jid = ?",
     };
     if let Some(row) = transaction.query(select, identity()).await?.next().await? {
         let claimed = row.get::<i64>(0)? != 0;
@@ -251,8 +254,8 @@ pub(crate) async fn claim_invite_for_message(
     let affected = transaction.execute(delete, params).await?;
     let claimed = affected > 0;
     let insert = match database.driver() {
-        crate::db::DatabaseDriver::Postgres => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (CAST(? AS UUID), ?, ?, ?, ?)",
-        crate::db::DatabaseDriver::Sqlite => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (?, ?, ?, ?, ?)",
+        DatabaseDriver::Postgres => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (CAST(? AS UUID), ?, ?, ?, ?)",
+        DatabaseDriver::Sqlite => "INSERT INTO muc_invite_claims (message_key, room_jid, invitee_jid, inviter_jid, claimed) VALUES (?, ?, ?, ?, ?)",
     };
     let mut params = identity();
     params.push(claimed.into());

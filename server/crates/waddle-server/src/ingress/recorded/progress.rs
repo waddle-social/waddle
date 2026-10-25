@@ -1,10 +1,9 @@
 //! Exact settlement evidence is distinct from the derived delivery audience.
 use super::{external_route_identity, external_route_recipient, external_route_targets};
-use crate::{
-    ingress::decision::EffectReceiptKey,
-    ingress_uow::IngressUowError,
-    server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, ExternalEffect},
-};
+use crate::ingress::decision::EffectReceiptKey;
+use crate::ingress_uow::IngressUowError;
+use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+use crate::server::routes::interpret::effects::ExternalEffect;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, EntityGeneration, IngressEffectIntent, StoredMessagePayload,

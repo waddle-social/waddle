@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    build_iq_error_xml_typed, build_last_activity_response, chrono, forbidden_iq_error,
+    internal_server_error_iq_error, iq_to_xml, local_account_exists, not_authorized_iq_error,
+    service_unavailable_iq_error, warn, DatabaseBlockingStorage, FullJid, GetDatabase, Jid,
+    WebSocketState,
+};
 
 pub(super) async fn handle_last_activity_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -95,7 +100,7 @@ pub(super) async fn handle_last_activity_iq(
             .deps
             .protocol
             .connection_registry
-            .get_available_resources_for_user(&target_bare)
+            .available_resources_for_user(&target_bare)
             .is_empty()
         {
             return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
@@ -105,7 +110,7 @@ pub(super) async fn handle_last_activity_iq(
             .deps
             .protocol
             .connection_registry
-            .get_last_activity(&target_bare)
+            .last_activity(&target_bare)
         {
             let seconds = chrono::Utc::now()
                 .signed_duration_since(last_activity.timestamp)

@@ -1,19 +1,19 @@
 //! Real host dispatch with a persistent local room and durable recipients.
-use super::super::*;
-use super::{super::groupchat::BOT_LINGER, direct_ingress};
+use super::super::groupchat::BOT_LINGER;
+use super::super::{
+    ActorRef, Arc, BareJid, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
+    FullJid, GetSnapshot, HostMessageTarget, HostSendMessage, InvocationKind, RoomActor, StanzaId,
+};
+use super::direct_ingress;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
-        RoomConfig,
-    },
-    registry::OutboundStanza,
-    Affiliation, Role, Stanza,
-};
+use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::RoomConfig;
+use waddle_xmpp::registry::OutboundStanza;
+use waddle_xmpp::{Affiliation, Role, Stanza};
 
 pub(super) struct GroupchatFixture {
     pub adapter: ExtensionHostAdapter,
@@ -345,7 +345,7 @@ async fn sends_share_a_lingering_occupancy(f: IngressFixture) {
         ]
     );
     let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
+    assert_eq!(room.affiliation(&bot.to_bare()), Affiliation::None);
     let chain = fixture
         .actor
         .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
@@ -427,7 +427,7 @@ async fn group_dm_refuses_the_bot(f: IngressFixture) {
         "the bot never joined the group DM"
     );
     assert_eq!(
-        room.get_affiliation(&bot.to_bare()),
+        room.affiliation(&bot.to_bare()),
         Affiliation::None,
         "the refusal leaves no Member affiliation behind"
     );

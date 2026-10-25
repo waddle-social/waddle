@@ -1,12 +1,23 @@
-use super::*;
+//! Typed message content, revisions, links, and extension-enrichment envelopes.
 
+use super::{
+    ActionId, BodyRange, CommandNode, Deserialize, DisplayText, Element, EnrichmentId,
+    ExtensionCapability, ExtensionPayload, LaunchId, LaunchToken, PayloadNamespace, PluginId,
+    RoomJid, Serialize, StanzaId, Timestamp, UiView, WaddleId, FRAMEWORK_NAMESPACE,
+};
+
+/// Versioned message envelope containing extension enrichments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionEnvelope {
+    /// Envelope format version; `new` initializes this to 1.
     pub version: u32,
+    /// Extension-produced enrichments attached to the message.
     pub enrichments: Vec<MessageEnrichment>,
 }
 
 impl ExtensionEnvelope {
+    /// Create a version-1 extension envelope containing the supplied enrichments.
+    #[must_use]
     pub fn new(enrichments: Vec<MessageEnrichment>) -> Self {
         Self {
             version: 1,
@@ -14,6 +25,8 @@ impl ExtensionEnvelope {
         }
     }
 
+    /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("extensions", FRAMEWORK_NAMESPACE).attr(
             minidom::rxml::xml_ncname!("version").to_owned(),
@@ -26,20 +39,33 @@ impl ExtensionEnvelope {
     }
 }
 
+/// Plugin-owned message annotations, payloads, UI views, and authorized launch descriptors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageEnrichment {
+    /// Identifier of this plugin contribution within the message envelope.
     pub id: EnrichmentId,
+    /// Extension identifier owning this value.
     pub plugin: PluginId,
+    /// Capability under which this enrichment was produced.
     pub capability: ExtensionCapability,
+    /// Namespace declared for the extension payloads carried by this value.
     pub payload_namespace: PayloadNamespace,
+    /// Creation timestamp serialized as supplied by the extension.
     pub created_at: Timestamp,
+    /// Canonical source metadata identifying the message targeted by this operation.
     pub source: Option<MessageSource>,
+    /// Declarative views rendered by the host alongside this enrichment's payloads.
     pub ui: Vec<UiView>,
+    /// Extension payload elements carried alongside the standard protocol fields.
     pub payloads: Vec<ExtensionPayload>,
+    /// Authorized actions offered for this enrichment.
     pub launches: Vec<LaunchDescriptor>,
 }
 
 impl MessageEnrichment {
+    /// Whether every payload's advertised namespace and root namespace match this
+    /// enrichment's declared namespace.
+    #[must_use]
     pub fn payloads_match_declared_namespace(&self) -> bool {
         self.payloads.iter().all(|payload| {
             payload.namespace == self.payload_namespace
@@ -47,6 +73,8 @@ impl MessageEnrichment {
         })
     }
 
+    /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("enrichment", FRAMEWORK_NAMESPACE)
             .attr(
@@ -95,13 +123,18 @@ impl MessageEnrichment {
     }
 }
 
+/// Original stanza identity and optional body range targeted by an enrichment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageSource {
+    /// Identifier of the source message targeted by this enrichment.
     pub stanza_id: StanzaId,
+    /// Range of message-body text associated with the enrichment.
     pub body_range: Option<BodyRange>,
 }
 
 impl MessageSource {
+    /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("source", FRAMEWORK_NAMESPACE).attr(
             minidom::rxml::xml_ncname!("stanza-id").to_owned(),
@@ -122,10 +155,14 @@ impl MessageSource {
     }
 }
 
+/// Community, optional room, and source stanza bound into a launch token.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchContext {
+    /// Identifier of the Waddle community providing invocation context.
     pub waddle_id: WaddleId,
+    /// Bare JID of the room in scope.
     pub room: Option<RoomJid>,
+    /// Identifier of the source stanza associated with this value.
     pub source_stanza_id: Option<StanzaId>,
 }
 
@@ -148,21 +185,34 @@ impl LaunchContext {
     }
 }
 
+/// Extension action with payloads, display fallback, and optional signed invocation authorization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LaunchDescriptor {
+    /// Identifier used to correlate this launch descriptor with later invocations.
     pub id: LaunchId,
+    /// Extension identifier owning this value.
     pub plugin: PluginId,
+    /// Action requested by the client or exposed by the UI.
     pub action: ActionId,
+    /// Ad-hoc command node used to dispatch the requested extension action.
     pub command_node: CommandNode,
+    /// Human-readable label rendered by the host.
     pub label: DisplayText,
+    /// Community and source-message context bound to the launch authorization.
     pub context: LaunchContext,
+    /// Extension payload elements carried alongside the standard protocol fields.
     pub payloads: Vec<ExtensionPayload>,
+    /// Optional declarative view shown when a richer launch presentation is unavailable.
     pub fallback: Option<UiView>,
+    /// Optional RFC 3339 deadline bound into the signed launch token.
     pub expires_at: Option<Timestamp>,
+    /// Optional host-issued signature authorizing this launch and its bound context.
     pub token: Option<LaunchToken>,
 }
 
 impl LaunchDescriptor {
+    /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("launch", FRAMEWORK_NAMESPACE)
             .attr(

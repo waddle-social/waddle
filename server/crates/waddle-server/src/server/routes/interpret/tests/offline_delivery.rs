@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    chat_msg, interpret, interpret_with_depth, jid, offline_pass_deps, pipelined_dispatcher, Arc,
+    BlockingStorage, ConnectionRegistry, InboxStorage, MamStorage, OutboundEvent, Stanza,
+    StanzaDispatcher, XmppStateMachine, MAX_RECIPIENT_PASS_DEPTH,
+};
 
 #[tokio::test]
 async fn offline_recipient_pass_persists_archive_for_bare_jid_target() {

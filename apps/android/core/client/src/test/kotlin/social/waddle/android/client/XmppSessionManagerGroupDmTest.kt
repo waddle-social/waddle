@@ -15,6 +15,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleException
+import social.waddle.client.ffi.WaddleGroupDmHistoryAccess
 
 /**
  * Group-DM lifecycle verbs through the manager: the
@@ -167,7 +168,7 @@ class XmppSessionManagerGroupDmTest {
             harness.manager.inviteToGroupDm(room, "charlie@waddle.test", fullHistory = true),
         )
         assertEquals(
-            Triple(room, "charlie@waddle.test", true),
+            Triple(room, "charlie@waddle.test", WaddleGroupDmHistoryAccess.FULL),
             harness.client.groupDm.inviteCalls.single(),
         )
 

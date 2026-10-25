@@ -54,7 +54,7 @@ fn replace_stanza_thread(message: &mut Message, thread_id: impl Into<String>) {
     // (XEP-0201/RFC 6121 implicitly require a non-empty body). Refuse
     // the rewrite — `ThreadInfo` enforces non-empty via `ThreadId`, and
     // there is no meaningful canonicalization for an empty thread.
-    let Some(thread_id) = ThreadId::new(thread_id) else {
+    let Some(thread_id) = ThreadId::try_new(thread_id) else {
         return;
     };
     let parent = thread_info_from_message_in_stanza_ns(message, CLIENT_STANZA_NS)
@@ -200,7 +200,7 @@ mod tests {
         s.parse().expect("valid bare jid")
     }
     fn tid(s: &str) -> ThreadId {
-        ThreadId::new(s).expect("non-empty")
+        ThreadId::try_new(s).expect("non-empty")
     }
 
     fn groupchat(room: &BareJid, sender: &FullJid, body: &str) -> Message {

@@ -3,14 +3,13 @@
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
 use crate::auth::redirect::{PkceS256Challenge, RedirectError, XmppClientRedirectUri};
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Json, Redirect},
-    routing::{get, post},
-    Form, Router,
-};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Redirect};
+use axum::routing::{get, post};
+use axum::{Form, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

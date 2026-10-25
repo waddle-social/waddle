@@ -4,13 +4,18 @@
 //! containing the set of joined [`Identity`] values, used by the MUC
 //! focus path to decide when a call has ended.
 
+use crate::config::ApiSecret;
+use crate::LiveParticipantsFuture;
+use crate::ParticipantRegistrationExpectation;
+use crate::ReconcileFuture;
+use crate::ReconcilePassSummary;
+use crate::SidEvidence;
+use crate::UnboundOccupantPolicy;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -284,7 +289,7 @@ struct ClearOutcome {
     removed_occupant_session: Option<OccupancySessionGeneration>,
     /// The caller's unbound-registration policy, carried into the durable
     /// removal so a confirmed departure keeps its authority (#1703).
-    unbound_occupant: crate::UnboundOccupantPolicy,
+    unbound_occupant: UnboundOccupantPolicy,
     /// Participants still registered after the clear.
     remaining: usize,
 }
@@ -302,7 +307,7 @@ struct RemoteTeardownEvidence {
     /// by the executor's rebind check instead of being ejected.
     session: Option<SessionBinding>,
     occupant_session: Option<OccupancySessionGeneration>,
-    unbound_occupant: crate::UnboundOccupantPolicy,
+    unbound_occupant: UnboundOccupantPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,9 +350,9 @@ enum SessionGate<'a> {
     /// caller's `unbound` policy says its evidence allows it (#1703).
     Occupant {
         presented: OccupancySessionGeneration,
-        unbound: crate::UnboundOccupantPolicy,
+        unbound: UnboundOccupantPolicy,
         /// The #1608 sid rule, applied alongside the generation rule.
-        sid: crate::SidEvidence<'a>,
+        sid: SidEvidence<'a>,
     },
 }
 
@@ -383,7 +388,7 @@ impl TeardownReporter {
             let mut state = self
                 .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             state.pending.extend(intents);
             if state.running {
                 return;
@@ -397,7 +402,7 @@ impl TeardownReporter {
                 let batch = {
                     let mut state = state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                     state.pending.drain().collect::<Vec<_>>()
                 };
                 for intent in batch {
@@ -405,7 +410,7 @@ impl TeardownReporter {
                 }
                 let mut state = state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                 if state.pending.is_empty() {
                     state.running = false;
                     break;
@@ -549,8 +554,7 @@ impl LiveKitTeardownExecutor {
                 Some(Some(bound)) if bound == *intent_occupant_session => {}
                 // Restored without a generation: only an intent minted by a
                 // CONFIRMED departure may remove it (#1703).
-                Some(None) if intent.unbound_occupant == crate::UnboundOccupantPolicy::TearDown => {
-                }
+                Some(None) if intent.unbound_occupant == UnboundOccupantPolicy::TearDown => {}
                 Some(_) => return Ok(TeardownExecution::StaleGeneration),
                 // A PARTIAL entry (another participant restored by a webhook
                 // while this identity's live replacement is known only to
@@ -1066,9 +1070,9 @@ impl LiveKitSfu {
     /// active so the teardown hot path can fire `RemoveParticipant` +
     /// `DeleteRoom` admin calls without making the [`SfuService`]
     /// surface async.
-    pub fn new(config: SfuConfig) -> Result<Self, SfuError> {
+    pub fn try_new(config: SfuConfig) -> Result<Self, SfuError> {
         let admin_base = admin_base_url_from_ws(&config.ws_url)?;
-        let admin = ReqwestLiveKitAdmin::new(
+        let admin = ReqwestLiveKitAdmin::try_new(
             admin_base,
             config.api_key.clone(),
             config.api_secret.clone(),
@@ -1243,7 +1247,7 @@ impl LiveKitSfu {
                 room_sid,
                 participant_sid,
                 occupant_session: None,
-                unbound_occupant: crate::UnboundOccupantPolicy::Keep,
+                unbound_occupant: UnboundOccupantPolicy::Keep,
                 // Revocation authority is token state, not a signaling
                 // terminate: rejoin protection here is the
                 // registration's own clear_pending_revocation_eject,
@@ -1485,7 +1489,7 @@ impl LiveKitSfu {
         identity: &Identity,
         session: Option<&SessionBinding>,
         occupant_session: Option<OccupancySessionGeneration>,
-        publication: Option<(&JoinToken, crate::ParticipantRegistrationExpectation)>,
+        publication: Option<(&JoinToken, ParticipantRegistrationExpectation)>,
     ) -> bool {
         let registration_revision = publication
             .map(|(_, expected)| expected.publication_revision)
@@ -1803,7 +1807,7 @@ impl LiveKitSfu {
                 let participant = entry.participants.get(identity);
                 match participant.and_then(|participant| participant.occupant_session) {
                     Some(bound) if bound == presented => {}
-                    None if unbound == crate::UnboundOccupantPolicy::TearDown => {}
+                    None if unbound == UnboundOccupantPolicy::TearDown => {}
                     _ => return ClearDisposition::SessionMismatch,
                 }
                 if !sid.accepts(participant.and_then(|participant| participant.session.as_ref())) {
@@ -1834,7 +1838,7 @@ impl LiveKitSfu {
         let unbound_occupant = match session_gate {
             SessionGate::Occupant { unbound, .. } => unbound,
             SessionGate::Any | SessionGate::Presented(_) | SessionGate::Registration(_) => {
-                crate::UnboundOccupantPolicy::Keep
+                UnboundOccupantPolicy::Keep
             }
         };
         let room_sid = entry.room_sid.clone();
@@ -2019,7 +2023,7 @@ impl LiveKitSfu {
             generation,
             room_sid,
             occupant_session: None,
-            unbound_occupant: crate::UnboundOccupantPolicy::Keep,
+            unbound_occupant: UnboundOccupantPolicy::Keep,
             session: None,
         });
         let report_all = || {
@@ -2257,10 +2261,7 @@ impl LiveKitSfu {
     /// empty participant lists) only marks streaks, clients silently
     /// rejoin, and the second pass observes them connected and clears
     /// the streaks.
-    async fn reconcile_active_calls_inner(
-        &self,
-        grace: ChronoDuration,
-    ) -> crate::ReconcilePassSummary {
+    async fn reconcile_active_calls_inner(&self, grace: ChronoDuration) -> ReconcilePassSummary {
         let now = Utc::now();
         self.prune_generation_tombstones(now);
         // Snapshot the registry into owned values up front so no
@@ -2489,7 +2490,7 @@ impl LiveKitSfu {
                     .cmp(&right_identity.as_livekit_identity())
             })
         });
-        let summary = crate::ReconcilePassSummary {
+        let summary = ReconcilePassSummary {
             swept,
             rooms_examined,
             rooms_adopted,
@@ -2509,7 +2510,7 @@ impl LiveKitSfu {
 }
 
 impl crate::SfuReconciler for LiveKitSfu {
-    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> crate::LiveParticipantsFuture<'a> {
+    fn live_participants<'a>(&'a self, call_id: &'a CallId) -> LiveParticipantsFuture<'a> {
         Box::pin(async move {
             match self.admin.room_occupancy(call_id).await {
                 Ok(occupancy) => Some(
@@ -2538,7 +2539,7 @@ impl crate::SfuReconciler for LiveKitSfu {
         })
     }
 
-    fn reconcile_active_calls(&self, grace: ChronoDuration) -> crate::ReconcileFuture<'_> {
+    fn reconcile_active_calls(&self, grace: ChronoDuration) -> ReconcileFuture<'_> {
         Box::pin(self.reconcile_active_calls_inner(grace))
     }
 }
@@ -2598,14 +2599,14 @@ impl SfuService for LiveKitSfu {
         &self,
         call_id: &CallId,
         identity: &Identity,
-    ) -> Option<crate::ParticipantRegistrationExpectation> {
+    ) -> Option<ParticipantRegistrationExpectation> {
         let revision = self.calls.get(call_id).and_then(|entry| {
             entry
                 .participants
                 .get(identity)
                 .map(|participant| participant.registration_revision)
         });
-        Some(crate::ParticipantRegistrationExpectation {
+        Some(ParticipantRegistrationExpectation {
             revision,
             publication_revision: uuid::Uuid::new_v4(),
         })
@@ -2618,7 +2619,7 @@ impl SfuService for LiveKitSfu {
         capabilities: MediaCapabilities,
         session: &SessionBinding,
         occupant: OccupancySessionGeneration,
-        expected: crate::ParticipantRegistrationExpectation,
+        expected: ParticipantRegistrationExpectation,
     ) -> Result<Option<JoinToken>, SfuError> {
         // JWT construction is side-effect free; publish it only after CAS.
         let token = mint_join_token(MintInputs {
@@ -2652,7 +2653,7 @@ impl SfuService for LiveKitSfu {
         &self,
         call_id: &CallId,
         identity: &Identity,
-        expected: crate::ParticipantRegistrationExpectation,
+        expected: ParticipantRegistrationExpectation,
     ) -> SessionScopedTeardown {
         self.unregister_participant_gated(
             call_id,
@@ -2899,8 +2900,8 @@ impl SfuService for LiveKitSfu {
         call_id: &CallId,
         identity: &Identity,
         presented: OccupancySessionGeneration,
-        unbound: crate::UnboundOccupantPolicy,
-        sid: crate::SidEvidence<'_>,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
         observed_sids: Option<&ObservedCallSids>,
     ) -> SessionScopedTeardown {
         self.unregister_participant_gated(
@@ -2952,8 +2953,8 @@ impl SfuService for LiveKitSfu {
         identity: &Identity,
         observed_sids: Option<&ObservedCallSids>,
         presented: OccupancySessionGeneration,
-        unbound: crate::UnboundOccupantPolicy,
-        sid: crate::SidEvidence<'_>,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
     ) -> SessionScopedTeardown {
         self.note_participant_left_gated(
             call_id,
@@ -3055,7 +3056,7 @@ impl SfuService for LiveKitSfu {
         &self.config.turn_host
     }
 
-    fn webhook_secret(&self) -> &crate::config::ApiSecret {
+    fn webhook_secret(&self) -> &ApiSecret {
         &self.config.webhook_secret
     }
 

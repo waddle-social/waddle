@@ -1,9 +1,16 @@
+//! Room-presence recognition and conversion into typed messaging events.
+
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};
 
-use super::namespaces::*;
-use super::types::*;
+use super::namespaces::{
+    build_idle_element, NS_CLIENT, NS_HATS, NS_IDLE, NS_JINGLE_RTP, NS_MUC_USER, NS_MUJI,
+    NS_VCARD_UPDATE, NS_WADDLE_IN_CALL,
+};
+use super::types::{
+    InboundPresence, MucAffiliation, MucRole, MucStatus, MujiPresence, PresenceHat,
+};
 
 pub(super) fn parse_presence(el: &Element) -> InboundPresence {
     let from = el.attr("from").map(String::from);
@@ -151,6 +158,7 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
 /// before handing a typed `Option<Show>` to [`build_presence_stanza`]. An
 /// unknown token yields `None` (plain Available) so an invalid value never
 /// reaches the wire.
+#[must_use]
 pub fn parse_show(token: &str) -> Option<Show> {
     match token {
         "away" => Some(Show::Away),
@@ -162,7 +170,7 @@ pub fn parse_show(token: &str) -> Option<Show> {
 }
 
 /// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
-/// [`xmpp_parsers::Presence`]. `show` is the typed availability state (or
+/// [`xmpp_parsers::presence::Presence`]. `show` is the typed availability state (or
 /// `None` for plain Available); `status` is an optional free-text `<status>`
 /// line; `idle_since` is the typed XEP-0319 last-interaction instant, present
 /// only on an auto-away presence and `None` on a return-from-idle (RFC 6121 /
@@ -174,6 +182,7 @@ pub fn parse_show(token: &str) -> Option<Show> {
 /// `Option<DateTime<Utc>>`, not raw tokens. Shared by the native
 /// [`super::MessagingExt::send_presence`] and the wasm `send_presence` binding;
 /// the caller serialises to an [`Element`] at the I/O boundary (`send_stanza`).
+#[must_use]
 pub fn build_presence_stanza(
     status: Option<&str>,
     show: Option<Show>,

@@ -6,10 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use xmpp_parsers::message::{Lang, Message};
 
+use super::message_context::effective_module_config_with_reader;
 use super::{
-    detect_links, effective_module_config_json, effective_module_config_with_reader,
-    message_hook_effect_launches_match_room, runtime_grants_for_module, sign_launch_token,
-    EffectiveModuleConfigError, ExtensionManager, LaunchValidationRequest, MAX_DETECTED_LINKS,
+    detect_links, effective_module_config_json, message_hook_effect_launches_match_room,
+    runtime_grants_for_module, sign_launch_token, EffectiveModuleConfigError, ExtensionManager,
+    LaunchValidationRequest, MAX_DETECTED_LINKS,
 };
 use crate::config::{ExtensionConfig, ExtensionModuleConfig};
 use crate::types::{
@@ -52,18 +53,18 @@ fn launch_tokens_cover_payload_fields() {
         route_descriptors: Vec::new(),
         launch_signing_key: Some(key.to_vec()),
     };
-    let plugin = PluginId::new("link-board").expect("plugin id");
-    let action = ActionId::new("save-link").expect("action id");
-    let launch_id = LaunchId::new("save-link-1").expect("launch id");
+    let plugin = PluginId::try_new("link-board").expect("plugin id");
+    let action = ActionId::try_new("save-link").expect("action id");
+    let launch_id = LaunchId::try_new("save-link-1").expect("launch id");
     let context = LaunchContext {
-        waddle_id: WaddleId::new("alice@example.com").expect("waddle id"),
+        waddle_id: WaddleId::try_new("alice@example.com").expect("waddle id"),
         room: None,
         source_stanza_id: None,
     };
-    let namespace = PayloadNamespace::new("urn:waddle:link-board:1").expect("namespace");
-    let payload = ExtensionPayload::new(
+    let namespace = PayloadNamespace::try_new("urn:waddle:link-board:1").expect("namespace");
+    let payload = ExtensionPayload::try_new(
         namespace.clone(),
-        XmlElement::new(
+        XmlElement::try_new(
             namespace,
             "link",
             vec![XmlAttribute {
@@ -88,11 +89,11 @@ fn launch_tokens_cover_payload_fields() {
     );
     let fields = vec![
         FormFieldValue {
-            name: UiActionId::new("payload#link#url").expect("field"),
+            name: UiActionId::try_new("payload#link#url").expect("field"),
             values: vec![DataFormValue::new("https://example.com/a")],
         },
         FormFieldValue {
-            name: UiActionId::new("payload#link").expect("field"),
+            name: UiActionId::try_new("payload#link").expect("field"),
             values: vec![DataFormValue::new("https://example.com/a")],
         },
     ];
@@ -109,7 +110,7 @@ fn launch_tokens_cover_payload_fields() {
     );
 
     let tampered_fields = vec![FormFieldValue {
-        name: UiActionId::new("payload#link#url").expect("field"),
+        name: UiActionId::try_new("payload#link#url").expect("field"),
         values: vec![DataFormValue::new("https://example.com/b")],
     }];
     assert!(
@@ -125,8 +126,8 @@ fn launch_tokens_cover_payload_fields() {
     );
 
     let room_context = LaunchContext {
-        waddle_id: WaddleId::new("alice@example.com").expect("waddle id"),
-        room: Some(RoomJid::new("pub@muc.example.com").expect("room jid")),
+        waddle_id: WaddleId::try_new("alice@example.com").expect("waddle id"),
+        room: Some(RoomJid::try_new("pub@muc.example.com").expect("room jid")),
         source_stanza_id: None,
     };
     assert!(
@@ -144,7 +145,7 @@ fn launch_tokens_cover_payload_fields() {
 
 #[test]
 fn message_hook_launches_must_stay_in_source_room() {
-    let source_room = RoomJid::new("pub@muc.example.com").expect("room jid");
+    let source_room = RoomJid::try_new("pub@muc.example.com").expect("room jid");
 
     assert!(message_hook_effect_launches_match_room(
         &enrich_effect_with_launch_room(Some("pub@muc.example.com")),
@@ -161,25 +162,25 @@ fn message_hook_launches_must_stay_in_source_room() {
 }
 
 fn enrich_effect_with_launch_room(room: Option<&str>) -> ExtensionEffect {
-    let namespace = PayloadNamespace::new("urn:waddle:decision-polls:1").expect("namespace");
+    let namespace = PayloadNamespace::try_new("urn:waddle:decision-polls:1").expect("namespace");
     ExtensionEffect::EnrichMessage(ExtensionEnvelope::new(vec![MessageEnrichment {
-        id: EnrichmentId::new("enrichment-1").expect("enrichment id"),
-        plugin: PluginId::new("decision-polls").expect("plugin id"),
+        id: EnrichmentId::try_new("enrichment-1").expect("enrichment id"),
+        plugin: PluginId::try_new("decision-polls").expect("plugin id"),
         capability: ExtensionCapability::MessageEnrich,
         payload_namespace: namespace,
-        created_at: Timestamp::new("2026-04-27T12:00:00Z").expect("timestamp"),
+        created_at: Timestamp::try_new("2026-04-27T12:00:00Z").expect("timestamp"),
         source: None,
         ui: Vec::new(),
         payloads: Vec::new(),
         launches: vec![LaunchDescriptor {
-            id: LaunchId::new("vote-yes").expect("launch id"),
-            plugin: PluginId::new("decision-polls").expect("plugin id"),
-            action: ActionId::new("vote").expect("action id"),
+            id: LaunchId::try_new("vote-yes").expect("launch id"),
+            plugin: PluginId::try_new("decision-polls").expect("plugin id"),
+            action: ActionId::try_new("vote").expect("action id"),
             command_node: CommandNode::invoke(),
-            label: DisplayText::new("Vote yes").expect("label"),
+            label: DisplayText::try_new("Vote yes").expect("label"),
             context: LaunchContext {
-                waddle_id: WaddleId::new("waddle-1").expect("waddle id"),
-                room: room.map(|value| RoomJid::new(value).expect("room jid")),
+                waddle_id: WaddleId::try_new("waddle-1").expect("waddle id"),
+                room: room.map(|value| RoomJid::try_new(value).expect("room jid")),
                 source_stanza_id: None,
             },
             payloads: Vec::new(),
@@ -414,9 +415,10 @@ fn runtime_grants_are_host_configured_and_manifest_bounded() {
         local_path: None,
     };
     let manifest = ExtensionManifest {
-        id: PluginId::new("example-extension").expect("static plugin id is valid"),
-        name: DisplayText::new("Example Extension").expect("static display text is valid"),
-        version: crate::types::PluginVersion::new("0.1.0").expect("static plugin version is valid"),
+        id: PluginId::try_new("example-extension").expect("static plugin id is valid"),
+        name: DisplayText::try_new("Example Extension").expect("static display text is valid"),
+        version: crate::types::PluginVersion::try_new("0.1.0")
+            .expect("static plugin version is valid"),
         payloads: Vec::new(),
         capabilities: vec![
             ExtensionCapability::Commands,

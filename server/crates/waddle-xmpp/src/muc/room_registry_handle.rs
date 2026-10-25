@@ -22,6 +22,7 @@
 //! complementary to the coarse per-stanza frame backstop (#808): see
 //! `docs/adr/008-stanza-handler-wedge-backstop.md`.
 
+use crate::xep::xep0317::ServerHats;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,7 +111,7 @@ impl RoomRegistry {
     pub fn spawn(
         muc_domain: String,
         occupant_id_secret: OccupantIdSecret,
-        server_hats: crate::xep::xep0317::ServerHats,
+        server_hats: ServerHats,
         membership_source: Option<Arc<dyn DurableMembershipSource>>,
     ) -> Self {
         let mut actor =
@@ -598,7 +599,7 @@ impl RoomRegistry {
         &self,
         room_jid: BareJid,
         claim_fence: super::RoomClaimFenceContext,
-        previous_owner: crate::ownership::NodeIdentity,
+        previous_owner: NodeIdentity,
     ) -> Result<(), RoomRegistryError> {
         self.inner
             .tell(RememberPendingReclaimedRoom {

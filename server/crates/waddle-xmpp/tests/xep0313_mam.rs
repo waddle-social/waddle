@@ -12,7 +12,12 @@ fn server_root_disco_does_not_advertise_a_domain_archive() {
 
 #[test]
 fn muc_room_disco_advertises_mam_extended_for_supported_id_filters() {
-    let features = muc_room_features(true, true, true, false, false);
+    let features = muc_room_features(
+        waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
+        waddle_xmpp_core::disco::info::RoomMembership::MembersOnly,
+        waddle_xmpp_core::disco::info::RoomVisibility::Public,
+        waddle_xmpp_core::types::Moderation::Unmoderated,
+    );
 
     assert!(features.contains(&Feature::mam()));
     assert!(features.contains(&Feature::mam_extended()));
@@ -222,7 +227,7 @@ use xmpp_parsers::message::{Message, MessageType};
 const MUC_USER_NS: &str = "http://jabber.org/protocol/muc#user";
 
 fn secret() -> OccupantIdSecret {
-    OccupantIdSecret::new(vec![7u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
+    OccupantIdSecret::try_new(vec![7u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
 }
 
 fn groupchat(room: &BareJid, sender: &FullJid, body: &str) -> Message {

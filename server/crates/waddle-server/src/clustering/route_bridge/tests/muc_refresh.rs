@@ -1,5 +1,11 @@
 //! Exercise the real owner-refresh fallback from controlled ingress relay tests.
-use super::*;
+use super::{
+    caller_delivery_outcome, envelope, origin_identity, payload_for_recipient, receiver_identity,
+    services_with_claims, test_peer_id, user_entity, Arc, CancellationToken,
+    ClusteringMessagingConfig, FullJidDeliveryOutcome, InMemorySmSessionRegistry,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayRecipient,
+    PreparedRemoteDelivery, Stanza,
+};
 use crate::server::routes::interpret::SmIngressAppendContext;
 
 // Build the database fixture before entering the recursive relay callback;

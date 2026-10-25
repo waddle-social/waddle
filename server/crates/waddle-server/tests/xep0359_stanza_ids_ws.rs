@@ -441,7 +441,7 @@ async fn xep_0359_query_filter_finds_row_by_typed_stanza_id() {
             &archive,
             waddle_xmpp::mam::MamArchiveKind::Room,
             &MamQuery {
-                thread_id: waddle_xmpp_core::mam::ThreadId::new("thread-by-stanza-id"),
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new("thread-by-stanza-id"),
                 ..Default::default()
             },
         )

@@ -55,6 +55,7 @@
 //! `<mark-read/>` IQ-set. The canonical query surface remains the
 //! standards-track `urn:xmpp:inbox:1` shape above.
 
+use crate::xep::xep0059::NS_RSM;
 use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::iq::Iq;
@@ -175,7 +176,7 @@ pub fn parse_inbox_query(iq: &Iq) -> Result<InboxQuery, InboxError> {
     }
     let unread_only = parse_bool_attr(elem, "unread-only", false);
     let messages = parse_bool_attr(elem, "messages", true);
-    let rsm = match elem.get_child("set", crate::xep::xep0059::NS_RSM) {
+    let rsm = match elem.get_child("set", NS_RSM) {
         Some(set) => Some(parse_rsm_request(set)?),
         None => None,
     };
@@ -513,7 +514,7 @@ pub fn parse_inbox_fin(iq: &Iq) -> Result<InboxFin, InboxError> {
         unread: read_u32(elem, "unread")?,
         all_unread: read_u32(elem, "all-unread")?,
     };
-    let rsm = match elem.get_child("set", crate::xep::xep0059::NS_RSM) {
+    let rsm = match elem.get_child("set", NS_RSM) {
         Some(set) => Some(parse_rsm_response(set)?),
         None => None,
     };

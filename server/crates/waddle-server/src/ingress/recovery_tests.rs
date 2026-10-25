@@ -1,32 +1,27 @@
 use crate as waddle_server;
 use crate::ingress::test_support::IngressFixture;
 use std::time::Duration;
-use waddle_server::ingress::{
-    commit::commit_submission, effects::Effect, DurableEffect, IngressSubmission, PlannedEffect,
+use waddle_server::inbox::DatabaseInboxStorage;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::room::{
+    DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
 };
-use waddle_server::{
-    inbox::DatabaseInboxStorage,
-    ingress::{
-        effects::room::{
-            DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
-        },
-        execute::execute_effects,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink,
-    },
-    notification_outbox::{
-        NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
-    },
+use waddle_server::ingress::effects::Effect;
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink};
+use waddle_server::ingress::{DurableEffect, IngressSubmission, PlannedEffect};
+use waddle_server::notification_outbox::{
+    NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
 };
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
 use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::ingress::IngressEffectIntent;
-use waddle_xmpp::{
-    inbox::{storage::GroupchatNotificationRecoveryKey, ConversationKind, InboxEntry},
-    ingress::{
-        GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
-        InboxProjectionMutation, NotificationActivityMutation, NotificationCandidateOutcome,
-    },
-    registry::ConnectionRegistry,
+use waddle_xmpp::ingress::{
+    GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
+    InboxProjectionMutation, NotificationActivityMutation, NotificationCandidateOutcome,
 };
+use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(crate) fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
@@ -153,7 +148,7 @@ pub(crate) fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
 }
 
 async fn rollback(fixture: IngressFixture) {
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())

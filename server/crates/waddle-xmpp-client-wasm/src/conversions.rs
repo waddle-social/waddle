@@ -1,4 +1,22 @@
-use super::*;
+//! Conversion between Rust protocol values and JavaScript-facing result models.
+
+use super::{
+    discovery, encrypted_file_to_js, messaging, ArchivedMessage, InCallSignal, InboundCallEvent,
+    InboundMessage, InboundPresence, MarkupSpanType, MdsCatchupEntry, MucAffiliation, MucRole,
+    PinEntry, PinEvent, PinEventAction, PinPreview, WaddleArchivedMessage, WaddleCallEvent,
+    WaddleCallMedia, WaddleCallThreadAnchor, WaddleCallThreadEnded, WaddleCarbonMarker,
+    WaddleEncryptedFileHash, WaddleExtensionEnrichment, WaddleExtensionEnvelope,
+    WaddleExtensionLaunch, WaddleExtensionLaunchContext, WaddleExtensionPayloadAttribute,
+    WaddleExtensionPayloadElement, WaddleExtensionSource, WaddleInCallSignal,
+    WaddleInboxConversation, WaddleInboxResult, WaddleLinkPreview, WaddleLinkPreviewImage,
+    WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo, WaddleLiveKitJoin, WaddleMamPage,
+    WaddleMarkupSpan, WaddleMdsDisplayedEntry, WaddleMessage, WaddleMujiPresence, WaddlePinEntry,
+    WaddlePinEvent, WaddlePinPreview, WaddlePresence, WaddlePresenceHat, WaddlePubsubEvent,
+    WaddlePubsubEventItem, WaddlePubsubEventPayload, WaddlePubsubReactionSummary, WaddleReference,
+    WaddleSafetyScoresFastening, WaddleSharedFile, WaddleStanzaId, WaddleUploadHeader,
+    WaddleUploadSlot,
+};
+use crate::state::InboxPage;
 
 pub(crate) fn upload_slot_to_js(slot: discovery::UploadSlot) -> WaddleUploadSlot {
     WaddleUploadSlot {
@@ -21,6 +39,7 @@ pub(crate) fn markup_span_type_to_string(span_type: MarkupSpanType) -> String {
         MarkupSpanType::CodeBlock => "code_block",
         MarkupSpanType::Blockquote => "blockquote",
         MarkupSpanType::Link => "link",
+        _ => "unknown",
     }
     .to_string()
 }
@@ -57,6 +76,7 @@ fn in_call_signal_to_js(signal: Option<InCallSignal>) -> Option<WaddleInCallSign
             emoji: payload.emoji.as_str().to_string(),
         }),
         None => None,
+        Some(_) => None,
     }
 }
 
@@ -66,6 +86,7 @@ pub(crate) fn call_thread_to_js(
     let kind = match anchor.kind {
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+        _ => "unknown",
     };
     let mut media = Vec::new();
     if anchor.media.audio {
@@ -323,6 +344,7 @@ fn pubsub_payload_to_js(
             }
         }
         waddle_xmpp_client::PubsubEventPayload::Empty => WaddlePubsubEventPayload::Empty,
+        _ => WaddlePubsubEventPayload::Empty,
     }
 }
 
@@ -557,7 +579,7 @@ pub(crate) fn mam_page_to_js(page: waddle_xmpp_client::MamPage) -> WaddleMamPage
     }
 }
 
-pub(crate) fn inbox_page_to_js(page: crate::state::InboxPage) -> WaddleInboxResult {
+pub(crate) fn inbox_page_to_js(page: InboxPage) -> WaddleInboxResult {
     let conversations = page.entries.into_iter().map(inbox_entry_to_js).collect();
     WaddleInboxResult {
         // `all-unread` is the XEP-0430 server-wide unread sum; mirror it
@@ -756,6 +778,17 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             // not a free-form passthrough.
             reason: reason
                 .map(|r| waddle_xmpp_client::messaging::jingle_reason_wire_name(r).to_string()),
+            tie_break: None,
+            migrated_to: None,
+        },
+        _ => WaddleCallEvent {
+            from,
+            to,
+            sid,
+            kind: "unknown",
+            media: None,
+            join: None,
+            reason: None,
             tie_break: None,
             migrated_to: None,
         },
@@ -1034,7 +1067,7 @@ mod inbound_to_js_tests {
         let reject = call_event_to_js(parse_jmi(messaging::build_reject_with_options(
             &sid("c1"),
             Some(messaging::JingleReason::Expired),
-            true,
+            messaging::TieBreak::Marked,
         )));
         assert_eq!(reject.kind, "reject");
         assert_eq!(reject.reason.as_deref(), Some("expired"));
@@ -1044,7 +1077,7 @@ mod inbound_to_js_tests {
         let retract = call_event_to_js(parse_jmi(messaging::build_retract_with_options(
             &sid("c2"),
             Some(messaging::JingleReason::Expired),
-            true,
+            messaging::TieBreak::Marked,
         )));
         assert_eq!(retract.kind, "retract");
         assert_eq!(retract.reason.as_deref(), Some("expired"));

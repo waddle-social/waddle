@@ -14,7 +14,11 @@
 //! enrichment — the sender is the room itself.
 
 use super::groupchat_archive::RoomArchiveFence;
-use super::*;
+use super::{
+    archive_groupchat_message, debug, effects, resolve_room_claim_fence, route_to_connection, warn,
+    ArchiveGroupchatOutcome, BareJid, Deps, GetRoom, GetRoomSnapshot, Jid, Message, Stanza,
+};
+use crate::ingress::RoomManifestSnapshot;
 use waddle_xmpp_core::xep0359::{add_stanza_id, StanzaId};
 
 pub(super) async fn broadcast_room_system_message_event(
@@ -162,7 +166,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
                     room: room.clone(),
                     fence: requirement,
                     snapshot_generation: snapshot.admission_revision,
-                    manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
+                    manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),
                 });
         }
 
@@ -232,7 +236,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     // without a destination, then each live/rebuilt occupant copy sets its own.
     let mut frozen_message = (*message).clone();
     frozen_message.to = None;
-    let system_message = match waddle_xmpp::ingress::StoredMessagePayload::new(frozen_message) {
+    let system_message = match waddle_xmpp::ingress::StoredMessagePayload::try_new(frozen_message) {
         Ok(payload) => payload,
         Err(error) => {
             warn!(room = %room, ?error, "could not freeze room system message");

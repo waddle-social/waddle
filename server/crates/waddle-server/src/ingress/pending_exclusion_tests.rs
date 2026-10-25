@@ -1,5 +1,10 @@
 //! Specialized invitation fallbacks remain outside ordinary offline restoration.
-use super::*;
+use super::{
+    commit_submission, execute_effects, ConnectionRegistry, Deps, Duration, Effect,
+    EffectMessageIdentity, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, ImmediateSink,
+    IngressEffectIntent, IngressFixture, MucUserRoute, PendingDeliveryMutation, PendingPayload,
+    PendingRow, PendingRowId, PlannedEffect,
+};
 
 async fn specialized_replay(fixture: IngressFixture, live: bool, decline: bool) {
     let storage = std::sync::Arc::new(

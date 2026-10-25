@@ -1,3 +1,7 @@
+//! Per-invocation Wasmtime state and host capability access.
+
+use crate::config::RuntimeLimits;
+use crate::types::RoomMessageSource;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -21,7 +25,7 @@ use crate::types::{DisplayText, ExtensionCapability, PluginId, WaddleId};
 /// table entry has no public constructor, representation, or receipt operation.
 pub struct DeliveryKey {
     capability: Arc<dyn ExtensionDeliveryCapability>,
-    source: crate::types::RoomMessageSource,
+    source: RoomMessageSource,
 }
 
 /// Host state made available to every WASM instance for satisfying WASI imports.
@@ -31,11 +35,12 @@ pub struct HostState {
     delivery: Option<Resource<DeliveryKey>>,
     tools: Arc<dyn ExtensionHostTools>,
     context: InvocationContext,
+    /// Guest configuration returned by the runtime configuration host import.
     pub config: String,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     pub(super) limits: wasmtime::StoreLimits,
-    runtime_limits: crate::config::RuntimeLimits,
+    runtime_limits: RuntimeLimits,
     http: super::http::HttpRuntime,
     http_requests: u32,
 }
@@ -47,7 +52,7 @@ impl HostState {
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
-        runtime_limits: crate::config::RuntimeLimits,
+        runtime_limits: RuntimeLimits,
         http: super::http::HttpRuntime,
     ) -> Self {
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -82,7 +87,7 @@ impl HostState {
     pub(super) async fn bind_delivery(
         &mut self,
         capability: Arc<dyn ExtensionDeliveryCapability>,
-        source: crate::types::RoomMessageSource,
+        source: RoomMessageSource,
     ) -> Result<(), HostToolError> {
         capability.validate(&self.context, &source).await?;
         let resource = self
@@ -90,7 +95,7 @@ impl HostState {
             .push(DeliveryKey { capability, source })
             .map_err(|_| {
                 HostToolError::denied(
-                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                    DisplayText::try_new("delivery resource unavailable").expect("static denial"),
                 )
             })?;
         self.delivery = Some(resource);
@@ -107,7 +112,7 @@ impl HostState {
         if let Some(resource) = self.delivery.as_ref() {
             let key = self.table.get(resource).map_err(|_| {
                 HostToolError::denied(
-                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                    DisplayText::try_new("delivery resource unavailable").expect("static denial"),
                 )
             })?;
             key.capability.validate(&self.context, &key.source).await?;
@@ -117,20 +122,17 @@ impl HostState {
 
     pub(super) fn for_init() -> Self {
         Self::for_init_with(
-            crate::config::RuntimeLimits::default(),
-            super::http::HttpRuntime::new().expect("static HTTP client configuration"),
+            RuntimeLimits::default(),
+            super::http::HttpRuntime::try_new().expect("static HTTP client configuration"),
         )
     }
 
-    pub(super) fn for_init_with(
-        limits: crate::config::RuntimeLimits,
-        http: super::http::HttpRuntime,
-    ) -> Self {
+    pub(super) fn for_init_with(limits: RuntimeLimits, http: super::http::HttpRuntime) -> Self {
         Self::new(
             Arc::new(DenyingExtensionHostTools),
             InvocationContext {
-                waddle_id: WaddleId::new("init").expect("static waddle id is valid"),
-                plugin_id: PluginId::new("initializing-extension")
+                waddle_id: WaddleId::try_new("init").expect("static waddle id is valid"),
+                plugin_id: PluginId::try_new("initializing-extension")
                     .expect("static plugin id is valid"),
                 requester: None,
                 source_room: None,
@@ -153,7 +155,7 @@ impl HostState {
             && capability == ExtensionCapability::HostMessageSend
         {
             return Err(HostToolError::denied(
-                DisplayText::new(
+                DisplayText::try_new(
                     "room observations return effects; message sending is unavailable",
                 )
                 .expect("static denial"),
@@ -163,7 +165,7 @@ impl HostState {
             Ok(())
         } else {
             Err(HostToolError::denied(
-                DisplayText::new(format!(
+                DisplayText::try_new(format!(
                     "missing extension capability {}",
                     capability.as_str()
                 ))
@@ -180,7 +182,7 @@ impl HostState {
             Ok(())
         } else {
             Err(HostToolError::denied(
-                DisplayText::new(format!(
+                DisplayText::try_new(format!(
                     "{tool_name} is only available during ad-hoc command execution"
                 ))
                 .expect("private host-tool denial message is non-empty"),
@@ -402,7 +404,8 @@ impl RuntimeHost for HostState {
                 .await
             }
             Ok(()) => Err(HostToolError::denied(
-                DisplayText::new("extension HTTP request limit exceeded").expect("static denial"),
+                DisplayText::try_new("extension HTTP request limit exceeded")
+                    .expect("static denial"),
             )),
             Err(error) => Err(error),
         };

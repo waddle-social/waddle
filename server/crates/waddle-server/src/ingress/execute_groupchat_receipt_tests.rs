@@ -1,6 +1,12 @@
 //! Generic delivery and sender-frame proof never settle per-occupant MUC progress.
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    classify_outcome, completed_receipts, proven_receipts, terminalize_if_complete, Duration,
+    Effect, EffectOutcome, EffectReceiptKey, EffectReceiptRepository, ExecutionReport,
+    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, FrameObligation,
+    FullJidDeliveryOutcome, IngressDecision, PlannedEffect, Stanza,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use jid::{BareJid, FullJid};

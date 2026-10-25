@@ -1,4 +1,4 @@
-use super::*;
+use super::{BareJid, ConnectionRegistry, Stanza};
 
 impl ConnectionRegistry {
     /// Queue a subscription stanza for an offline bare JID.

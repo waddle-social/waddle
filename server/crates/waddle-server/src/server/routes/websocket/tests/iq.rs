@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    authenticated_phase_for_session, create_test_server_owner_session, create_test_session,
+    create_test_websocket_state, create_test_websocket_state_with_calls,
+    create_test_websocket_state_with_fixture_bot,
+    create_test_websocket_state_with_fixture_bot_avatar, disco_info_iq_frame, disco_items_iq_frame,
+    get_or_create_room_actor, handle_iq, handle_iq_with_conn_state, handle_xmpp_frame,
+    iq_set_frame, parse_iq_for_test, ready_phase, register_test_connection, stanza_to_xml,
+    Affiliation, Arc, BareJid, CommandContext, CommandResult, ConnectionPhase, Element, FromStr,
+    FullJid, Iq, IqConnState, IqPayload, JoinAffiliationGrant, JoinWithAffiliation, Object,
+    ObjectType, OutboundStanza, Permission, Relation, Session, Stanza, Subject, Tuple,
+    WebSocketState, WriteTuple, WsConnState, FIXTURE_BOT_PLUGIN,
+};
 use crate::permissions::{CheckPermission, SubjectType};
 
 fn disco_feature_vars_for_test(query: &Element) -> std::collections::BTreeSet<String> {
@@ -96,7 +107,7 @@ async fn link_preview_lookup_for_test(
         "example.com",
         "muc.example.com",
         state,
-        &Some(session),
+        Some(&session),
         &ready_phase(bound_jid),
         &mut conn_state,
     )
@@ -391,7 +402,7 @@ async fn handle_iq_roster_query_returns_parseable_result() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -486,7 +497,7 @@ async fn handle_iq_roster_query_without_xmlns_survives_xmlns_like_attribute_valu
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -507,7 +518,7 @@ async fn handle_iq_roster_query_requires_ready_phase() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session.clone()),
+        Some(&session.clone()),
         &authenticated_phase_for_session(&session, "example.com"),
     )
     .await;
@@ -533,7 +544,7 @@ async fn handle_iq_carbons_enable_returns_parseable_result() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -572,7 +583,7 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -589,7 +600,7 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -610,7 +621,7 @@ async fn handle_iq_unknown_includes_routing_addresses_in_error() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -645,7 +656,7 @@ async fn handle_iq_result_returns_empty_response() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&sender_jid),
     )
     .await;
@@ -665,7 +676,7 @@ async fn handle_iq_error_returns_empty_response() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&sender_jid),
     )
     .await;
@@ -727,7 +738,7 @@ async fn handle_iq_command_request_routes_to_registry() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&sender_jid),
     )
     .await;
@@ -776,7 +787,7 @@ async fn handle_iq_single_shot_completed_command_carries_generated_sessionid() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&sender_jid),
     )
     .await;
@@ -841,7 +852,7 @@ async fn handle_iq_command_request_requires_ready_phase() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ConnectionPhase::authenticated(&pending_jid),
         &mut conn_state,
     )
@@ -871,7 +882,7 @@ async fn handle_iq_disco_info_advertises_replies() {
         server_domain,
         muc_domain,
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -887,7 +898,7 @@ async fn handle_iq_disco_info_advertises_replies() {
         server_domain,
         muc_domain,
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -903,7 +914,7 @@ async fn handle_iq_disco_info_advertises_replies() {
         server_domain,
         muc_domain,
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -922,7 +933,7 @@ async fn handle_iq_disco_info_advertises_replies() {
         server_domain,
         muc_domain,
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&user_jid),
     )
     .await;
@@ -999,7 +1010,7 @@ async fn handle_iq_disco_info_answers_every_component_domain() {
                 server_domain,
                 muc_domain,
                 state.as_ref(),
-                &None,
+                None,
                 &phase,
             )
             .await;
@@ -1049,7 +1060,7 @@ async fn disco_reply_for_test(
     phase: &ConnectionPhase,
     frame: &str,
 ) -> Element {
-    let responses = handle_iq(frame, "example.com", "muc.example.com", state, &None, phase).await;
+    let responses = handle_iq(frame, "example.com", "muc.example.com", state, None, phase).await;
     assert_eq!(responses.len(), 1, "exactly one reply: {responses:?}");
     Element::from_str(&responses[0]).expect("reply is well-formed XML")
 }
@@ -1234,10 +1245,10 @@ async fn handle_iq_disco_items_lists_room_bots() {
         .await
         .expect("member tuple");
     let db = state.deps.app_state.db_pool.global();
-    let fixture = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin");
+    let fixture = waddle_extensions::PluginId::try_new(FIXTURE_BOT_PLUGIN).expect("plugin");
     for plugin in [
         fixture.clone(),
-        waddle_extensions::PluginId::new("uninstalled").expect("plugin"),
+        waddle_extensions::PluginId::try_new("uninstalled").expect("plugin"),
     ] {
         crate::server::extension_bot_rooms::record(db, &room, &plugin)
             .await
@@ -1482,7 +1493,8 @@ fn vcard_get_frame(to: &str) -> String {
 #[tokio::test]
 async fn handle_iq_serves_extension_bot_avatars_in_band() {
     use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
     use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
 
     let artifacts = wiremock::MockServer::start().await;
@@ -1702,7 +1714,7 @@ async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(bob),
+        Some(&bob),
         &ready_phase(&bob_jid),
     )
     .await;
@@ -1727,7 +1739,7 @@ async fn handle_iq_cross_user_pep_disco_resolves_session_backed_accounts() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(alice),
+        Some(&alice),
         &ready_phase(
             &"alice-session@example.com/phone"
                 .parse()
@@ -1754,7 +1766,7 @@ async fn handle_iq_disco_items_server_advertises_spaces_service() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -1784,7 +1796,7 @@ async fn handle_iq_disco_info_push_service_reports_xep0357_pubsub_identity() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -1853,7 +1865,7 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -1870,7 +1882,7 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -1894,7 +1906,7 @@ async fn handle_iq_disco_items_push_service_is_owner_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -1934,7 +1946,7 @@ async fn handle_iq_disco_info_push_node_is_owner_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob_jid),
     )
     .await;
@@ -1949,7 +1961,7 @@ async fn handle_iq_disco_info_push_node_is_owner_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice_jid),
     )
     .await;
@@ -2017,7 +2029,7 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2056,7 +2068,7 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2179,7 +2191,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2293,7 +2305,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &None,
+            None,
             &ready_phase(&jid),
         )
         .await;
@@ -2376,7 +2388,7 @@ async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2461,7 +2473,7 @@ async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&bob),
     )
     .await;
@@ -2518,7 +2530,7 @@ async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_s
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2560,7 +2572,7 @@ async fn handle_iq_push_service_xep0050_unknown_action_is_malformed_action() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2641,7 +2653,7 @@ async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_se
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2770,7 +2782,7 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2782,7 +2794,7 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await
@@ -2827,7 +2839,7 @@ async fn handle_iq_xep0357_disable_without_matching_registration_does_not_retire
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2890,7 +2902,7 @@ async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish(
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2942,7 +2954,7 @@ async fn handle_iq_pubsub_publish_rejects_iq_get() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -2977,7 +2989,7 @@ async fn handle_iq_disco_items_spaces_is_empty_without_owner_created_spaces() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &authenticated_session,
+        authenticated_session.as_ref(),
         &authenticated_phase,
     )
     .await;
@@ -3046,7 +3058,7 @@ async fn handle_iq_pubsub_items_spaces_node_lists_published_bookmarks() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &authenticated_session,
+        authenticated_session.as_ref(),
         &authenticated_phase,
     )
     .await;
@@ -3145,7 +3157,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &authenticated_session,
+        authenticated_session.as_ref(),
         &authenticated_phase,
     )
     .await;
@@ -3252,7 +3264,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &authenticated_session,
+        authenticated_session.as_ref(),
         &ready_phase(&authenticated_jid),
     )
     .await;
@@ -3337,7 +3349,7 @@ async fn handle_iq_pubsub_configure_spaces_node_rejects_unsupported_access_model
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &Some(session.clone()),
+            Some(&session.clone()),
             &ready_phase(&bound_jid),
         )
         .await;
@@ -3415,7 +3427,7 @@ async fn handle_iq_pubsub_configure_spaces_node_keeps_spaces_defaults() {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &Some(session.clone()),
+            Some(&session.clone()),
             &ready_phase(&bound_jid),
         )
         .await;
@@ -3494,7 +3506,7 @@ async fn handle_iq_pubsub_configure_spaces_node_merges_partial_form_with_existin
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -3633,7 +3645,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -3765,7 +3777,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -3861,7 +3873,7 @@ async fn admin_channels_create_space_bookmark_grants_space_members_channel_view(
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -3996,7 +4008,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -4057,7 +4069,7 @@ async fn spaces_publish_and_retract_sync_channel_space_link_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session.clone()),
+        Some(&session.clone()),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -4088,7 +4100,7 @@ async fn spaces_publish_and_retract_sync_channel_space_link_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -4159,7 +4171,7 @@ async fn spaces_publish_accepts_escaped_space_node_and_syncs_link_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session.clone()),
+        Some(&session.clone()),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -4194,7 +4206,7 @@ async fn spaces_publish_accepts_escaped_space_node_and_syncs_link_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&bound_jid),
     )
     .await;
@@ -4251,7 +4263,7 @@ async fn handle_iq_disco_info_spaces_node_reports_open_for_public_space() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(viewer),
+        Some(&viewer),
         &viewer_phase,
     )
     .await;
@@ -4306,7 +4318,7 @@ async fn handle_iq_disco_info_spaces_node_reports_whitelist_for_private_space() 
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(viewer),
+        Some(&viewer),
         &viewer_phase,
     )
     .await;
@@ -4342,7 +4354,7 @@ async fn handle_iq_disco_info_unknown_spaces_node_returns_item_not_found() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(viewer),
+        Some(&viewer),
         &viewer_phase,
     )
     .await;
@@ -4368,7 +4380,7 @@ async fn upload_slot_request_requires_ready_phase() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &pending_phase,
     )
     .await;
@@ -4416,7 +4428,7 @@ async fn upload_slot_too_large_error_is_typed_xep0363_iq() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready,
     )
     .await;
@@ -4480,7 +4492,7 @@ async fn handle_iq_pubsub_publish_returns_result() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4520,7 +4532,7 @@ async fn xep0402_bookmark_publish_updates_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4579,7 +4591,7 @@ async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4605,7 +4617,7 @@ async fn xep0402_bookmark_publish_overwrites_existing_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4672,7 +4684,7 @@ async fn xep0402_bookmark_publish_deletes_evicted_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4704,7 +4716,7 @@ async fn xep0402_bookmark_publish_deletes_evicted_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4780,7 +4792,7 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4825,7 +4837,7 @@ async fn xep0402_bookmark_publish_with_malformed_notify_is_rejected() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4860,7 +4872,7 @@ async fn xep0402_bookmark_publish_with_malformed_notify_is_rejected() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4909,7 +4921,7 @@ async fn xep0402_bookmark_publish_with_duplicate_identity_notify_is_rejected() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4951,7 +4963,7 @@ async fn xep0402_bookmark_publish_with_malformed_conference_is_rejected() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -4988,7 +5000,7 @@ async fn xep0402_bookmark_retract_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5014,7 +5026,7 @@ async fn xep0402_bookmark_retract_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5059,7 +5071,7 @@ async fn xep0402_bookmark_node_purge_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5083,7 +5095,7 @@ async fn xep0402_bookmark_node_purge_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5128,7 +5140,7 @@ async fn xep0402_bookmark_node_delete_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5152,7 +5164,7 @@ async fn xep0402_bookmark_node_delete_deletes_xep0492_projection() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5192,7 +5204,7 @@ async fn xep0402_bookmark_publish_and_retract_require_jid_item_ids() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5222,7 +5234,7 @@ async fn xep0402_bookmark_publish_and_retract_require_jid_item_ids() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5250,7 +5262,7 @@ async fn handle_iq_pubsub_items_empty_node_returns_result() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&jid),
     )
     .await;
@@ -5310,7 +5322,7 @@ async fn dm_call_session_initiate_forwards_to_peer_not_feature_not_implemented()
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ready_phase(&alice),
     )
     .await;
@@ -5375,7 +5387,7 @@ async fn mam_members_only_channel_query_returns_forbidden_for_non_member() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&mallory),
     )
     .await;
@@ -5417,7 +5429,7 @@ async fn mam_members_only_channel_query_succeeds_for_channel_member() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&alice),
     )
     .await;
@@ -5442,7 +5454,7 @@ async fn mam_public_channel_query_succeeds_for_non_member() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&mallory),
     )
     .await;
@@ -5506,7 +5518,7 @@ async fn mam_members_only_unmanaged_room_query_returns_forbidden_for_non_member(
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&mallory),
     )
     .await;
@@ -5535,7 +5547,7 @@ async fn mam_members_only_unmanaged_room_query_succeeds_for_member() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&member),
     )
     .await;
@@ -5557,7 +5569,7 @@ async fn mam_room_query_without_bound_session_returns_forbidden() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &ConnectionPhase::Unauthenticated,
     )
     .await;
@@ -5585,7 +5597,7 @@ async fn mam_unmanaged_room_without_live_actor_fails_closed() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &ready_phase(&mallory),
     )
     .await;
@@ -5635,7 +5647,7 @@ async fn owner_configure_without_access_model_does_not_lock_in_legacy_presence_a
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(session),
+        Some(&session),
         &authenticated_phase,
     )
     .await;
@@ -5694,7 +5706,7 @@ async fn peer_read_repairs_unmarked_legacy_presence_avatar_node() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &Some(reader),
+        Some(&reader),
         &phase,
     )
     .await;

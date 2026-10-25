@@ -3,7 +3,8 @@
 use minidom::Element;
 use sqlx::SqlitePool;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use xmpp_parsers::{iq::Iq, stanza_error::DefinedCondition};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::stanza_error::DefinedCondition;
 
 const NS_SEARCH: &str = "jabber:iq:search";
 

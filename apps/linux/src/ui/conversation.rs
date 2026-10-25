@@ -5,10 +5,17 @@
 //! virtualised `ListView`, so only changed rows are touched. Message
 //! actions (react, reply, edit, delete) are in `ui/actions.rs`.
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{
+    ActionExt, ActionMapExt, ActionRowExt, AdjustmentExt, ApplicationExt, BoxExt, ButtonExt, Cast,
+    CastNone, EntryExt, GestureExt, GtkWindowExt, ListBoxRowExt, ListItemExt, ListModelExt,
+    NavigationPageExt, ObjectExt, TextureExt, ToVariant, WidgetExt,
+};
+use adw::subclass::prelude::ObjectSubclassIsExt;
+use gtk::gio::prelude::FileExtManual;
 use gtk::{gdk, gio, glib};
-use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
+use waddle_client_session::{
+    Attachment, Delivery, HistoryPage, Reaction, Timeline, TimelineDiff, TimelineItem,
+};
 
 use std::time::Instant;
 
@@ -162,7 +169,7 @@ impl WaddleWindow {
         imp.account_status.set_title("Connecting…");
         imp.content_stack.set_visible_child_name("empty");
 
-        let transfers = match attachments::Transfers::new(account.server.as_url()) {
+        let transfers = match attachments::Transfers::try_new(account.server.as_url()) {
             Ok(transfers) => transfers,
             Err(error) => {
                 tracing::warn!(%error, "could not set up HTTP for file sharing");
@@ -723,7 +730,15 @@ impl WaddleWindow {
                 .borrow_mut()
                 .entry(key.clone())
                 .or_default()
-                .apply_history_page(selected, page.first_id, page.complete);
+                .apply_history_page(
+                    selected,
+                    page.first_id,
+                    if page.complete {
+                        HistoryPage::Complete
+                    } else {
+                        HistoryPage::Partial
+                    },
+                );
             let current = imp.current.borrow().as_deref() == Some(key.as_str());
             if current {
                 window.apply(&diffs);
@@ -825,6 +840,7 @@ impl WaddleWindow {
                     rows.splice(*index, 1, &[boxed((**item).clone(), Layout::UNPLACED)]);
                     touched.extend([at, at + 1]);
                 }
+                _ => {}
             }
         }
         self.refresh_headers(&rows, touched);
@@ -1337,6 +1353,7 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
             body.add_css_class("error");
         }
         Delivery::Sent | Delivery::Received => {}
+        _ => {}
     }
     body.set_visible(!markup.is_empty());
     body.set_markup(&markup);

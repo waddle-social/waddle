@@ -266,9 +266,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("call-abc-123").expect("valid call id");
         let identity = fixture_identity();
 
         let token = mint_join_token(fixture_inputs(
@@ -311,9 +312,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("general@muc.waddle.social").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("general@muc.waddle.social").expect("valid call id");
         let identity = fixture_identity();
 
         let mut inputs = fixture_inputs(&api_key, &secret, &ws_url, &call_id, &identity);
@@ -342,9 +344,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("call-skew").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("call-skew").expect("valid call id");
         let identity = fixture_identity();
 
         let before = Utc::now().timestamp();
@@ -377,9 +380,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("call-abc-123").expect("valid call id");
         let identity = fixture_identity();
         let a = mint_join_token(fixture_inputs(
             &api_key, &secret, &ws_url, &call_id, &identity,
@@ -397,9 +401,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("call-abc-123").expect("valid call id");
         let identity = fixture_identity();
 
         let token = mint_join_token(MintInputs {
@@ -433,9 +438,10 @@ mod tests {
         let api_key = ApiKey::new("APIxxxxxxxx");
         let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length");
-        let ws_url = WebsocketUrl::new("wss://livekit.waddle.social".parse().expect("valid URL"))
-            .expect("valid ws url");
-        let call_id = CallId::new("call-abc-123").expect("valid call id");
+        let ws_url =
+            WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("valid URL"))
+                .expect("valid ws url");
+        let call_id = CallId::try_new("call-abc-123").expect("valid call id");
         let identity = fixture_identity();
 
         let token = mint_join_token(fixture_inputs(

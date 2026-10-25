@@ -37,7 +37,7 @@ pub(super) async fn promote_iq(
     let target = iq
         .to()
         .and_then(|jid| jid.clone().try_into_full().ok())
-        .filter(|full| registry.get_entry(full).is_some());
+        .filter(|full| registry.entry(full).is_some());
     if let Some(target) = target {
         if matches!(
             registry.send_to(&target, Stanza::Iq(Box::new(iq))).await,
@@ -60,7 +60,7 @@ pub(super) async fn promote_presence(
         .to
         .as_ref()
         .and_then(|jid| jid.clone().try_into_full().ok())
-        .filter(|full| registry.get_entry(full).is_some());
+        .filter(|full| registry.entry(full).is_some());
     if let Some(target) = target {
         if matches!(
             registry.send_to(&target, Stanza::Presence(presence)).await,

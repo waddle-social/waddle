@@ -51,6 +51,7 @@ pub const NS_WADDLE_SAFETY_SCORES: &str = "urn:waddle:safety-scores:1";
 
 /// A category in the room extension safety-score payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SafetyCategory {
     /// `is_question`: a community-enrichment signal, not a safety one.
     IsQuestion,
@@ -72,6 +73,7 @@ pub enum SafetyCategory {
 
 impl SafetyCategory {
     /// The wire token, as sent in `<score category='…'/>`.
+    #[must_use]
     pub fn as_wire(self) -> &'static str {
         match self {
             SafetyCategory::IsQuestion => "is_question",
@@ -86,6 +88,7 @@ impl SafetyCategory {
     }
 
     /// Parses a wire token; `None` for a category this client does not know.
+    #[must_use]
     pub fn from_wire(token: &str) -> Option<Self> {
         match token {
             "is_question" => Some(SafetyCategory::IsQuestion),
@@ -107,10 +110,13 @@ pub struct SafetyProbability(f64);
 
 impl SafetyProbability {
     /// `None` unless `value` is finite and within `0.0..=1.0`.
-    pub fn new(value: f64) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: f64) -> Option<Self> {
         (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
     }
 
+    /// Return the finite probability within 0.0..=1.0.
+    #[must_use]
     pub fn value(self) -> f64 {
         self.0
     }
@@ -122,10 +128,13 @@ impl SafetyProbability {
 pub struct JudgmentModelVersion(String);
 
 impl JudgmentModelVersion {
-    pub fn new(value: &str) -> Option<Self> {
+    /// Create a trimmed, non-blank model-version token, returning None for blank input.
+    #[must_use]
+    pub fn try_new(value: &str) -> Option<Self> {
         non_empty(value).map(Self)
     }
-
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -137,10 +146,13 @@ impl JudgmentModelVersion {
 pub struct TaxonomyVersion(String);
 
 impl TaxonomyVersion {
-    pub fn new(value: &str) -> Option<Self> {
+    /// Create a trimmed, non-blank taxonomy-version token, returning None for blank input.
+    #[must_use]
+    pub fn try_new(value: &str) -> Option<Self> {
         non_empty(value).map(Self)
     }
-
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -149,14 +161,18 @@ impl TaxonomyVersion {
 /// One `<score/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScore {
+    /// XEP-0030 identity category.
     pub category: SafetyCategory,
+    /// Model probability constrained to the supported unit interval.
     pub probability: SafetyProbability,
+    /// Version of the category taxonomy used by the scoring model.
     pub taxonomy_version: TaxonomyVersion,
 }
 
 /// One `<safety-scores/>` batch: every score one model call produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScores {
+    /// Version of the scoring model that produced these values.
     pub model_version: JudgmentModelVersion,
     /// Known categories only, in document order, one per category.
     pub scores: Vec<SafetyScore>,
@@ -171,11 +187,13 @@ pub struct SafetyScoresFastening {
     pub target_stanza_id: StanzaId,
     /// Room-assigned identity of the body revision that was judged.
     pub source_revision_id: StanzaId,
+    /// Model-produced safety scores for the referenced message revision.
     pub scores: SafetyScores,
 }
 
 /// Extracts a safety-scores fastening from a `<message/>`, or `None` when
 /// the message carries none or carries a malformed one.
+#[must_use]
 pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFastening> {
     let apply_to = single_apply_to(message)?;
     if is_true(apply_to.attr("clear")) {
@@ -214,6 +232,7 @@ pub fn parse_safety_scores_fastening(message: &Element) -> Option<SafetyScoresFa
 /// uses to reject an occupant's own claim of moderation. A direct-message
 /// fastening is not accepted: no trusted 1:1 sender is defined for this
 /// payload.
+#[must_use]
 pub fn parse_room_safety_scores_child(message: &Element) -> Option<SafetyScoresFastening> {
     let from: jid::BareJid = message.attr("from")?.parse().ok()?;
     if message.attr("type") != Some("groupchat") {
@@ -234,7 +253,7 @@ fn single_apply_to(message: &Element) -> Option<&Element> {
 }
 
 fn parse_safety_scores(payload: &Element) -> Option<SafetyScores> {
-    let model_version = JudgmentModelVersion::new(payload.attr("model-version")?)?;
+    let model_version = JudgmentModelVersion::try_new(payload.attr("model-version")?)?;
     let mut scores: Vec<SafetyScore> = Vec::new();
     for score in payload
         .children()
@@ -258,8 +277,8 @@ fn parse_score(element: &Element) -> Option<SafetyScore> {
         .trim()
         .parse::<f64>()
         .ok()
-        .and_then(SafetyProbability::new)?;
-    let taxonomy_version = TaxonomyVersion::new(element.attr("taxonomy-version")?)?;
+        .and_then(SafetyProbability::try_new)?;
+    let taxonomy_version = TaxonomyVersion::try_new(element.attr("taxonomy-version")?)?;
     Some(SafetyScore {
         category,
         probability,

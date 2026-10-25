@@ -1,5 +1,17 @@
-use super::*;
+use super::{
+    current_claim, deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, user_entity,
+    Arc, MucProxyOrigin, MucProxyRouteAttempt, MucProxyRouteDecision, NodeId,
+    OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind, OrderedRelayMucProxyOutcome,
+    OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind, RelayHandle, RelayTraceContext, Stanza,
+    ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+};
+#[cfg(test)]
+use crate::clustering::ordered_relay::{OrderedRelayReply, RemoteStanzaEnvelope};
 use crate::clustering::relay::{RelayMucCleanup, RelayMucCleanupOutcome};
+#[cfg(test)]
+use crate::clustering::route_bridge::ORDERED_RECEIVER_DELIVERY_TIMEOUT;
+#[cfg(test)]
+use std::time::Duration;
 
 impl OrderedRelayDeliveryBridge {
     /// A detached/failed connection has no registered remote resource to route
@@ -159,10 +171,13 @@ impl DelayedCleanupRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clustering::route_bridge::delivery::receiver::room_entity;
     use crate::clustering::route_bridge::tests::{
         receiver_identity, services_with_claims, test_peer_id,
     };
+    use crate::config::ClusteringMessagingConfig;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
+    use tokio_util::sync::CancellationToken;
     use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;

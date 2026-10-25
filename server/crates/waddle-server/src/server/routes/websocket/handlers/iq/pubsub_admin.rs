@@ -1,7 +1,12 @@
 use super::permissions::{
     seed_spaces_node_owners, server_permission_allowed, write_space_owner_tuple,
 };
-use super::*;
+use super::{
+    build_pubsub_affiliations_result, build_pubsub_configure_form_result, build_pubsub_error,
+    build_pubsub_owner_subscriptions_result, build_pubsub_subscribe_result, build_pubsub_success,
+    debug, iq_to_xml, is_pep_self_or_to, spaces_service_bare_jid, warn, BareJid, Permission,
+    PubSubError, PubSubRequest, Session, SubId, SubscriptionState, WebSocketState,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
 use crate::space_identity::{space_jid_for_node, SpaceNode};
 
@@ -21,7 +26,7 @@ pub(super) async fn handle_pubsub_admin_request(
     target_jid: &BareJid,
     user_jid: &BareJid,
     spaces_domain: &str,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     request: PubSubRequest,
 ) -> Vec<String> {
     match request {
@@ -32,9 +37,7 @@ pub(super) async fn handle_pubsub_admin_request(
             if target_jid.to_string() == spaces_domain {
                 if server_permission_allowed(
                     state,
-                    authenticated_session
-                        .as_ref()
-                        .map(ResolvedPrincipal::from_authenticated_session),
+                    authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     Permission::CreateSpace,
                 )
                 .await
@@ -72,12 +75,8 @@ pub(super) async fn handle_pubsub_admin_request(
                                     PubSubError::Forbidden,
                                 ))];
                             }
-                            if let Err(error) = write_space_owner_tuple(
-                                state,
-                                &node,
-                                authenticated_session.as_ref(),
-                            )
-                            .await
+                            if let Err(error) =
+                                write_space_owner_tuple(state, &node, authenticated_session).await
                             {
                                 warn!(node = %node, error = %error, "Failed to persist Space owner tuple");
                                 return vec![iq_to_xml(build_pubsub_error(
@@ -686,6 +685,7 @@ pub(super) async fn handle_pubsub_admin_request(
         PubSubRequest::Publish { .. }
         | PubSubRequest::Items { .. }
         | PubSubRequest::Retract { .. } => Vec::new(),
+        _ => Vec::new(),
     }
 }
 

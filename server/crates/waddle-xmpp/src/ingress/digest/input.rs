@@ -186,7 +186,7 @@ impl DigestInput {
         validate_name_opt(context.stanza_lang.as_ref().map(|lang| lang.0.as_str()))?;
 
         // Thread ids preserve their ORIGINAL bytes (only whitespace-only is
-        // absent), exactly like `ThreadId::new` and every archive/routing
+        // absent), exactly like `ThreadId::try_new` and every archive/routing
         // consumer built on it — trimming here would falsely digest-equal
         // messages whose archived thread ids observably differ. Parents come
         // pre-trimmed by the parse layer.
@@ -219,7 +219,7 @@ impl DigestInput {
                 }
                 // The reattached XEP-0201 thread element (frame.rs). The
                 // downstream consumer (`thread_info_from_message_in_stanza_ns`)
-                // TRIMS payload-form id text before `ThreadId::new` — unlike
+                // TRIMS payload-form id text before `ThreadId::try_new` — unlike
                 // the typed-field fallback, which preserves bytes — so the
                 // digest mirrors that exact split.
                 (CLIENT_STANZA_NS, "thread") => {
@@ -292,11 +292,11 @@ pub(super) struct DigestFields {
 /// them verbatim), whitespace-only means no thread, and the parent (already
 /// trimmed by the parse layer) gets the same treatment.
 fn digest_thread(id: &str, parent: Option<&str>) -> Option<Result<DigestThread, DigestInputError>> {
-    let id = ThreadId::new(id)?;
+    let id = ThreadId::try_new(id)?;
     if let Err(error) = validate_id(id.as_str()) {
         return Some(Err(error));
     }
-    let parent = parent.map(str::trim).and_then(ThreadId::new);
+    let parent = parent.map(str::trim).and_then(ThreadId::try_new);
     if let Some(parent) = &parent {
         if let Err(error) = validate_id(parent.as_str()) {
             return Some(Err(error));
@@ -359,7 +359,7 @@ fn parse_reply(element: &Element) -> Result<DigestReply, DigestInputError> {
     // attribute), so trimming would falsely digest-equal replies whose
     // archived ids observably differ. Whitespace-only — no reply to every
     // consumer — is rejected rather than hashed.
-    let Some(id) = RichMessageId::new(id) else {
+    let Some(id) = RichMessageId::try_new(id) else {
         return Err(DigestInputError::ReplyMalformed);
     };
     if id.as_str().len() > MAX_ID_LEN {

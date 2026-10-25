@@ -96,7 +96,7 @@ fn dm_bucket_stays_under_web_push_max_body() {
 fn vapid_signer_produces_jwt_verifiable_under_own_public_key() {
     let secret = p256::SecretKey::random(&mut OsRng);
     let kid = Kid::new();
-    let signer = InProcessVapidSigner::new(kid, secret).expect("signer");
+    let signer = InProcessVapidSigner::try_new(kid, secret).expect("signer");
     let aud = aud_for(&Url::parse("https://fcm.googleapis.com/fcm/send/abc").unwrap())
         .expect("valid endpoint");
     let sub = VapidSub::default_for_domain("example.com").expect("valid sub");
@@ -121,7 +121,7 @@ fn vapid_signer_produces_jwt_verifiable_under_own_public_key() {
 #[test]
 fn vapid_k_header_matches_signer_public_key() {
     let secret = p256::SecretKey::random(&mut OsRng);
-    let signer = InProcessVapidSigner::new(Kid::new(), secret).expect("signer");
+    let signer = InProcessVapidSigner::try_new(Kid::new(), secret).expect("signer");
     let k = vapid_k_header(&signer.current_public_key());
     // Decoded bytes are exactly the uncompressed public-key point.
     let decoded = URL_SAFE_NO_PAD.decode(&k).expect("base64url decode");

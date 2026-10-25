@@ -6,14 +6,13 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Json, Router,
-};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use jid::BareJid;
@@ -674,6 +673,11 @@ mod tests {
     use waddle_xmpp::pubsub::{InMemoryPubSubStorage, NodeConfig, PubSubItem};
     use waddle_xmpp_core::xcal::{Freq, Rrule, Weekday};
 
+    fn feed_secret() -> &'static [u8; 32] {
+        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &KEY
+    }
+
     fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, 0)
             .single()
@@ -687,7 +691,7 @@ mod tests {
     async fn test_auth_state() -> Arc<AuthState> {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig;
-        let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
+        let db_pool = DatabasePool::try_new(config, pool_config).await.unwrap();
         MigrationRunner::global()
             .run(db_pool.global())
             .await
@@ -705,13 +709,15 @@ mod tests {
     #[test]
     fn feed_token_round_trips_and_rejects_tampering() {
         let community: BareJid = "community.localhost".parse().unwrap();
-        let token = sign_feed_token(b"secret", &community);
-        assert_eq!(verify_feed_token(b"secret", &token).unwrap(), community);
+        let token = sign_feed_token(feed_secret(), &community);
+        assert_eq!(verify_feed_token(feed_secret(), &token).unwrap(), community);
 
         let mut tampered = token.clone();
         tampered.push('x');
-        assert!(verify_feed_token(b"secret", &tampered).is_err());
-        assert!(verify_feed_token(b"other-secret", &token).is_err());
+        assert!(verify_feed_token(feed_secret(), &tampered).is_err());
+        let mut other_secret = *feed_secret();
+        other_secret[0] ^= 1;
+        assert!(verify_feed_token(&other_secret, &token).is_err());
     }
 
     #[test]
@@ -827,9 +833,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -878,9 +884,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -943,9 +949,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -1026,9 +1032,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -1109,9 +1115,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -1169,9 +1175,9 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             storage,
-            b"calendar-test-key",
+            feed_secret(),
         ));
-        let token = sign_feed_token(b"calendar-test-key", &community);
+        let token = sign_feed_token(feed_secret(), &community);
         let response = router(state)
             .oneshot(
                 Request::builder()
@@ -1202,7 +1208,7 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             Arc::new(InMemoryPubSubStorage::new()),
-            b"calendar-test-key",
+            feed_secret(),
         ));
 
         let response = router(state)
@@ -1244,7 +1250,7 @@ mod tests {
         let state = Arc::new(CalendarFeedState::new(
             auth_state.clone(),
             Arc::new(InMemoryPubSubStorage::new()),
-            b"calendar-test-key",
+            feed_secret(),
         ));
 
         let response = router(state)

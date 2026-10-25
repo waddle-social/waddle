@@ -1,6 +1,7 @@
 //! XEP-0060 subscription typed payloads.
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use jid::Jid;
 use serde::{Deserialize, Serialize};
@@ -13,15 +14,19 @@ pub struct SubId(String);
 
 impl SubId {
     /// Generate a fresh subid backed by a v4 UUID.
+    #[must_use]
     pub fn generate() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
     /// Wrap an existing identifier (used by storage when reading rows back).
+    #[must_use]
     pub fn from_raw(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -39,9 +44,13 @@ impl fmt::Display for SubId {
 /// exposed only so handlers can return it from `<subscription/>` queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubscriptionState {
+    /// No affiliation, subscription, or optional protocol value is assigned.
     None,
+    /// The subscription awaits owner approval.
     Pending,
+    /// Subscription configuration must be completed before notifications are sent.
     Unconfigured,
+    /// Approve a presence subscription.
     Subscribed,
 }
 
@@ -73,9 +82,13 @@ impl FromStr for SubscriptionState {
 /// A persisted subscription (XEP-0060 §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscription {
+    /// Service-assigned identifier distinguishing this subscription.
     pub subid: SubId,
+    /// XMPP address receiving subscription notifications.
     pub subscriber: Jid,
+    /// Current lifecycle or protocol state.
     pub state: SubscriptionState,
+    /// Subscription creation time as Unix milliseconds.
     pub created_at_ms: i64,
 }
 

@@ -179,12 +179,12 @@ pub fn parse_search_request(iq: &Iq) -> Option<SearchRequest> {
     if form.form_type != FormType::Submit {
         return None;
     }
-    if form.get_form_type_value() != Some(NS_CHANNEL_SEARCH_PARAMS) {
+    if form.form_type_value() != Some(NS_CHANNEL_SEARCH_PARAMS) {
         return None;
     }
 
     let rsm = extract_rsm_request(elem).and_then(Result::ok);
-    let query = form.get_value(FIELD_QUERY).unwrap_or_default().to_owned();
+    let query = form.value(FIELD_QUERY).unwrap_or_default().to_owned();
     let max = rsm.as_ref().and_then(|rsm| rsm.max);
 
     Some(SearchRequest { query, max, rsm })

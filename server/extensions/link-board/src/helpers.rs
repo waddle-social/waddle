@@ -1,4 +1,4 @@
-use super::*;
+use super::{types, PLUGIN_ID, PLUGIN_NS};
 
 use core::fmt::Write as _;
 

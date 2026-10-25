@@ -3,11 +3,18 @@
 //! Registration shares the archive insert transaction and its counter lock.
 //! Readiness never acquires canonical locks or executes predecessor work;
 //! callers bound any re-probes and defer persistent barriers to recovery.
+use crate::db::Database;
+use crate::db::Row;
+use crate::db::Rows;
+use crate::ingress_substrate::IngressSubstrateError;
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{ingress::MessageKey, mam::ArchiveOrdinal, pending_delivery::PendingRowId};
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::mam::ArchiveOrdinal;
+use waddle_xmpp::pending_delivery::PendingRowId;
 
 use super::{EffectReceiptRepository, IngressUowError, IngressUowTransaction};
-use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
+use crate::db::DatabaseDriver;
+use crate::ingress::decision::EffectReceiptKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchTarget {
@@ -46,7 +53,8 @@ impl ArchiveDispatchRepository {
         row: &waddle_xmpp::pending_delivery::PendingRow,
         physical_id: &PendingRowId,
     ) -> Result<bool, IngressUowError> {
-        use waddle_xmpp::{ingress::IngressEffectIntent, pending_delivery::PendingPayload};
+        use waddle_xmpp::ingress::IngressEffectIntent;
+        use waddle_xmpp::pending_delivery::PendingPayload;
         let (IngressEffectIntent::RouteDirect { recipient, .. }, PendingPayload::Archived(stamp)) =
             (intent, &row.payload)
         else {
@@ -147,7 +155,7 @@ impl ArchiveDispatchRepository {
     }
 
     pub(crate) async fn positions_pooled(
-        db: &crate::db::Database,
+        db: &Database,
         key: MessageKey,
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>, IngressUowError> {
@@ -311,7 +319,7 @@ fn positions_query(driver: DatabaseDriver) -> &'static str {
 }
 
 async fn decode_positions(
-    mut rows: crate::db::Rows,
+    mut rows: Rows,
 ) -> Result<Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>, IngressUowError> {
     let mut positions = Vec::new();
     while let Some(row) = rows.next().await? {
@@ -429,9 +437,10 @@ WHERE p.archive_jid = ? AND p.archive_seq < ?
 ORDER BY p.archive_seq, p.message_key";
 
 fn decode_message(stored: &str) -> Result<MessageKey, IngressUowError> {
-    stored.parse().map(MessageKey::from_storage).map_err(|_| {
-        crate::ingress_substrate::IngressSubstrateError::InvalidStoredMessageKey.into()
-    })
+    stored
+        .parse()
+        .map(MessageKey::from_storage)
+        .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey.into())
 }
 
 struct DispatchPosition {
@@ -440,7 +449,7 @@ struct DispatchPosition {
     resource: Option<FullJid>,
 }
 
-fn decode_position(row: &crate::db::Row) -> Result<DispatchPosition, IngressUowError> {
+fn decode_position(row: &Row) -> Result<DispatchPosition, IngressUowError> {
     let archive: String = row.get(0)?;
     let ordinal: i64 = row.get(1)?;
     let resource: String = row.get(2)?;

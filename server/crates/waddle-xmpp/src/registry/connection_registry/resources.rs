@@ -1,4 +1,5 @@
-use super::*;
+use super::{BareJid, ConnectionRegistry, FullJid, Ordering, SendResult, Stanza};
+use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
     /// Mark a connected resource as interested in roster pushes.
@@ -24,7 +25,7 @@ impl ConnectionRegistry {
     }
 
     /// Get all connected interested resources for a bare JID.
-    pub fn get_roster_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+    pub fn roster_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
         self.connections
             .iter()
             .filter(|entry| {
@@ -57,7 +58,7 @@ impl ConnectionRegistry {
     }
 
     /// Get all connected resources for a bare JID that requested the blocklist.
-    pub fn get_blocklist_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
+    pub fn blocklist_interested_resources_for_user(&self, bare_jid: &BareJid) -> Vec<FullJid> {
         self.connections
             .iter()
             .filter(|entry| {
@@ -104,7 +105,7 @@ impl ConnectionRegistry {
     /// sessions, not active ones, so without this the janitor would
     /// wrongly treat actively-claimed-but-not-yet-acked rows as
     /// orphaned and release them. (Codex/Qodo review on PR #360.)
-    pub fn active_sm_stream_ids(&self) -> Vec<crate::pending_delivery::SmSessionId> {
+    pub fn active_sm_stream_ids(&self) -> Vec<SmSessionId> {
         self.connections
             .iter()
             .filter_map(|entry| entry.value().sm_stream_id())
@@ -115,9 +116,9 @@ impl ConnectionRegistry {
     ///
     /// Returns all full JIDs that match the bare JID except the excluded one.
     /// This does NOT filter by carbons status — callers that are routing
-    /// XEP-0280 carbon copies should use [`Self::get_other_carbon_resources_for_user`]
+    /// XEP-0280 carbon copies should use [`Self::other_carbon_resources_for_user`]
     /// instead so that non-opted-in resources are not sent carbon-wrapped stanzas.
-    pub fn get_other_resources_for_user(
+    pub fn other_resources_for_user(
         &self,
         bare_jid: &BareJid,
         exclude_jid: &FullJid,
@@ -141,7 +142,7 @@ impl ConnectionRegistry {
     /// have explicitly opted in via `<enable xmlns='urn:xmpp:carbons:2'/>`.
     /// `exclude_jids` is the original stanza's delivery set (XEP-0280 §6.3:
     /// clients addressed by the original MUST NOT also get a forwarded copy).
-    pub fn get_other_carbon_resources_for_user(
+    pub fn other_carbon_resources_for_user(
         &self,
         bare_jid: &BareJid,
         exclude_jids: &[FullJid],

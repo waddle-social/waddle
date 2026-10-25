@@ -7,6 +7,8 @@
 
 use super::codec::RemoteStanza;
 use super::NodeId;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::IngressCanonicalRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -237,12 +239,12 @@ pub enum OrderedRelayPayload {
     ProcessedDirectMessage {
         recipient: jid::Jid,
         stanza: RemoteStanza,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
     },
     Message {
         recipient: jid::Jid,
         stanza: RemoteStanza,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
@@ -255,7 +257,7 @@ pub enum OrderedRelayPayload {
         stanza: RemoteStanza,
     },
     MucProxy {
-        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        canonical: Option<IngressCanonicalRef>,
         principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
         #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
         stanza_lang: Option<xmpp_parsers::message::Lang>,
@@ -699,12 +701,12 @@ enum OrderedRelayPayloadFingerprint {
     ProcessedDirectMessage {
         recipient: jid::Jid,
         stanza: minidom::Element,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
     },
     Message {
         recipient: jid::Jid,
         stanza: minidom::Element,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Iq {
@@ -716,7 +718,7 @@ enum OrderedRelayPayloadFingerprint {
         stanza: minidom::Element,
     },
     MucProxy {
-        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        canonical: Option<IngressCanonicalRef>,
         principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
         stanza_lang: Option<xmpp_parsers::message::Lang>,
         room_jid: jid::BareJid,

@@ -35,7 +35,7 @@ impl XmppServiceDomains {
         {
             return None;
         }
-        PluginId::new(jid.node()?.as_str()).ok()
+        PluginId::try_new(jid.node()?.as_str()).ok()
     }
 
     /// The bot's own full JID.

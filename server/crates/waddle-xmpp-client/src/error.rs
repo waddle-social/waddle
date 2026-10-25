@@ -1,3 +1,5 @@
+//! Typed transport, session, authentication, and XMPP stanza failures.
+
 use std::time::Duration;
 
 use minidom::Element;
@@ -8,94 +10,178 @@ use crate::push::PushRegistrationError;
 use crate::request::{RequestId, StanzaId};
 use crate::state::{ClientState, SessionPhase};
 
+/// Result of a client operation with a typed client failure.
 pub type ClientResult<T> = Result<T, ClientError>;
 
 /// RFC 6120 §8.3 stanza-error condition names used by higher-level
 /// protocol flows.
 pub const STANZA_CONDITION_ITEM_NOT_FOUND: &str = "item-not-found";
+/// Protocol token `precondition-not-met`.
 pub const STANZA_CONDITION_PRECONDITION_NOT_MET: &str = "precondition-not-met";
+/// Protocol token `session-expired`.
 pub const STANZA_CONDITION_SESSION_EXPIRED: &str = "session-expired";
 
 #[derive(Debug, Error)]
+/// Transport, authentication, session-state, request, and protocol failures exposed by the client.
+#[non_exhaustive]
 pub enum ClientError {
     #[error(transparent)]
+    /// Validation failure raised by the shared XMPP core.
     Core(#[from] waddle_xmpp_core::CoreError),
     #[error("invalid websocket endpoint scheme `{scheme}`; expected `ws` or `wss`")]
-    InvalidTransportScheme { scheme: String },
+    /// Invalid websocket endpoint scheme `scheme`; expected `ws` or `wss`.
+    InvalidTransportScheme {
+        #[doc = "URL scheme that failed endpoint or origin validation."]
+        scheme: String,
+    },
     #[error("websocket endpoint must include a host")]
+    /// Websocket endpoint must include a host.
     MissingWebSocketHost,
     #[error("client resource must not be empty")]
+    /// Client resource must not be empty.
     EmptyResource,
     #[error("stanza id must not be empty")]
+    /// Stanza id must not be empty.
     EmptyStanzaId,
     #[error("request correlation ids are exhausted")]
+    /// Request correlation ids are exhausted.
     RequestIdExhausted,
     #[error("request {request_id} is already pending")]
-    DuplicateRequest { request_id: RequestId },
+    /// Request `request_id` is already pending.
+    DuplicateRequest {
+        #[doc = "Identifier used to correlate the pending client request."]
+        request_id: RequestId,
+    },
     #[error("stanza id `{stanza_id}` is already pending")]
-    DuplicateStanzaCorrelation { stanza_id: StanzaId },
+    /// Stanza id `stanza_id` is already pending.
+    DuplicateStanzaCorrelation {
+        #[doc = "Identifier used for stanza correlation."]
+        stanza_id: StanzaId,
+    },
     #[error("request {request_id} is not pending")]
-    UnknownRequest { request_id: RequestId },
+    /// Request `request_id` is not pending.
+    UnknownRequest {
+        #[doc = "Identifier used to correlate the pending client request."]
+        request_id: RequestId,
+    },
     #[error("stanza id `{stanza_id}` is not pending")]
-    UnknownStanzaCorrelation { stanza_id: StanzaId },
+    /// Stanza id `stanza_id` is not pending.
+    UnknownStanzaCorrelation {
+        #[doc = "Identifier used for stanza correlation."]
+        stanza_id: StanzaId,
+    },
     #[error("unsupported session transition from {from:?} to {to:?}")]
+    /// Unsupported session transition from `from:?` to `to:?`.
     InvalidPhaseTransition {
+        /// Session phase before the rejected transition.
         from: SessionPhase,
+        /// Requested target session phase.
         to: SessionPhase,
     },
     #[error("unsupported client-state transition from {from:?} to {to:?}")]
-    InvalidStateTransition { from: ClientState, to: ClientState },
+    /// Unsupported client-state transition from `from:?` to `to:?`.
+    InvalidStateTransition {
+        #[doc = "Client state before the rejected transition."]
+        from: ClientState,
+        #[doc = "Requested target client state."]
+        to: ClientState,
+    },
     #[error("server did not advertise required stream feature {feature}")]
-    MissingStreamFeature { feature: RequiredStreamFeature },
+    /// Server did not advertise required stream feature `feature`.
+    MissingStreamFeature {
+        #[doc = "Feature required by the request or advertised by the service."]
+        feature: RequiredStreamFeature,
+    },
     #[error("received invalid stream features payload")]
+    /// Received invalid stream features payload.
     InvalidStreamFeatures,
     #[error("received invalid SASL failure payload")]
+    /// Received invalid SASL failure payload.
     InvalidSaslFailure,
     #[error("received invalid bind response payload")]
+    /// Received invalid bind response payload.
     InvalidBindResponse,
     #[error("server rejected SASL authentication with condition `{condition}`")]
-    AuthenticationRejected { condition: SaslFailureCondition },
+    /// Server rejected SASL authentication with condition `condition`.
+    AuthenticationRejected {
+        #[doc = "XMPP error condition identifying the protocol failure."]
+        condition: SaslFailureCondition,
+    },
     #[error("websocket transport request could not be built")]
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    /// Websocket transport request could not be built.
     InvalidWebSocketRequest(#[source] tokio_tungstenite::tungstenite::http::Error),
     #[error("websocket connection timed out after {timeout:?}")]
-    WebSocketConnectTimeout { timeout: Duration },
+    /// Websocket connection timed out after `timeout:?`.
+    WebSocketConnectTimeout {
+        #[doc = "Duration after which the operation times out."]
+        timeout: Duration,
+    },
     #[error("websocket write timed out after {timeout:?}")]
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
-    WebSocketWriteTimeout { timeout: Duration },
+    /// Websocket write timed out after `timeout:?`.
+    WebSocketWriteTimeout {
+        #[doc = "Duration after which the operation times out."]
+        timeout: Duration,
+    },
     #[error("iq request timed out after {timeout:?}")]
-    IqTimeout { timeout: Duration },
+    /// Iq request timed out after `timeout:?`.
+    IqTimeout {
+        #[doc = "Duration after which the operation times out."]
+        timeout: Duration,
+    },
     #[error("websocket transport failed")]
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    /// Websocket transport failed.
     WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("websocket TLS configuration could not be built")]
     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+    /// Websocket TLS configuration could not be built.
     WebSocketTlsConfig(#[source] rustls::Error),
     #[error("websocket transport received an empty XMPP frame")]
+    /// Websocket transport received an empty XMPP frame.
     EmptyTransportFrame,
     #[error("websocket transport frame exceeds the maximum size of {max} bytes")]
-    TransportFrameTooLarge { max: usize },
+    /// Websocket transport frame exceeds the maximum size of `max` bytes.
+    TransportFrameTooLarge {
+        #[doc = "Maximum accepted size or count."]
+        max: usize,
+    },
     #[error("websocket transport received malformed XMPP framing")]
+    /// Websocket transport received malformed XMPP framing.
     InvalidTransportFrame,
     #[error("stream open frame contains an invalid `to` JID")]
+    /// Stream open frame contains an invalid `to` JID.
     InvalidStreamOpenTo,
     #[error("stream open frame contains an invalid `from` JID")]
+    /// Stream open frame contains an invalid `from` JID.
     InvalidStreamOpenFrom,
     #[error("stream open frame uses unsupported version `{version}`")]
-    UnsupportedStreamVersion { version: String },
+    /// Stream open frame uses unsupported version `version`.
+    UnsupportedStreamVersion {
+        #[doc = "Version advertised by the extension or protocol entity."]
+        version: String,
+    },
     #[error("websocket transport received an unsupported message type")]
+    /// Websocket transport received an unsupported message type.
     UnsupportedWebSocketMessage,
     #[error("websocket transport is already closed")]
+    /// Websocket transport is already closed.
     TransportClosed,
     #[error("stream management acknowledgement timer is unavailable")]
+    /// Stream management acknowledgement timer is unavailable.
     StreamManagementClockUnavailable,
     #[error("request was cancelled")]
+    /// Request was cancelled.
     RequestCancelled,
     #[error("the XMPP session is disconnected")]
+    /// The XMPP session is disconnected.
     Disconnected,
     #[error(transparent)]
+    /// Failure of the push-service registration handshake.
     PushRegistration(#[from] PushRegistrationError),
     #[error("server returned a stanza error: {0}")]
+    /// Server returned a stanza error: `0`.
     StanzaError(#[from] StanzaError),
 }
 
@@ -129,17 +215,24 @@ pub struct StanzaError {
 /// identified by its element name and namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationCondition {
+    /// Namespace URI of the application-specific condition element.
     pub namespace: String,
+    /// Local XML name of the condition element, such as `session-expired`.
     pub name: String,
 }
 
 /// Values of the `type` attribute on an XMPP `<error/>` element (RFC 6120 §8.3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StanzaErrorType {
+    /// Authorization must be obtained before retrying.
     Auth,
+    /// The request should not be retried unchanged.
     Cancel,
+    /// Processing may continue despite the error.
     Continue,
+    /// The request must be modified before retrying.
     Modify,
+    /// The request may succeed when retried later.
     Wait,
     /// An unrecognised type string was received.
     Unknown,
@@ -149,6 +242,7 @@ impl StanzaErrorType {
     /// The RFC 6120 §8.3.2 wire value, the inverse of the parse in
     /// [`parse_stanza_error`]. Kept on the type so boundary adapters
     /// (wasm rejections, telemetry) can't drift from the parser.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auth => "auth",
@@ -166,6 +260,7 @@ impl StanzaErrorType {
 /// Looks for a child `<error/>` element, extracts `type`, the RFC 6120 condition
 /// child (in the `urn:ietf:params:xml:ns:xmpp-stanzas` namespace), and optional
 /// `<text/>` content.  Returns a best-effort `StanzaError` even if parts are missing.
+#[must_use]
 pub fn parse_stanza_error(element: &Element) -> StanzaError {
     const NS_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
     const NS_CLIENT_ALT: &str = "jabber:client";

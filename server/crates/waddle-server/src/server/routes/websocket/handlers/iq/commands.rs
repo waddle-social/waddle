@@ -1,5 +1,10 @@
 use super::extension_forms::CommandBoundary;
-use super::*;
+use super::{
+    build_command_result, build_xmpp_error_response, get_managed_channel_for_room, get_room_actor,
+    iq_to_xml, parse_command_from_iq, AdHocCommandCondition, Affiliation, BareJid, CheckPermission,
+    Command, CommandContext, CommandError, CommandResult, CommandStatus, DbQueryOne, FullJid,
+    GetSnapshot, Jid, Object, ObjectType, Permission, Subject, WebSocketState, XmppError,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) struct CommandTargets<'a> {
@@ -155,7 +160,7 @@ async fn room_command_available(
         if !snapshot.room.config.group_dm {
             return false;
         }
-        if snapshot.room.get_affiliation(&requester_bare) >= Affiliation::Member {
+        if snapshot.room.affiliation(&requester_bare) >= Affiliation::Member {
             return true;
         }
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {

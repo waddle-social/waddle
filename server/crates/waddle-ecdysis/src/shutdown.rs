@@ -2,7 +2,7 @@
 //!
 //! Provides signal-driven shutdown with connection draining:
 //! - `SIGTERM` → stop accepting, drain, exit
-//! - `SIGQUIT` → restart (exec new process), stop accepting, drain, exit
+//! - `SIGQUIT` → restart intent, stop accepting, drain, exit
 //!
 //! Uses `CancellationToken` for coordination and `ConnectionGuard` for drain tracking.
 
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 pub enum ShutdownSignal {
     /// SIGTERM: graceful stop (drain and exit).
     Terminate,
-    /// SIGQUIT: graceful restart (exec new process, drain old, exit).
+    /// SIGQUIT: restart intent, drain connections and exit.
     Restart,
 }
 
@@ -193,7 +193,7 @@ impl GracefulShutdown {
                 ShutdownSignal::Terminate
             }
             _ = sigquit.recv() => {
-                info!("Received SIGQUIT — initiating graceful restart");
+                info!("Received SIGQUIT — draining with restart intent");
                 ShutdownSignal::Restart
             }
         }
@@ -236,7 +236,7 @@ impl GracefulShutdown {
     /// Run the full shutdown lifecycle.
     ///
     /// 1. Wait for SIGTERM or SIGQUIT
-    /// 2. If SIGQUIT, call `on_restart` (which should call `restart()` and never return)
+    /// 2. If SIGQUIT, call `on_restart` to record or arrange restart intent
     /// 3. Cancel the stop token (stops accept loops)
     /// 4. Drain connections or timeout
     /// 5. Return the signal
@@ -250,9 +250,7 @@ impl GracefulShutdown {
         if signal == ShutdownSignal::Restart {
             info!("Executing restart callback");
             on_restart().await;
-            // If on_restart returns, it means restart() was not called or failed.
-            // Fall through to drain — we're shutting down either way.
-            error!("Restart callback returned — falling through to drain and exit");
+            info!("Restart callback complete — draining connections before exit");
         }
 
         info!("Stopping accept loops");

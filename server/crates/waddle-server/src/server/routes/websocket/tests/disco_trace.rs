@@ -71,7 +71,7 @@ async fn disco_info_answered_trace_surfaces_at_info_level() {
         "example.com",
         "muc.example.com",
         state.as_ref(),
-        &None,
+        None,
         &phase,
     )
     .await;

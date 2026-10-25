@@ -1,8 +1,9 @@
 //! Atomic notification candidate and recovery writes beneath the canonical lock.
-use waddle_xmpp::{
-    inbox::storage::GroupchatNotificationRecoveryKey,
-    ingress::{IngressEffectIntent, MessageKey, NotificationActivityMutation},
-};
+use crate::db::DatabaseDriver;
+use crate::ingress_substrate::MessageEnvelope;
+use std::collections::BTreeSet;
+use waddle_xmpp::inbox::storage::GroupchatNotificationRecoveryKey;
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NotificationActivityMutation};
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::notification_outbox::{
@@ -143,7 +144,7 @@ async fn lock_pending_notification_row(
     tx: &mut IngressUowTransaction<'_>,
     expected: &waddle_xmpp::pending_delivery::PendingRow,
 ) -> Result<bool, IngressUowError> {
-    let query = if tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres {
+    let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
         "SELECT recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id, flushed_in_session, notification_outboxed_at_ms FROM pending_delivery WHERE row_id = ? FOR UPDATE NOWAIT"
     } else {
         "SELECT recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id, flushed_in_session, notification_outboxed_at_ms FROM pending_delivery WHERE row_id = ?"
@@ -177,7 +178,7 @@ async fn lock_pending_notification_row(
 }
 
 fn pending_candidate_from_envelope(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &MessageEnvelope,
     row: &waddle_xmpp::pending_delivery::PendingRow,
 ) -> Result<Option<NotificationCandidate>, IngressUowError> {
     let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
@@ -217,13 +218,13 @@ struct PendingNotificationSource {
 #[derive(Debug)]
 pub(crate) struct PendingNotificationRecovery {
     row: waddle_xmpp::pending_delivery::PendingRow,
-    envelope: Box<crate::ingress_substrate::MessageEnvelope>,
+    envelope: Box<MessageEnvelope>,
     candidate: Option<NotificationCandidate>,
     sources: Vec<PendingNotificationSource>,
 }
 
 impl PendingNotificationRecovery {
-    pub(crate) fn envelope(&self) -> &crate::ingress_substrate::MessageEnvelope {
+    pub(crate) fn envelope(&self) -> &MessageEnvelope {
         &self.envelope
     }
 }
@@ -239,7 +240,7 @@ impl RecoveryReceiptRepository {
         tx: &mut IngressUowTransaction<'_>,
         message: MessageKey,
         intent: &IngressEffectIntent,
-        envelope: &crate::ingress_substrate::MessageEnvelope,
+        envelope: &MessageEnvelope,
         row: &waddle_xmpp::pending_delivery::PendingRow,
     ) -> Result<bool, IngressUowError> {
         let Some(candidate) = pending_candidate_from_envelope(envelope, row)? else {
@@ -262,7 +263,7 @@ impl RecoveryReceiptRepository {
         row: &waddle_xmpp::pending_delivery::PendingRow,
     ) -> Result<PendingNotificationPreparation, IngressUowError> {
         let sources = pending_notification_sources(tx, row).await?;
-        let mut locked = std::collections::BTreeSet::new();
+        let mut locked = BTreeSet::new();
         for source in &sources {
             if locked.insert(source.message.to_storage()) {
                 if let Err(error) =
@@ -289,10 +290,7 @@ impl RecoveryReceiptRepository {
                 retry_class: super::DbRetryClass::CanonicalLockContention,
             });
         }
-        let mut frozen: Option<(
-            Box<crate::ingress_substrate::MessageEnvelope>,
-            Option<NotificationCandidate>,
-        )> = None;
+        let mut frozen: Option<(Box<MessageEnvelope>, Option<NotificationCandidate>)> = None;
         for source in &sources {
             let envelope = super::CanonicalMessageRepository::load_envelope(tx, source.message)
                 .await?

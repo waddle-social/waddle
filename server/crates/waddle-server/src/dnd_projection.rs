@@ -40,6 +40,7 @@
 //! write lock and the later committer always sees a strictly higher
 //! version.
 
+use crate::db::Row;
 use jid::BareJid;
 use minidom::Element;
 use thiserror::Error;
@@ -167,7 +168,7 @@ pub async fn delete_dnd_projection_tx(
     Ok(affected)
 }
 
-fn decode_row(row: crate::db::Row) -> Result<DndProjection, DndProjectionError> {
+fn decode_row(row: Row) -> Result<DndProjection, DndProjectionError> {
     let owner_bare_jid_text: String = row.get(0)?;
     let payload_xml: String = row.get(1)?;
     let source_version: i64 = row.get(2)?;

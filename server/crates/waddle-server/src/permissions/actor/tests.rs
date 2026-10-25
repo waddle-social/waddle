@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use kameo::actor::{ActorRef, Spawn};
 
-use super::*;
+use super::{
+    CheckPermission, DeleteTuple, ExclusiveRelationSwap, ListRelations, ListSubjects, Object,
+    ObjectType, Permission, PermissionActor, PermissionError, Relation, ReplaceExclusiveRelation,
+    Subject, SwapExclusiveRelation, Tuple, WriteTuple,
+};
 use crate::config::ServerConfig;
 use crate::db::{Database, MigrationRunner};
 

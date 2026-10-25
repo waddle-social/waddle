@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    create_test_server_owner_session, create_test_websocket_state_with_clustering, drain_due,
+    fixture_config, handle_muc_join_with_occupancy_session, occupant_generation,
+    participant_intent, state_with_executor, Arc, BareJid, CallGeneration, CallId,
+    CallTeardownIntent, CallTeardownStatus, FromStr, FullJid, Identity, Mutex, NodeIdentity,
+    ObservedCallSids, ParticipantSid, RecordingAdmin, RoomOccupancy, SfuService,
+    SharedNodeIdentity, TeardownTarget,
+};
 
 #[tokio::test]
 async fn drain_executes_admin_call_and_marks_intent_done() {
@@ -72,13 +79,13 @@ async fn drain_skips_participant_when_intent_occupant_generation_is_stale() {
         &alice,
         "alice",
         None,
-        (current_occupant, &Some(owner_session)),
+        (current_occupant, Some(&owner_session)),
     )
     .await;
 
     let stale_occupant = occupant_generation();
-    let current_session = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let current_session = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
     sfu.register_call_participant_with_session(
         &call_id,
@@ -173,7 +180,7 @@ async fn one_to_one_drain_holds_the_producer_fence_through_execution_and_complet
             &identity,
             &ObservedCallSids::new(
                 intent.room_sid.clone(),
-                Some(ParticipantSid::new("PA_test").expect("participant sid")),
+                Some(ParticipantSid::try_new("PA_test").expect("participant sid")),
             ),
         ),
         waddle_sfu::SidObservationDisposition::Applied
@@ -296,10 +303,10 @@ async fn drain_marks_higher_generation_stale_without_admin_call() {
         &alice,
         "alice",
         None,
-        (occupant_generation(), &Some(owner_session.clone())),
+        (occupant_generation(), Some(&owner_session.clone())),
     )
     .await;
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
     sfu.register_call_participant(&call_id, &identity);
     let _ = sfu.note_participant_left(&call_id, &identity, None);
@@ -355,7 +362,7 @@ async fn room_not_owned_by_this_node_remains_queued() {
     ));
     let state = state_with_executor(Arc::clone(&sfu)).await;
     let intent = CallTeardownIntent {
-        call_id: CallId::new("room@muc.example.test").expect("room call id"),
+        call_id: CallId::try_new("room@muc.example.test").expect("room call id"),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
             participant_sid: None,
@@ -416,7 +423,7 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
         .protocol
         .call_teardown_outbox
         .enqueue(CallTeardownIntent {
-            call_id: CallId::new("alice@example.test:occupied-call").expect("call id"),
+            call_id: CallId::try_new("alice@example.test:occupied-call").expect("call id"),
             target: TeardownTarget::Room,
             generation: None,
             occupant: None,
@@ -451,7 +458,7 @@ async fn unfenced_participant_rejoin_is_skipped_without_admin_call() {
         fixture_config(),
         Arc::clone(&admin) as Arc<_>,
     ));
-    let call_id = CallId::new("alice@example.test:rejoin-call").expect("call id");
+    let call_id = CallId::try_new("alice@example.test:rejoin-call").expect("call id");
     let identity =
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
     sfu.register_call_participant(&call_id, &identity);
@@ -518,7 +525,7 @@ async fn unfenced_participant_without_live_registration_still_removes_participan
         .protocol
         .call_teardown_outbox
         .enqueue(CallTeardownIntent {
-            call_id: CallId::new("alice@example.test:no-live-registration").expect("call id"),
+            call_id: CallId::try_new("alice@example.test:no-live-registration").expect("call id"),
             target: TeardownTarget::Participant {
                 identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
                 participant_sid: None,

@@ -1,6 +1,9 @@
-use std::{fmt, future::Future, time::Duration};
+use std::fmt;
+use std::future::Future;
+use std::time::Duration;
 
-use crate::{db::DatabaseError, ingress_uow::IngressUowError};
+use crate::db::DatabaseError;
+use crate::ingress_uow::IngressUowError;
 
 /// Sanitized driver error classification retained after database diagnostics are
 /// discarded at the ingress boundary.

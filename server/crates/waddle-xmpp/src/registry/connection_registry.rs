@@ -2,6 +2,7 @@
 //!
 //! Tracks active XMPP connections by their full JID for message routing.
 
+use crate::pending_delivery::SmSessionId;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -56,7 +57,7 @@ pub struct ConnectionRegistry {
     /// while holding the connection slot's exclusive guard. Lookups remain
     /// best-effort snapshots: the cross-node resume bridge must re-verify the
     /// connection's own SM id before requesting force-detach.
-    sm_stream_owners: Arc<DashMap<crate::pending_delivery::SmSessionId, FullJid>>,
+    sm_stream_owners: Arc<DashMap<SmSessionId, FullJid>>,
 }
 
 impl ConnectionRegistry {
@@ -78,7 +79,7 @@ impl ConnectionRegistry {
     /// slot. Otherwise a resumed same-JID successor could republish the same
     /// stream id before an old teardown removes its reverse mapping.
     fn remove_sm_stream_owner(
-        sm_stream_owners: &DashMap<crate::pending_delivery::SmSessionId, FullJid>,
+        sm_stream_owners: &DashMap<SmSessionId, FullJid>,
         jid: &FullJid,
         entry: &ConnectionEntry,
     ) {
@@ -92,11 +93,7 @@ impl ConnectionRegistry {
     /// index (ADR-0017 Phase 3 Slice 6). Supersedes bare
     /// `ConnectionEntry::set_sm_stream_id` at every call site so the two
     /// never drift apart.
-    pub fn set_sm_stream_id(
-        &self,
-        jid: &FullJid,
-        stream_id: Option<crate::pending_delivery::SmSessionId>,
-    ) {
+    pub fn set_sm_stream_id(&self, jid: &FullJid, stream_id: Option<SmSessionId>) {
         let Some(entry) = self.connections.get_mut(jid) else {
             return;
         };
@@ -144,7 +141,7 @@ impl ConnectionRegistry {
         &self,
         jid: &FullJid,
         owner: &Arc<AtomicBool>,
-        stream_id: Option<crate::pending_delivery::SmSessionId>,
+        stream_id: Option<SmSessionId>,
     ) -> bool {
         let Some(entry) = self.connections.get_mut(jid) else {
             return false;
@@ -165,10 +162,7 @@ impl ConnectionRegistry {
     /// after this snapshot, so callers MUST re-verify the returned entry's
     /// `ConnectionEntry::sm_stream_id()` still equals `stream_id` before
     /// acting on it.
-    pub fn sm_stream_owner(
-        &self,
-        stream_id: &crate::pending_delivery::SmSessionId,
-    ) -> Option<FullJid> {
+    pub fn sm_stream_owner(&self, stream_id: &SmSessionId) -> Option<FullJid> {
         self.sm_stream_owners
             .get(stream_id)
             .map(|entry| entry.value().clone())

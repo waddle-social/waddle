@@ -1,4 +1,7 @@
-use super::*;
+use super::{Arc, Blocklist, BytesStart, Event, FullJid, Writer};
+use crate::db::blocking::BlockingStorageError;
+use crate::db::blocking::DatabaseBlockingStorage;
+use crate::db::DatabasePool;
 
 /// Load the bound user's persisted XEP-0191 blocklist from the
 /// global database adapter and convert it into the typed
@@ -21,11 +24,11 @@ use super::*;
 /// update the SM's internal blocklist directly); the snapshot loaded
 /// here is the bind-time baseline only.
 pub(super) async fn load_blocklist_for_bind(
-    db_pool: &Arc<crate::db::DatabasePool>,
+    db_pool: &Arc<DatabasePool>,
     full_jid: &FullJid,
-) -> Result<Blocklist, crate::db::blocking::BlockingStorageError> {
+) -> Result<Blocklist, BlockingStorageError> {
     let bare = full_jid.to_bare();
-    let storage = crate::db::blocking::DatabaseBlockingStorage::new(db_pool.global().clone());
+    let storage = DatabaseBlockingStorage::new(db_pool.global().clone());
     storage
         .list_blocked_jid_entries(&bare)
         .await

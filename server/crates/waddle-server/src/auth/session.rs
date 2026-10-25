@@ -4,6 +4,7 @@
 //! and avoid SQLite write-lock contention.
 
 use super::AuthError;
+use crate::db::Value;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use kameo::actor::ActorRef;
@@ -217,7 +218,7 @@ impl SessionManager {
         )))
     }
 
-    fn values_to_session(&self, row: &[crate::db::Value]) -> Result<Session, AuthError> {
+    fn values_to_session(&self, row: &[Value]) -> Result<Session, AuthError> {
         let id = row_value(row, 0)
             .and_then(ValueExt::as_string)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get session id: {}", e)))?;
@@ -420,7 +421,7 @@ impl SessionManager {
     }
 }
 
-fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<u64, AuthError> {
+fn integer_column(row: &[Value], index: usize, name: &str) -> Result<u64, AuthError> {
     match row_value(row, index).map_err(|error| AuthError::DatabaseError(error.to_string()))? {
         crate::db::Value::Integer(value) => (*value)
             .try_into()
@@ -434,7 +435,8 @@ fn integer_column(row: &[crate::db::Value], index: usize, name: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{PrincipalResolution, Session, SessionManager};
-    use crate::db::{actor::DbActor, actor::DbExecute, Database, MigrationRunner, Value};
+    use crate::db::actor::{DbActor, DbExecute};
+    use crate::db::{Database, MigrationRunner, Value};
     use kameo::actor::Spawn;
 
     #[tokio::test]

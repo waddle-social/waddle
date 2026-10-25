@@ -99,40 +99,31 @@
 //! holds, or a missing WebSocket state all mean "not a ghost", and the copy
 //! stays owed.
 
+use crate::server::routes::interpret::SmIngressAppendContext;
 use std::time::Duration;
 
 use jid::FullJid;
 use kameo::actor::ActorRef;
-use waddle_xmpp::{
-    ingress::MessageKey,
-    muc::{
-        room_actor::{
-            GetOccupantSessionGeneration, GetReplayOccupantSessionGeneration, LeaveSessionSelector,
-            RoomActor,
-        },
-        MucRemovalCause,
-    },
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::muc::room_actor::{
+    GetOccupantSessionGeneration, GetReplayOccupantSessionGeneration, LeaveSessionSelector,
+    RoomActor,
 };
+use waddle_xmpp::muc::MucRemovalCause;
 use waddle_xmpp_core::OccupancySessionGeneration;
 
-use crate::{
-    ingress_uow::{
-        CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-    },
-    server::routes::{
-        interpret::{DeliveryExecutionContext, Deps},
-        websocket::{
-            retain_abandoned_muc_occupancy_sweep, sweep_abandoned_muc_occupancy, MucCleanupOutcome,
-            WebSocketState,
-        },
-    },
+use crate::ingress_uow::{
+    CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
+    EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
+};
+use crate::server::routes::interpret::{DeliveryExecutionContext, Deps};
+use crate::server::routes::websocket::{
+    retain_abandoned_muc_occupancy_sweep, sweep_abandoned_muc_occupancy, MucCleanupOutcome,
+    WebSocketState,
 };
 
-use super::{
-    recovery_departed::{self, RoomAuthority},
-    recovery_reachability, RouteProgress,
-};
+use super::recovery_departed::{self, RoomAuthority};
+use super::{recovery_reachability, RouteProgress};
 
 /// Test seam for the window the generation pin exists to close: everything
 /// between pinning the seated generation and the reachability probes, which a
@@ -297,7 +288,7 @@ pub(super) async fn repair_stalled_row(
                                 .child(&progress.receipt, Some(&occupant))
                                 .is_some_and(|child| child.occupancy.is_some())
                     }) {
-                        let context = crate::server::routes::interpret::SmIngressAppendContext {
+                        let context = SmIngressAppendContext {
                             message_key: key,
                             receipt: retiring_route.receipt.clone(),
                             received_at: retiring_route.received_at,

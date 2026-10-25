@@ -1,4 +1,14 @@
-use super::super::*;
+use super::super::{
+    owner_remote_entry_if_current, Arc, AtomicBool, CarbonKind, ConnectionEntry,
+    ConnectionRegistry, OrderedRelayDeliveryBridge, Ordering, PresenceState, RelayAskError,
+    RelayHandle, RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect,
+    RelayRemoteUserSideEffectReply, RelayRemoteUserSideEffectStatus, RelaySendEffect,
+    RelayTraceContext, RemotePresenceStateSnapshot, RemoteResourceStateSnapshot, RemoteStanza,
+    RemoteUserSideEffect, RosterItem, RosterVersion, Stanza, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::server::routes::interpret::carbons::CarbonFanoutFailure;
+use crate::server::routes::interpret::carbons::CarbonRegistryDeps;
 
 /// Whether the remote owner supplied an authoritative XEP-0280 recipient
 /// snapshot. A timeout after send can be maybe-committed, but must never be
@@ -8,7 +18,7 @@ pub(crate) enum RemoteCarbonFanout {
         carbon_recipients: Vec<jid::FullJid>,
     },
     Incomplete {
-        reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure,
+        reason: CarbonFanoutFailure,
         carbon_recipients: Vec<jid::FullJid>,
     },
     MaybeCommitted,
@@ -38,7 +48,7 @@ impl OrderedRelayDeliveryBridge {
         message: &xmpp_parsers::message::Message,
         kind: CarbonKind,
         exclude: Vec<jid::FullJid>,
-        ingress_append: Option<&crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<&IngressAppendObligationRef>,
     ) -> Option<RemoteCarbonFanout> {
         self.try_remote_user_carbons(
             source_jid,
@@ -310,11 +320,11 @@ impl OrderedRelayDeliveryBridge {
                                 || delivery.is_none()
                             {
                                 return RelayRemoteUserSideEffectReply {
-                                status: RelayRemoteUserSideEffectStatus::Incomplete {
-                                    reason: crate::server::routes::interpret::carbons::CarbonFanoutFailure::Delivery,
-                                },
-                                carbon_recipients: Vec::new(),
-                            };
+                                    status: RelayRemoteUserSideEffectStatus::Incomplete {
+                                        reason: CarbonFanoutFailure::Delivery,
+                                    },
+                                    carbon_recipients: Vec::new(),
+                                };
                             }
                             if let (Some(delivery), Some(state)) =
                                 (delivery.as_mut(), web_socket_state.as_deref())
@@ -328,7 +338,7 @@ impl OrderedRelayDeliveryBridge {
                         let outcome =
                         crate::server::routes::interpret::carbons::send_carbons_to_registry_with_capture(
                             &services.connection_registry,
-                            crate::server::routes::interpret::carbons::CarbonRegistryDeps {
+                            CarbonRegistryDeps {
                                 ingress_delivery: delivery.as_ref(),
                                 ingress_effect_capture: None,
                                 sm_session_registry: Some(&services.sm_session_registry),

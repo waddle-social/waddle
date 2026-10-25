@@ -1,7 +1,11 @@
 //! XEP-0402 / XEP-0492 bookmark payload validation and projection
 //! mutation derivation: pure functions over published bookmark elements.
 
-use super::*;
+use super::{
+    is_notify_element, parse_notify_fallback_setting, validate_notify_element, BareJid,
+    ConversationKind, Element, NotificationSettingsProjection, NotificationSettingsProjectionError,
+    NotificationSettingsProjectionMutation, NotificationSettingsSource,
+};
 
 pub fn derive_bookmark_projection_mutation(
     owner_bare_jid: &BareJid,

@@ -1,6 +1,9 @@
 use super::super::{CarbonKind, OrderedRelayRouteOrigin};
+use crate::notification_outbox::NotificationCandidate;
 use jid::{BareJid, FullJid};
-use waddle_xmpp::{pending_delivery::PendingRow, telemetry::call::PendingCallSetupRoute, Stanza};
+use waddle_xmpp::pending_delivery::PendingRow;
+use waddle_xmpp::telemetry::call::PendingCallSetupRoute;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +79,7 @@ pub enum ExternalDeliveryEffect {
 /// Frozen T0 decision; post-commit insertion does not recompute message policy.
 #[derive(Debug, Clone)]
 pub enum PreparedOfflineNotification {
-    Prepared(Box<crate::notification_outbox::NotificationCandidate>),
+    Prepared(Box<NotificationCandidate>),
     Suppressed,
     RetryLater,
 }

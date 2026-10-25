@@ -1,6 +1,12 @@
 //! Row/JSON codecs between durable storage and typed values.
 
-use super::*;
+use super::{
+    require_full_sender_jid, require_full_sender_jid_set, require_sender_matches_conversation,
+    require_sender_set_contains_scalar, require_sender_set_matches_conversation, BareJid, Element,
+    Jid, NotificationCandidate, NotificationClass, NotificationOutboxError, NotificationOutboxJob,
+    NotificationOutboxJobId, NotificationOutboxStatus, NotificationReason, NotificationThreadId,
+    PushServiceNodeName, RichSummary, Row, StanzaId,
+};
 
 pub(super) fn encode_sender_jids(sender_jids: &[Jid]) -> Result<String, NotificationOutboxError> {
     let values: Vec<String> = sender_jids.iter().map(ToString::to_string).collect();
@@ -118,7 +124,7 @@ pub(super) fn decode_outbox_job(
         push_service_jid: push_service_raw
             .parse()
             .map_err(|_| NotificationOutboxError::InvalidPushServiceBareJid(push_service_raw))?,
-        node: PushServiceNodeName::new(row.get::<String>(3)?)?,
+        node: PushServiceNodeName::try_new(row.get::<String>(3)?)?,
         conversation_jid,
         sender_jid,
         sender_jids,

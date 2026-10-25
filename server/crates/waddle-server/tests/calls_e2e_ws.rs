@@ -11,7 +11,8 @@
 
 use waddle_ws_test_support as ws_common;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde_json::json;
 use sha2::{Digest, Sha256};

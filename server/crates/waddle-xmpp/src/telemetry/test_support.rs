@@ -31,7 +31,7 @@ use opentelemetry_sdk::metrics::{
 use opentelemetry_sdk::trace::{
     InMemorySpanExporter, InMemorySpanExporterBuilder, SdkTracerProvider, SpanData,
 };
-use tracing_subscriber::prelude::*;
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
 /// One exported `u64` counter value and its complete attribute set.
 /// Gauges reuse this value/attribute shape without counter summation semantics.

@@ -1,4 +1,4 @@
-use super::*;
+use super::{mention_bits_for_recipient, BareJid, Jid, Message, RecipientMentionBits};
 
 fn bare(value: &str) -> BareJid {
     value.parse().expect("valid bare JID")

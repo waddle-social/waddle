@@ -1,3 +1,5 @@
+//! Typed XMPP WebSocket frames, transport events, and transport factory contracts.
+
 use jid::BareJid;
 use minidom::Element;
 
@@ -16,25 +18,36 @@ pub use native::{DefaultTransportFactory, WebSocketTransport, WebSocketTransport
 
 /// Transport kind supported by the native client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportKind {
+    /// RFC 7395 WebSocket transport.
     WebSocket,
 }
 
 /// Connection state surfaced by the transport adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportState {
+    /// No connection or bootstrap operation is in progress.
     Idle,
+    /// The transport connection is being established.
     Connecting,
+    /// Access is open to any requester.
     Open,
+    /// The transport is closing.
     Closing,
+    /// The connection has fully closed.
     Closed,
+    /// Stream-management negotiation or resumption failed.
     Failed,
 }
 
 /// Static feature flags reported by a connected transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportCapabilities {
+    /// Whether the server advertised XEP-0198 support.
     pub stream_management: bool,
+    /// Whether the session may be resumed after transport loss.
     pub resumable: bool,
 }
 
@@ -50,16 +63,23 @@ impl Default for TransportCapabilities {
 /// RFC 7395 `<open/>` frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamOpen {
+    /// XMPP address of the recipient.
     pub to: Option<BareJid>,
+    /// XMPP address of the sender.
     pub from: Option<BareJid>,
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: Option<StreamId>,
+    /// Language tag associated with the displayed text.
     pub language: Option<String>,
+    /// Version advertised by the extension or protocol entity.
     pub version: &'static str,
 }
 
 impl StreamOpen {
+    /// Protocol token `1.0`.
     pub const VERSION: &'static str = "1.0";
-
+    /// Construct this bootstrap value from the validated client configuration.
+    #[must_use]
     pub fn from_config(config: &ClientConfig) -> Self {
         Self {
             to: Some(config.connection.server.clone()),
@@ -70,6 +90,8 @@ impl StreamOpen {
         }
     }
 
+    /// Create a server-originated stream-open frame with the supplied sender JID.
+    #[must_use]
     pub fn from_server(from: BareJid) -> Self {
         Self {
             to: None,
@@ -87,22 +109,33 @@ pub struct StreamClose;
 
 /// Typed transport payloads exchanged across the runtime boundary.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransportMessage {
+    /// A stream-open frame starting XMPP negotiation.
     Open(StreamOpen),
+    /// A parsed application stanza or stream-control element.
     Element(Element),
+    /// A stream-close frame ending the XMPP session.
     Close(StreamClose),
 }
 
 /// Transport-level events surfaced back into the session runtime.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransportEvent {
+    /// The transport changed lifecycle state.
     StateChanged(TransportState),
+    /// A complete XMPP frame was received and decoded.
     MessageReceived(TransportMessage),
+    /// An XMPP frame was successfully written to the transport.
     MessageSent(TransportMessage),
+    /// The connection has fully closed.
     Closed,
 }
 
 impl TransportEvent {
+    /// Map this transport event to its resulting transport state, if any.
+    #[must_use]
     pub fn transport_state(&self) -> TransportState {
         match self {
             Self::StateChanged(state) => *state,

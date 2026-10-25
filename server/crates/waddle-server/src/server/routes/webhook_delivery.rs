@@ -29,7 +29,7 @@ impl WebhookEventId {
     /// `None` for an empty/whitespace id: LiveKit has historically
     /// shipped payloads without one, and the dedupe path treats those
     /// as "not deduplicable" rather than keying the ledger on "".
-    pub(crate) fn new(id: &str) -> Option<Self> {
+    pub(crate) fn try_new(id: &str) -> Option<Self> {
         let id = id.trim();
         (!id.is_empty()).then(|| Self(id.to_owned()))
     }
@@ -379,7 +379,7 @@ mod tests {
     use super::*;
 
     fn ev(id: &str) -> WebhookEventId {
-        WebhookEventId::new(id).expect("valid test event id")
+        WebhookEventId::try_new(id).expect("valid test event id")
     }
 
     #[tokio::test]

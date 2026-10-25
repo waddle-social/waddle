@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    display, enrichment_id, field_value, launch, link_item_id, link_payload, links_node,
+    normalized_url, payload_namespace, plugin_id, saved_link_extension_item, timestamp, types,
+    view, PLUGIN_NAME,
+};
 
 pub(super) fn link_enrichments(hook: &types::MessageHook) -> Vec<types::ExtensionEffect> {
     let Some(room) = hook.context.room.clone() else {

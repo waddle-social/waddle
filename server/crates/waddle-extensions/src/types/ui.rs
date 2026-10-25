@@ -1,9 +1,18 @@
-use super::*;
+//! Serializable UI blocks, forms, actions, and lists rendered by the host.
 
+use super::{
+    ArtifactReference, Deserialize, DisplayText, Element, LaunchId, ListId, ListItemId, Serialize,
+    UiActionId, UiViewId, FRAMEWORK_NAMESPACE,
+};
+
+/// Named declarative view whose ordered blocks are rendered uniformly by the host.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiView {
+    /// Identifier of this declarative view within the extension response.
     pub id: UiViewId,
+    /// Human-readable title rendered by the host.
     pub title: Option<DisplayText>,
+    /// UI blocks in their render order.
     pub blocks: Vec<UiBlock>,
 }
 
@@ -26,12 +35,19 @@ impl UiView {
     }
 }
 
+/// Renderable text, image, action, form, or list within an extension view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UiBlock {
+    /// Display styled text.
     Text(TextBlock),
+    /// Display an immutable image artifact with alternative text.
     Image(ImageBlock),
+    /// Display a control that invokes a referenced launch descriptor.
     Action(ActionBlock),
+    /// Display or submit a typed form.
     Form(DataForm),
+    /// Display an ordered list of items and optional launch controls.
     List(ListView),
 }
 
@@ -47,12 +63,18 @@ impl UiBlock {
     }
 }
 
+/// Display treatment applied to an extension text block.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum TextStyle {
+    /// Ordinary body text.
     Body,
+    /// Section heading text.
     Heading,
+    /// Visually subdued secondary text.
     Muted,
+    /// Monospaced code text.
     Code,
 }
 
@@ -67,9 +89,12 @@ impl TextStyle {
     }
 }
 
+/// Nonblank display text and the style requested by an extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextBlock {
+    /// Human-readable text associated with this value.
     pub text: DisplayText,
+    /// Host display treatment requested for the text block.
     pub style: TextStyle,
 }
 
@@ -85,9 +110,12 @@ impl TextBlock {
     }
 }
 
+/// Immutable image artifact paired with accessible alternative text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageBlock {
+    /// Immutable artifact referenced by this value.
     pub artifact: ArtifactReference,
+    /// Nonblank alternative text describing the artifact image.
     pub alt: DisplayText,
 }
 
@@ -102,9 +130,12 @@ impl ImageBlock {
     }
 }
 
+/// Button label referencing a launch descriptor from the same extension response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionBlock {
+    /// Identifier of the launch associated with this value.
     pub launch_id: LaunchId,
+    /// Human-readable label rendered by the host.
     pub label: DisplayText,
 }
 
@@ -123,12 +154,17 @@ impl ActionBlock {
     }
 }
 
+/// Whether a form asks for input, submits it, cancels, or reports a result.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum DataFormType {
+    /// Request user input using the supplied fields.
     Form,
+    /// Submit field values to the command handler.
     Submit,
+    /// Cancel the form interaction.
     Cancel,
+    /// Report completed command output.
     Result,
 }
 
@@ -143,18 +179,29 @@ impl DataFormType {
     }
 }
 
+/// Input and display kinds supported by the extension data-form vocabulary.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum FormFieldType {
+    /// Single boolean choice.
     Boolean,
+    /// Read-only text displayed without a submitted input.
     Fixed,
+    /// Value retained and submitted without a visible input.
     Hidden,
+    /// Multiple XMPP addresses.
     JidMulti,
+    /// One XMPP address.
     JidSingle,
+    /// Multiple choices from the offered options.
     ListMulti,
+    /// One choice from the offered options.
     ListSingle,
+    /// Multiline text input.
     TextMulti,
+    /// Private text input rendered with obscured characters.
     TextPrivate,
+    /// Single-line text input.
     TextSingle,
 }
 
@@ -175,44 +222,66 @@ impl FormFieldType {
     }
 }
 
+/// One allowed form value and its optional user-visible label.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormFieldOption {
+    /// Human-readable label rendered by the host.
     pub label: Option<DisplayText>,
+    /// Submitted form value selected when this option is chosen.
     pub value: DataFormValue,
 }
 
+/// Named form input, validation requirement, current values, and offered choices.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataFormField {
+    /// Machine-readable form field name serialized as the `var` attribute.
     pub name: UiActionId,
+    /// Input or display kind determining how the form field is rendered.
     pub field_type: FormFieldType,
+    /// Human-readable label rendered by the host.
     pub label: Option<DisplayText>,
+    /// Whether a value must be supplied for this field.
     pub required: bool,
+    /// Values associated with this field.
     pub values: Vec<DataFormValue>,
+    /// Allowed values offered to the user.
     pub options: Vec<FormFieldOption>,
 }
 
+/// Form text retained verbatim, including empty strings and whitespace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataFormValue(String);
 
 impl DataFormValue {
+    /// Wrap form text verbatim; empty values are retained.
+    #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
+    /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
 }
 
+/// Typed extension form with a purpose, display instructions, and ordered fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataForm {
+    /// Purpose of this form: request input, submit, cancel, or report a result.
     pub form_type: DataFormType,
+    /// Human-readable title rendered by the host.
     pub title: Option<DisplayText>,
+    /// Instructions displayed to the user.
     pub instructions: Vec<DisplayText>,
+    /// Fields carried by the data form or provider payload.
     pub fields: Vec<DataFormField>,
 }
 
@@ -286,10 +355,14 @@ impl DataForm {
     }
 }
 
+/// Named ordered list of display items with optional launch actions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListView {
+    /// Identifier of this list within the declarative view.
     pub id: ListId,
+    /// Human-readable title rendered by the host.
     pub title: Option<DisplayText>,
+    /// Items carried in the publication or response.
     pub items: Vec<ListItem>,
 }
 
@@ -312,12 +385,18 @@ impl ListView {
     }
 }
 
+/// Labeled list entry with optional description, image, and launch action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListItem {
+    /// Identifier of this entry within its containing list.
     pub id: ListItemId,
+    /// Human-readable label rendered by the host.
     pub label: DisplayText,
+    /// Longer human-readable description.
     pub description: Option<DisplayText>,
+    /// Optional immutable image artifact displayed with the list item.
     pub image: Option<ArtifactReference>,
+    /// Identifier of the launch associated with this value.
     pub launch_id: Option<LaunchId>,
 }
 

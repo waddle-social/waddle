@@ -1,11 +1,13 @@
-use super::*;
+use super::{global, sql, waddle, Migration, MigrationRunner};
 use crate::db::{
     migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
     MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,
 };
 use crate::ingress::test_support::{runbook_sql_block, runbook_statements};
 use sqlx::{Column, Row};
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 
 #[tokio::test]
 async fn test_migration_runner_global() {
@@ -5103,9 +5105,9 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
             room: room.clone(),
             requester: "alice@example.com".parse().expect("requester"),
             sender: "room@conference.example.com/alice".parse().expect("sender"),
-            plugin: PluginId::new(plugin).expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("a".repeat(64)).expect("artifact identity"),
+            plugin: PluginId::try_new(plugin).expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("a".repeat(64)).expect("artifact identity"),
             correction_target: None,
         };
         let hash = Sha256::digest(effect.semantic_key().storage_identity().as_bytes()).to_vec();

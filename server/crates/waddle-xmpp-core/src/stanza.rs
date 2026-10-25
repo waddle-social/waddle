@@ -10,13 +10,17 @@
 /// `large_enum_variant` lint without a lint-suppression escape hatch.
 #[derive(Debug, Clone)]
 pub enum Stanza {
+    /// An XMPP message stanza with its parsed standard fields and extension payloads.
     Message(xmpp_parsers::message::Message),
+    /// An XMPP presence stanza describing availability or subscription state.
     Presence(xmpp_parsers::presence::Presence),
+    /// An XMPP information/query request, result, or error stanza.
     Iq(Box<xmpp_parsers::iq::Iq>),
 }
 
 impl Stanza {
     /// Get the stanza type name for tracing.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Stanza::Message(_) => "message",
@@ -26,6 +30,7 @@ impl Stanza {
     }
 
     /// Convert the stanza to a minidom Element.
+    #[must_use]
     pub fn to_element(&self) -> minidom::Element {
         match self {
             Stanza::Message(message) => {

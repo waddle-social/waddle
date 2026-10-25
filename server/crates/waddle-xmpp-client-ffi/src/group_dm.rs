@@ -19,6 +19,25 @@ use crate::error::client_error_to_waddle;
 use crate::messaging_verbs::send_iq_with_timeout;
 use crate::{WaddleClient, WaddleError};
 
+/// History a newly invited group-DM member may read.
+///
+/// `Full` sends the Waddle history-access extension. `FromJoin` omits
+/// that child and the server applies its from-join default.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleGroupDmHistoryAccess {
+    /// New member may only see archive rows from their add boundary.
+    FromJoin,
+    /// New member may query the full group-DM archive.
+    Full,
+}
+
+fn core_history_access(access: WaddleGroupDmHistoryAccess) -> core::GroupDmHistoryAccess {
+    match access {
+        WaddleGroupDmHistoryAccess::FromJoin => core::GroupDmHistoryAccess::FromJoin,
+        WaddleGroupDmHistoryAccess::Full => core::GroupDmHistoryAccess::Full,
+    }
+}
+
 impl WaddleClient {
     /// Send one group-DM command IQ and hand back the raw result
     /// element. Error IQs surface as typed stanza errors.
@@ -94,25 +113,22 @@ impl WaddleClient {
     }
 
     /// XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
-    /// group DM. `full_history` requests the full-archive grant via
-    /// the Waddle history-access extension; `false` omits the child
-    /// and the server applies its from-join default. Fire-and-forget
-    /// at the stanza level: the server answers refusals with a typed
+    /// group DM. [`WaddleGroupDmHistoryAccess::Full`] requests the
+    /// full-archive grant via the Waddle history-access extension.
+    /// [`WaddleGroupDmHistoryAccess::FromJoin`] omits the child and
+    /// the server applies its from-join default. Fire-and-forget at
+    /// the stanza level: the server answers refusals with a typed
     /// message error, delivered through the regular event stream.
     pub async fn invite_to_group_dm(
         &self,
         room_jid: String,
         invitee_jid: String,
-        full_history: bool,
+        history: WaddleGroupDmHistoryAccess,
     ) -> Result<(), WaddleError> {
         let room = self.require_bare_jid(&room_jid)?;
         let invitee = self.require_bare_jid(&invitee_jid)?;
-        let access = if full_history {
-            core::GroupDmHistoryAccess::Full
-        } else {
-            core::GroupDmHistoryAccess::FromJoin
-        };
-        let message = core::build_group_dm_invite_message(&room, &invitee, access);
+        let message =
+            core::build_group_dm_invite_message(&room, &invitee, core_history_access(history));
         let handle = self.clone_handle().await.ok_or(WaddleError::NotConnected)?;
         handle
             .send_stanza(message)

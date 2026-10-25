@@ -1,3 +1,5 @@
+//! Preservation of rejected message payloads and stanza-error details.
+
 use jid::{BareJid, Jid};
 use minidom::Element;
 use xmpp_parsers::stanza_error::StanzaError;
@@ -10,9 +12,13 @@ use super::namespaces::{NS_CLIENT, NS_MUC_USER};
 /// Applications must correlate both the ID and sender with their outbound send.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageRejection {
+    /// Identifier used for stanza correlation.
     pub stanza_id: StanzaId,
+    /// XMPP address of the sender.
     pub from: Jid,
+    /// XMPP address of the recipient.
     pub to: Option<Jid>,
+    /// Failure information returned by the operation.
     pub error: StanzaError,
 }
 
@@ -29,7 +35,7 @@ impl MessageRejection {
             return None;
         }
         Some(Self {
-            stanza_id: StanzaId::new(element.attr("id")?).ok()?,
+            stanza_id: StanzaId::try_new(element.attr("id")?).ok()?,
             from: match element.attr("from") {
                 Some(from) => from.parse().ok()?,
                 // RFC 6120 §8.1.2.1: only a direct stream stanza can inherit

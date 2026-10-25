@@ -280,7 +280,7 @@ async fn bare_store() -> DatabasePushServiceStore {
     .expect("push service store");
     // The user server's XEP-0357 registration table lives in the same
     // database; creating its store creates the table.
-    DatabasePushRegistrationStore::new(store.database())
+    DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store");
     store
@@ -410,7 +410,7 @@ async fn attempt_statuses(store: &DatabasePushServiceStore, node: &str) -> Vec<(
 }
 
 async fn enabled_registrations(store: &DatabasePushServiceStore, owner: &BareJid) -> usize {
-    DatabasePushRegistrationStore::new(store.database())
+    DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store")
         .get_for_user(owner.to_string().as_str())
@@ -472,7 +472,7 @@ async fn xep0357_user_server_stores_only_the_service_jid_and_node_for_android() 
 
     // The XEP-0357 registration row carries the service JID and node, and
     // no column of it holds any of the device's FCM credentials.
-    let registrations = DatabasePushRegistrationStore::new(store.database())
+    let registrations = DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store")
         .get_for_user(owner.to_string().as_str())
@@ -513,7 +513,7 @@ async fn xep0357_user_server_stores_only_the_service_jid_and_node_for_android() 
             ))
             .append(data_form_field(field, "smuggled-secret"))
             .build();
-        let error = DatabasePushRegistrationStore::new(store.database())
+        let error = DatabasePushRegistrationStore::try_new(store.database())
             .await
             .expect("registration store")
             .register(PushSubscription {

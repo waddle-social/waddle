@@ -1,4 +1,22 @@
-use super::*;
+use super::{
+    classify, classify_effect, finish_ordered_reservation, is_no_effect_stale_ref_relookup_error,
+    is_ordered_unsupported_envelope_error, is_stale_ref_error, ordered_send_error,
+    relay_dispatch_span, relay_name, Demote, DemoteReply, Deserialize, Mutex,
+    OrderedRelayNackReason, OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation,
+    PendingReplyReceipts, RelayDispatchKind, RelayReassertMediaGrants,
+    RelayReassertMediaGrantsReply, RelayResumeSteal, RelayResumeStealReply, Serialize,
+};
+use super::{
+    refresh_relay_registration, remote_resource_compat, send_error, Arc, CancellationToken,
+    Duration, NodeId, OrderedRelayDeliveryBridge, RelayActor, RelayAskError, RelayDeliverOrdered,
+    RelayEchoStanza, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelayMucAdminQuery,
+    RelayMucAdminQueryItem, RelayMucAdminQueryReply, RelayPing, RelayRegisterAttempt,
+    RelayRemoteUserSideEffect, RelayRemoteUserSideEffectStatus, RelayResourcePresence,
+    RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure, RelayTraceContext,
+    RemoteResourceOutboundFrame, RemoteSendError, RemoteStanza, RemoteStanzaEnvelope,
+    RemoteUserSideEffect, ResumeStealBridge, RoomLocalClaims, SharedNodeIdentity, Spawn,
+    REREGISTER_INTERVAL, RESPAWN_BACKOFF,
+};
 use crate::clustering::claims::{NodeLeaseStore, OrphanedSmSessionClaim};
 use crate::clustering::ordered_relay::{
     OrderedRelayChannel, OrderedRelayClaim, OrderedRelayOrigin, OrderedRelayPayload,
@@ -273,18 +291,18 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
     let message = RelayExtensionRoomSend {
         context: InvocationContext {
-            waddle_id: waddle_extensions::WaddleId::new("space").expect("waddle"),
-            plugin_id: waddle_extensions::PluginId::new("stargate").expect("plugin"),
+            waddle_id: waddle_extensions::WaddleId::try_new("space").expect("waddle"),
+            plugin_id: waddle_extensions::PluginId::try_new("stargate").expect("plugin"),
             requester: Some("romeo@example.test".parse().expect("requester")),
             source_room: Some(room.clone()),
             kind: InvocationKind::Command,
             provider_room_grants: vec![room.clone()],
         },
         room: room.clone(),
-        offered_id: waddle_extensions::StanzaId::new("offered-1893").expect("offered"),
+        offered_id: waddle_extensions::StanzaId::try_new("offered-1893").expect("offered"),
         origin_budget: Duration::from_millis(10_500),
-        body: waddle_extensions::DisplayText::new("hello").expect("body"),
-        thread_id: Some(waddle_extensions::ThreadId::new("thread").expect("thread")),
+        body: waddle_extensions::DisplayText::try_new("hello").expect("body"),
+        thread_id: Some(waddle_extensions::ThreadId::try_new("thread").expect("thread")),
         reply_to: None,
         markup: vec![waddle_extensions::MessageMarkupSpan {
             kind: waddle_extensions::MessageMarkupKind::Blockquote,
@@ -306,11 +324,11 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
 
     for reply in [
         RelayExtensionRoomSendReply::Sent(
-            waddle_extensions::StanzaId::new("canonical").expect("id"),
+            waddle_extensions::StanzaId::try_new("canonical").expect("id"),
         ),
         RelayExtensionRoomSendReply::HostError(HostToolError {
             code: HostToolErrorCode::Denied,
-            message: waddle_extensions::DisplayText::new("denied").expect("message"),
+            message: waddle_extensions::DisplayText::try_new("denied").expect("message"),
         }),
         RelayExtensionRoomSendReply::NotOwner,
     ] {

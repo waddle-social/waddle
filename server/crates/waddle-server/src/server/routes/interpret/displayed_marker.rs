@@ -264,7 +264,7 @@ mod tests {
     ) -> MamArchivedMessage {
         let archive_jid = jid::Jid::from(room.clone());
         let thread_info = thread.and_then(|raw| {
-            ThreadId::new(raw.to_string()).map(|id| ThreadInfo { id, parent: None })
+            ThreadId::try_new(raw.to_string()).map(|id| ThreadInfo { id, parent: None })
         });
         let stanza_id = Some(Xep0359StanzaId::new(
             wire_id.to_string(),
@@ -393,15 +393,11 @@ mod tests {
     async fn snapshot_read_failure_prevents_ingress_commit(
         fixture: crate::ingress::test_support::IngressFixture,
     ) {
-        use crate::ingress::{
-            commit::commit_submission, IngressDecisionClass, IngressEffectCapture,
-        };
-        use crate::server::routes::interpret::{
-            build_plan_deps,
-            effects::{PlanFailure, PlanSink},
-            interpret,
-            message_plan::finish_plan,
-        };
+        use crate::ingress::commit::commit_submission;
+        use crate::ingress::{IngressDecisionClass, IngressEffectCapture};
+        use crate::server::routes::interpret::effects::{PlanFailure, PlanSink};
+        use crate::server::routes::interpret::message_plan::finish_plan;
+        use crate::server::routes::interpret::{build_plan_deps, interpret};
         let owner = fixture.principal.bare_jid().clone();
         let room = bare("team@conf.example.com");
         let inbox: Arc<dyn InboxStorage> = Arc::new(

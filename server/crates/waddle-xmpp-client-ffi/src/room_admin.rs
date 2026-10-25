@@ -171,9 +171,10 @@ pub(crate) fn room_config_from_form(form: &RoomConfigForm) -> WaddleRoomConfig {
         pin_permission: form
             .value(FIELD_PIN_PERMISSION)
             .and_then(RoomPinPermission::from_form_value)
-            .map(|value| match value {
-                RoomPinPermission::AdminsOnly => WaddlePinPermission::AdminsOnly,
-                RoomPinPermission::Anyone => WaddlePinPermission::Anyone,
+            .and_then(|value| match value {
+                RoomPinPermission::AdminsOnly => Some(WaddlePinPermission::AdminsOnly),
+                RoomPinPermission::Anyone => Some(WaddlePinPermission::Anyone),
+                _ => None,
             }),
     }
 }

@@ -1,6 +1,7 @@
-use super::*;
+use super::XmppAppState;
+use crate::db::actor::DbActor;
+use crate::db::Database;
 use crate::db::MigrationRunner;
-use crate::db::{actor::DbActor, Database};
 use crate::permissions::{ObjectType, PermissionActor};
 use kameo::actor::{ActorRef, Spawn};
 use std::sync::Arc;

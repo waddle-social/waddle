@@ -1,10 +1,14 @@
 //! XEP-0357 publish errors retire a gone target without consuming retry budget.
 
-use super::*;
+use super::{
+    BareJid, NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
+    PushSubscriptionStore, STATUS_FAILED,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{
     candidate, enqueue_jobs_for_test, inbox_with_unread, target_named,
 };
+use crate::notification_outbox::NotificationCandidate;
 use crate::push_registrations::DatabasePushRegistrationStore;
 use crate::push_service::test_support::{fcm_registration, FCM_TEST_APP_ID};
 use crate::push_service::DatabasePushServiceStore;
@@ -66,10 +70,10 @@ async fn attach_outbox_custody(
 
 async fn deleted_node_disables_only_its_registration(fixture: IngressFixture) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    let registrations = DatabasePushRegistrationStore::new(fixture.db.clone())
+    let registrations = DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registrations");
     let notification = candidate("deleted-push-node");
@@ -210,10 +214,10 @@ async fn gone_registration_preserves_prior_provider_custody(
     host_registration_missing: bool,
 ) {
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    let registrations = DatabasePushRegistrationStore::new(fixture.db.clone())
+    let registrations = DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registrations");
     let notification = candidate("gone-after-unknown-acceptance");
@@ -391,10 +395,10 @@ async fn postgres_xep0357_delayed_gone_outcome_preserves_later_reenable() {
     let Some(fixture) = IngressFixture::postgres("gone_registration_reenable").await else {
         return;
     };
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    let registrations = DatabasePushRegistrationStore::new(fixture.db.clone())
+    let registrations = DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registrations");
     let service: BareJid = "push.example.com".parse().expect("service");

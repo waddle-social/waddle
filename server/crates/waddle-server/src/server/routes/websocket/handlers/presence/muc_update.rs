@@ -34,11 +34,9 @@
 
 use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
-use waddle_xmpp::muc::{
-    build_occupant_presence_update,
-    presence::NS_MUC,
-    room_actor::{ClearMujiPresence, UpsertInCallState, UpsertMujiPresence},
-};
+use waddle_xmpp::muc::build_occupant_presence_update;
+use waddle_xmpp::muc::presence::NS_MUC;
+use waddle_xmpp::muc::room_actor::{ClearMujiPresence, UpsertInCallState, UpsertMujiPresence};
 use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
 use waddle_xmpp::xep::xep0421::OccupantIdentity;
@@ -56,9 +54,8 @@ use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::presence::Presence;
 
 use super::super::super::{get_room_actor, stanza_to_xml};
-use crate::server::routes::websocket::{
-    interpret_loop::build_interpret_deps, ActiveCallThread, WebSocketState,
-};
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::{ActiveCallThread, WebSocketState};
 
 /// Pull out the typed [`Muji`] element from an inbound presence's
 /// payloads if it carries one. Returns `None` when the namespace
@@ -510,7 +507,7 @@ fn build_call_thread_anchor_message(
     active_muji: Option<&Muji>,
     initiator_nick: &str,
 ) -> Option<CallThreadAnchorMessage> {
-    let thread_id = ThreadId::new(uuid::Uuid::new_v4().to_string())?;
+    let thread_id = ThreadId::try_new(uuid::Uuid::new_v4().to_string())?;
     let sid = SessionId(uuid::Uuid::new_v4().to_string());
     let media = media_from_muji(active_muji);
     let body = format!("{initiator_nick} started a call");

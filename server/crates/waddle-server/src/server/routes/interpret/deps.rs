@@ -1,4 +1,19 @@
-use super::*;
+use super::{
+    ActorRef, ArchiveIdRewrite, BlockingStorage, ConnectionRegistry, ExtensionManager, FullJid,
+    InMemorySmSessionRegistry, InboundEvent, InboxStorage, MamStorage, RoomRegistryActor,
+    StanzaDispatcher, WebSocketState,
+};
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::RemoteResourceOriginSnapshot;
+use crate::ingress::append_authority::AppendAuthority;
+use crate::ingress::append_authority::AppendAuthorityRejection;
+use crate::ingress::nested::HostFrameConsumer;
+use crate::ingress::DispatchProbeBudget;
+use crate::ingress::EffectReceiptKey;
+use crate::ingress::IngressEffectCapture;
+use crate::ingress_uow::IngressUnitOfWork;
+use crate::server::extension_bot::RESOURCE;
+use crate::server::routes::websocket::ResolvedPrincipal;
 use std::sync::Arc;
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::protocol::TimerId;
@@ -37,7 +52,7 @@ impl From<DeliveryExecutionContext>
 pub enum OrderedRelayRouteOriginKind {
     SmSession(waddle_xmpp::pending_delivery::SmSessionId),
     Entity(waddle_xmpp::ownership::Entity),
-    RemoteResource(crate::clustering::route_bridge::RemoteResourceOriginSnapshot),
+    RemoteResource(RemoteResourceOriginSnapshot),
 }
 
 #[derive(Clone, Debug)]
@@ -126,13 +141,13 @@ pub enum TimerCommand {
 #[derive(Clone, Debug)]
 pub struct SmIngressAppendContext {
     pub message_key: waddle_xmpp::ingress::MessageKey,
-    pub receipt: crate::ingress::EffectReceiptKey,
+    pub receipt: EffectReceiptKey,
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
     pub archive_positions: Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>,
     pub dispatch_stream: Option<waddle_xmpp::pending_delivery::SmSessionId>,
     /// Whether this identity is already proven against the canonical row.
     /// Not serialized; every constructor decides explicitly.
-    pub(crate) authority: crate::ingress::append_authority::AppendAuthority,
+    pub(crate) authority: AppendAuthority,
 }
 
 impl SmIngressAppendContext {
@@ -141,7 +156,7 @@ impl SmIngressAppendContext {
     pub(crate) async fn ensure_verified(
         &self,
         stanza: &waddle_xmpp::Stanza,
-    ) -> Result<(), crate::ingress::append_authority::AppendAuthorityRejection> {
+    ) -> Result<(), AppendAuthorityRejection> {
         self.authority.ensure_verified(stanza).await
     }
 
@@ -177,7 +192,7 @@ impl HostOwnedResources {
     }
 
     pub(super) fn owns_configured_bot(target: &FullJid, state: &WebSocketState) -> bool {
-        target.resource().as_str() == crate::server::extension_bot::RESOURCE
+        target.resource().as_str() == RESOURCE
             && state
                 .deps
                 .service_domains
@@ -206,19 +221,18 @@ impl HostOwnedResources {
 #[derive(Clone)]
 pub struct Deps<'a> {
     /// Shared allowance for fair recheck rounds within one ingress pass.
-    pub(crate) dispatch_probe_budget: Option<crate::ingress::DispatchProbeBudget>,
+    pub(crate) dispatch_probe_budget: Option<DispatchProbeBudget>,
     pub(crate) delivery_execution_context: DeliveryExecutionContext,
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
     /// Canonical authority of the current post-commit execution.
-    pub(crate) ingress_delivery_uow: Option<crate::ingress_uow::IngressUnitOfWork>,
+    pub(crate) ingress_delivery_uow: Option<IngressUnitOfWork>,
     /// Forced shutdown fence retained from the execution admission.
     pub(crate) ingress_delivery_stop: Option<tokio_util::sync::CancellationToken>,
     /// Resources whose planned frames are consumed by an extension host.
     pub host_sender: Option<HostOwnedResources>,
     /// Actual nested consumer, available only in its authority-owned host continuation.
-    pub(crate) host_copy_consumer:
-        Option<std::sync::Arc<crate::ingress::nested::HostFrameConsumer>>,
+    pub(crate) host_copy_consumer: Option<std::sync::Arc<HostFrameConsumer>>,
     /// Identity scoped to the current direct-routing invocation.
     pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,
@@ -274,8 +288,7 @@ pub struct Deps<'a> {
     /// managed-room owner check (announcements room admits server
     /// owners only) without re-querying. `None` for unauthenticated
     /// flows (early connection lifecycle, unit tests).
-    pub(crate) authenticated_principal:
-        Option<crate::server::routes::websocket::ResolvedPrincipal<'a>>,
+    pub(crate) authenticated_principal: Option<ResolvedPrincipal<'a>>,
     /// Authoritative local XMPP domain. Used by the
     /// [`OutboundEvent::RouteToConnection`] arm to gate the
     /// headless offline-recipient pass (#229 PR15) to local-domain
@@ -312,7 +325,7 @@ pub struct Deps<'a> {
     /// Typed, infallible capture handle for the shadow ingress seam.
     /// `None` on paths that are intentionally outside the message-ingress
     /// capture surface (tests, replay, IQ/presence).
-    pub ingress_effect_capture: Option<crate::ingress::IngressEffectCapture>,
+    pub ingress_effect_capture: Option<IngressEffectCapture>,
 }
 
 impl<'a> Deps<'a> {
@@ -330,10 +343,7 @@ impl<'a> Deps<'a> {
         self
     }
 
-    pub fn with_ingress_effect_capture(
-        mut self,
-        capture: Option<crate::ingress::IngressEffectCapture>,
-    ) -> Self {
+    pub fn with_ingress_effect_capture(mut self, capture: Option<IngressEffectCapture>) -> Self {
         self.ingress_effect_capture = capture;
         self
     }

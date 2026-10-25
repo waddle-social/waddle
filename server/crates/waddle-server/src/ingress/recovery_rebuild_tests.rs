@@ -1,9 +1,16 @@
-use super::*;
-use crate::server::routes::interpret::effects::{
-    delivery::PreparedOfflineNotification, room::ExternalRoomEffect,
+use super::{
+    rebuild, ExternalDeliveryEffect, ExternalEffect, MessageEnvelope, PlanEffectDependency,
+    RebuiltRecovery, RecoveryInput, RouteProgress, Utc,
 };
+use crate::server::routes::interpret::effects::delivery::PreparedOfflineNotification;
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
 use jid::{BareJid, FullJid};
-use waddle_xmpp::ingress::*;
+use waddle_xmpp::ingress::{
+    DmPinMutationAction, EffectMessageIdentity, GroupchatNotificationRecoveryAction,
+    GroupchatNotificationRecoveryMutation, IngressEffectIntent, IngressEffectKind, MessageKey,
+    MucInviteLedgerAction, MucInviteLedgerMutation, NotificationActivityMutation,
+    NotificationCandidateOutcome, PendingDeliveryMutation,
+};
 use waddle_xmpp::protocol::CarbonKind;
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::{Message, MessageType};
@@ -275,10 +282,10 @@ fn observer() -> IngressEffectIntent {
         room: bare("room@conference.example.com"),
         requester: bare("romeo@example.com"),
         sender: full("romeo@example.com/phone"),
-        plugin: waddle_extensions::PluginId::new("fixture").expect("plugin"),
+        plugin: waddle_extensions::PluginId::try_new("fixture").expect("plugin"),
         correction_target: None,
-        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+        generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
     }
 }
 #[test]

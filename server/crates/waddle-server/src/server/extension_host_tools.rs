@@ -18,7 +18,7 @@ impl DeferredExtensionHostTools {
     ) -> std::result::Result<&Arc<dyn ext_host::ExtensionHostTools>, ext_host::HostToolError> {
         self.inner.get().ok_or_else(|| ext_host::HostToolError {
             code: ext_host::HostToolErrorCode::Unsupported,
-            message: waddle_extensions::DisplayText::new(
+            message: waddle_extensions::DisplayText::try_new(
                 "extension host tools are not wired into the server",
             )
             .expect("static host-tool error is non-empty"),

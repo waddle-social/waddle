@@ -6,22 +6,18 @@ use jid::BareJid;
 use minidom::Element;
 use std::sync::Arc;
 use uuid::Uuid;
-use waddle_server::{
-    notification_outbox::{
-        NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
-        WADDLE_PUSH_CONTEXT_NS,
-    },
-    push_service::{DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration},
+use waddle_server::notification_outbox::{
+    NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
+    WADDLE_PUSH_CONTEXT_NS,
 };
-use waddle_xmpp::{
-    inbox::{
-        storage::{InMemoryInboxStorage, InboxStorage},
-        ConversationKind, InboxEntry,
-    },
-    pubsub::{Affiliation, InMemoryPubSubStorage, PubSubStorage},
-    push::{InMemoryPushStore, PushSubscription, PushSubscriptionStore},
-    xep::xep0191::InMemoryBlockingStorage,
+use waddle_server::push_service::{
+    DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
+use waddle_xmpp::inbox::storage::{InMemoryInboxStorage, InboxStorage};
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::pubsub::{Affiliation, InMemoryPubSubStorage, PubSubStorage};
+use waddle_xmpp::push::{InMemoryPushStore, PushSubscription, PushSubscriptionStore};
+use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
 fn publish_options(access_model: &str) -> Element {
     use waddle_xmpp::xep::{NS_DATA_FORMS, NS_PUBSUB_PUBLISH_OPTIONS};
@@ -60,7 +56,7 @@ impl Fixture {
     async fn new(outbox_db: IngressFixture, push_db: IngressFixture) -> Self {
         let owner: BareJid = "alice@example.com".parse().expect("owner");
         let service: BareJid = "push.example.com".parse().expect("service");
-        let outbox = NotificationOutboxStore::new(outbox_db.db.clone())
+        let outbox = NotificationOutboxStore::try_new(outbox_db.db.clone())
             .await
             .expect("outbox");
         let backing = Arc::new(InMemoryPubSubStorage::new());
@@ -72,9 +68,11 @@ impl Fixture {
         )
         .await
         .expect("push service");
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_db.db.clone())
-            .await
-            .expect("registration schema");
+        waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+            push_db.db.clone(),
+        )
+        .await
+        .expect("registration schema");
         let node = push
             .ensure_node(&owner, "web")
             .await
@@ -333,7 +331,7 @@ async fn inactive_node_fails_once_and_disables_registration(fixture: Fixture) {
         NotificationOutboxPublishOutcome::Failed { .. }
     ));
     assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 0 AND queue_acceptance_may_exist = 0 AND claim_token IS NULL AND next_attempt_at_ms IS NULL AND last_error = 'registration_gone'").await, 1);
-    let registrations = waddle_server::push_registrations::DatabasePushRegistrationStore::new(
+    let registrations = waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
         fixture.push_db.db.clone(),
     )
     .await

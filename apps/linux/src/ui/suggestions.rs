@@ -3,8 +3,11 @@
 //! It never takes focus from the entry. Up and Down move the selection,
 //! Tab or Enter picks it, and Escape dismisses the popover.
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{
+    AccessibleExtManual, BoxExt, Cast, EditableExt, EntryExt, GtkWindowExt, ListBoxRowExt,
+    ObjectExt, PopoverExt, WidgetExt,
+};
+use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::gdk;
 
 use super::WaddleWindow;
@@ -72,7 +75,7 @@ impl WaddleWindow {
     /// Focus sits in the entry's inner text widget, not the entry itself.
     fn composer_focused(&self) -> bool {
         let entry = self.imp().composer_entry.get();
-        gtk::prelude::GtkWindowExt::focus(self).is_some_and(|focus| {
+        GtkWindowExt::focus(self).is_some_and(|focus| {
             focus == entry.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&entry)
         })
     }

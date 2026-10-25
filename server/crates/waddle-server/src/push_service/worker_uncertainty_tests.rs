@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    apns_dispatch, dispatch, fcm_dispatch, Arc, BareJid, DatabasePushServiceStore,
+    DispatchedAttempt, Phase1Outcome, PushDevicePlatform, PushDisposition, PushFailureClass,
+    PushPublishJob, PushRetryReason, ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+    ATTEMPT_STATUS_WEB_NOT_CONFIGURED, MAX_DELIVERY_ATTEMPTS_PER_NODE,
+    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED, PUBLISH_JOB_STATUS_IN_PROGRESS,
+    PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     settle_recorded, CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
@@ -20,7 +27,7 @@ struct State {
 
 async fn seed(fixture: &IngressFixture, label: &str) -> State {
     let service: BareJid = "push.example.com".parse().expect("service");
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registrations");
     let backing = Arc::new(

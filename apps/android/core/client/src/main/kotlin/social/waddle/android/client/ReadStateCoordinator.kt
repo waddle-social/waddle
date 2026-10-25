@@ -240,7 +240,7 @@ internal class ReadStateCoordinator(
         var failed = false
         if (markerAllowed(ids, isGroupchat, conversation)) {
             val sent = runCatching {
-                client.sendDisplayed(conversation, ids.markerId, isGroupchat)
+                client.sendDisplayed(conversation, ids.markerId, messageAudience(isGroupchat))
             }.getOrDefault(false)
             failed = failed || !sent
         }

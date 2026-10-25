@@ -1,17 +1,19 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, Effect, ExternalDirectEffect,
+    ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::notification_activity::{
     NotificationActivityReader, NotificationActivityStore, NotificationChatState,
 };
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, NotificationActivityMutation},
-    registry::ConnectionRegistry,
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, NotificationActivityMutation};
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn gone_preserves_newer_activity(fixture: IngressFixture) {
-    let store = NotificationActivityStore::new(fixture.db.clone())
+    let store = NotificationActivityStore::try_new(fixture.db.clone())
         .await
         .expect("activity store");
     let owner = "alice@example.com".parse().expect("owner");
@@ -56,7 +58,7 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("activity-retry"), "activity");
     let owner = submission.sender.to_bare();
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
-    let store = NotificationActivityStore::new(fixture.db.clone())
+    let store = NotificationActivityStore::try_new(fixture.db.clone())
         .await
         .expect("canonical activity store");
     let mutation = NotificationActivityMutation::ChatStateGone {

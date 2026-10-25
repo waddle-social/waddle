@@ -1,7 +1,7 @@
 //! Typed activity model: chat-state and presence tokens with closed-set
 //! db codecs, the activity row, and the reader trait.
 
-use super::*;
+use super::{async_trait, BareJid, DatabaseError, Error};
 
 /// XEP-0085 chat-state token persisted on
 /// `notification_activity.last_chat_state`.

@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    connection_origin, groupchat_stanza_to, inbound, muji_envelope, muji_initiate_stanza,
+    origin_claim, origin_node, presence_stanza, presence_stanza_to, receive, room_channel,
+    room_channel_for_lane, room_claim, room_jid, sender_claim, MucProxyOrigin, OrderedRelayAck,
+    OrderedRelayMucProxyKind, OrderedRelayNack, OrderedRelayNackReason, OrderedRelayPayload,
+    OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayRoomLane, OrderedRelaySequence,
+    RemoteStanza, RemoteStanzaEnvelope,
+};
 use std::str::FromStr;
 
 #[test]

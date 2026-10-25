@@ -50,7 +50,7 @@ extension FFIXmppPort {
 
 extension FFIXmppPort {
     func sendDisplayed(stanzaID: String, in conversation: ConversationID) async -> Bool {
-        await client.sendDisplayed(peerJid: conversation.jid.description, stanzaId: stanzaID, isMuc: conversation.isRoom)
+        await client.sendDisplayed(peerJid: conversation.jid.description, stanzaId: stanzaID, audience: conversation.isRoom ? .muc : .direct)
     }
 
     func publishDisplayedCursor(_ cursor: DisplayedCursor) async -> Bool {
@@ -76,7 +76,9 @@ extension FFIXmppPort {
 
     /// The cheap hydration shape: every conversation, no embedded bodies.
     func fetchInbox() async throws -> [InboxEntry] {
-        let result = try await mappingPortErrors { try await client.fetchInbox(onlyUnread: false, noMessages: true) }
+        let result = try await mappingPortErrors {
+            try await client.fetchInbox(readFilter: .all, messageContent: .omit)
+        }
         return result.conversations.compactMap(FFIInbound.inboxEntry)
     }
 

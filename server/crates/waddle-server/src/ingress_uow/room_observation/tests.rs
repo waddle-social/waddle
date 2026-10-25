@@ -33,9 +33,9 @@ fn sender() -> BareJid {
 
 fn configured_observer(generation: u64, identity_byte: char) -> ConfiguredRoomObserver {
     ConfiguredRoomObserver {
-        plugin: PluginId::new("observer-fixture").expect("plugin"),
-        generation: ObservationGeneration::new(generation).expect("generation"),
-        identity: Sha256Digest::new(identity_byte.to_string().repeat(64)).expect("identity"),
+        plugin: PluginId::try_new("observer-fixture").expect("plugin"),
+        generation: ObservationGeneration::try_new(generation).expect("generation"),
+        identity: Sha256Digest::try_new(identity_byte.to_string().repeat(64)).expect("identity"),
         scope: RoomObservationScope::Rooms(vec![room()]),
         max_concurrent: 1,
     }
@@ -94,11 +94,11 @@ fn message(wire_id: &str, stanza_id: &str, origin_id: Option<&str>, body: &str) 
 }
 
 fn payload() -> ExtensionPayload {
-    let ns =
-        waddle_extensions::PayloadNamespace::new("urn:waddle:safety-scores:1").expect("namespace");
-    ExtensionPayload::new(
+    let ns = waddle_extensions::PayloadNamespace::try_new("urn:waddle:safety-scores:1")
+        .expect("namespace");
+    ExtensionPayload::try_new(
         ns.clone(),
-        XmlElement::new(ns, "safety-scores", vec![], vec![]).expect("element"),
+        XmlElement::try_new(ns, "safety-scores", vec![], vec![]).expect("element"),
     )
     .expect("payload")
 }
@@ -455,7 +455,7 @@ async fn lease_fence_and_publication_share_receipt_commit(fixture: IngressFixtur
         .expect("publication")
         .expect("pending");
     let mut other_observer = observer.clone();
-    other_observer.plugin = PluginId::new("other-observer").expect("plugin");
+    other_observer.plugin = PluginId::try_new("other-observer").expect("plugin");
     Repo::sync_configured(&mut tx, &[other_observer.clone()], crate::time::now_ms())
         .await
         .expect("other plugin");

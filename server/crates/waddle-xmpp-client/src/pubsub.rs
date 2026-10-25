@@ -35,6 +35,10 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 /// stories, and xCal events nodes. Mirrors
 /// [`crate::extension_commands::fallback_extension_service_jid`] for
 /// the extensions component.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if the derived community-service address is not a valid bare JID.
 pub fn community_service_jid(domain: &str) -> Result<BareJid, jid::Error> {
     BareJid::from_str(&format!("community.{domain}"))
 }
@@ -43,14 +47,21 @@ pub fn community_service_jid(domain: &str) -> Result<BareJid, jid::Error> {
 /// publish-options preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubAccessModel {
+    /// Access is open to any requester.
     Open,
+    /// Access depends on an existing presence subscription.
     Presence,
+    /// An entity discovered through the account roster.
     Roster,
+    /// Subscription requires approval from a node owner.
     Authorize,
+    /// Only explicitly authorized affiliates may access the node.
     Whitelist,
 }
 
 impl PubsubAccessModel {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -66,12 +77,17 @@ impl PubsubAccessModel {
 /// values accepted in publish-options preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubSendLastPublishedItem {
+    /// Do not send the last published item automatically.
     Never,
+    /// Send the last published item when a subscription is created.
     OnSub,
+    /// Send the last item on subscription and when the subscriber becomes available.
     OnSubAndPresence,
 }
 
 impl PubsubSendLastPublishedItem {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Never => "never",
@@ -86,16 +102,22 @@ impl PubsubSendLastPublishedItem {
 /// modelled; each `Some` field becomes one `jabber:x:data` submit
 /// field alongside the mandatory hidden FORM_TYPE.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PubsubPublishOptions {
+    /// Whether published items persist in node storage.
     pub persist_items: Option<bool>,
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: Option<PubsubAccessModel>,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: Option<PubsubSendLastPublishedItem>,
+    /// Maximum number of retained or returned items.
     pub max_items: Option<u32>,
 }
 
 impl PubsubPublishOptions {
     /// Build the `<publish-options xmlns='…pubsub'/>` element carrying
     /// the submit form.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         let mut form = Element::builder("x", NS_DATA_FORMS)
             .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit")
@@ -175,6 +197,7 @@ fn wrap_pubsub_iq(
 /// `max_items`. `service: None` routes to the account's own PEP
 /// service (XEP-0163); `Some(service)` addresses a pubsub component
 /// such as `community.<domain>`.
+#[must_use]
 pub fn build_pubsub_items_iq(
     iq_id: &str,
     service: Option<&BareJid>,
@@ -201,6 +224,7 @@ pub fn build_pubsub_items_iq(
 /// `item_id: None` lets the service generate the ItemID (§7.1.1);
 /// `publish_options` appends a XEP-0223/§7.1.5 precondition form after
 /// the `<publish/>` element.
+#[must_use]
 pub fn build_pubsub_publish_iq(
     iq_id: &str,
     service: Option<&BareJid>,
@@ -226,6 +250,7 @@ pub fn build_pubsub_publish_iq(
 
 /// XEP-0060 §6.1 subscribe SET: subscribe `subscriber` (the account's
 /// bare JID per §6.1.1) to `node` on `service`.
+#[must_use]
 pub fn build_pubsub_subscribe_iq(
     iq_id: &str,
     service: &BareJid,
@@ -249,6 +274,7 @@ pub fn build_pubsub_subscribe_iq(
 /// to `node` on `service`, scoped to `subid` when the service handed
 /// one out at subscribe time (§6.2.3.1 requires it when a JID holds
 /// multiple subscriptions to the node).
+#[must_use]
 pub fn build_pubsub_unsubscribe_iq(
     iq_id: &str,
     service: &BareJid,
@@ -275,9 +301,13 @@ pub fn build_pubsub_unsubscribe_iq(
 /// (or §8.8.4 notification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubSubscriptionState {
+    /// Approve a presence subscription.
     Subscribed,
+    /// The subscription awaits owner approval.
     Pending,
+    /// Subscription configuration must be completed before notifications are sent.
     Unconfigured,
+    /// No affiliation, subscription, or optional protocol value is assigned.
     None,
 }
 
@@ -298,9 +328,13 @@ impl PubsubSubscriptionState {
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubSubscription {
+    /// PubSub node named by the returned subscription.
     pub node: String,
+    /// Subscriber JID, when the response supplies a parseable address.
     pub jid: Option<Jid>,
+    /// Service-assigned identifier distinguishing this subscription.
     pub subid: Option<String>,
+    /// Subscription state reported by the service.
     pub state: PubsubSubscriptionState,
 }
 
@@ -308,6 +342,7 @@ pub struct PubsubSubscription {
 /// IQ carries no `<subscription/>` or its `subscription` state is
 /// missing/unknown — the caller surfaces both as a typed protocol
 /// error.
+#[must_use]
 pub fn parse_pubsub_subscribe_result(iq: &Element) -> Option<PubsubSubscription> {
     let subscription = iq
         .get_child("pubsub", NS_PUBSUB)?
@@ -326,6 +361,7 @@ pub fn parse_pubsub_subscribe_result(iq: &Element) -> Option<PubsubSubscription>
 /// XEP-0060 §7.2 retract SET removing `item_id` from `node`, always
 /// with `notify='true'` so subscribers receive the §7.2.2.1 retract
 /// notification (the community surfaces rely on it for live removal).
+#[must_use]
 pub fn build_pubsub_retract_iq(
     iq_id: &str,
     service: Option<&BareJid>,
@@ -351,7 +387,9 @@ pub fn build_pubsub_retract_iq(
 /// every payload child, preserved as typed elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubResultItem {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: String,
+    /// Extension payload elements carried alongside the standard protocol fields.
     pub payloads: Vec<Element>,
 }
 
@@ -359,6 +397,7 @@ impl PubsubResultItem {
     /// First payload child matching `name`/`ns` — the idiom every
     /// surface uses to pick its typed payload (`<entry/>`,
     /// `<vcalendar/>`, `<reads/>`) out of the item.
+    #[must_use]
     pub fn payload(&self, name: &str, ns: &str) -> Option<&Element> {
         self.payloads.iter().find(|payload| payload.is(name, ns))
     }
@@ -368,6 +407,7 @@ impl PubsubResultItem {
 /// design: a missing `<pubsub/>`/`<items/>` wrapper yields an empty
 /// list, and items without an ItemID are skipped (every Waddle node
 /// persists items under explicit ids).
+#[must_use]
 pub fn parse_pubsub_items_result(iq: &Element) -> Vec<PubsubResultItem> {
     let Some(items) = iq
         .get_child("pubsub", NS_PUBSUB)
@@ -392,6 +432,7 @@ pub fn parse_pubsub_items_result(iq: &Element) -> Vec<PubsubResultItem> {
 /// (`<pubsub><publish node='…'><item id='…'/></publish></pubsub>`).
 /// Returns `None` when the service omitted the echo (legal when the
 /// publisher supplied the ItemID itself).
+#[must_use]
 pub fn parse_pubsub_publish_result_item_id(iq: &Element) -> Option<String> {
     iq.get_child("pubsub", NS_PUBSUB)
         .and_then(|pubsub| pubsub.get_child("publish", NS_PUBSUB))

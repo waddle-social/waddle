@@ -1,6 +1,7 @@
 //! Preview retries keep the original approval even when enrichment changes.
+use crate::server::routes::interpret::effects::direct::ExternalDirectEffect;
 use crate::server::routes::interpret::effects::{
-    direct::ExternalDirectEffect, Effect, ExternalEffect, IngressPlan, PlannedEffect,
+    Effect, ExternalEffect, IngressPlan, PlannedEffect,
 };
 use waddle_xmpp::ingress::IngressEffectIntent;
 

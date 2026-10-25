@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectSink, PlanSink, PlannedEffect};
 use crate::ingress::effects::room::{DurableRoomEffect, RoomFenceRequirement};
 use crate::ingress::effects::{DurableEffect, Effect};
 use jid::BareJid;

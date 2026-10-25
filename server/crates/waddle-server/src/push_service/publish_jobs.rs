@@ -2,8 +2,18 @@
 //! recovery, retry bookkeeping, retention pruning, and row decoding for
 //! jobs and delivery attempts.
 
+use crate::db::DatabaseDriver;
+use crate::db::DatabaseError;
+use crate::db::Row;
+use crate::db::Transaction;
+use crate::ingress_substrate::ALIAS_RETENTION;
+use crate::ingress_uow::DbRetryClass;
+use crate::ingress_uow::EffectDescendantRepository;
+use crate::ingress_uow::IngressUowError;
+use crate::notification_outbox::PushServiceNodeName;
 use jid::BareJid;
 use minidom::Element;
+use std::collections::HashSet;
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::XmppError;
 
@@ -53,7 +63,7 @@ pub(super) const PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS: i64 = 24;
 pub(super) const PUBLISH_JOB_MAX_RETRY_AFTER_MS: i64 = 60 * 60 * 1_000;
 
 pub(super) async fn allocate_publication_order_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
 ) -> Result<i64, XmppError> {
     tx.execute("INSERT INTO push_publication_orders (node, next_order) VALUES (?, 0) ON CONFLICT DO NOTHING", crate::db_params![node]).await.map_err(|error| XmppError::internal(error.to_string()))?;
@@ -83,7 +93,7 @@ pub(super) async fn allocate_publication_order_tx(
 }
 
 pub(super) async fn wake_queued_publish_jobs_for_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     now_ms: i64,
 ) -> Result<(), XmppError> {
@@ -109,7 +119,7 @@ pub(super) async fn wake_queued_publish_jobs_for_node_tx(
 }
 
 pub(super) async fn claim_publish_job_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
     now_ms: i64,
 ) -> Result<Option<PushPublishJob>, XmppError> {
@@ -161,7 +171,7 @@ pub(super) async fn claim_publish_job_tx(
 }
 
 pub(super) async fn get_publish_job_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<PushPublishJob>, XmppError> {
     let mut rows = tx
@@ -190,7 +200,7 @@ pub(super) async fn get_publish_job_tx(
 /// (record attempts) so the actual Web Push dispatch happens outside any
 /// DB transaction.
 pub(super) async fn get_publish_job_payload_xml_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<String>, XmppError> {
     let mut rows = tx
@@ -220,9 +230,9 @@ pub(super) async fn get_publish_job_payload_xml_tx(
 /// failing sibling does not turn into duplicate OS notifications on
 /// every device that already received the item (#1123).
 pub(super) async fn delivered_device_ids_for_acceptance_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     publish_job_id: &str,
-) -> Result<std::collections::HashSet<String>, XmppError> {
+) -> Result<HashSet<String>, XmppError> {
     let mut rows = tx
         .query(
             r#"
@@ -239,7 +249,7 @@ pub(super) async fn delivered_device_ids_for_acceptance_tx(
         )
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?;
-    let mut delivered = std::collections::HashSet::new();
+    let mut delivered = HashSet::new();
     while let Some(row) = rows
         .next()
         .await
@@ -257,12 +267,12 @@ pub(super) async fn delivered_device_ids_for_acceptance_tx(
 /// claim is still ours before persisting any side effects. Returns
 /// `None` when the row was recovered (token cleared) or deleted.
 pub(super) async fn read_publish_job_claim_token_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<String>, XmppError> {
     // The finalizer already holds canonical/owner/node locks. Retain this
     // row lock so by-ID repair cannot raise uncertainty after its reread.
-    let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT claim_token FROM push_publish_jobs WHERE job_id = ? FOR UPDATE NOWAIT"
     } else {
         "SELECT claim_token FROM push_publish_jobs WHERE job_id = ?"
@@ -287,7 +297,7 @@ pub(super) async fn read_publish_job_claim_token_tx(
 /// Read the persisted `attempt_count` for a job. Used by phase 3 to
 /// enforce [`PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS`] (XEP-0357 §6.1).
 pub(super) async fn read_publish_job_attempt_count_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<i64>, XmppError> {
     let mut rows = tx
@@ -319,7 +329,7 @@ pub(super) struct KnownPublishJobFailure {
 /// A known failure of this attempt cannot resolve an earlier unknown send.
 /// Decide from the durable row atomically and retain the captured claim fence.
 pub(super) async fn record_known_publish_job_failure_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job: &PushPublishJob,
     error: &str,
     now_ms: i64,
@@ -389,10 +399,8 @@ pub(super) async fn record_known_publish_job_failure_tx(
     }))
 }
 
-async fn has_notification_lineage_tx(
-    tx: &mut crate::db::Transaction<'_>,
-) -> Result<bool, XmppError> {
-    Ok(if tx.driver() == crate::db::DatabaseDriver::Postgres {
+async fn has_notification_lineage_tx(tx: &mut Transaction<'_>) -> Result<bool, XmppError> {
+    Ok(if tx.driver() == DatabaseDriver::Postgres {
         let mut rows = tx
             .query(
                 "SELECT to_regclass('notification_outbox_lineage')::text",
@@ -424,13 +432,13 @@ async fn has_notification_lineage_tx(
 /// Push schema initialization precedes the outbox's runtime upgrade at boot.
 /// Resolve the actual table, not a same-named table in another PostgreSQL schema.
 pub(super) async fn has_notification_outbox_frozen_schema_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
 ) -> Result<bool, XmppError> {
     let sql = match tx.driver() {
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             "SELECT COUNT(*) FROM pg_attribute WHERE attrelid = to_regclass('notification_outbox') AND NOT attisdropped AND attname IN ('approved_payload_xml', 'approved_publish_options_xml')"
         }
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             "SELECT COUNT(*) FROM pragma_table_info('notification_outbox') WHERE name IN ('approved_payload_xml', 'approved_publish_options_xml')"
         }
     };
@@ -452,7 +460,7 @@ pub(super) async fn has_notification_outbox_frozen_schema_tx(
 }
 
 pub(super) async fn lock_notification_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     lock_notification_ancestry_typed_tx(tx, job)
@@ -470,9 +478,9 @@ pub(super) enum NotificationAncestryLockError {
     Failed(XmppError),
 }
 
-impl From<crate::ingress_uow::IngressUowError> for NotificationAncestryLockError {
-    fn from(error: crate::ingress_uow::IngressUowError) -> Self {
-        if error.retry_class() == crate::ingress_uow::DbRetryClass::CanonicalLockContention {
+impl From<IngressUowError> for NotificationAncestryLockError {
+    fn from(error: IngressUowError) -> Self {
+        if error.retry_class() == DbRetryClass::CanonicalLockContention {
             Self::Contended
         } else {
             Self::Failed(XmppError::internal("notification ancestry unavailable"))
@@ -480,8 +488,8 @@ impl From<crate::ingress_uow::IngressUowError> for NotificationAncestryLockError
     }
 }
 
-impl From<crate::db::DatabaseError> for NotificationAncestryLockError {
-    fn from(error: crate::db::DatabaseError) -> Self {
+impl From<DatabaseError> for NotificationAncestryLockError {
+    fn from(error: DatabaseError) -> Self {
         if let crate::db::DatabaseError::Internal(sqlx::Error::Database(database)) = &error {
             if database.code().as_deref() == Some("55P03") {
                 return Self::Contended;
@@ -492,34 +500,34 @@ impl From<crate::db::DatabaseError> for NotificationAncestryLockError {
 }
 
 pub(super) async fn lock_notification_ancestry_typed_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), NotificationAncestryLockError> {
     if let Some(id) = job.ancestry_job_id() {
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
         if has_notification_lineage_tx(tx)
             .await
             .map_err(NotificationAncestryLockError::Failed)?
         {
-            let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            let sql = if tx.driver() == DatabaseDriver::Postgres {
                 "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
             } else {
                 "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
             };
             let mut rows = tx.query(sql, crate::db_params![id.to_string()]).await?;
             while rows.next().await?.is_some() {}
-            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+            EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
         }
     }
     Ok(())
 }
 
 pub(super) async fn settle_notification_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     if let Some(id) = job.ancestry_job_id() {
-        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
+        EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
             .await
             .map_err(|_| XmppError::internal("notification ancestry settlement unavailable"))?;
         if has_notification_lineage_tx(tx).await? {
@@ -532,7 +540,7 @@ pub(super) async fn settle_notification_ancestry_tx(
 }
 
 pub(super) async fn settle_terminal_notification_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
     let mut rows = tx
@@ -565,7 +573,7 @@ pub(super) async fn settle_terminal_notification_ancestry_tx(
 }
 
 pub(super) async fn prune_delivery_attempts_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
@@ -618,7 +626,7 @@ pub(super) async fn prune_delivery_attempts_tx(
 }
 
 pub(super) async fn prune_publish_jobs_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
@@ -644,7 +652,7 @@ pub(super) async fn prune_publish_jobs_tx(
     if excess == 0 {
         return Ok(());
     }
-    let has_foundation = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let has_foundation = if tx.driver() == DatabaseDriver::Postgres {
         let mut rows = tx
             .query("SELECT to_regclass('ingress_effect_descendants')::text", ())
             .await
@@ -672,8 +680,7 @@ pub(super) async fn prune_publish_jobs_tx(
     } else {
         ""
     };
-    let cutoff = crate::time::now_ms()
-        .saturating_sub(crate::ingress_substrate::ALIAS_RETENTION.num_milliseconds());
+    let cutoff = crate::time::now_ms().saturating_sub(ALIAS_RETENTION.num_milliseconds());
     tx.execute(
         &format!(
             r#"
@@ -719,10 +726,10 @@ pub(super) async fn prune_publish_jobs_tx(
 /// Canonical locks and the upstream child lock are held by the caller; take the
 /// provider row NOWAIT so reversed scheduler ordering cannot wait in a cycle.
 pub(crate) async fn acknowledge_completed_outbox_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     job_id: &str,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
-    let has_provider = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+) -> Result<(), IngressUowError> {
+    let has_provider = if tx.driver() == DatabaseDriver::Postgres {
         let mut rows = tx
             .query("SELECT to_regclass('push_publish_jobs')::text", ())
             .await?;
@@ -742,7 +749,7 @@ pub(crate) async fn acknowledge_completed_outbox_tx(
     if !has_provider {
         return Ok(());
     }
-    let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let lock = if tx.driver() == DatabaseDriver::Postgres {
         " FOR UPDATE NOWAIT"
     } else {
         ""
@@ -767,9 +774,9 @@ pub(crate) async fn acknowledge_completed_outbox_tx(
 /// Only genuinely outstanding ancestry makes a known failed job retireable;
 /// already-settled failure history is immutable during endpoint retirement.
 pub(super) async fn pending_notification_custody_sql(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
 ) -> Result<String, XmppError> {
-    let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT to_regclass('notification_outbox_lineage') IS NOT NULL, to_regclass('ingress_effect_descendants') IS NOT NULL"
     } else {
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox_lineage'), EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants')"
@@ -804,7 +811,7 @@ pub(super) async fn pending_notification_custody_sql(
 }
 
 pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
 ) -> Result<u64, XmppError> {
@@ -812,7 +819,7 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
 }
 
 pub(super) async fn registration_publish_job_nodes_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     service: &BareJid,
     node: Option<&str>,
@@ -837,7 +844,7 @@ pub(super) async fn registration_publish_job_nodes_tx(
 }
 
 pub(super) async fn cancel_registration_publish_jobs_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     service: &BareJid,
     node: &str,
@@ -845,15 +852,13 @@ pub(super) async fn cancel_registration_publish_jobs_tx(
     cancel_retryable_publish_jobs_tx(tx, owner_bare_jid, node, Some(service)).await
 }
 
-async fn retireable_publish_jobs_sql(
-    tx: &mut crate::db::Transaction<'_>,
-) -> Result<String, XmppError> {
+async fn retireable_publish_jobs_sql(tx: &mut Transaction<'_>) -> Result<String, XmppError> {
     let pending = pending_notification_custody_sql(tx).await?;
     Ok(format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND terminal_disposition IS NULL AND (uncertain_send = 1 OR ({pending}))))"))
 }
 
 async fn cancel_retryable_publish_jobs_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
     service: Option<&BareJid>,
@@ -958,7 +963,7 @@ fn retry_deadline_sql_with_jitter(now_ms: i64, jitter: i64) -> String {
     )
 }
 
-fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError> {
+fn decode_publish_job(row: &Row) -> Result<PushPublishJob, XmppError> {
     let owner_bare_jid: String = row
         .get(1)
         .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -1020,7 +1025,7 @@ fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError>
     })
 }
 
-fn decode_attempt(row: &crate::db::Row) -> Result<PushDeliveryAttempt, XmppError> {
+fn decode_attempt(row: &Row) -> Result<PushDeliveryAttempt, XmppError> {
     Ok(PushDeliveryAttempt {
         attempt_id: row
             .get(0)
@@ -1116,7 +1121,7 @@ impl DatabasePushServiceStore {
     pub(crate) async fn canonical_terminal_notification_proof(
         &self,
         service: &BareJid,
-        node: &crate::notification_outbox::PushServiceNodeName,
+        node: &PushServiceNodeName,
         item: &PubSubItem,
         owner: &BareJid,
         options: Option<&Element>,
@@ -1161,7 +1166,7 @@ impl DatabasePushServiceStore {
     pub(crate) async fn acknowledge_canonical_outbox_completion(
         &self,
         service: &BareJid,
-        node: &crate::notification_outbox::PushServiceNodeName,
+        node: &PushServiceNodeName,
         item: &PubSubItem,
         owner: &BareJid,
         options: Option<&Element>,
@@ -1205,7 +1210,7 @@ impl DatabasePushServiceStore {
     /// Standalone stores have no authority over host registration state.
     async fn disable_gone_node_registration_tx(
         &self,
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         owner: &BareJid,
         service: Option<&BareJid>,
         node: &str,
@@ -1807,7 +1812,7 @@ mod tests {
         if let Some(fixture) =
             crate::ingress::test_support::IngressFixture::postgres("push_repair_backoff").await
         {
-            let store = DatabasePushServiceStore::new(fixture.db.clone())
+            let store = DatabasePushServiceStore::try_new(fixture.db.clone())
                 .await
                 .expect("store");
             verify_atomic_repair_backoff(store).await;

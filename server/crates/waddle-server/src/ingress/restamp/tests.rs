@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    restamp_plan, restore_route_identities, ArchiveRole, ArchivedMessage, BareJid,
+    ConversationKind, DurableDirectEffect, DurableEffect, DurableRoomEffect, Effect,
+    ExternalDeliveryEffect, ExternalDirectEffect, ExternalEffect, ExternalRoomEffect, InboxEntry,
+    IngressEffectIntent, IngressPlan, Message, PendingPayload, PlanEffectDependency,
+    PreparedOfflineNotification, Stanza, StanzaId,
+};
 use crate::server::routes::interpret::effects::{PlannedEffect, RoomExecutionPath};
 use waddle_xmpp::ingress::{EffectMessageIdentity, RetractionTombstoneMutation};
 use waddle_xmpp_core::xep0359::{
@@ -33,7 +39,7 @@ fn prepared_route_restamps_only_derived_ids_and_preserves_real_drift() {
         recipient: recipient.clone(),
         fanout: vec!["bob@example.test/phone".parse().expect("target")],
         route_identity: EffectMessageIdentity::capture_ordinal(7),
-        prepared: Some(StoredMessagePayload::new(message).expect("valid payload")),
+        prepared: Some(StoredMessagePayload::try_new(message).expect("valid payload")),
     };
     let saved = intent(original.clone());
     for drift in ["none", "body", "target", "foreign", "fanout", "ambiguous"] {

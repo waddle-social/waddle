@@ -55,6 +55,7 @@ impl BookmarkItem {
     ///
     /// Returns `None` if either the item id is not a bare JID or the
     /// expected `<conference/>` payload is missing.
+    #[must_use]
     pub fn parse_item(item: &Element) -> Option<Self> {
         let id_attr = item.attr("id")?;
         let jid: BareJid = id_attr.parse().ok()?;
@@ -105,6 +106,7 @@ impl BookmarkItem {
     /// `autojoin` is only emitted when `true` — XEP-0402 §2.2 XSD
     /// defaults the attribute to `false`, and an absent attr is the
     /// canonical "no autojoin" wire shape.
+    #[must_use]
     pub fn build_conference_element(&self) -> Element {
         let mut builder = Element::builder("conference", NS_BOOKMARKS);
         if self.autojoin {
@@ -136,6 +138,7 @@ impl BookmarkItem {
 
 /// Build a `get` IQ requesting the user's bookmark items from their
 /// own PEP `urn:xmpp:bookmarks:1` node.
+#[must_use]
 pub fn build_fetch_bookmarks_iq(request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -159,6 +162,7 @@ pub fn build_fetch_bookmarks_iq(request_id: &str) -> Element {
 ///
 /// Includes the XEP-0402 §3.1 `publish-options` so the server creates
 /// the node with the correct access model on first publish.
+#[must_use]
 pub fn build_publish_bookmark_iq(item: &BookmarkItem, request_id: &str) -> Element {
     let publish_options = Element::builder("publish-options", NS_PUBSUB)
         .append(
@@ -215,6 +219,7 @@ pub fn build_publish_bookmark_iq(item: &BookmarkItem, request_id: &str) -> Eleme
 /// `urn:xmpp:bookmarks:1`, returning them as typed [`BookmarkItem`]
 /// values. Items with an unparseable id or missing conference payload
 /// are skipped.
+#[must_use]
 pub fn parse_bookmarks_response(iq: &Element) -> Vec<BookmarkItem> {
     let Some(items) = iq
         .get_child("pubsub", NS_PUBSUB)
@@ -245,7 +250,8 @@ fn submit_value_field(var: &str, value: &str) -> Element {
 mod tests {
     use super::*;
     use crate::xep::xep0492::{
-        merge_notify_into_extensions, read_fallback_mode, NotifyMode, NS_NOTIFICATION_SETTINGS,
+        merge_notify_into_extensions, read_fallback_mode, NotifyMode, RichPushSummary,
+        NS_NOTIFICATION_SETTINGS,
     };
 
     #[test]
@@ -326,7 +332,7 @@ mod tests {
 
     #[test]
     fn build_conference_round_trips_extension_children() {
-        let merged = merge_notify_into_extensions(None, NotifyMode::Never, false);
+        let merged = merge_notify_into_extensions(None, NotifyMode::Never, RichPushSummary::OptOut);
         let item = BookmarkItem {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),

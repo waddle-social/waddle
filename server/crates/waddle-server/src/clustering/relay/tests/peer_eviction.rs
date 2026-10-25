@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    relay_name, Arc, CancellationToken, Duration, Entity, EntityType, NodeId,
+    OrderedRelayDeliveryBridge, OrderedRelayReply, OrderedRelaySequence, RelayActor,
+    RelayDeliverOrdered,
+};
 use crate::clustering::ordered_relay::{
     OrderedRelayReceiverState, OrderedRelayReservation, ORDERED_RELAY_DIVERSION_COOLDOWN,
 };
@@ -9,12 +13,11 @@ use crate::server::routes::interpret::{
     FullJidDeliveryOutcome, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind,
 };
 use futures::StreamExt;
-use kameo::remote::{
-    self, messaging::SwarmRequest, messaging::SwarmResponse, registry::ActorRegistration,
-};
-use libp2p::{
-    noise, request_response, swarm::SwarmEvent, tcp, yamux, StreamProtocol, SwarmBuilder,
-};
+use kameo::remote;
+use kameo::remote::messaging::{SwarmRequest, SwarmResponse};
+use kameo::remote::registry::ActorRegistration;
+use libp2p::swarm::SwarmEvent;
+use libp2p::{noise, request_response, tcp, yamux, StreamProtocol, SwarmBuilder};
 use std::borrow::Cow;
 
 /// Exercise the public messaging transport and ordered-delivery boundary

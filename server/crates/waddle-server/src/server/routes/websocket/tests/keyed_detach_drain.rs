@@ -4,8 +4,15 @@
 //! both drains and the session store are the real ones.
 
 use super::super::cleanup::{cleanup_connection_shutdown, ConnectionShutdownOutcome};
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::Message;
+use super::{
+    create_test_session, create_test_websocket_state_with_extension_manager,
+    empty_extension_manager, mpsc, stanza_to_xml, Arc, Blocklist, ConnectionPhase, DatabasePool,
+    FullJid, InMemorySmSessionRegistry, OutboundStanza, Stanza, TestStateOverrides, WebSocketState,
+    WsConnState,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, MessageKey};
 use waddle_xmpp::stream_management::{
     SmIngressAppendKey, SmIngressReceiptKind, SmKeyedAppendOutcome, SmRelayedAppendObligation,
@@ -31,7 +38,7 @@ async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
             .expect("SM persistence"),
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
-    let pool = DatabasePool::new(
+    let pool = DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

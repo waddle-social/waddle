@@ -1,12 +1,18 @@
-use super::*;
-use super::{
-    session_init::load_blocklist_for_bind,
-    state::WsConnState,
-    stream_management::{
-        finalize_sm_after_registry_registration, reject_unregistered_resume, sm_show_name,
-        SmRegistrationFinalization,
-    },
+use super::session_init::load_blocklist_for_bind;
+use super::state::WsConnState;
+use super::stream_management::{
+    finalize_sm_after_registry_registration, reject_unregistered_resume, sm_show_name,
+    SmRegistrationFinalization,
 };
+use super::{error, info, mpsc, Blocklist, FullJid, OutboundStanza, WebSocketState};
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::RemoteResourceRegisterOutcome;
+use crate::clustering::NodeAdmissionPermit;
+use crate::db::DatabaseError;
+use crate::server::dual_registration::MirrorRegisterOutcome;
+use crate::sm_promotion::DisplacedPromotionDeps;
+#[cfg(test)]
+use std::sync::Arc;
 
 /// A resume can briefly observe the previous node's `UserActor` while its
 /// force-detach cleanup drains.  Bound retries keep that handoff from turning
@@ -28,7 +34,7 @@ enum BindPreparationError {
     #[error("resumed occupancy generation is no longer authoritative")]
     ResumeAuthorityRevoked,
     #[error("occupancy authority storage failed: {0}")]
-    Authority(#[from] crate::db::DatabaseError),
+    Authority(#[from] DatabaseError),
     #[error("SM generation inventory failed: {0}")]
     Inventory(#[from] waddle_xmpp::stream_management::SmRegistryError),
     #[error("incumbent occupancy retirement could not be confirmed")]
@@ -153,7 +159,7 @@ pub(crate) async fn complete_bind_retirements(
             // generation's storage operation.
             crate::sm_promotion::promote_displaced_sessions(
                 removed.clone(),
-                crate::sm_promotion::DisplacedPromotionDeps {
+                DisplacedPromotionDeps {
                     sm_registry: &state.deps.protocol.sm_session_registry,
                     connection_registry: registry,
                     user_registry: &state.deps.protocol.user_registry,
@@ -186,15 +192,14 @@ fn resume_registration_busy_backoff(attempt: usize) -> std::time::Duration {
 
 pub(super) async fn retry_resumed_registration_busy<F, Fut>(
     mut register: F,
-) -> crate::server::dual_registration::MirrorRegisterOutcome
+) -> MirrorRegisterOutcome
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = crate::server::dual_registration::MirrorRegisterOutcome>,
+    Fut: std::future::Future<Output = MirrorRegisterOutcome>,
 {
     for attempt in 0..RESUME_REGISTRATION_BUSY_ATTEMPTS {
         let outcome = register().await;
-        if outcome == crate::server::dual_registration::MirrorRegisterOutcome::Busy
-            && attempt + 1 < RESUME_REGISTRATION_BUSY_ATTEMPTS
+        if outcome == MirrorRegisterOutcome::Busy && attempt + 1 < RESUME_REGISTRATION_BUSY_ATTEMPTS
         {
             tokio::time::sleep(resume_registration_busy_backoff(attempt)).await;
             continue;
@@ -219,7 +224,7 @@ pub(super) enum RegistrationAfterFrame {
 }
 
 fn registration_authoritative(
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> bool {
     !shutdown.is_cancelled() && permit.revalidate().is_ok()
@@ -434,7 +439,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
     domain: &str,
     conn: &mut WsConnState,
     pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> RegistrationAfterFrame {
     if !registration_authoritative(permit, shutdown) {
@@ -702,7 +707,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             .await
         };
         let registration_outcome = match mirror_outcome {
-            crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
+            MirrorRegisterOutcome::ForeignOwner => {
                 #[cfg(test)]
                 if let Ok((entered, release)) = FOREIGN_OWNER_GATE.try_with(Clone::clone) {
                     entered.notify_one();
@@ -716,9 +721,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             rollback_registered_connection(state, &jid, &owner, conn).await;
             return RegistrationAfterFrame::AuthorityRevoked;
         }
-        if registration_outcome
-            == crate::server::dual_registration::MirrorRegisterOutcome::Registered
-        {
+        if registration_outcome == MirrorRegisterOutcome::Registered {
             bind_guard.complete_actor_retirements_after_registration();
         } else {
             // Rollback also clears the presence_states published above.
@@ -808,7 +811,7 @@ async fn register_remote_clustered_resource(
     jid: &FullJid,
     entry: waddle_xmpp::registry::ConnectionEntry,
     owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> crate::server::dual_registration::MirrorRegisterOutcome {
+) -> MirrorRegisterOutcome {
     use crate::server::dual_registration::MirrorRegisterOutcome;
     let Some(bridge) = state
         .deps
@@ -830,16 +833,16 @@ async fn register_remote_clustered_resource(
             .try_register_remote_user_resource(jid, entry.clone(), owner.clone())
             .await
         {
-            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Registered => {
+            RemoteResourceRegisterOutcome::Registered => {
                 return MirrorRegisterOutcome::Registered;
             }
-            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Retryable => {
+            RemoteResourceRegisterOutcome::Retryable => {
                 return MirrorRegisterOutcome::Busy;
             }
-            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Failed => {
+            RemoteResourceRegisterOutcome::Failed => {
                 return MirrorRegisterOutcome::Failed;
             }
-            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::NotRemote => {
+            RemoteResourceRegisterOutcome::NotRemote => {
                 let outcome = retry_resumed_registration_busy(|| {
                     crate::server::dual_registration::mirror_register_outcome(
                         &state.deps.protocol.user_registry,
@@ -866,6 +869,6 @@ async fn register_remote_clustered_resource(
     _jid: &FullJid,
     _entry: waddle_xmpp::registry::ConnectionEntry,
     _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> crate::server::dual_registration::MirrorRegisterOutcome {
-    crate::server::dual_registration::MirrorRegisterOutcome::Failed
+) -> MirrorRegisterOutcome {
+    MirrorRegisterOutcome::Failed
 }

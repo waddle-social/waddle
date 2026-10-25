@@ -32,6 +32,7 @@
 //! 7. RFC 6121 §8.5.2.1 bare-JID resource selection, excluding
 //!    negative-priority resources.
 
+use crate::pending_delivery::PendingRowId;
 use jid::FullJid;
 use kameo::message::Context;
 use tokio::sync::mpsc::error::TrySendError;
@@ -177,7 +178,7 @@ impl kameo::message::Message<TrySendPeer> for UserActor {
 pub struct TrySendPendingFlush {
     pub jid: FullJid,
     pub stanza: Stanza,
-    pub row_id: crate::pending_delivery::PendingRowId,
+    pub row_id: PendingRowId,
     pub original_receipt_at: chrono::DateTime<chrono::Utc>,
 }
 

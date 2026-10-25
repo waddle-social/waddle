@@ -1,9 +1,38 @@
+#[cfg(test)]
+use super::effects;
 use super::groupchat_archive::{
     extract_room_stanza_id, GroupchatInboxProjectionInputs, GroupchatInboxProjectionOutcome,
 };
-use super::*;
+use super::{
+    debug, info, project_groupchat_inbox, warn, BareJid, Deps, GroupchatInboxAudience,
+    GroupchatThreadProjection, IngressEffectIntent, Jid, Message, WebSocketState, Xep0359StanzaId,
+};
+use crate::ingress::RecoverySweepOutcome;
+use crate::ingress_uow::IngressUowError;
+use crate::notification_activity::NoopActivityReader;
+use crate::notification_activity::NotificationActivity;
 #[cfg(test)]
-use crate::notification_outbox::groupchat_class::*;
+use crate::notification_outbox::groupchat_class::{
+    groupchat_channel_mention_scope, groupchat_mentions_carry_owner_noping,
+    groupchat_mentions_owner, groupchat_notification_class,
+    groupchat_notification_class_from_message, GroupchatChannelMentionScope,
+    GroupchatNotificationClassDecision, GroupchatNotificationClassOutcome,
+};
+use crate::notification_outbox::DndState;
+use crate::notification_outbox::GroupchatCandidateIdentity;
+use crate::notification_outbox::NoopDndReader;
+use crate::notification_outbox::NoopRoomPolicy;
+use crate::notification_outbox::NotificationCandidate;
+use crate::notification_outbox::NotificationCandidateInsertOutcome;
+use crate::notification_outbox::NotificationOutboxError;
+use crate::notification_outbox::NotificationThreadId;
+use crate::notification_outbox::PushEvalCaches;
+use crate::notification_outbox::PushEvalDeps;
+use crate::notification_outbox::PushEvalStage;
+use crate::notification_outbox::RoomPolicyCacheEntry;
+use crate::notification_outbox::T1PushDispatchOutcome;
+use crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS;
+use std::collections::BTreeMap;
 
 pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
     pub deps: &'a Deps<'deps>,
@@ -54,12 +83,13 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room: &room,
         message: &message,
         is_recipient,
-        thread: &thread,
+        thread: thread.as_ref(),
         dispatch_timestamp,
         notification_recovery,
     })
     .await;
-    if let Some(mutation) = groupchat_inbox_mutation(&room, &thread, is_recipient, &outcome) {
+    if let Some(mutation) = groupchat_inbox_mutation(&room, thread.as_ref(), is_recipient, &outcome)
+    {
         deps.capture_intent(IngressEffectIntent::InboxProject {
             owner: owner.clone(),
             mutation,
@@ -87,7 +117,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
-        thread: &thread,
+        thread: thread.as_ref(),
         outcome: &outcome,
         notification_recovery: notification_recovery_for_capture.as_ref(),
     })
@@ -132,7 +162,7 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     /// XEP-0513 frozen permission snapshot; see
     /// [`ProjectGroupchatInboxEvent::sender_can_broadcast_channel_mention`].
     sender_can_broadcast_channel_mention: bool,
-    thread: &'a Option<GroupchatThreadProjection>,
+    thread: Option<&'a GroupchatThreadProjection>,
     outcome: &'a GroupchatInboxProjectionOutcome,
     notification_recovery: Option<&'a super::effects::room::PlannedGroupchatNotificationRecovery>,
 }
@@ -145,7 +175,7 @@ fn groupchat_notification_recovery_mutation(
         recipient: recovery.key.recipient.clone(),
         room: recovery.key.room.clone(),
         thread_id: recovery.key.thread_id.as_ref().map(|thread_id| {
-            waddle_xmpp_core::mam::ThreadId::new(thread_id.clone())
+            waddle_xmpp_core::mam::ThreadId::try_new(thread_id.clone())
                 .expect("stored groupchat recovery thread id must be valid")
         }),
         archive_stanza_id: recovery.key.archive_stanza_id.clone(),
@@ -190,19 +220,15 @@ enum GroupchatNotificationCandidateQueueOutcome {
 
 fn groupchat_inbox_mutation(
     room: &BareJid,
-    thread: &Option<GroupchatThreadProjection>,
+    thread: Option<&GroupchatThreadProjection>,
     is_recipient: bool,
     outcome: &GroupchatInboxProjectionOutcome,
 ) -> Option<waddle_xmpp::ingress::InboxProjectionMutation> {
-    match (
-        outcome.channel_committed,
-        outcome.thread_committed,
-        thread.as_ref(),
-    ) {
+    match (outcome.channel_committed, outcome.thread_committed, thread) {
         (true, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelAndThread {
                 room: room.clone(),
-                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new(thread.thread_id.clone())?,
                 increment_unread: is_recipient,
             },
         ),
@@ -215,7 +241,7 @@ fn groupchat_inbox_mutation(
         (false, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThread {
                 room: room.clone(),
-                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new(thread.thread_id.clone())?,
             },
         ),
         _ => None,
@@ -327,10 +353,8 @@ async fn enqueue_groupchat_notification_candidate(
     };
     let thread_id = thread
         .as_ref()
-        .map(|thread| {
-            crate::notification_outbox::NotificationThreadId::new(thread.thread_id.clone())
-        })
-        .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
+        .map(|thread| NotificationThreadId::new(thread.thread_id.clone()))
+        .unwrap_or_else(NotificationThreadId::root);
     insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
         deps: Some(deps),
         recovery: notification_recovery,
@@ -360,7 +384,7 @@ struct GroupchatNotificationCandidateSeed<'a> {
     room: &'a BareJid,
     message: &'a Message,
     sender_jid: Jid,
-    thread_id: crate::notification_outbox::NotificationThreadId,
+    thread_id: NotificationThreadId,
     archive_stanza_id: Xep0359StanzaId,
     is_live_occupant: bool,
     /// `room_members_only` is known message-locally on this T0 path
@@ -398,7 +422,7 @@ async fn insert_groupchat_notification_candidate(
     } = seed;
     let candidate = match crate::notification_outbox::candidate_from_envelope(
         message,
-        crate::notification_outbox::GroupchatCandidateIdentity {
+        GroupchatCandidateIdentity {
             owner,
             room,
             sender: &sender_jid,
@@ -452,7 +476,7 @@ async fn insert_groupchat_notification_candidate(
             );
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
-        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+        T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
             warn!(
                 recipient = %owner,
                 room = %room,
@@ -502,7 +526,7 @@ async fn insert_groupchat_notification_candidate(
         .insert_candidate(&candidate)
         .await
     {
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
+        Ok(NotificationCandidateInsertOutcome::Inserted) => {
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
@@ -522,7 +546,7 @@ async fn insert_groupchat_notification_candidate(
             );
             GroupchatNotificationCandidateQueueOutcome::Completed
         }
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+        Ok(NotificationCandidateInsertOutcome::Duplicate) => {
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
@@ -607,14 +631,10 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
     let mut had_failure = false;
     for recovery in recoveries {
         match reconcile_groupchat_notification_recovery(state, &recovery).await {
-            Ok(
-                crate::ingress::RecoverySweepOutcome::Completed
-                | crate::ingress::RecoverySweepOutcome::CanonicalGone,
-            ) => completed += 1,
-            Ok(
-                crate::ingress::RecoverySweepOutcome::Pending
-                | crate::ingress::RecoverySweepOutcome::Missing,
-            ) => had_failure = true,
+            Ok(RecoverySweepOutcome::Completed | RecoverySweepOutcome::CanonicalGone) => {
+                completed += 1
+            }
+            Ok(RecoverySweepOutcome::Pending | RecoverySweepOutcome::Missing) => had_failure = true,
             Err(error) => {
                 warn!(%error, "notification recovery settlement failed");
                 had_failure = true;
@@ -630,7 +650,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
 pub(crate) async fn reconcile_groupchat_notification_recovery(
     state: &WebSocketState,
     recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
-) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress_uow::IngressUowError> {
+) -> Result<RecoverySweepOutcome, IngressUowError> {
     use crate::ingress::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
     let authority = &state.deps.protocol.ingress;
     let preparation = authority.prepare_notification_recovery(recovery).await?;
@@ -648,7 +668,7 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
     } else if deferred_policy || candidate_required {
         let candidate = match crate::notification_outbox::candidate_from_envelope(
             envelope.message(),
-            crate::notification_outbox::GroupchatCandidateIdentity {
+            GroupchatCandidateIdentity {
                 owner: &recovery.key.recipient,
                 room: &recovery.key.room,
                 sender: &recovery.sender_jid,
@@ -656,8 +676,8 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
                     .key
                     .thread_id
                     .clone()
-                    .map(crate::notification_outbox::NotificationThreadId::new)
-                    .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root),
+                    .map(NotificationThreadId::new)
+                    .unwrap_or_else(NotificationThreadId::root),
                 archive_stanza_id: &recovery.key.archive_stanza_id,
                 is_live_occupant: recovery.is_live_occupant,
                 sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
@@ -685,8 +705,9 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
                 Ok(crate::notification_outbox::T1PushDispatchOutcome::Suppressed { .. }) => {
                     RecoveryPolicyDecision::Suppressed
                 }
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy)
-                | Err(_) => RecoveryPolicyDecision::RetryLater,
+                Ok(T1PushDispatchOutcome::DeferUnknownRoomPolicy) | Err(_) => {
+                    RecoveryPolicyDecision::RetryLater
+                }
             }
         } else {
             RecoveryPolicyDecision::Deliver(Box::new(candidate))
@@ -701,13 +722,10 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
 
 async fn evaluate_recovery_policy(
     state: &WebSocketState,
-    candidate: &crate::notification_outbox::NotificationCandidate,
+    candidate: &NotificationCandidate,
     room: &BareJid,
     room_members_only: bool,
-) -> Result<
-    crate::notification_outbox::T1PushDispatchOutcome,
-    crate::notification_outbox::NotificationOutboxError,
-> {
+) -> Result<T1PushDispatchOutcome, NotificationOutboxError> {
     // T0 push-gate evaluation — compliance: suppressed
     // outcomes leave no row in `notification_candidates`. The same
     // typed evaluator runs again at T1 inside
@@ -721,32 +739,25 @@ async fn evaluate_recovery_policy(
     // is held only to satisfy the trait-object signature; if the
     // cache ever misses (it won't, given the pre-insert) it would
     // surface as `DeferUnknownRoomPolicy` rather than a silent default.
-    let room_policy = crate::notification_outbox::NoopRoomPolicy;
-    let mut room_policy_cache = std::collections::BTreeMap::<
-        BareJid,
-        crate::notification_outbox::RoomPolicyCacheEntry,
-    >::new();
+    let room_policy = NoopRoomPolicy;
+    let mut room_policy_cache = BTreeMap::<BareJid, RoomPolicyCacheEntry>::new();
     room_policy_cache.insert(
         room.clone(),
         if room_members_only {
-            crate::notification_outbox::RoomPolicyCacheEntry::Private
+            RoomPolicyCacheEntry::Private
         } else {
-            crate::notification_outbox::RoomPolicyCacheEntry::Public
+            RoomPolicyCacheEntry::Public
         },
     );
-    let dnd_reader = crate::notification_outbox::NoopDndReader;
-    let mut dnd_cache =
-        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
+    let dnd_reader = NoopDndReader;
+    let mut dnd_cache = BTreeMap::<BareJid, DndState>::new();
     // T0 emission deliberately skips the XEP-0513 `<active/>` filter
     // — current activity is a T1 read per the recipient-state
     // contract. `NoopActivityReader` satisfies the typed signature
     // without persisting a row at T0; T1 then runs the real read.
-    let activity_reader = crate::notification_activity::NoopActivityReader;
-    let mut activity_cache = std::collections::BTreeMap::<
-        (BareJid, BareJid),
-        Option<crate::notification_activity::NotificationActivity>,
-    >::new();
-    let eval_deps = crate::notification_outbox::PushEvalDeps {
+    let activity_reader = NoopActivityReader;
+    let mut activity_cache = BTreeMap::<(BareJid, BareJid), Option<NotificationActivity>>::new();
+    let eval_deps = PushEvalDeps {
         settings_projection: state
             .deps
             .protocol
@@ -761,17 +772,15 @@ async fn evaluate_recovery_policy(
         // the default-in-ms as a typed placeholder; T1 (which DOES
         // consult the TTL) reads the env-driven value at the drain
         // site (Copilot review on PR #731).
-        active_mention_ttl_ms: (crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
-            as i64)
-            * 1_000,
+        active_mention_ttl_ms: (DEFAULT_ACTIVE_MENTION_TTL_SECONDS as i64) * 1_000,
     };
-    let mut eval_caches = crate::notification_outbox::PushEvalCaches {
+    let mut eval_caches = PushEvalCaches {
         room_policy: &mut room_policy_cache,
         dnd: &mut dnd_cache,
         activity: &mut activity_cache,
     };
     crate::notification_outbox::evaluate_push_gate_at_dispatch(
-        crate::notification_outbox::PushEvalStage::T0Emit,
+        PushEvalStage::T0Emit,
         eval_deps,
         candidate,
         &mut eval_caches,
@@ -2018,6 +2027,9 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod audience_tests {
+    use waddle_xmpp_core::xep0359::add_stanza_id as replace_stanza_id;
+    use xmpp_parsers::message::MessageType as XmppMessageType;
+
     use super::*;
     use crate::server::routes::interpret::effects::{Effect, ExternalEffect, PlanSink};
 
@@ -2129,7 +2141,7 @@ mod audience_tests {
             is_live_occupant: false,
             room_members_only: false,
             sender_can_broadcast_channel_mention: false,
-            thread: &None,
+            thread: None,
             outcome: &outcome,
             notification_recovery: None,
         })
@@ -2178,7 +2190,7 @@ mod audience_tests {
             is_live_occupant: true,
             room_members_only: false,
             sender_can_broadcast_channel_mention: false,
-            thread: &None,
+            thread: None,
             outcome: &outcome,
             notification_recovery: None,
         })

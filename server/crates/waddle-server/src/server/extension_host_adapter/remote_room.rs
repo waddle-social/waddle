@@ -3,12 +3,12 @@
 //! The origin forwards the host call; the owner runs the unchanged local send
 //! path. A forwarded call enters at [`relayed_room_send`], which never
 //! forwards again.
-use std::{sync::Arc, time::Duration};
+use crate::clustering::NodeId;
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{
-    future::{BoxFuture, Shared},
-    FutureExt,
-};
+use futures::future::{BoxFuture, Shared};
+use futures::FutureExt;
 use jid::BareJid;
 use waddle_extensions::{host_tools as ext_host, DisplayText, PluginId, StanzaId};
 use waddle_xmpp::ownership::NodeIdentity;
@@ -17,11 +17,13 @@ use crate::clustering::relay::{
     RelayAskError, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelayHandle,
     RelaySendEffect, RelaySendFailure,
 };
-use crate::server::routes::{interpret::effects::PlanFailure, websocket::WebSocketState};
+use crate::server::routes::interpret::effects::PlanFailure;
+use crate::server::routes::websocket::WebSocketState;
 
+use super::conversions::host_tool_error;
 use super::{
-    conversions::host_tool_error, interpret, ExtensionHostAdapter, ExtensionHostAdapterError,
-    ExtensionInvocation, HostMessageTarget, HostSendMessage,
+    interpret, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
+    HostMessageTarget, HostSendMessage,
 };
 
 /// Receiver-side windows for one owner ask; kameo enforces them on the owner.
@@ -194,7 +196,7 @@ impl ExtensionHostAdapter {
                     .as_ref()
                 else {
                     return Err(RelayAskError::NotFound {
-                        node_id: crate::clustering::NodeId::new(owner.node_id.clone()),
+                        node_id: NodeId::new(owner.node_id.clone()),
                     });
                 };
                 handle.insert(bridge.extension_room_handle(owner))
@@ -284,6 +286,6 @@ fn host_request(
 pub(crate) fn temporary_failure(message: &'static str) -> ext_host::HostToolError {
     ext_host::HostToolError {
         code: ext_host::HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new(message).expect("static text"),
+        message: DisplayText::try_new(message).expect("static text"),
     }
 }

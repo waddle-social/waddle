@@ -2,12 +2,30 @@ use super::super::effects::room::DurableRoomEffect;
 #[cfg(feature = "clustering")]
 use super::super::effects::room::ExternalRoomEffect;
 use super::super::effects::{DurableEffect, Effect, ExternalEffect, PlanSink, RoomExecutionPath};
-use super::*;
+#[cfg(feature = "clustering")]
+use super::Deps;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+use super::{
+    dispatch_to_room, BareJid, FullJid, GetRoomSnapshot, IngressEffectIntent, Jid, Message,
+    OutboundEvent, Stanza,
+};
+use crate::server::routes::interpret::interpret;
+#[cfg(feature = "clustering")]
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, register_test_connection,
 };
+use std::sync::Arc;
+use waddle_xmpp::mam::{
+    ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, MamStorage, RichMessageId,
+};
 use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::protocol::XmppStateMachine;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 fn message(room: &BareJid, sender: &FullJid) -> Message {
     let mut message = Message::new(Some(Jid::from(room.clone())));
@@ -180,12 +198,10 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
 
 #[tokio::test]
 async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
-    use super::super::effects::{
-        delivery::ExternalDeliveryEffect,
-        direct::{DurableDirectEffect, ExternalDirectEffect},
-        room::{ExternalRoomEffect, RoomActorMutation},
-        PlanSuppressionPolicy,
-    };
+    use super::super::effects::delivery::ExternalDeliveryEffect;
+    use super::super::effects::direct::{DurableDirectEffect, ExternalDirectEffect};
+    use super::super::effects::room::{ExternalRoomEffect, RoomActorMutation};
+    use super::super::effects::PlanSuppressionPolicy;
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
     use waddle_xmpp::muc::pin::{PinChangeRequest, PinPreview, PinStateChange, PinnedEntry};
     use waddle_xmpp::muc::room_actor::{ApplyPin, GetPinList};
@@ -261,7 +277,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
         body: None,
         rich: Some(ArchivedRichMessage {
             payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
-                retraction_id: RichMessageId::new("later-retraction"),
+                retraction_id: RichMessageId::try_new("later-retraction"),
                 stamp: chrono::Utc::now(),
                 moderation: None,
                 sender_scope: Some(alice.to_bare()),
@@ -292,7 +308,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
             mutations: vec![waddle_xmpp::ingress::LinkPreviewMediaRefMutation {
                 upload_slot_id: uuid::Uuid::nil(),
                 archive: room.clone(),
-                message_id: RichMessageId::new(target.id.clone()).expect("message id"),
+                message_id: RichMessageId::try_new(target.id.clone()).expect("message id"),
                 current_archive_stanza_id: target.clone(),
                 state: waddle_xmpp::ingress::LinkPreviewMediaRefState::Current,
             }],
@@ -416,7 +432,8 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
 }
 
 async fn large_room_plan_commits(fixture: crate::ingress::test_support::IngressFixture) {
-    use crate::ingress::{commit::commit_submission, IngressDecisionClass};
+    use crate::ingress::commit::commit_submission;
+    use crate::ingress::IngressDecisionClass;
     use crate::server::routes::websocket::tests::create_test_session;
     use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
 

@@ -1,3 +1,5 @@
+//! XMPP stream-feature, SASL, and resource-binding parsing and construction.
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -12,19 +14,30 @@ use crate::request::StanzaId;
 use crate::state::{SessionBinding, StreamId};
 use crate::transport::TransportMessage;
 
+/// Protocol token `urn:ietf:params:xml:ns:xmpp-bind`.
 pub const NS_BIND: &str = "urn:ietf:params:xml:ns:xmpp-bind";
+/// Protocol token `jabber:client`.
 pub const NS_CLIENT: &str = "jabber:client";
+/// Protocol token `urn:ietf:params:xml:ns:xmpp-sasl`.
 pub const NS_SASL: &str = "urn:ietf:params:xml:ns:xmpp-sasl";
+/// Protocol token `urn:ietf:params:xml:ns:xmpp-session`.
 pub const NS_SESSION: &str = "urn:ietf:params:xml:ns:xmpp-session";
+/// Protocol token `urn:xmpp:sm:3`.
 pub const NS_SM: &str = "urn:xmpp:sm:3";
+/// Protocol token `http://etherx.jabber.org/streams`.
 pub const NS_STREAMS: &str = "http://etherx.jabber.org/streams";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// SASL authentication mechanism supported by the client.
+#[non_exhaustive]
 pub enum AuthMechanism {
+    /// Authenticate using the SASL OAUTHBEARER mechanism.
     OAuthBearer,
 }
 
 impl AuthMechanism {
+    /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OAuthBearer => "OAUTHBEARER",
@@ -46,8 +59,12 @@ impl fmt::Display for AuthMechanism {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Bootstrap feature required before advancing the session.
+#[non_exhaustive]
 pub enum RequiredStreamFeature {
+    /// The peer must advertise the selected SASL mechanism.
     Authentication(AuthMechanism),
+    /// The server supports binding an account resource.
     ResourceBinding,
 }
 
@@ -63,18 +80,32 @@ impl fmt::Display for RequiredStreamFeature {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// RFC 6120 SASL failure condition returned by the authentication peer.
+#[non_exhaustive]
 pub enum SaslFailureCondition {
+    /// The peer aborted authentication before it completed.
     Aborted,
+    /// The account is disabled and cannot authenticate.
     AccountDisabled,
+    /// The supplied authentication credentials have expired.
     CredentialsExpired,
+    /// The peer requires transport encryption before continuing.
     EncryptionRequired,
+    /// The peer used an invalid character encoding.
     IncorrectEncoding,
+    /// The requested authorization identity is invalid.
     InvalidAuthzid,
+    /// The selected SASL mechanism is not supported.
     InvalidMechanism,
+    /// The SASL request does not conform to the mechanism's syntax.
     MalformedRequest,
+    /// The SASL mechanism does not meet the peer's security requirements.
     MechanismTooWeak,
+    /// The peer rejected the authorization attempt.
     NotAuthorized,
+    /// Authentication failed for a transient reason and may succeed later.
     TemporaryAuthFailure,
+    /// The received token is not recognized by this client.
     Unknown,
 }
 
@@ -117,15 +148,26 @@ impl fmt::Display for SaslFailureCondition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Recognized SASL, resource-binding, session, and stream-management features advertised by the peer.
 pub struct StreamFeatures {
+    /// SASL mechanisms advertised by the server.
     pub mechanisms: Vec<AuthMechanism>,
+    /// Whether resource binding was advertised by the server.
     pub bind: bool,
+    /// Whether the server advertises legacy session establishment.
     pub legacy_session: bool,
+    /// Whether the server advertised XEP-0198 support.
     pub stream_management: bool,
+    /// Whether the session may be resumed after transport loss.
     pub resumable: bool,
 }
 
 impl StreamFeatures {
+    /// Parse the supported protocol fields from an XML element.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::InvalidStreamFeatures` unless the root is a features element in the stream namespace. Unrecognized advertised mechanisms and features are ignored.
     pub fn from_element(element: &Element) -> ClientResult<Self> {
         if element.name() != "features" || !is_streams_ns(&element.ns()) {
             return Err(ClientError::InvalidStreamFeatures);
@@ -173,17 +215,24 @@ impl StreamFeatures {
         })
     }
 
+    /// Whether the peer advertised the requested authentication mechanism.
+    #[must_use]
     pub fn supports(&self, mechanism: AuthMechanism) -> bool {
         self.mechanisms.contains(&mechanism)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Typed authentication exchange to be written to the stream.
+#[non_exhaustive]
 pub enum AuthenticationRequest {
+    /// A SASL OAUTHBEARER initial response ready for transmission.
     OAuthBearer(OAuthBearerRequest),
 }
 
 impl AuthenticationRequest {
+    /// Construct this bootstrap value from the validated client configuration.
+    #[must_use]
     pub fn from_config(config: &OAuthBearerConfig) -> Self {
         Self::OAuthBearer(OAuthBearerRequest {
             account: config.account.clone(),
@@ -191,24 +240,33 @@ impl AuthenticationRequest {
         })
     }
 
+    /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         match self {
             Self::OAuthBearer(request) => request.to_element(),
         }
     }
 
+    /// Wrap this bootstrap XML in a transport message for transmission.
+    #[must_use]
     pub fn to_transport_message(&self) -> TransportMessage {
         TransportMessage::Element(self.to_element())
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
+/// SASL OAUTHBEARER initial response assembled from the account and bearer credential.
 pub struct OAuthBearerRequest {
+    /// Bare JID of the account being authenticated.
     pub account: BareJid,
+    /// Bearer credential used during OAUTHBEARER authentication.
     pub access_token: AccessToken,
 }
 
 impl OAuthBearerRequest {
+    /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         Element::builder("auth", NS_SASL)
             .attr(
@@ -240,11 +298,18 @@ impl fmt::Debug for OAuthBearerRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// SASL failure condition parsed from the peer's authentication response.
 pub struct SaslFailure {
+    /// XMPP error condition identifying the protocol failure.
     pub condition: SaslFailureCondition,
 }
 
 impl SaslFailure {
+    /// Parse the supported protocol fields from an XML element.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::InvalidSaslFailure` unless the root is a failure element in the SASL namespace. A missing or unrecognized condition becomes `SaslFailureCondition::Unknown`.
     pub fn from_element(element: &Element) -> ClientResult<Self> {
         if element.name() != "failure" || element.ns() != NS_SASL {
             return Err(ClientError::InvalidSaslFailure);
@@ -261,12 +326,17 @@ impl SaslFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// IQ correlation identifier and requested resource for XMPP resource binding.
 pub struct ResourceBindingRequest {
+    /// Identifier used for stanza correlation.
     pub stanza_id: StanzaId,
+    /// Requested XMPP resource name for account binding.
     pub resource: ClientResource,
 }
 
 impl ResourceBindingRequest {
+    /// Create a bind IQ request with the supplied stanza identifier and resource.
+    #[must_use]
     pub fn new(stanza_id: StanzaId, resource: ClientResource) -> Self {
         Self {
             stanza_id,
@@ -274,6 +344,8 @@ impl ResourceBindingRequest {
         }
     }
 
+    /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         Element::builder("iq", NS_CLIENT)
             .attr(
@@ -293,18 +365,47 @@ impl ResourceBindingRequest {
             .build()
     }
 
+    /// Wrap this bootstrap XML in a transport message for transmission.
+    #[must_use]
     pub fn to_transport_message(&self) -> TransportMessage {
         TransportMessage::Element(self.to_element())
     }
 }
 
+/// Whether the bound session may be resumed with XEP-0198.
+///
+/// Intentionally exhaustive: the two variants replace a bare resumption boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamResumption {
+    /// The peer may resume this stream.
+    Resumable,
+    /// The stream cannot be resumed.
+    NotResumable,
+}
+
+impl StreamResumption {
+    /// Whether this session may be resumed.
+    #[must_use]
+    pub const fn is_resumable(self) -> bool {
+        matches!(self, Self::Resumable)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Full account JID returned by successful resource binding.
 pub struct ResourceBindingResult {
+    /// Identifier used for stanza correlation.
     pub stanza_id: StanzaId,
+    /// XMPP address identifying the referenced entity.
     pub jid: FullJid,
 }
 
 impl ResourceBindingResult {
+    /// Parse the supported protocol fields from an XML element.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::InvalidBindResponse` for a non-result client IQ, missing bind/JID elements, or an invalid full JID. Missing IQ identifiers are invalid bind responses; blank identifiers return `EmptyStanzaId`.
     pub fn from_element(element: &Element) -> ClientResult<Self> {
         if element.name() != "iq" || !is_client_stanza_ns(&element.ns()) {
             return Err(ClientError::InvalidBindResponse);
@@ -317,7 +418,7 @@ impl ResourceBindingResult {
         let stanza_id = element
             .attr("id")
             .ok_or(ClientError::InvalidBindResponse)
-            .and_then(StanzaId::new)?;
+            .and_then(StanzaId::try_new)?;
 
         let bind = element
             .children()
@@ -334,28 +435,42 @@ impl ResourceBindingResult {
         Ok(Self { stanza_id, jid })
     }
 
+    /// Consume the resource-binding result and attach the stream identity and resumption policy.
+    #[must_use]
     pub fn into_session_binding(
         self,
         stream_id: Option<StreamId>,
-        resumable: bool,
+        resumption: StreamResumption,
     ) -> SessionBinding {
         SessionBinding {
             jid: self.jid,
             stream_id,
-            resumable,
+            resumable: resumption.is_resumable(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Recognized stream-bootstrap response parsed before application stanzas are dispatched.
+#[non_exhaustive]
 pub enum BootstrapElement {
+    /// Features advertised by the peer during stream negotiation.
     StreamFeatures(StreamFeatures),
+    /// The SASL exchange completed successfully.
     SaslSuccess,
+    /// Authentication rejection reported by the peer.
     SaslFailure(SaslFailure),
+    /// Successful resource binding reported by the peer.
     ResourceBindingResult(ResourceBindingResult),
 }
 
 impl BootstrapElement {
+    /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed client error inside `Some` for recognized bootstrap elements with invalid content; unrelated elements return `None`.
+    #[must_use]
     pub fn parse(element: &Element) -> Option<ClientResult<Self>> {
         let ns = element.ns();
         match element.name() {

@@ -1,5 +1,12 @@
 use super::roster::roster_storage_for_state;
-use super::*;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, chrono, global_database,
+    internal_server_error_iq_error, iq_to_xml, mark_span_error, not_authorized_iq_error,
+    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid, warn,
+    BareJid, DatabaseBlockingStorage, FullJid, HashSet, IqConnState, Jid, Stanza, WebSocketState,
+};
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::RemoteResourceStateUpdate;
 
 pub(super) async fn handle_blocking_iq(
     iq: &xmpp_parsers::iq::Iq,
@@ -215,7 +222,7 @@ async fn mirror_remote_blocklist_interest(
             .update_remote_user_resource_if_owner(
                 jid,
                 owner,
-                crate::clustering::route_bridge::RemoteResourceStateUpdate::BlocklistInterested,
+                RemoteResourceStateUpdate::BlocklistInterested,
             )
             .await;
     }
@@ -373,7 +380,7 @@ pub(crate) async fn send_blocking_pushes(
         .deps
         .protocol
         .connection_registry
-        .get_blocklist_interested_resources_for_user(user_bare)
+        .blocklist_interested_resources_for_user(user_bare)
     {
         if recorded_detached.contains(&resource_jid) {
             continue;

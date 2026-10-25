@@ -1,3 +1,5 @@
+//! Native client message, presence, and room-join operations.
+
 use minidom::Element;
 
 use crate::client::ClientHandle;
@@ -8,40 +10,71 @@ use super::builders::{
     build_chat_state_message, build_displayed_message, build_outbound_message,
     build_retraction_message,
 };
-use super::namespaces::*;
+use super::namespaces::{NS_CLIENT, NS_MUC};
 use super::types::SendMessageOptions;
 use crate::xep::thread::ThreadRef;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+/// Native client operations for messages, presence, and MUC occupancy.
 pub trait MessagingExt {
+    /// Queue a MUC join presence addressed to the room and nickname.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     fn join_room<'a>(
         &'a self,
         room_jid: &'a str,
         nick: &'a str,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue unavailable presence for the room occupant.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     fn leave_room<'a>(
         &'a self,
         room_jid: &'a str,
         nick: &'a str,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue a groupchat message and return its stable stanza identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Also propagates file-sharing validation errors for encrypted attachments without plaintext hashes or ciphertext sources.
     fn send_groupchat_message<'a>(
         &'a self,
         room_jid: &'a str,
         body: &'a str,
         options: &'a SendMessageOptions,
     ) -> impl std::future::Future<Output = ClientResult<StanzaId>> + Send + 'a;
+    /// Queue a direct chat message and return its stable stanza identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Also propagates file-sharing validation errors for encrypted attachments without plaintext hashes or ciphertext sources.
     fn send_chat_message<'a>(
         &'a self,
         peer_jid: &'a str,
         body: &'a str,
         options: &'a SendMessageOptions,
     ) -> impl std::future::Future<Output = ClientResult<StanzaId>> + Send + 'a;
+    /// Queue availability with optional status, show, and idle timestamp; unrecognized show and idle values are omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     fn send_presence<'a>(
         &'a self,
         status: Option<&'a str>,
         show: Option<&'a str>,
         idle_since: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an XEP-0085 chat-state notification, optionally scoped to a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Returns a bad-request error for unsupported chat-state tokens.
     fn send_chat_state<'a>(
         &'a self,
         jid: &'a str,
@@ -49,6 +82,11 @@ pub trait MessagingExt {
         message_type: &'a str,
         thread: Option<&'a ThreadRef>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an XEP-0333 displayed marker for a previously received message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     fn send_displayed_marker<'a>(
         &'a self,
         jid: &'a str,
@@ -56,6 +94,11 @@ pub trait MessagingExt {
         message_type: &'a str,
         thread: Option<&'a ThreadRef>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an XEP-0424 retraction targeting a previously sent message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     fn retract_message<'a>(
         &'a self,
         jid: &'a str,

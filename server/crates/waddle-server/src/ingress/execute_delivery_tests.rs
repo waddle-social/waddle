@@ -1,15 +1,20 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
-use crate::server::routes::interpret::effects::{invite::MucUserRoute, EffectSink, PlanSink};
-use crate::server::routes::interpret::DeliveryExecutionContext;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation},
-    pending_delivery::{
-        storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-    },
-    protocol::CarbonKind,
-    registry::ConnectionRegistry,
+use super::{
+    classify_outcome, completed_receipts, execute_effects, proven_receipts,
+    terminalize_if_complete, Deps, Duration, Effect, EffectOutcome, EffectReceiptRepository,
+    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome, ImmediateSink,
+    PlannedEffect,
 };
+
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::effects::invite::MucUserRoute;
+use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::DeliveryExecutionContext;
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation};
+use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
+use waddle_xmpp::protocol::CarbonKind;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn invite_pending_storage(
     fixture: &IngressFixture,
@@ -385,10 +390,8 @@ async fn sqlite_invite_uncertain_live_send_falls_back_only_after_its_deadline() 
 }
 
 async fn invite_quota_preserves_authorization_until_delivery(fixture: IngressFixture) {
-    use crate::server::routes::{
-        interpret::effects::invite::InviteDeliveryFailure,
-        websocket::muc_invites::{self, OutstandingInvite},
-    };
+    use crate::server::routes::interpret::effects::invite::InviteDeliveryFailure;
+    use crate::server::routes::websocket::muc_invites::{self, OutstandingInvite};
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
     let registry = ConnectionRegistry::new();
@@ -632,25 +635,21 @@ async fn invite_quota_recovers_generated_notification(
     fixture: IngressFixture,
     affiliation: waddle_xmpp::Affiliation,
 ) {
-    use crate::server::routes::{
-        interpret::effects::{
-            early::RoomMembershipMutation, invite::InviteDeliveryFailure, PlanEffectDependency,
-        },
-        websocket::{
-            handlers::message::muc_invite::{InviteLedgerMutation, MucMembershipMutation},
-            muc_invites::OutstandingInvite,
-        },
+    use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+    use crate::server::routes::interpret::effects::invite::InviteDeliveryFailure;
+    use crate::server::routes::interpret::effects::PlanEffectDependency;
+    use crate::server::routes::websocket::handlers::message::muc_invite::{
+        InviteLedgerMutation, MucMembershipMutation,
     };
+    use crate::server::routes::websocket::muc_invites::OutstandingInvite;
     use kameo::actor::Spawn;
-    use waddle_xmpp::{
-        ingress::{MucInviteLedgerAction, MucInviteLedgerMutation, MucInviteMembershipGrant},
-        muc::{
-            room_actor::{GetSnapshot, RoomActor},
-            MucRoom, RoomConfig,
-        },
-        xep::xep0421::OccupantIdSecret,
-        Affiliation,
+    use waddle_xmpp::ingress::{
+        MucInviteLedgerAction, MucInviteLedgerMutation, MucInviteMembershipGrant,
     };
+    use waddle_xmpp::muc::room_actor::{GetSnapshot, RoomActor};
+    use waddle_xmpp::muc::{MucRoom, RoomConfig};
+    use waddle_xmpp::xep::xep0421::OccupantIdSecret;
+    use waddle_xmpp::Affiliation;
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let storage = invite_pending_storage(&fixture, QuotaPolicy::CountCap { max_rows: 0 }).await;
     let registry = ConnectionRegistry::new();
@@ -672,7 +671,7 @@ async fn invite_quota_recovers_generated_notification(
     room.set_affiliation(invite.invitee.clone(), affiliation);
     let actor = RoomActor::spawn(RoomActor::new(
         room,
-        OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'x'; 32]).expect("secret"),
     ));
     let grant = MucMembershipMutation {
         room: invite.room.clone(),
@@ -794,7 +793,7 @@ async fn invite_quota_recovers_generated_notification(
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
     assert_eq!(
-        snapshot.room.get_affiliation(&invite.invitee),
+        snapshot.room.affiliation(&invite.invitee),
         Affiliation::Member,
         "canonical quota exhaustion preserves both existing and newly granted membership"
     );
@@ -903,7 +902,7 @@ async fn invite_quota_recovers_generated_notification(
             .await
             .expect("membership preserved")
             .room
-            .get_affiliation(&invite.invitee),
+            .affiliation(&invite.invitee),
         Affiliation::Member
     );
     actor.kill();

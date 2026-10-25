@@ -2,7 +2,8 @@
 use crate::db::{DatabaseDriver, Transaction};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmPersistenceError,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmAcknowledgementMode,
+    SmPersistenceError,
 };
 
 fn storage_error(error: impl std::fmt::Display) -> SmPersistenceError {
@@ -16,7 +17,7 @@ pub(crate) async fn acknowledge(
     stream_id: &SmSessionId,
     acknowledged_h: u32,
     driver: DatabaseDriver,
-    retire: bool,
+    mode: SmAcknowledgementMode,
 ) -> Result<(), SmPersistenceError> {
     let sql = match driver {
         DatabaseDriver::Postgres => {
@@ -73,7 +74,7 @@ pub(crate) async fn acknowledge(
         .await
         .map_err(storage_error)?;
     }
-    let sql = if retire {
+    let sql = if mode == SmAcknowledgementMode::RetireForPromotion {
         "UPDATE sm_sessions SET last_acked = ?, max_resume_secs = 0, max_resume_duration_ms = 0 WHERE stream_id = ?"
     } else {
         "UPDATE sm_sessions SET last_acked = ? WHERE stream_id = ?"

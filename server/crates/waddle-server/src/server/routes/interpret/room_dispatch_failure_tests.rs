@@ -1,18 +1,23 @@
 //! Phase-A room infrastructure failures must leave the origin-id retryable.
 use super::super::effects::{PlanFailure, PlanSink};
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressStreamIdentity, IngressSubmission,
-};
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+use super::{dispatch_to_room, BareJid, Deps, FullJid, IngressEffectIntent};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressDecisionClass, IngressStreamIdentity, IngressSubmission};
 use crate::ingress_uow::SmIngressStreamRepository;
+#[cfg(feature = "clustering")]
+use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::websocket::tests::create_test_websocket_state;
 use kameo::actor::Spawn;
+use std::sync::Arc;
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, WireHandledCount};
-use waddle_xmpp::muc::{
-    room_actor::{ChangeAffiliation, Join},
-    room_registry_actor::{CreateRoom, RoomRegistryActor},
-};
+use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+use waddle_xmpp::muc::room_registry_actor::{CreateRoom, RoomRegistryActor};
+#[cfg(feature = "clustering")]
+use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 async fn room_submission(fixture: &IngressFixture, room: &BareJid) -> IngressSubmission {
     let mut submission = fixture.submission(Some("dispatch-infrastructure-retry"), "room body");
@@ -151,7 +156,7 @@ async fn healthy_room(
 fn room_registry() -> kameo::actor::ActorRef<RoomRegistryActor> {
     RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![b'd'; 32]).expect("secret"),
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![b'd'; 32]).expect("secret"),
     ))
 }
 

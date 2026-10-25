@@ -1,14 +1,22 @@
 //! Extension bots are host-owned: a joined bot observes room messages through hooks without
 //! a socket copy, and is never a peer for direct messages, private messages or subscriptions.
-use super::*;
+use super::{
+    create_test_server_owner_session, create_test_session,
+    create_test_websocket_state_with_db_pool_and_ingress,
+    create_test_websocket_state_with_fixture_bot, get_or_create_room_actor, get_room_actor,
+    handle_message_through_ingress, handle_xmpp_frame, mpsc, register_test_connection,
+    seed_local_account, Affiliation, Arc, BareJid, ConnectionPhase, Element, FromStr, FullJid,
+    RoomConfig, Stanza, WebSocketState, WsConnState, FIXTURE_BOT_PLUGIN,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 async fn user_groupchat_with_bot(f: IngressFixture, another_user: bool) {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -313,7 +321,7 @@ async fn extension_bot_muc_private_message_is_refused_from_the_occupant() {
             None,
             (
                 super::super::record_test_occupancy_session(&state, jid),
-                &Some(session),
+                Some(&session),
             ),
         )
         .await;

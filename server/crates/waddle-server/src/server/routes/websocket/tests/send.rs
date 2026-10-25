@@ -538,7 +538,7 @@ where
             .expect("force detach must promptly return the batch to cleanup")
     };
     assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(conn.sm_state.outbound_count, 2);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].stanza_xml, frames[0]);

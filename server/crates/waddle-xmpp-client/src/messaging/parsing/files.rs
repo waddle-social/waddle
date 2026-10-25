@@ -1,7 +1,10 @@
+//! Parsing of shared-file metadata and attachment payloads.
+
+use crate::stickers::StickerHash;
 use minidom::Element;
 
-use super::super::namespaces::*;
-use super::super::types::*;
+use super::super::namespaces::{NS_FILE_METADATA, NS_SFS, NS_URL_DATA};
+use super::super::types::{SharedFile, SharedFileDisposition};
 use crate::xep::encrypted_file as xep_encrypted_file;
 
 pub(super) fn parse_shared_file(reference_el: &Element) -> Option<SharedFile> {
@@ -72,7 +75,7 @@ pub(super) fn parse_file_sharing_element(file_sharing_el: &Element) -> Option<Sh
     let disposition_attr = file_sharing_el.attr("disposition");
     let mut encrypted = None;
     let mut desc: Option<String> = None;
-    let mut hashes: Vec<crate::stickers::StickerHash> = Vec::new();
+    let mut hashes: Vec<StickerHash> = Vec::new();
 
     if let Some(file_el) = file_sharing_el.get_child("file", NS_FILE_METADATA) {
         name = file_el

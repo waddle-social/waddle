@@ -163,7 +163,7 @@ mod tests {
     use waddle_xmpp::{Affiliation, Role, Voice};
 
     fn occupant_id_secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(b"room-effect-render-test-secret-is-32b".as_slice().to_vec())
+        OccupantIdSecret::try_new(b"room-effect-render-test-secret-is-32b".as_slice().to_vec())
             .expect("test occupant-id secret")
     }
 
@@ -260,19 +260,19 @@ mod tests {
             recipient: alice_real.clone(),
             is_self: true,
             occupant: occupant_jid(),
-            nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+            nick: MucOccupantNick::try_new("alice".to_owned()).expect("nick"),
             occupant_bare_jid: alice_bare.clone(),
             disclosed_real_jid: Some(alice_real.clone()),
             affiliation: Affiliation::Member,
             kind: AdminPresenceKind::Kicked,
             actor: Some(actor_jid()),
-            reason: Some(DestroyReason::new("cleanup".to_owned()).expect("reason")),
+            reason: Some(DestroyReason::try_new("cleanup".to_owned()).expect("reason")),
         };
         let broadcast_update = OccupantPresenceUpdate {
             recipient: peer_jid(),
             is_self: false,
             occupant: occupant_jid(),
-            nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+            nick: MucOccupantNick::try_new("alice".to_owned()).expect("nick"),
             occupant_bare_jid: alice_bare.clone(),
             // Disclosure is per recipient: this peer must not inherit the
             // removed occupant's real JID from the self-notification.
@@ -351,11 +351,11 @@ mod tests {
         let alice_bare = bare_jid("alice@example.test");
         let alice_real = real_jid();
         let effect = RoomEffect::DestroyNotification {
-            reason: Some(DestroyReason::new("closed".to_owned()).expect("reason")),
+            reason: Some(DestroyReason::try_new("closed".to_owned()).expect("reason")),
             alternate_venue: Some(bare_jid("newroom@conference.example.test")),
-            password: Some(DestroyPassword::new("secret".to_owned()).expect("password")),
+            password: Some(DestroyPassword::try_new("secret".to_owned()).expect("password")),
             recipients: vec![DestroyRecipient {
-                nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+                nick: MucOccupantNick::try_new("alice".to_owned()).expect("nick"),
                 sessions: vec![alice_real.clone()],
             }],
         };
@@ -430,7 +430,7 @@ mod tests {
                 recipient: real_jid(),
                 is_self: true,
                 occupant: occupant_jid(),
-                nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+                nick: MucOccupantNick::try_new("alice".to_owned()).expect("nick"),
                 occupant_bare_jid: bare_jid("alice@example.test"),
                 disclosed_real_jid: Some(real_jid()),
                 affiliation: Affiliation::Member,
@@ -458,7 +458,7 @@ mod tests {
                 recipient: sibling_recipient.clone(),
                 is_self: false,
                 occupant: occupant_jid(),
-                nick: MucOccupantNick::new("alice".to_owned()).expect("nick"),
+                nick: MucOccupantNick::try_new("alice".to_owned()).expect("nick"),
                 occupant_bare_jid: sibling_bare,
                 disclosed_real_jid: None,
                 affiliation: Affiliation::Member,

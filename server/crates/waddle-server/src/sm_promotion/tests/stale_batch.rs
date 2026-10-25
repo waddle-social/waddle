@@ -1,6 +1,10 @@
 //! A paused server batch cannot outlive its captured ownership incarnation.
 
-use super::*;
+use super::{
+    bare, detached_session_with_unacked, dm_xml, full, promote_displaced_sessions,
+    test_user_registry, Arc, BareJid, ConnectionRegistry, DisplacedPromotionDeps,
+    PendingDeliveryStorage, QuotaPolicy,
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;

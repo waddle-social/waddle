@@ -1,34 +1,30 @@
 use crate::ingress_support::IngressFixture;
 use std::time::Duration;
-use waddle_server::ingress::{
-    commit::commit_submission, effects::Effect, DurableEffect, IngressSubmission, PlannedEffect,
+use waddle_server::inbox::DatabaseInboxStorage;
+use waddle_server::ingress::commit::commit_submission;
+use waddle_server::ingress::effects::room::{
+    DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
 };
-use waddle_server::{
-    inbox::DatabaseInboxStorage,
-    ingress::{
-        effects::room::{
-            DurableRoomEffect, ExternalRoomEffect, PlannedGroupchatNotificationRecovery,
-        },
-        execute::execute_effects,
-        Deps, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecision,
-    },
-    notification_outbox::{
-        NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
-    },
+use waddle_server::ingress::effects::Effect;
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{
+    Deps, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecision,
+};
+use waddle_server::ingress::{DurableEffect, IngressSubmission, PlannedEffect};
+use waddle_server::notification_outbox::{
+    NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
 };
 use waddle_xmpp::inbox::storage::InboxStorage;
-use waddle_xmpp::ingress::IngressEffectIntent;
-use waddle_xmpp::{
-    inbox::{
-        storage::{GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey},
-        ConversationKind, InboxEntry,
-    },
-    ingress::{
-        GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
-        InboxProjectionMutation, NotificationActivityMutation, NotificationCandidateOutcome,
-    },
-    registry::ConnectionRegistry,
+use waddle_xmpp::inbox::storage::{
+    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey,
 };
+use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::ingress::{
+    GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
+    InboxProjectionMutation, NotificationActivityMutation, NotificationCandidateOutcome,
+};
+use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
@@ -162,7 +158,7 @@ async fn committed(
     NotificationOutboxStore,
     GroupchatNotificationRecovery,
 ) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())
@@ -326,7 +322,8 @@ fn rebuild(
             is_live_occupant: recovery.is_live_occupant,
             sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
         },
-        &waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![7_u8; 32]).expect("occupant secret"),
+        &waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![7_u8; 32])
+            .expect("occupant secret"),
     )
     .expect("canonical candidate")
 }
@@ -501,7 +498,7 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
     use waddle_server::ingress::{
         RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome,
     };
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())

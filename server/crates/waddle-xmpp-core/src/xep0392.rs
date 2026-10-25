@@ -51,6 +51,7 @@ pub struct HslColor {
 
 impl HslColor {
     /// Create a new HSL color.
+    #[must_use]
     pub fn new(hue: f64, saturation: f64, lightness: f64) -> Self {
         Self {
             hue,
@@ -60,6 +61,7 @@ impl HslColor {
     }
 
     /// Convert to a CSS `hsl()` string.
+    #[must_use]
     pub fn to_css(&self) -> String {
         format!(
             "hsl({:.0}, {:.0}%, {:.0}%)",
@@ -68,12 +70,14 @@ impl HslColor {
     }
 
     /// Convert to an RGB hex string (e.g., `#ff8040`).
+    #[must_use]
     pub fn to_hex(&self) -> String {
         let (r, g, b) = hsl_to_rgb(self.hue, self.saturation / 100.0, self.lightness / 100.0);
         format!("#{:02x}{:02x}{:02x}", r, g, b)
     }
 
     /// Convert to RGB tuple (0–255 each).
+    #[must_use]
     pub fn to_rgb(&self) -> (u8, u8, u8) {
         hsl_to_rgb(self.hue, self.saturation / 100.0, self.lightness / 100.0)
     }
@@ -86,6 +90,7 @@ impl HslColor {
 /// 2. Take first 2 bytes as little-endian u16 (XEP-0392 §"Angle
 ///    generation": "with the second byte being the most significant one")
 /// 3. Map to 0.0–360.0 hue range
+#[must_use]
 pub fn compute_hue(input: &str) -> f64 {
     let hash = Sha1::digest(input.as_bytes());
     let value = u16::from_le_bytes([hash[0], hash[1]]);
@@ -93,6 +98,7 @@ pub fn compute_hue(input: &str) -> f64 {
 }
 
 /// Apply color vision deficiency correction to a hue angle.
+#[must_use]
 pub fn apply_cvd_correction(hue: f64, correction: CvdCorrection) -> f64 {
     match correction {
         CvdCorrection::None => hue,
@@ -110,6 +116,7 @@ pub fn apply_cvd_correction(hue: f64, correction: CvdCorrection) -> f64 {
 /// Generate a consistent color for an input string.
 ///
 /// Uses the default saturation (100%) and lightness (50%).
+#[must_use]
 pub fn generate_color(input: &str) -> HslColor {
     generate_color_with_params(
         input,
@@ -120,6 +127,7 @@ pub fn generate_color(input: &str) -> HslColor {
 }
 
 /// Generate a consistent color with custom parameters.
+#[must_use]
 pub fn generate_color_with_params(
     input: &str,
     saturation: f64,

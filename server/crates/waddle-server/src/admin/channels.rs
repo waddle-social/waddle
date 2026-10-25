@@ -21,30 +21,33 @@
 //! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
+use crate::room_effect_outbox::RoomEffectArmSupervisor;
+use crate::room_effect_outbox::RoomEffectOutboxError;
+use crate::room_effect_outbox::RoomEffectOutboxStore;
+use crate::server::routes::websocket::InFlightLease;
+use crate::server::routes::websocket::LeaveAskFailure;
+use crate::server::routes::websocket::LocalDepartureItem;
+use crate::server::routes::websocket::PendingLocalMucDepartures;
 use std::collections::HashSet;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, OnceLock},
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, OnceLock};
 
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
+use waddle_xmpp::muc::affiliation::FederatedAffiliationConfig;
+use waddle_xmpp::muc::room_actor::{
+    ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
+    GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
+    RoomActor, UpdateConfig,
+};
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, CreateRoomWithInitialAffiliations, DestroyRoom, DestroyRoomOutcome,
     DestroyRoomReason, GetOrCreateRoom, GetOrCreateRoomWithLiveRoster, GetRoom, ListRooms,
     RetryPendingRoomReleases,
 };
-use waddle_xmpp::muc::{
-    affiliation::FederatedAffiliationConfig,
-    room_actor::{
-        ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
-        GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
-        RoomActor, UpdateConfig,
-    },
-    AdminItem, PinPermission, RoomConfig,
-};
+use waddle_xmpp::muc::{AdminItem, PinPermission, RoomConfig};
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::registry::ConnectionRegistry;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -881,7 +884,7 @@ async fn handle_kick(
 // ---------------------------------------------------------------------------
 
 fn parse_optional_text(form: &DataForm, var: &str) -> Option<String> {
-    form.get_value(var)
+    form.value(var)
         .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
@@ -897,7 +900,7 @@ fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String
 }
 
 fn parse_optional_bool(form: &DataForm, var: &str) -> Result<Option<bool>, String> {
-    let Some(raw) = form.get_value(var) else {
+    let Some(raw) = form.value(var) else {
         return Ok(None);
     };
     let raw = raw.trim();
@@ -925,7 +928,7 @@ fn parse_optional_channel_type(form: &DataForm, var: &str) -> Result<Option<Chan
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
-    match form.get_value("page_size") {
+    match form.value("page_size") {
         Some(raw) if !raw.is_empty() => {
             let parsed: u32 = raw
                 .parse()
@@ -968,7 +971,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
             after_cursor: None,
         });
     }
-    let space_jid = match form.get_value("space_jid") {
+    let space_jid = match form.value("space_jid") {
         Some(raw) if !raw.is_empty() => Some(
             raw.parse::<BareJid>()
                 .map_err(|e| format!("space_jid invalid: {e}"))?,
@@ -976,7 +979,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
         _ => None,
     };
     let prefix = form
-        .get_value("prefix")
+        .value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
     let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
@@ -996,7 +999,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let topic = parse_optional_text(form, "topic");
-    let space_jid = match form.get_value("space_jid") {
+    let space_jid = match form.value("space_jid") {
         Some(raw) if !raw.is_empty() => Some(
             raw.parse::<BareJid>()
                 .map_err(|e| format!("space_jid invalid: {e}"))?,
@@ -1025,7 +1028,7 @@ pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCrea
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let member_values = form
-        .get_values("member_jids")
+        .values("member_jids")
         .ok_or_else(|| "member_jids is required".to_string())?;
     let mut member_jids = Vec::with_capacity(member_values.len());
     for value in member_values
@@ -1121,7 +1124,7 @@ pub fn parse_affiliations_args(
 ) -> Result<ChannelsAffiliationsArgs, String> {
     let form = form.ok_or_else(|| "channels:affiliations requires an args form".to_string())?;
     let channel_jid = parse_required_bare_jid(form, "channel_jid")?;
-    let filter = match form.get_value("filter") {
+    let filter = match form.value("filter") {
         Some(raw) if !raw.is_empty() => Some(WireAffiliation::parse(raw)?),
         _ => None,
     };
@@ -1292,7 +1295,7 @@ async fn run_list(
         if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
             entry.occupant_count =
                 u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
-            for affiliation in snapshot.room.get_all_affiliations() {
+            for affiliation in snapshot.room.all_affiliations() {
                 match affiliation.affiliation {
                     Affiliation::Owner => entry.affiliation_owner_count += 1,
                     Affiliation::Admin => entry.affiliation_admin_count += 1,
@@ -2188,7 +2191,7 @@ async fn run_group_dm_create(
 
 async fn run_group_dm_leave(
     state: &AppState,
-    pending_local_muc_departures: &Arc<crate::server::routes::websocket::PendingLocalMucDepartures>,
+    pending_local_muc_departures: &Arc<PendingLocalMucDepartures>,
     connections: &ConnectionRegistry,
     user_registry: &ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_sessions: &InMemorySmSessionRegistry,
@@ -2317,7 +2320,7 @@ async fn run_group_dm_leave(
     {
         for resource in resources {
             let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-            let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
+            let in_flight = LocalDepartureItem::InFlight {
                 room: args.room_jid.clone(),
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
@@ -2327,10 +2330,8 @@ async fn run_group_dm_leave(
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             };
             pending_local_muc_departures.record_in_flight(in_flight.clone());
-            let _in_flight_lease = crate::server::routes::websocket::InFlightLease::hold(
-                Arc::clone(pending_local_muc_departures),
-                in_flight.clone(),
-            );
+            let _in_flight_lease =
+                InFlightLease::hold(Arc::clone(pending_local_muc_departures), in_flight.clone());
             match crate::server::routes::websocket::ask_leave_bounded(
                 &actor,
                 LeaveByRealJid {
@@ -2377,64 +2378,56 @@ async fn run_group_dm_leave(
                 }
                 Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
-                    pending_local_muc_departures.record(
-                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                            room: args.room_jid.clone(),
-                            jid: resource,
-                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                            attempt,
-                            notified: HashSet::new(),
-                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
-                        },
-                    );
+                    pending_local_muc_departures.record(LocalDepartureItem::RoomDeparture {
+                        room: args.room_jid.clone(),
+                        jid: resource,
+                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt,
+                        notified: HashSet::new(),
+                        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                    });
                 }
-                Err(crate::server::routes::websocket::LeaveAskFailure::Timeout) => {
+                Err(LeaveAskFailure::Timeout) => {
                     // A timeout proves nothing about the actor's seal: retain
                     // the administrative departure itself for the janitor.
                     pending_local_muc_departures.complete_in_flight(&in_flight);
-                    pending_local_muc_departures.record(
-                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                            room: args.room_jid.clone(),
-                            jid: resource,
-                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                            attempt,
-                            notified: HashSet::new(),
-                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
-                        },
-                    );
+                    pending_local_muc_departures.record(LocalDepartureItem::RoomDeparture {
+                        room: args.room_jid.clone(),
+                        jid: resource,
+                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt,
+                        notified: HashSet::new(),
+                        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                    });
                 }
                 Err(crate::server::routes::websocket::LeaveAskFailure::Handler(
                     waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
                 )) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
-                    pending_local_muc_departures.record(
-                        crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
-                            room: args.room_jid.clone(),
-                            jid: resource,
-                            actor: actor.id(),
-                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                            attempt,
-                            notified: HashSet::new(),
-                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
-                        },
-                    );
+                    pending_local_muc_departures.record(LocalDepartureItem::ConfirmRetired {
+                        room: args.room_jid.clone(),
+                        jid: resource,
+                        actor: actor.id(),
+                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt,
+                        notified: HashSet::new(),
+                        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                    });
                 }
                 Err(_) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
-                    pending_local_muc_departures.record(
-                        crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
-                            room: args.room_jid.clone(),
-                            jid: resource,
-                            cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                            attempt,
-                            notified: HashSet::new(),
-                            removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
-                        },
-                    );
+                    pending_local_muc_departures.record(LocalDepartureItem::RoomDeparture {
+                        room: args.room_jid.clone(),
+                        jid: resource,
+                        cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
+                        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                        attempt,
+                        notified: HashSet::new(),
+                        removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
+                    });
                 }
             }
         }
@@ -2777,7 +2770,7 @@ fn find_occupant_for_full_jid<'a>(
         occupant.real_jid == *full_jid
             || snapshot
                 .room
-                .get_occupant_sessions(&occupant.nick)
+                .occupant_sessions(&occupant.nick)
                 .iter()
                 .any(|session| session == full_jid)
     })
@@ -2847,7 +2840,7 @@ fn broadcast_group_dm_config_change(
     snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
 ) {
     for occupant in snapshot.room.occupants.values() {
-        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in snapshot.room.occupant_sessions(&occupant.nick) {
             let message = build_group_dm_config_change_message(room_jid, &recipient_jid);
             let _ = connections.try_send_to(&recipient_jid, Stanza::Message(message));
         }
@@ -2976,7 +2969,7 @@ async fn broadcast_admin_config_change(
         return;
     };
     for occupant in snapshot.room.occupants.values() {
-        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in snapshot.room.occupant_sessions(&occupant.nick) {
             let message = waddle_xmpp::muc::build_config_change_message(
                 room_jid,
                 &recipient_jid,
@@ -3006,7 +2999,7 @@ fn arm_config_effect_reservation(
 #[derive(Clone)]
 enum CancelledConfigAskRecoveryAction {
     ArmReservation {
-        arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+        arm_supervisor: RoomEffectArmSupervisor,
     },
     DeferMembersOnly(PendingAdminMembersOnlyEnforcementSeed),
 }
@@ -3017,7 +3010,7 @@ struct PendingAdminMembersOnlyEnforcementSeed {
     config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
     room_jid: BareJid,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: RoomEffectArmSupervisor,
 }
 
 impl PendingAdminMembersOnlyEnforcementSeed {
@@ -3090,14 +3083,11 @@ pub(crate) async fn reacquire_config_actor(
 /// Retain every inert config row since the ask began: a later identical
 /// config commit may advance coordinates without producing a new outbox row.
 pub(crate) async fn staged_config_reservations_since(
-    outbox: &crate::room_effect_outbox::RoomEffectOutboxStore,
+    outbox: &RoomEffectOutboxStore,
     previous: &waddle_xmpp::muc::room_actor::RoomSnapshot,
     coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
     include_latest: bool,
-) -> Result<
-    Vec<waddle_xmpp::muc::RoomEffectReservation>,
-    crate::room_effect_outbox::RoomEffectOutboxError,
-> {
+) -> Result<Vec<waddle_xmpp::muc::RoomEffectReservation>, RoomEffectOutboxError> {
     let latest = if include_latest {
         outbox
             .staged_reservation_for(coordinates.lifecycle, coordinates.revision)
@@ -3127,7 +3117,7 @@ struct CancelledConfigAskRecoveryGuard {
     intended_config: RoomConfig,
     previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
     registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    outbox: Arc<RoomEffectOutboxStore>,
     action: CancelledConfigAskRecoveryAction,
     disarmed: bool,
 }
@@ -3341,7 +3331,7 @@ struct PendingAdminMembersOnlyEnforcement {
     config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
     room_jid: BareJid,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: RoomEffectArmSupervisor,
 }
 
 impl PendingAdminMembersOnlyEnforcement {
@@ -3534,7 +3524,7 @@ fn install_recovery_publication_hook(
     let mut slot = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     (*slot).replace(RecoveryPublicationHookEntry { room_jid, hook })
 }
 
@@ -3543,7 +3533,7 @@ fn restore_recovery_publication_hook(previous: Option<RecoveryPublicationHookEnt
     let mut slot = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     *slot = previous;
 }
 
@@ -3552,7 +3542,7 @@ async fn run_recovery_publication_hook(room_jid: &BareJid, actor: &ActorRef<Room
     let hook = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .clone()
         .filter(|entry| entry.room_jid == *room_jid)
         .map(|entry| entry.hook);
@@ -4488,7 +4478,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         ),
         None => None,
     };
-    let mut bookmark_nodes: std::collections::BTreeSet<String> = state
+    let mut bookmark_nodes: BTreeSet<String> = state
         .pubsub_storage
         .list_node_names_for_item(&state.spaces_jid, &item_id)
         .await
@@ -4499,8 +4489,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         bookmark_nodes.insert(node.to_string());
     }
 
-    let mut bookmark_snapshots: std::collections::BTreeMap<String, Option<PubSubItem>> =
-        std::collections::BTreeMap::new();
+    let mut bookmark_snapshots: BTreeMap<String, Option<PubSubItem>> = BTreeMap::new();
     for node in &bookmark_nodes {
         bookmark_snapshots.insert(
             node.clone(),
@@ -5605,7 +5594,7 @@ mod tests {
     }
 
     fn admin_effect_origin() -> RoomEffectOriginInstanceId {
-        RoomEffectOriginInstanceId::new("admin-channel-test-origin".to_owned())
+        RoomEffectOriginInstanceId::try_new("admin-channel-test-origin".to_owned())
             .expect("origin instance")
     }
 
@@ -5868,8 +5857,8 @@ mod tests {
             members_only: true,
         };
         let form = build_channel_form(&channel);
-        assert_eq!(form.get_value("is_public"), Some("1"));
-        assert_eq!(form.get_value("members_only"), Some("1"));
+        assert_eq!(form.value("is_public"), Some("1"));
+        assert_eq!(form.value("members_only"), Some("1"));
     }
 
     #[test]
@@ -6111,7 +6100,7 @@ mod sfu_eviction_tests {
     use waddle_xmpp::muc::RoomConfig;
 
     async fn fresh_state() -> AppState {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()
@@ -6254,10 +6243,8 @@ mod group_dm_durable_reconciliation_tests {
     use crate::server::AppState;
     use kameo::actor::Spawn;
     use std::collections::HashMap;
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
-    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
@@ -6547,7 +6534,7 @@ mod group_dm_durable_reconciliation_tests {
                 if !exact {
                     return Err(RoomCommitError::NotOwner);
                 }
-                let effect_origin = crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                let effect_origin = crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
                     "admin-channel-test-origin".to_owned(),
                 )
                 .expect("test origin instance");
@@ -6685,7 +6672,7 @@ mod group_dm_durable_reconciliation_tests {
     async fn fresh_state_with_room_registry(
         mode: DurableMode,
     ) -> (AppState, Arc<TestGroupDmDurableStore>) {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()
@@ -7224,7 +7211,7 @@ mod group_dm_durable_reconciliation_tests {
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(&alice_web)
+                .entry(&alice_web)
                 .is_some(),
             "the deferred administrative resource stays live while retained for janitor retry"
         );

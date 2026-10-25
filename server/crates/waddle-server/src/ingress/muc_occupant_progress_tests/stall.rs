@@ -1,17 +1,11 @@
 //! Cancel the selected stalled copy only after it reaches the delivery seam.
-use std::{
-    future::Future,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::ingress::{
-    execute::ExecutionReport,
-    execute_uow::{CANCEL_STALLED_DELIVERY, STALL_DELIVERY_RESOURCE},
-};
+use crate::ingress::execute::ExecutionReport;
+use crate::ingress::execute_uow::{CANCEL_STALLED_DELIVERY, STALL_DELIVERY_RESOURCE};
 
 pub(in crate::ingress) async fn execute(
     target: jid::FullJid,

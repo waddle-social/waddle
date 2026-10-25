@@ -1,4 +1,5 @@
 use super::RoomEffectOutboxError;
+use crate::db::ConnectionGuard;
 use crate::db::{Database, DatabaseDriver};
 
 /// Dedicated transaction-scoped Postgres advisory lock for room-effect outbox
@@ -48,7 +49,7 @@ async fn sqlite(db: &Database) -> Result<(), RoomEffectOutboxError> {
 }
 
 async fn sqlite_column_present(
-    connection: &crate::db::ConnectionGuard,
+    connection: &ConnectionGuard,
     column: &str,
 ) -> Result<bool, RoomEffectOutboxError> {
     let mut rows = connection

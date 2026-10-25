@@ -31,7 +31,7 @@ use super::types::{PushDevicePlatform, PushDeviceRegistration};
 pub(crate) const FCM_TEST_APP_ID: &str = "social.waddle.android";
 
 pub(super) async fn store() -> DatabasePushServiceStore {
-    DatabasePushServiceStore::new(
+    DatabasePushServiceStore::try_new(
         Database::in_memory("push-service")
             .await
             .expect("push service db"),

@@ -4,7 +4,12 @@
 //! shutdown, nothing else reclaims a user whose only live socket is on this
 //! node. The origin-refresh path therefore promotes locally when the claim is
 //! absent or its owner is committed expired.
-use super::*;
+use super::{
+    mpsc, origin_identity, receiver_identity, services_with_claims, target_full, test_peer_id, Arc,
+    CancellationToken, ClaimEpoch, ClaimError, ClaimStore, ClusteringMessagingConfig,
+    ConnectionEntry, Entity, NodeId, NodeIdentity, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, RemoteResourceOriginRefresh, RemoteResourceOriginSnapshot,
+};
 use waddle_xmpp::ownership::{ClaimSnapshot, ResumeIdentityProof, StalePredicate};
 use waddle_xmpp::registry::ListUsers;
 

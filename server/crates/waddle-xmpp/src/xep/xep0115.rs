@@ -14,7 +14,8 @@
 //!
 //! - <https://xmpp.org/extensions/xep-0115.html>
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use minidom::Element;
 use sha1::{Digest, Sha1};
 use std::sync::Arc;

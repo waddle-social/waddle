@@ -1,5 +1,12 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+#[cfg(feature = "clustering")]
+use super::IngressUnitOfWork;
+use super::{
+    obligation, test_hooks, BroadcastOutcome, Duration, FullJid, FullJidDeliveryOutcome,
+    IngressEffectIntent, NodeIdentity, SendAttemptRepository, SendClaim, SmIngressAppendContext,
+    Stanza, LEASE_DURATION,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use waddle_xmpp::ingress::EffectMessageIdentity;
 

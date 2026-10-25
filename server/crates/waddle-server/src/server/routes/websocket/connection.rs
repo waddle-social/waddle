@@ -1,38 +1,48 @@
-use super::*;
+use super::batch_write::{
+    write_ingress_response_batch_with_admission, write_response_batch_with_admission,
+    BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+};
+use super::cleanup::cleanup_connection_shutdown;
+use super::frame::{
+    handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame, StreamErrorFrame,
+};
+use super::interpret_loop::build_interpret_deps;
+use super::outbound::{handle_outbound_stanza, OutboundAuthority};
+use super::registration::{
+    register_bound_connection_after_frame_with_admission, RegistrationAfterFrame,
+};
+use super::replay::drive_interpret_loop;
+use super::send::{
+    close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
+    send_ws_text_frames_with_authority, AuthoritySendOutcome, InterruptibleSink,
+};
+use super::session_init::build_internal_server_error_stream_error;
+use super::state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
+use super::stream_management::SmRegistrationFinalization;
+use super::timers::TransportTimers;
+use super::transport_xml::{
+    build_conflict_stream_error, build_system_shutdown_stream_error,
+    websocket_stream_close_element, websocket_stream_close_xml,
+};
 use super::{
-    batch_write::{
-        write_ingress_response_batch_with_admission, write_response_batch_with_admission,
-        BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
-    },
-    cleanup::cleanup_connection_shutdown,
-    frame::{handle_xmpp_frame_with_admission, ResponseBatch, ResponseFrame, StreamErrorFrame},
-    interpret_loop::build_interpret_deps,
-    outbound::{handle_outbound_stanza, OutboundAuthority},
-    registration::{register_bound_connection_after_frame_with_admission, RegistrationAfterFrame},
-    replay::drive_interpret_loop,
-    send::{
-        close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-        send_ws_text_frames_with_authority, AuthoritySendOutcome, InterruptibleSink,
-    },
-    session_init::build_internal_server_error_stream_error,
-    state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
-    stream_management::SmRegistrationFinalization,
-    timers::TransportTimers,
-    transport_xml::{
-        build_conflict_stream_error, build_system_shutdown_stream_error,
-        websocket_stream_close_element, websocket_stream_close_xml,
-    },
+    batch_write, cleanup, debug, error, get, info, mpsc, warn, Arc, ConnectionPhase, InboundEvent,
+    Message, OutboundStanza, Response, Router, Sink, Stanza, State, StreamExt, WebSocket,
+    WebSocketState, WebSocketUpgrade,
 };
-use axum::{
-    extract::{FromRequest, Request},
-    response::IntoResponse,
-};
+use crate::clustering::NodeAdmissionError;
+use crate::clustering::NodeAdmissionPermit;
+use crate::room_effect_outbox::drain::RoomEffectCompletion;
+use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+use axum::extract::{FromRequest, Request};
+use axum::response::IntoResponse;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use waddle_xmpp::stream_management::SmRequest;
 
 #[derive(Debug, PartialEq, Eq)]
 enum WebSocketAdmissionRevocation {
     Shutdown,
-    Lifecycle(crate::clustering::NodeAdmissionError),
+    Lifecycle(NodeAdmissionError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +59,7 @@ enum BatchCompletionOutcome {
 /// guarantees that socket is then dropped without processing XMPP.
 fn revalidate_websocket_admission(
     state: &WebSocketState,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
 ) -> Result<(), WebSocketAdmissionRevocation> {
     if state.deps.shutdown.stop_token().is_cancelled() {
         return Err(WebSocketAdmissionRevocation::Shutdown);
@@ -212,7 +222,7 @@ pub(super) struct ConnectionIo<'a, S, R> {
 
 #[derive(Clone, Copy)]
 pub(super) struct FrameAuthority<'a> {
-    pub(super) permit: &'a crate::clustering::NodeAdmissionPermit,
+    pub(super) permit: &'a NodeAdmissionPermit,
     pub(super) shutdown: &'a tokio_util::sync::CancellationToken,
 }
 
@@ -240,7 +250,7 @@ async fn handle_xmpp_websocket(
     // been closed AND its SM state handed to the session registry for
     // Q6 promotion.
     _connection_guard: waddle_ecdysis::ConnectionGuard,
-    admission_permit: crate::clustering::NodeAdmissionPermit,
+    admission_permit: NodeAdmissionPermit,
 ) {
     let domain = state.deps.auth_state.xmpp_domain.clone();
     let shutdown_token = state.deps.shutdown.stop_token();
@@ -279,9 +289,7 @@ async fn handle_xmpp_websocket(
     let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
     let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
         .with_resume_control(live_resume_control.clone());
-    let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
-        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-    >();
+    let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<OrderedRelayHandoffCompletion>();
     conn.ordered_relay_handoff_tx = Some(handoff_tx);
     // RFC 7395 §3.8 keepalive (issue #1090): the liveness policy lives
     // in the per-connection sans-io machine, so one must exist from
@@ -752,9 +760,7 @@ async fn handle_xmpp_websocket(
 /// Channel state carried from the live loop into its connection-owned shutdown.
 pub(super) struct ConnectionShutdownChannels<'a> {
     pub(super) outbound_rx: &'a mut mpsc::Receiver<OutboundStanza>,
-    pub(super) handoff_rx: &'a mut mpsc::UnboundedReceiver<
-        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-    >,
+    pub(super) handoff_rx: &'a mut mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     pub(super) pending_force_detach: &'a mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
@@ -938,7 +944,7 @@ where
 async fn close_live_session_for_force_detach<S, E>(
     ws_sender: &mut S,
     conn: &WsConnState,
-    admission_permit: &crate::clustering::NodeAdmissionPermit,
+    admission_permit: &NodeAdmissionPermit,
     shutdown_token: &tokio_util::sync::CancellationToken,
 ) where
     S: Sink<Message, Error = E> + Unpin,
@@ -1248,7 +1254,8 @@ fn ack_force_detach_requests(
 #[cfg(test)]
 mod admission_tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::body::Body;
+    use axum::http::Request;
     use tower::ServiceExt;
 
     fn websocket_request() -> Request<Body> {
@@ -1715,7 +1722,7 @@ where
     if conn.sm_inbound_completion.has_unhandled_hole() {
         warn!(
             jid = ?conn.phase.bound_jid(),
-            inbound_h = conn.sm_state.get_inbound_count(),
+            inbound_h = conn.sm_state.inbound_count(),
             resumable = conn.sm_state.is_resumable(),
             "Ending transport after unhandled stanza dispatch timeout; preserving sender responsibility"
         );
@@ -1737,7 +1744,7 @@ async fn close_if_frame_authority_revoked<S, E>(
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
     ws_sender: &mut S,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> bool
 where
@@ -1770,8 +1777,8 @@ async fn handle_ordered_relay_handoff_completion<S, SE, R, RE>(
     ws_receiver: &mut R,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    completion: OrderedRelayHandoffCompletion,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> bool
 where
@@ -1809,9 +1816,7 @@ where
 }
 
 async fn drain_ordered_relay_handoffs_before_cleanup(
-    handoff_rx: &mut mpsc::UnboundedReceiver<
-        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
-    >,
+    handoff_rx: &mut mpsc::UnboundedReceiver<OrderedRelayHandoffCompletion>,
     conn: &mut WsConnState,
 ) {
     if !conn.sm_inbound_completion.has_pending() {
@@ -1878,7 +1883,7 @@ async fn drain_ordered_relay_handoffs_before_cleanup(
 
 fn apply_ordered_relay_handoff_completion(
     conn: &mut WsConnState,
-    completion: crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+    completion: OrderedRelayHandoffCompletion,
 ) {
     conn.sm_inbound_completion
         .complete(completion.inbound_sequence, &mut conn.sm_state);
@@ -1912,7 +1917,7 @@ async fn settle_deferred_inbound_before_cleanup(
     domain: &str,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
     pending_force_detach: &[waddle_xmpp::registry::ForceDetachRequest],
 ) {
@@ -1965,7 +1970,7 @@ async fn process_deferred_inbound_after_transport_loss(
     domain: &str,
     state: &Arc<WebSocketState>,
     conn: &mut WsConnState,
-    permit: &crate::clustering::NodeAdmissionPermit,
+    permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) {
     if conn.sm_inbound_completion.has_unhandled_hole() {
@@ -2112,10 +2117,7 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[ResponseFrame]) 
 
 fn response_batch_completion_frames(
     responses: ResponseBatch,
-) -> Vec<(
-    crate::room_effect_outbox::drain::RoomEffectCompletion,
-    usize,
-)> {
+) -> Vec<(RoomEffectCompletion, usize)> {
     responses
         .completions
         .into_iter()
@@ -2123,10 +2125,7 @@ fn response_batch_completion_frames(
         .collect()
 }
 
-fn complete_batch_completions(
-    state: &Arc<WebSocketState>,
-    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
-) {
+fn complete_batch_completions(state: &Arc<WebSocketState>, completions: Vec<RoomEffectCompletion>) {
     for completion in completions {
         let state = Arc::clone(state);
         tokio::spawn(async move {
@@ -2160,10 +2159,7 @@ fn settle_batch_completions(
     outcome: BatchCompletionOutcome,
     resumable: bool,
     accepted_frame_indices: &[usize],
-    completion_frames: Vec<(
-        crate::room_effect_outbox::drain::RoomEffectCompletion,
-        usize,
-    )>,
+    completion_frames: Vec<(RoomEffectCompletion, usize)>,
 ) {
     let (completions_to_complete, retained) = select_batch_completions_to_complete(
         outcome,
@@ -2184,9 +2180,9 @@ fn settle_batch_completions(
 
 fn queue_replay_recorded_completions(
     conn: &mut WsConnState,
-    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    completions: Vec<RoomEffectCompletion>,
 ) {
-    let mut queued: std::collections::HashSet<_> = conn
+    let mut queued: HashSet<_> = conn
         .pending_replay_completions
         .iter()
         .map(|completion| (completion.key.clone(), completion.lease.clone()))
@@ -2224,26 +2220,16 @@ fn select_batch_completions_to_complete(
     outcome: BatchCompletionOutcome,
     resumable: bool,
     accepted_frame_indices: &[usize],
-    completion_frames: Vec<(
-        crate::room_effect_outbox::drain::RoomEffectCompletion,
-        usize,
-    )>,
-) -> (
-    Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
-    usize,
-) {
-    let accepted_frame_indices: std::collections::HashSet<_> =
-        accepted_frame_indices.iter().copied().collect();
-    let mut grouped = std::collections::HashMap::new();
+    completion_frames: Vec<(RoomEffectCompletion, usize)>,
+) -> (Vec<RoomEffectCompletion>, usize) {
+    let accepted_frame_indices: HashSet<_> = accepted_frame_indices.iter().copied().collect();
+    let mut grouped = HashMap::new();
     for (completion, frame_index) in completion_frames {
         let completion_key = (completion.key.clone(), completion.lease.clone());
         grouped
             .entry(completion_key)
             .and_modify(
-                |(_, all_frames_accepted): &mut (
-                    crate::room_effect_outbox::drain::RoomEffectCompletion,
-                    bool,
-                )| {
+                |(_, all_frames_accepted): &mut (RoomEffectCompletion, bool)| {
                     *all_frames_accepted &= accepted_frame_indices.contains(&frame_index)
                 },
             )
@@ -2266,14 +2252,14 @@ fn select_batch_completions_to_complete(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        batch_write::{
-            write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
-        },
-        cleanup::cleanup_connection_shutdown,
-        state::TERMINAL_RECOVERY_QUEUE_CAP,
-        transport_xml::websocket_stream_open_xml,
+    use minidom::Element;
+
+    use super::super::batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
     };
+    use super::super::cleanup::cleanup_connection_shutdown;
+    use super::super::state::TERMINAL_RECOVERY_QUEUE_CAP;
+    use super::super::transport_xml::websocket_stream_open_xml;
     use super::*;
     use jid::{BareJid, FullJid};
     use std::pin::Pin;
@@ -2389,7 +2375,7 @@ mod tests {
     }
 
     fn replay_completion_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
-        crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+        crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
             "connection-replay-completion".to_owned(),
         )
         .expect("origin instance")
@@ -2952,7 +2938,7 @@ mod tests {
         .await
         .expect("abandoned sequence must not block cleanup");
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
     }
 
     #[tokio::test]
@@ -2994,7 +2980,7 @@ mod tests {
         .await
         .expect("abandoned consumed completion must not block cleanup");
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         assert!(!conn.sm_inbound_completion.has_pending());
         assert!(sender.sent.is_empty());
     }
@@ -3021,7 +3007,7 @@ mod tests {
         drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
-            conn.sm_state.get_inbound_count(),
+            conn.sm_state.inbound_count(),
             1,
             "the contiguous pre-hole stanza must be acknowledged before detach"
         );
@@ -3091,7 +3077,7 @@ mod tests {
         );
 
         assert_eq!(
-            conn.sm_state.get_stanzas_to_resend(0).len(),
+            conn.sm_state.stanzas_to_resend(0).len(),
             1,
             "the initiator reply is retained for SM replay"
         );
@@ -3871,7 +3857,7 @@ mod tests {
         tokio::time::advance(ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE).await;
         drain.await;
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         assert!(!conn.sm_inbound_completion.has_pending());
     }
 
@@ -3898,7 +3884,7 @@ mod tests {
         drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
-            conn.sm_state.get_inbound_count(),
+            conn.sm_state.inbound_count(),
             ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS as u32,
             "cleanup must cap ready backlog work before detaching"
         );
@@ -3919,7 +3905,7 @@ mod tests {
 
         assert_eq!(discard_deferred_inbound(&mut conn), 2);
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
     }
 
     async fn assert_deferred_force_detach_handling(
@@ -3973,8 +3959,8 @@ mod tests {
         .await;
 
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), expected_handled);
-        let responses = conn.sm_state.get_stanzas_to_resend(0);
+        assert_eq!(conn.sm_state.inbound_count(), expected_handled);
+        let responses = conn.sm_state.stanzas_to_resend(0);
         assert_eq!(responses.len(), expected_handled as usize);
         if let Some(response) = responses.first() {
             let response = Element::from_str(&response.stanza_xml).expect("replay IQ XML");
@@ -4063,8 +4049,8 @@ mod tests {
         .await;
 
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
-        assert!(conn.sm_state.get_stanzas_to_resend(0).is_empty());
+        assert_eq!(conn.sm_state.inbound_count(), 0);
+        assert!(conn.sm_state.stanzas_to_resend(0).is_empty());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::Replacements;
+use crate::ingress_uow::IngressUowError;
 use jid::BareJid;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent,
@@ -28,10 +29,7 @@ impl Replacements {
         }
     }
 
-    pub(super) fn intent(
-        &self,
-        intent: &mut IngressEffectIntent,
-    ) -> Result<(), crate::ingress_uow::IngressUowError> {
+    pub(super) fn intent(&self, intent: &mut IngressEffectIntent) -> Result<(), IngressUowError> {
         match intent {
             IngressEffectIntent::DmCallThreadState { state, .. } => {
                 if let Some(id) = state
@@ -57,7 +55,7 @@ impl Replacements {
                 if let Some(payload) = prepared {
                     let mut message = payload.message().clone();
                     self.message(&mut message);
-                    *payload = StoredMessagePayload::new(message)?;
+                    *payload = StoredMessagePayload::try_new(message)?;
                 }
             }
             IngressEffectIntent::RouteMucGroupchat { route_identity, .. }

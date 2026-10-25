@@ -40,3 +40,6 @@ uuid = { version = "1.23", default-features = false, features = ["v4"] }
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
+
+[lints]
+workspace = true

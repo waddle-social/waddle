@@ -113,7 +113,7 @@ pub struct HttpApnsSender {
 
 impl HttpApnsSender {
     /// Sender for Apple's production and sandbox hosts, HTTPS only.
-    pub fn new() -> Result<Self, ApnsSenderBuildError> {
+    pub fn try_new() -> Result<Self, ApnsSenderBuildError> {
         let client = base_client_builder()
             .https_only(true)
             .build()
@@ -344,7 +344,7 @@ mod tests {
                 topic: ApnsTopic::parse("social.waddle.app").expect("topic"),
                 jwt: signer.current().expect("jwt"),
                 payload,
-                collapse_id: ApnsCollapseId::new("stanza-1").expect("collapse id"),
+                collapse_id: ApnsCollapseId::try_new("stanza-1").expect("collapse id"),
             }
         }
 
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn production_sender_targets_apple_hosts() {
-        let sender = HttpApnsSender::new().expect("sender");
+        let sender = HttpApnsSender::try_new().expect("sender");
         let token = ApnsDeviceToken::parse(TOKEN).expect("token");
         assert_eq!(
             sender
@@ -579,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn production_client_connect_timeout_preserves_pre_send_evidence() {
-        let sender = HttpApnsSender::new().expect("production sender");
+        let sender = HttpApnsSender::try_new().expect("production sender");
         crate::push::types::assert_production_connect_timeout(sender.client).await;
     }
 

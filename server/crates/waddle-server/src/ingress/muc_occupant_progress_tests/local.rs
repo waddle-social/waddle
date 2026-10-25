@@ -1,6 +1,13 @@
-use super::*;
+use super::{
+    build_interpret_deps, commit_submission, execute_effects, interpret, receipt_key,
+    terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput,
+    Duration, EffectReceiptRepository, ExternalOutcome, ImmediateSink, IngressEffectCapture,
+    IngressEffectIntent, IngressFixture, Join, NormalizedTarget, OutboundEvent, PlanSink,
+};
 use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
 use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::tests as socket_tests;
+use crate::sm_persistence::DatabaseSmPersistence;
 use std::sync::Arc;
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
@@ -81,7 +88,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         .await
         .expect("sender join");
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );

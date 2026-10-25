@@ -35,6 +35,7 @@
 
 use minidom::{Element, Node};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use xmpp_parsers::message::MessageType;
 
 use super::input::{DigestInput, DigestInputError};
@@ -183,7 +184,7 @@ impl PreimageWriter {
 
     fn langmap(
         &mut self,
-        map: &std::collections::BTreeMap<xmpp_parsers::message::Lang, String>,
+        map: &BTreeMap<xmpp_parsers::message::Lang, String>,
     ) -> Result<(), DigestInputError> {
         self.u32(map.len())?;
         for (language, text) in map {

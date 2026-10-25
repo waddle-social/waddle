@@ -1,5 +1,5 @@
 use super::delivery::receiver::room_entity;
-use super::*;
+use super::{Duration, OrderedRelayDeliveryBridge};
 
 /// Bound on each receiver-side claim-store read in
 /// [`OrderedRelayDeliveryBridge::reassert_media_grants_local`]. The

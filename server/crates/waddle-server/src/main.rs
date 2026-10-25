@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use tracing::info;
-use waddle_server::{config, config::ServerConfig, db, server, telemetry};
+use waddle_ecdysis::InheritedListeners;
+use waddle_server::config;
+use waddle_server::config::ServerConfig;
+use waddle_server::{db, server, telemetry};
 
 /// Tokio's default 2 MiB worker stack is no longer enough for the deepest
 /// protocol futures (a debug/ci-test-profile session-initiate rewrite
@@ -9,15 +12,20 @@ use waddle_server::{config, config::ServerConfig, db, server, telemetry};
 /// merge). 8 MiB matches the platform main-thread default and keeps
 /// headroom; the real long-term fix is boxing the fattest handler futures.
 fn main() -> Result<()> {
+    // SAFETY: This is the first startup operation, before runtime/telemetry
+    // threads or other descriptor owners exist. The launcher exclusively
+    // transfers the LISTEN_FDS descriptors at exec; this call adopts them once.
+    let inherited = unsafe { InheritedListeners::from_env() };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(8 * 1024 * 1024)
         .build()
         .context("build tokio runtime")?
-        .block_on(async_main())
+        .block_on(async_main(inherited))
 }
 
-async fn async_main() -> Result<()> {
+async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
+    let inherited = inherited.map(InheritedListeners::into_listener_set);
     // Install the ring crypto provider for rustls (required for XMPP TLS)
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -35,10 +43,9 @@ async fn async_main() -> Result<()> {
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("License: {}", env!("CARGO_PKG_LICENSE"));
 
-    // Check for inherited listeners (Ecdysis restart from parent process)
-    let inherited = waddle_ecdysis::ListenerSet::from_env();
+    // Report inherited listeners captured from the launcher before runtime startup.
     if inherited.is_some() {
-        info!("Inherited listeners from parent process (Ecdysis graceful restart)");
+        info!("Inherited listeners from launcher");
     }
 
     // Load configuration
@@ -72,7 +79,7 @@ async fn async_main() -> Result<()> {
     }
 
     let pool_config = db::PoolConfig;
-    let db_pool = db::DatabasePool::new(db_config, pool_config)
+    let db_pool = db::DatabasePool::try_new(db_config, pool_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
 

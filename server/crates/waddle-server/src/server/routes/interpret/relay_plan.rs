@@ -1,10 +1,8 @@
 //! Owner-side room planning for a committed origin ingress identity.
-use super::{
-    effects::{
-        delivery::ExternalDeliveryEffect, Effect, EffectSink, ExternalEffect, IngressPlan, PlanSink,
-    },
-    Deps,
-};
+use super::effects::delivery::ExternalDeliveryEffect;
+use super::effects::{Effect, EffectSink, ExternalEffect, IngressPlan, PlanSink};
+use super::Deps;
+use crate::ingress::IngressEffectCapture;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;
@@ -24,7 +22,7 @@ pub(crate) async fn plan_muc_for_relay(
         sink.observe_sender(sender);
     }
     sink.observe_message(&message);
-    let capture = crate::ingress::IngressEffectCapture::new();
+    let capture = IngressEffectCapture::new();
     let planned =
         super::build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
     super::room_dispatch::dispatch_to_room(&planned, room, message.clone(), 0).await;

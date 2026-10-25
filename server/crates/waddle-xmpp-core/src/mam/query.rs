@@ -1,3 +1,5 @@
+//! Validation and parsing of MAM data forms and result-set constraints.
+
 use chrono::{DateTime, Utc};
 use jid::Jid;
 use minidom::Element;
@@ -14,6 +16,10 @@ use super::{
 use crate::{CoreError, CoreResult};
 
 /// Parse a MAM query from an IQ stanza.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` unless this is a MAM IQ-set query with valid data-form fields, timestamps, identifiers, and result-set constraints.
 pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
     let query_elem = match iq {
         Iq::Set { payload, .. } if payload.name() == "query" && payload.ns() == MAM_NS => payload,
@@ -61,6 +67,7 @@ pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
 }
 
 /// Check if an IQ asks for the XEP-0313 supported query fields form.
+#[must_use]
 pub fn is_mam_query_form_request(iq: &Iq) -> bool {
     matches!(
         iq,
@@ -69,6 +76,7 @@ pub fn is_mam_query_form_request(iq: &Iq) -> bool {
 }
 
 /// Check if an IQ is a MAM query.
+#[must_use]
 pub fn is_mam_query(iq: &Iq) -> bool {
     matches!(
         iq,
@@ -78,6 +86,7 @@ pub fn is_mam_query(iq: &Iq) -> bool {
 }
 
 /// Build the XEP-0313 supported query fields response.
+#[must_use]
 pub fn build_query_form_iq(original_iq: &Iq) -> Iq {
     let form = Element::builder("x", DATA_FORMS_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "form")
@@ -228,7 +237,7 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                     if value.is_empty() {
                         continue;
                     }
-                    let Some(token) = MamFilterStanzaId::new(value) else {
+                    let Some(token) = MamFilterStanzaId::try_new(value) else {
                         return Err(CoreError::bad_request(Some(format!(
                             "MAM stanza-id filter value exceeds max length {MAX_FILTER_STANZA_ID_LEN}"
                         ))));
@@ -244,10 +253,10 @@ fn parse_data_form(form: &Element, query: &mut MamQuery) -> CoreResult<()> {
                 query.stanza_ids = tokens;
             }
             WADDLE_MAM_THREAD_FIELD => {
-                query.thread_id = value.and_then(ThreadId::new);
+                query.thread_id = value.and_then(ThreadId::try_new);
             }
             FULLTEXT_MAM_FIELD => {
-                query.fulltext = value.and_then(RichText::new);
+                query.fulltext = value.and_then(RichText::try_new);
             }
             _ => {
                 return Err(CoreError::NotImplemented);

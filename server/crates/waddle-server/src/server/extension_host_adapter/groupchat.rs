@@ -1,14 +1,17 @@
 //! Trusted bot sends commit under the plugin's configured grant.
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use jid::{BareJid, FullJid};
-use tokio::{sync::OwnedMutexGuard, task::JoinHandle};
-use waddle_extensions::{host_tools::InvocationKind, PluginId, StanzaId};
+use tokio::sync::OwnedMutexGuard;
+use tokio::task::JoinHandle;
+use waddle_extensions::host_tools::InvocationKind;
+use waddle_extensions::{PluginId, StanzaId};
 use waddle_xmpp::ingress::{NormalizedTarget, TransportGeneration};
 
+use crate::ingress::nested::NestedContinuation;
 use crate::ingress::{
-    nested::NestedContinuation, ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity,
-    IngressSubmission,
+    ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
 };
 use crate::server::routes::websocket::WebSocketState;
 
@@ -218,7 +221,7 @@ impl ExtensionHostAdapter {
             Ok(archive_ids
                 .into_iter()
                 .find(|(archive, _)| archive == &room)
-                .and_then(|(_, id)| StanzaId::new(id.id).ok()))
+                .and_then(|(_, id)| StanzaId::try_new(id.id).ok()))
         }
         .await;
         drop(cleanup);

@@ -4,7 +4,8 @@ use std::time::Duration;
 use minidom::Element;
 use uuid::Uuid;
 use waddle_xmpp_client::ClientError;
-use xmpp_parsers::{iq::Iq, ping::Ping};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::ping::Ping;
 
 use crate::error::{client_error_to_waddle, WaddleError};
 use crate::WaddleClient;

@@ -3,6 +3,9 @@
 //! Binding crates deserialize their own boundary options and call these
 //! helpers; the XMPP fetch/merge/publish/retract semantics live here.
 
+use crate::error::ClientError;
+use crate::pep::NS_BOOKMARKS;
+use crate::pep::NS_PUBSUB;
 use jid::BareJid;
 use minidom::Element;
 use uuid::Uuid;
@@ -17,45 +20,85 @@ use crate::xep::xep0402::{
 use crate::xep::xep0492::{
     build_fetch_dm_bookmarks_iq, build_publish_dm_bookmark_iq, build_retract_dm_bookmark_iq,
     dm_notify_is_default, merge_notify, merge_notify_into_extensions, read_dm_bookmark_notify,
-    NotifyMode, NS_WADDLE_DM_BOOKMARKS,
+    NotifyMode, RichPushSummary, NS_WADDLE_DM_BOOKMARKS,
 };
 
+fn rich_push_summary(opt_in: bool) -> RichPushSummary {
+    if opt_in {
+        RichPushSummary::OptIn
+    } else {
+        RichPushSummary::OptOut
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Inputs for updating a room bookmark's notification policy.
 pub struct SetRoomNotificationMode {
+    /// Bare JID of the room in scope.
     pub room_jid: BareJid,
+    /// Fallback bookmark name used when the room has no existing bookmark name.
     pub name: Option<String>,
+    /// Selected notification or availability policy.
     pub mode: NotifyMode,
+    /// Whether the room bookmark opts into Waddle rich push summaries.
     pub rich_payload_opt_in: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of updating a room bookmark notification policy.
+#[non_exhaustive]
 pub enum SetRoomNotificationModeOutcome {
-    Ok { item: BookmarkItem },
+    /// The requested update succeeded and returns the resulting item.
+    Ok {
+        #[doc = "Item to publish."]
+        item: BookmarkItem,
+    },
+    /// Existing node configuration does not satisfy the requested publish options.
     NodeConfigMismatch,
+    /// The operation failed; inspect the associated error details.
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Inputs for updating a direct-message bookmark's notification policy.
 pub struct SetDmNotificationMode {
+    /// Bare JID identifying the direct-message peer.
     pub dm_jid: BareJid,
+    /// Selected notification or availability policy.
     pub mode: NotifyMode,
+    /// Whether the direct-message bookmark opts into Waddle rich push summaries.
     pub rich_payload_opt_in: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of updating a direct-message bookmark notification policy.
+#[non_exhaustive]
 pub enum SetDmNotificationModeOutcome {
+    /// The requested update succeeded and returns the resulting item.
     Ok {
+        /// XMPP address identifying the referenced entity.
         jid: BareJid,
+        /// Selected notification or availability policy.
         mode: NotifyMode,
+        /// Rich push-summary opt-in stored in the resulting direct-message bookmark.
         rich_payload_opt_in: bool,
     },
+    /// The target item or membership has been removed.
     Removed {
+        /// XMPP address identifying the referenced entity.
         jid: BareJid,
     },
+    /// Existing node configuration does not satisfy the requested publish options.
     NodeConfigMismatch,
+    /// The operation failed; inspect the associated error details.
     Error,
 }
 
+/// Set the room notification mode and return the updated value.
+///
+/// # Errors
+///
+/// Propagates transport, IQ timeout, and unhandled stanza errors from the supplied IQ sender. Missing nodes and documented publish conflicts use the fallback paths described above.
 pub async fn set_room_notification_mode<D: CommandDriver>(
     driver: &D,
     options: SetRoomNotificationMode,
@@ -72,7 +115,7 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     let merged_extensions = merge_notify_into_extensions(
         existing_extensions.as_ref(),
         options.mode,
-        options.rich_payload_opt_in,
+        rich_push_summary(options.rich_payload_opt_in),
     );
     let extensions = merged_extensions.children().cloned().collect();
 
@@ -98,6 +141,11 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     }
 }
 
+/// Set the dm notification mode and return the updated value.
+///
+/// # Errors
+///
+/// Propagates transport, IQ timeout, and unhandled stanza errors from the supplied IQ sender. Missing nodes and documented publish conflicts use the fallback paths described above.
 pub async fn set_dm_notification_mode<D: CommandDriver>(
     driver: &D,
     options: SetDmNotificationMode,
@@ -117,7 +165,7 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     let merged = merge_notify(
         existing_notify.as_ref(),
         options.mode,
-        options.rich_payload_opt_in,
+        rich_push_summary(options.rich_payload_opt_in),
     );
 
     if dm_notify_is_default(&merged, NotifyMode::Always) {
@@ -156,17 +204,19 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     }
 }
 
+/// Read direct-message bookmark items from a PubSub result, ignoring malformed or unrelated payloads.
+#[must_use]
 pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
     let Some(items) = iq
-        .get_child("pubsub", crate::pep::NS_PUBSUB)
-        .and_then(|pubsub| pubsub.get_child("items", crate::pep::NS_PUBSUB))
+        .get_child("pubsub", NS_PUBSUB)
+        .and_then(|pubsub| pubsub.get_child("items", NS_PUBSUB))
         .filter(|items| items.attr("node") == Some(NS_WADDLE_DM_BOOKMARKS))
     else {
         return Vec::new();
     };
     items
         .children()
-        .filter(|child| child.name() == "item" && child.ns() == crate::pep::NS_PUBSUB)
+        .filter(|child| child.name() == "item" && child.ns() == NS_PUBSUB)
         .filter_map(|item| {
             let jid: BareJid = item.attr("id")?.parse().ok()?;
             jid.node()?;
@@ -177,18 +227,18 @@ pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
 }
 
 fn build_extensions_wrapper(children: &[Element]) -> Element {
-    let mut builder = Element::builder("extensions", crate::pep::NS_BOOKMARKS);
+    let mut builder = Element::builder("extensions", NS_BOOKMARKS);
     for child in children {
         builder = builder.append(child.clone());
     }
     builder.build()
 }
 
-fn is_stanza_condition(err: &crate::error::ClientError, condition: &str) -> bool {
+fn is_stanza_condition(err: &ClientError, condition: &str) -> bool {
     matches!(err, crate::error::ClientError::StanzaError(stanza_err) if stanza_err.condition == condition)
 }
 
-fn warn_stanza_error(err: &crate::error::ClientError, operation: &'static str) -> bool {
+fn warn_stanza_error(err: &ClientError, operation: &'static str) -> bool {
     let crate::error::ClientError::StanzaError(stanza_err) = err else {
         return false;
     };

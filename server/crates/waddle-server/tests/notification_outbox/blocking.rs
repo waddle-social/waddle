@@ -2,10 +2,17 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{
+    bare, candidate_for_sender_jid, drain_deps_with_noop_activity, enqueue_jobs_for_test,
+    groupchat_candidate_for, inbox_with_unread, noop_activity_reader, register_push_target,
+    settings_projection, store, target, FailingBlockingStorage, StubRoomPolicy,
+};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NoopDndReader, NotificationClass, NotificationOutboxJob, NotificationOutboxPublishOutcome,
+    NotificationOutboxStatus, NotificationOutboxTarget, PushServiceNodeName,
+};
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
 
@@ -44,9 +51,11 @@ async fn drain_dm_outbox_with_sender_jid(
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
-        .await
-        .expect("push registration schema");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+        push_service.database(),
+    )
+    .await
+    .expect("push registration schema");
     let push_node = push_service
         .ensure_node(&recipient, "web")
         .await
@@ -69,7 +78,7 @@ async fn drain_dm_outbox_with_sender_jid(
         .expect("first-party registration");
     let target = NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(push_node.node()).expect("push node target"),
+        PushServiceNodeName::try_new(push_node.node()).expect("push node target"),
     );
     enqueue_jobs_for_test(
         &store,
@@ -230,9 +239,11 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
-        .await
-        .expect("push registration schema");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+        push_service.database(),
+    )
+    .await
+    .expect("push registration schema");
     let push_node = push_service
         .ensure_node(&recipient, "web")
         .await
@@ -255,7 +266,7 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
         .expect("first-party registration");
     let target = NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(push_node.node()).expect("push node target"),
+        PushServiceNodeName::try_new(push_node.node()).expect("push node target"),
     );
     register_push_target(&push_store, &recipient, &target).await;
 

@@ -27,7 +27,8 @@
 //! - Community "what's happening now" feed
 //! - Auto-cleanup of old content
 
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use minidom::Element;
@@ -52,6 +53,8 @@ pub const DEFAULT_EXPIRY_HOURS: i64 = 24;
 pub struct StoryMediaType(String);
 
 impl StoryMediaType {
+    /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         let (top, sub) = value.split_once('/')?;
@@ -66,6 +69,8 @@ impl StoryMediaType {
         Some(Self(value.to_owned()))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -106,6 +111,7 @@ pub struct Story {
 
 impl Story {
     /// Create a new story.
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -119,62 +125,71 @@ impl Story {
     }
 
     /// Set the text body.
+    #[must_use]
     pub fn with_body(mut self, body: impl Into<String>) -> Self {
         self.body = Some(body.into());
         self
     }
 
     /// Set a media URL.
+    #[must_use]
     pub fn with_media(mut self, url: impl Into<String>) -> Self {
         self.media_url = Some(url.into());
         self
     }
 
     /// Set the media MIME type.
+    #[must_use]
     pub fn with_media_type(mut self, media_type: StoryMediaType) -> Self {
         self.media_type = Some(media_type);
         self
     }
 
     /// Set the author.
+    #[must_use]
     pub fn with_author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
         self
     }
 
     /// Set custom expiry duration from now.
+    #[must_use]
     pub fn with_expiry(mut self, duration: Duration) -> Self {
         self.expires = Some(Utc::now() + duration);
         self
     }
 
     /// Set a specific expiry time.
+    #[must_use]
     pub fn with_expires_at(mut self, at: DateTime<Utc>) -> Self {
         self.expires = Some(at);
         self
     }
 
     /// Returns `true` if the story has expired.
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires.is_some_and(|e| e < Utc::now())
     }
 
     /// Returns `true` if the story is still active.
+    #[must_use]
     pub fn is_active(&self) -> bool {
         !self.is_expired()
     }
 
     /// Remaining time until expiry, if not yet expired.
+    #[must_use]
     pub fn time_remaining(&self) -> Option<Duration> {
         self.expires
             .filter(|e| *e > Utc::now())
             .map(|e| e.signed_duration_since(Utc::now()))
     }
 }
-
 // ── Detection ────────────────────────────────────────────────────────
 
 /// Check if an element is a story element.
+#[must_use]
 pub fn is_story_element(elem: &Element) -> bool {
     elem.ns() == NS_ATOM && elem.name() == "entry" && enclosure_links(elem).next().is_some()
 }
@@ -182,6 +197,7 @@ pub fn is_story_element(elem: &Element) -> bool {
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Parse a story from an Atom `<entry/>` element.
+#[must_use]
 pub fn parse_story(item_id: &str, elem: &Element) -> Option<Story> {
     if elem.ns() != NS_ATOM || elem.name() != "entry" {
         return None;
@@ -225,10 +241,10 @@ pub fn parse_story(item_id: &str, elem: &Element) -> Option<Story> {
         expires,
     })
 }
-
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build a story Atom `<entry/>` element.
+#[must_use]
 pub fn build_story_element(story: &Story) -> Element {
     let mut elem = Element::builder("entry", NS_ATOM).build();
     let posted = story.posted.unwrap_or_else(Utc::now).to_rfc3339();
@@ -270,6 +286,7 @@ pub fn build_story_element(story: &Story) -> Element {
 }
 
 /// Stamp a story payload with the authenticated publisher as author.
+#[must_use]
 pub fn stamp_story_author(item_id: &str, elem: &Element, author: &str) -> Option<Element> {
     parse_story(item_id, elem)?;
 
@@ -289,6 +306,7 @@ pub fn stamp_story_author(item_id: &str, elem: &Element, author: &str) -> Option
 }
 
 /// Filter a list of stories to only active (non-expired) ones.
+#[must_use]
 pub fn filter_active(stories: &[Story]) -> Vec<&Story> {
     stories.iter().filter(|s| s.is_active()).collect()
 }

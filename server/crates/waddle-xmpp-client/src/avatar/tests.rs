@@ -1,11 +1,19 @@
-use super::*;
+use super::{
+    build_data_request_iq, build_disable_avatar_iq, build_metadata_request_iq,
+    build_publish_avatar_data_iq, build_publish_avatar_metadata_iq, build_vcard_request_iq,
+    compute_avatar_item_id, parse_data_response, parse_metadata_event, parse_metadata_response,
+    parse_vcard_photo_response, request_avatar_with_iq, request_avatar_with_iq_skipping,
+    vcard_photo_to_avatar, AvatarChanged, AvatarId, AvatarItemId, AvatarPublishInfo,
+    AvatarRequestFailure, BareJid, Element, VcardPhoto, AVATAR_REMOVE_ITEM_ID, NS_AVATAR_DATA,
+    NS_AVATAR_METADATA, NS_CLIENT, NS_PUBSUB, NS_VCARD_TEMP,
+};
 use crate::pubsub_event::{PubsubEvent, PubsubEventItem, PubsubEventPayload};
 
 const HELLO_ID: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
 const WORLD_ID: &str = "7c211433f02071597741e6ff5a8ea34789abbf43";
 
 fn item_id(value: &str) -> AvatarItemId {
-    AvatarItemId::new(value).expect("valid SHA-1 item id")
+    AvatarItemId::try_new(value).expect("valid SHA-1 item id")
 }
 
 fn make_metadata_iq(id: &str, mime: &str) -> Element {
@@ -185,8 +193,8 @@ fn parse_metadata_skips_malformed_and_url_info_for_in_band() {
 
 #[test]
 fn avatar_item_id_validates_sha1_hex_without_changing_wire_case() {
-    assert!(AvatarItemId::new("not-a-hash").is_none());
-    assert!(AvatarItemId::new("z".repeat(40)).is_none());
+    assert!(AvatarItemId::try_new("not-a-hash").is_none());
+    assert!(AvatarItemId::try_new("z".repeat(40)).is_none());
     let upper = HELLO_ID.to_ascii_uppercase();
     assert_eq!(item_id(&upper).as_str(), upper);
 }

@@ -15,9 +15,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dashmap::{RwLock, RwLockWriteGuard};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -284,7 +285,7 @@ pub struct OAuthFcmTokenSource {
     #[cfg(test)]
     token_url: Url,
     clock: Arc<dyn FcmClock>,
-    cache: Mutex<Option<CachedAccessToken>>,
+    cache: RwLock<Option<CachedAccessToken>>,
     /// Held across the token exchange: concurrent refreshes queue here
     /// and then find the cache already filled.
     refresh: tokio::sync::Mutex<()>,
@@ -297,7 +298,7 @@ struct TokenResponse {
 }
 
 impl OAuthFcmTokenSource {
-    pub fn new(
+    pub fn try_new(
         key: FcmServiceAccountKey,
         clock: Arc<dyn FcmClock>,
     ) -> Result<Self, FcmTokenSourceBuildError> {
@@ -318,7 +319,7 @@ impl OAuthFcmTokenSource {
             token_url: Url::parse(GOOGLE_OAUTH_TOKEN_URL)
                 .map_err(|_| FcmTokenSourceBuildError::TokenUrl)?,
             clock,
-            cache: Mutex::new(None),
+            cache: RwLock::new(None),
             refresh: tokio::sync::Mutex::new(()),
         })
     }
@@ -337,7 +338,7 @@ impl OAuthFcmTokenSource {
             client,
             token_url,
             clock,
-            cache: Mutex::new(None),
+            cache: RwLock::new(None),
             refresh: tokio::sync::Mutex::new(()),
         }
     }
@@ -354,12 +355,10 @@ impl OAuthFcmTokenSource {
         self.token_url.as_str()
     }
 
-    /// A cached entry is independent of any panicking writer, so a
-    /// poisoned lock is recovered rather than disabling the cache.
-    fn lock_cache(&self) -> MutexGuard<'_, Option<CachedAccessToken>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Serialize cache access without poisoning: mutations replace complete records,
+    /// with no user callbacks or custom panicking destructors under this guard.
+    fn lock_cache(&self) -> RwLockWriteGuard<'_, Option<CachedAccessToken>> {
+        self.cache.write()
     }
 
     fn fresh_cached(&self) -> Option<FcmAccessToken> {
@@ -528,7 +527,9 @@ pub(crate) mod test_keys {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     use jsonwebtoken::{DecodingKey, Validation};
 
@@ -596,7 +597,7 @@ mod tests {
         let (private_pem, _) = rsa_key_pair();
         let key = FcmServiceAccountKey::from_json(&service_account_json(&private_pem, ""))
             .expect("service-account key");
-        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock))
+        let source = OAuthFcmTokenSource::try_new(key, Arc::new(SystemFcmClock))
             .expect("production token source");
         crate::push::types::assert_production_connect_timeout(source.client).await;
     }
@@ -712,7 +713,7 @@ mod tests {
             "https://evil.example/token",
         ))
         .expect("key");
-        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock)).expect("source");
+        let source = OAuthFcmTokenSource::try_new(key, Arc::new(SystemFcmClock)).expect("source");
         assert_eq!(source.token_url.as_str(), GOOGLE_OAUTH_TOKEN_URL);
     }
 
@@ -762,10 +763,12 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let callers = (0..8).map(|_| {
-            let source = Arc::clone(&fixture.source);
-            tokio::spawn(async move { source.current().await })
-        });
+        let callers: Vec<_> = (0..8)
+            .map(|_| {
+                let source = Arc::clone(&fixture.source);
+                tokio::spawn(async move { source.current().await })
+            })
+            .collect();
         for caller in callers {
             assert_eq!(
                 caller.await.expect("join").expect("token").as_str(),
@@ -773,6 +776,68 @@ mod tests {
             );
         }
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn cache_unwind_preserves_reuse_and_single_flight_refresh() {
+        let mut fixture = fixture().await;
+        let first = fixture
+            .server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_body(token_body("ya29.first", 3600))
+            .expect(1)
+            .create_async()
+            .await;
+        let stale = fixture.source.current().await.expect("first");
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _cache = fixture.source.lock_cache();
+            panic!("fault while holding the populated cache guard");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            fixture.source.current().await.expect("cached after unwind"),
+            stale
+        );
+        first.assert_async().await;
+        first.remove_async().await;
+
+        let second = fixture
+            .server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_body(token_body("ya29.second", 3600))
+            .expect(1)
+            .create_async()
+            .await;
+        fixture.source.invalidate(&stale);
+        let callers: Vec<_> = (0..8)
+            .map(|_| {
+                let source = Arc::clone(&fixture.source);
+                tokio::spawn(async move { source.current().await })
+            })
+            .collect();
+        for caller in callers {
+            assert_eq!(
+                caller
+                    .await
+                    .expect("join")
+                    .expect("refreshed token")
+                    .as_str(),
+                "ya29.second"
+            );
+        }
+        fixture.source.invalidate(&stale);
+        assert_eq!(
+            fixture
+                .source
+                .current()
+                .await
+                .expect("newer token retained")
+                .as_str(),
+            "ya29.second"
+        );
+        second.assert_async().await;
     }
 
     #[tokio::test]

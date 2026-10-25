@@ -4,9 +4,9 @@ use tracing::warn;
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
-use super::super::{
-    cleanup::cleanup_invalidated_detached_session, state::WsConnState, WebSocketState,
-};
+use super::super::cleanup::cleanup_invalidated_detached_session;
+use super::super::state::WsConnState;
+use super::super::WebSocketState;
 
 #[cfg(feature = "clustering")]
 async fn unregister_remote_user_resource_if_owner(
@@ -129,7 +129,7 @@ async fn complete_pending_resume_claim(
             Some(h) => {
                 detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
                     detached.inbound_count,
-                    conn.sm_state.get_inbound_count(),
+                    conn.sm_state.inbound_count(),
                 );
                 conn.sm_state.restore_from_session(&detached);
                 // The resume `h` acknowledges the mod-2^32 window
@@ -164,7 +164,7 @@ async fn complete_pending_resume_claim(
                 }
                 resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
                 SmRegistrationFinalization::ReplaceWithResumed {
-                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
+                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.inbound_count()),
                     replay_after_h: h,
                 }
             }
@@ -223,7 +223,7 @@ async fn complete_pending_resume_claim(
             // releases the claim after canonical source confirmation.
             let handled = waddle_xmpp::stream_management::sequence::max_in_window(
                 detached.inbound_count,
-                conn.sm_state.get_inbound_count(),
+                conn.sm_state.inbound_count(),
             );
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner).await;
@@ -271,7 +271,7 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     conn: &mut WsConnState,
     jid: &FullJid,
 ) -> SmRegistrationFinalization {
-    let handled = conn.sm_state.get_inbound_count();
+    let handled = conn.sm_state.inbound_count();
     if let Some(claim) = conn.pending_resume_claim.take() {
         claim.release().await;
     }
@@ -388,15 +388,16 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state_with_sm_registry_and_pending_storage, register_test_connection,
     };
-    use waddle_xmpp::{
-        pending_delivery::{storage::InMemoryPendingDeliveryStorage, SmSessionId},
-        stream_management::{
-            persistence::{InMemorySmPersistence, SmPersistenceStorage},
-            DetachedSessionSnapshot, InMemorySmSessionRegistry, PromotionCaptureCustody,
-            SmSessionRegistry, StreamManagementState,
-        },
-        telemetry::attributes::SmEvictionPath,
+    use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
     };
+    use waddle_xmpp::stream_management::{
+        DetachedSessionSnapshot, InMemorySmSessionRegistry, PromotionCaptureCustody,
+        SmSessionRegistry, StreamManagementState,
+    };
+    use waddle_xmpp::telemetry::attributes::SmEvictionPath;
 
     #[tokio::test]
     async fn xep0198_expired_resume_reports_handled_count_without_requeuing_acknowledged_stanza() {

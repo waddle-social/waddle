@@ -104,7 +104,7 @@ pub enum ListedRoomName {
 
 impl ListedRoomName {
     pub fn classify(name: String) -> Self {
-        match CallId::new(name.clone()) {
+        match CallId::try_new(name.clone()) {
             Ok(call_id) => Self::Waddle(call_id),
             Err(_) => Self::Foreign(name),
         }
@@ -146,7 +146,7 @@ impl RoomOccupancy {
 /// consuming crates (e.g. `waddle-xmpp`'s XEP-0272 Muji suite) can
 /// inject a recording mock via [`crate::LiveKitSfu::with_admin`]; the
 /// production implementation is [`ReqwestLiveKitAdmin`] and is
-/// constructed automatically by [`crate::LiveKitSfu::new`].
+/// constructed automatically by [`crate::LiveKitSfu::try_new`].
 pub trait LiveKitAdmin: Send + Sync + 'static {
     /// List every active LiveKit room. This uses the cluster-wide
     /// `roomList` grant rather than a room-scoped `roomAdmin` grant.
@@ -208,7 +208,7 @@ impl ReqwestLiveKitAdmin {
     /// Build a new admin client. `base_url` is the LiveKit admin REST
     /// origin (`https://sfu.example.com/`); typically derived from the
     /// client-facing websocket URL via [`admin_base_url_from_ws`].
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         base_url: Url,
         api_key: ApiKey,
         api_secret: ApiSecret,
@@ -773,7 +773,7 @@ mod tests {
     }
 
     fn test_admin() -> ReqwestLiveKitAdmin {
-        ReqwestLiveKitAdmin::new(
+        ReqwestLiveKitAdmin::try_new(
             Url::parse("http://127.0.0.1/").expect("base URL"),
             ApiKey::new("test-key".to_owned()),
             ApiSecret::from_text("test-secret-test-secret-test-secret").expect("API secret"),
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn delete_room_token_carries_create_and_auditing_grants() {
         let admin = test_admin();
-        let room = CallId::new("room@muc.example.com".to_owned()).expect("call ID");
+        let room = CallId::try_new("room@muc.example.com".to_owned()).expect("call ID");
 
         let grant = decode_grant(&admin.mint_delete_room_token(&room).expect("token"));
 
@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn participant_operation_token_omits_create_grant() {
         let admin = test_admin();
-        let room = CallId::new("room@muc.example.com".to_owned()).expect("call ID");
+        let room = CallId::try_new("room@muc.example.com".to_owned()).expect("call ID");
 
         let grant = decode_grant(&admin.mint_admin_token(&room).expect("token"));
 
@@ -879,21 +879,21 @@ mod tests {
 
     #[test]
     fn admin_base_url_swaps_wss_to_https() {
-        let ws = WebsocketUrl::new("wss://sfu.waddle.social/".parse().unwrap()).unwrap();
+        let ws = WebsocketUrl::try_new("wss://sfu.waddle.social/".parse().unwrap()).unwrap();
         let admin = admin_base_url_from_ws(&ws).unwrap();
         assert_eq!(admin.as_str(), "https://sfu.waddle.social/");
     }
 
     #[test]
     fn admin_base_url_swaps_ws_to_http() {
-        let ws = WebsocketUrl::new("ws://livekit.local:7880/".parse().unwrap()).unwrap();
+        let ws = WebsocketUrl::try_new("ws://livekit.local:7880/".parse().unwrap()).unwrap();
         let admin = admin_base_url_from_ws(&ws).unwrap();
         assert_eq!(admin.as_str(), "http://livekit.local:7880/");
     }
 
     #[test]
     fn admin_base_url_drops_query_and_fragment() {
-        let ws = WebsocketUrl::new("wss://sfu.waddle.social/?x=1#y".parse().unwrap()).unwrap();
+        let ws = WebsocketUrl::try_new("wss://sfu.waddle.social/?x=1#y".parse().unwrap()).unwrap();
         let admin = admin_base_url_from_ws(&ws).unwrap();
         assert_eq!(admin.as_str(), "https://sfu.waddle.social/");
     }
@@ -924,7 +924,8 @@ mod tests {
         // Defensive: an operator who set
         // `LIVEKIT_WS_URL=wss://user:pass@sfu/` must not have
         // basic-auth credentials leak alongside the admin Bearer.
-        let ws = WebsocketUrl::new("wss://user:pass@sfu.waddle.social/".parse().unwrap()).unwrap();
+        let ws =
+            WebsocketUrl::try_new("wss://user:pass@sfu.waddle.social/".parse().unwrap()).unwrap();
         let admin = admin_base_url_from_ws(&ws).unwrap();
         assert_eq!(admin.as_str(), "https://sfu.waddle.social/");
         assert_eq!(admin.username(), "");
@@ -959,11 +960,11 @@ mod tests {
             vec![
                 (
                     "alice@waddle.social/desktop".to_string(),
-                    Some(ParticipantSid::new("PA_1").expect("participant sid")),
+                    Some(ParticipantSid::try_new("PA_1").expect("participant sid")),
                 ),
                 (
                     "bob@waddle.social/mobile".to_string(),
-                    Some(ParticipantSid::new("PA_2").expect("participant sid")),
+                    Some(ParticipantSid::try_new("PA_2").expect("participant sid")),
                 ),
             ]
         );
@@ -984,7 +985,7 @@ mod tests {
             vec![
                 ListedRoom {
                     name: ListedRoomName::classify("general@muc.waddle.social".to_owned()),
-                    sid: Some(RoomSid::new("RM_1").expect("room sid")),
+                    sid: Some(RoomSid::try_new("RM_1").expect("room sid")),
                     num_participants: Some(2),
                 },
                 ListedRoom {

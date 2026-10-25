@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Connection state in the XMPP stream lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// Initial state, waiting for stream header
     Initial,
@@ -23,6 +24,7 @@ pub enum ConnectionState {
 
 /// Transport type for the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Transport {
     /// WebSocket
     WebSocket,
@@ -115,12 +117,15 @@ pub enum Role {
 /// this alongside the role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moderation {
+    /// Only occupants granted voice may broadcast messages.
     Moderated,
+    /// Visitors may broadcast messages as well as participants and moderators.
     Unmoderated,
 }
 
 impl Moderation {
     /// Lift a [`crate::types::Moderation`] out of a room-config flag.
+    #[must_use]
     pub fn from_moderated_flag(moderated: bool) -> Self {
         if moderated {
             Self::Moderated
@@ -136,11 +141,15 @@ impl Moderation {
 /// [`Role::voice`] rather than testing roles ad hoc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Voice {
+    /// The occupant may send messages to all room occupants.
     Voiced,
+    /// The occupant may not broadcast messages to the room.
     Muted,
 }
 
 impl Voice {
+    /// Whether this occupant may broadcast messages to all room occupants.
+    #[must_use]
     pub fn is_voiced(self) -> bool {
         matches!(self, Self::Voiced)
     }
@@ -155,6 +164,7 @@ impl Role {
     /// visitors in unmoderated rooms — which Waddle does, so an
     /// unmoderated room's visitor keeps voice. `Role::None` is not an
     /// occupant at all and never has voice.
+    #[must_use]
     pub fn voice(self, moderation: Moderation) -> Voice {
         match self {
             Role::None => Voice::Muted,

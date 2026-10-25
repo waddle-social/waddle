@@ -65,7 +65,9 @@ const SEC1_UNCOMPRESSED_PREFIX: u8 = 0x04;
 /// re-encoding from raw bytes is a needless serialization round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushVapidAdvertisement {
+    /// Base64url-encoded uncompressed P-256 VAPID public key.
     pub public_key_base64url: String,
+    /// UUID identifying the advertised VAPID signing key.
     pub kid: Uuid,
 }
 
@@ -74,20 +76,30 @@ pub struct PushVapidAdvertisement {
 /// deployment. Other variants flag a malformed advertisement; callers
 /// should refuse to subscribe rather than degrade silently.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushVapidDiscoParseError {
     #[error("Push Service disco#info does not advertise a `{PUSH_VAPID_FORM_TYPE}` form")]
+    /// Push Service disco#info does not advertise a ``PUSH_VAPID_FORM_TYPE`` form.
     NotAdvertised,
     #[error("missing required field `{0}`")]
+    /// Missing required field ``0``.
     MissingField(&'static str),
     #[error("`public-key` is not valid base64url-no-pad")]
+    /// `public-key` is not valid base64url-no-pad.
     PublicKeyBase64urlDecode,
     #[error(
         "`public-key` is not a {SEC1_UNCOMPRESSED_P256_LEN}-byte uncompressed SEC1 P-256 point (got {got} bytes)"
     )]
-    PublicKeyWrongLength { got: usize },
+    /// The decoded VAPID public key does not have the required uncompressed P-256 length.
+    PublicKeyWrongLength {
+        #[doc = "Number of decoded public-key bytes that were received."]
+        got: usize,
+    },
     #[error("`public-key` is not a 0x04-prefixed uncompressed SEC1 point")]
+    /// `public-key` is not a 0x04-prefixed uncompressed SEC1 point.
     PublicKeyWrongPrefix,
     #[error("`kid` is not a valid UUID")]
+    /// `kid` is not a valid UUID.
     KidInvalidUuid,
 }
 
@@ -96,6 +108,10 @@ pub enum PushVapidDiscoParseError {
 /// VAPID form) just means Web Push isn't available — but malformed forms
 /// MUST surface as errors so the chat refuses to subscribe instead of
 /// guessing at a half-decoded key.
+///
+/// # Errors
+///
+/// Returns a typed discovery error if the VAPID form is absent or has missing fields, an invalid base64url key, the wrong key length/prefix, or an invalid UUID key identifier.
 pub fn parse_push_vapid_from_disco_info(
     disco: &DiscoInfoResult,
 ) -> Result<PushVapidAdvertisement, PushVapidDiscoParseError> {
@@ -141,6 +157,7 @@ pub fn parse_push_vapid_from_disco_info(
 /// Outcomes for [`parse_push_vapid_reply`]: the reply-level checks in
 /// front of [`parse_push_vapid_from_disco_info`].
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushVapidReplyError {
     /// The reply is not stamped by the queried service (RFC 6120
     /// §8.1.2.1 requires components to stamp `from`). A key from anyone
@@ -148,14 +165,20 @@ pub enum PushVapidReplyError {
     #[error("Push Service disco#info reply is not from the queried service")]
     WrongOrigin,
     #[error("Push Service disco#info reply carries no disco#info <query/>")]
+    /// Push Service disco#info reply carries no disco#info `<query/>`.
     MissingQuery,
     #[error(transparent)]
+    /// The expected service replied, but its VAPID advertisement failed validation.
     Advertisement(#[from] PushVapidDiscoParseError),
 }
 
 /// Parse the Push Service's VAPID advertisement out of its disco#info
-/// reply [`reply`], refusing any reply whose `from` is not exactly
-/// [`service`] (a bare component JID, never a resource).
+/// reply `reply`, refusing any reply whose `from` is not exactly
+/// `service` (a bare component JID, never a resource).
+///
+/// # Errors
+///
+/// Returns `WrongOrigin` for a reply from a different service, `MissingQuery` for a missing discovery payload, or the nested VAPID advertisement validation error.
 pub fn parse_push_vapid_reply(
     reply: &Element,
     service: &BareJid,

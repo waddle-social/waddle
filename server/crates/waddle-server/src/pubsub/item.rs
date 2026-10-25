@@ -1,3 +1,6 @@
+use crate::db::Row;
+use crate::db::Transaction;
+use crate::db::Value;
 use jid::BareJid;
 use tracing::warn;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
@@ -438,11 +441,11 @@ impl DatabasePubSubStorage {
                 ORDER BY seq ASC
                 "#
             );
-            let mut params: Vec<crate::db::Value> = Vec::with_capacity(2 + item_ids.len());
-            params.push(crate::db::Value::from(owner.to_string()));
-            params.push(crate::db::Value::from(node_name));
+            let mut params: Vec<Value> = Vec::with_capacity(2 + item_ids.len());
+            params.push(Value::from(owner.to_string()));
+            params.push(Value::from(node_name));
             for id in item_ids {
-                params.push(crate::db::Value::from(id.clone()));
+                params.push(Value::from(id.clone()));
             }
             return self.run_select_items(&sql, params).await;
         }
@@ -474,12 +477,12 @@ impl DatabasePubSubStorage {
             "#
         };
 
-        let mut params: Vec<crate::db::Value> = vec![
+        let mut params: Vec<Value> = vec![
             crate::db::Value::from(owner.to_string()),
             crate::db::Value::from(node_name),
         ];
         if let Some(n) = limit_value {
-            params.push(crate::db::Value::from(n));
+            params.push(Value::from(n));
         }
         self.run_select_items(sql, params).await
     }
@@ -628,7 +631,7 @@ impl DatabasePubSubStorage {
 
     pub(super) async fn enforce_max_items_tx(
         &self,
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         owner: &BareJid,
         node_name: &str,
         max_items: u32,
@@ -676,7 +679,7 @@ impl DatabasePubSubStorage {
     async fn run_select_items(
         &self,
         sql: &str,
-        params: Vec<crate::db::Value>,
+        params: Vec<Value>,
     ) -> Result<Vec<StoredItem>, XmppError> {
         let mut rows = self.query(sql, params).await?;
         let mut items = Vec::new();
@@ -690,7 +693,7 @@ impl DatabasePubSubStorage {
         Ok(items)
     }
 
-    fn decode_item(row: &crate::db::Row) -> Result<StoredItem, XmppError> {
+    fn decode_item(row: &Row) -> Result<StoredItem, XmppError> {
         let id: String = row
             .get(0)
             .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -725,7 +728,7 @@ impl DatabasePubSubStorage {
 /// for `owner`. Used by node-delete (`node.rs`) when the deleted node is
 /// the XEP-0402 bookmarks node.
 pub(super) async fn clear_bookmark_projection_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
 ) -> Result<(), XmppError> {
     clear_projection_for_source_tx(tx, owner, NotificationSettingsSource::Xep0402Bookmarks).await
@@ -737,7 +740,7 @@ pub(super) async fn clear_bookmark_projection_tx(
 /// otherwise deleting the node would orphan every `WaddleDmBookmarks`
 /// projection row (stale push suppression with no wire way to clear it).
 pub(super) async fn clear_dm_bookmark_projection_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
 ) -> Result<(), XmppError> {
     clear_projection_for_source_tx(tx, owner, NotificationSettingsSource::WaddleDmBookmarks).await
@@ -747,7 +750,7 @@ pub(super) async fn clear_dm_bookmark_projection_tx(
 /// `source_node` column. Used by the carrier-purge paths so purging one
 /// carrier (MUC vs DM) leaves the other carrier's rows untouched.
 async fn clear_projection_for_source_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
     source: NotificationSettingsSource,
 ) -> Result<(), XmppError> {
@@ -775,7 +778,7 @@ async fn clear_projection_for_source_tx(
 /// when both carriers point at the same conversation JID. Callers pass
 /// the source of the carrier whose item is being removed.
 async fn delete_bookmark_projection_for_item_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &BareJid,
     item_id: &str,
     source: NotificationSettingsSource,
@@ -800,7 +803,7 @@ async fn delete_bookmark_projection_for_item_tx(
 }
 
 async fn apply_projection_mutation_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     mutation: NotificationSettingsProjectionMutation,
 ) -> Result<(), XmppError> {
     match mutation {
@@ -872,14 +875,12 @@ async fn apply_projection_mutation_tx(
 }
 
 async fn next_notification_settings_source_version_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
 ) -> Result<i64, XmppError> {
     next_singleton_counter_tx(tx, "notification_settings_projection_source_version").await
 }
 
-async fn next_dnd_projection_source_version_tx(
-    tx: &mut crate::db::Transaction<'_>,
-) -> Result<i64, XmppError> {
+async fn next_dnd_projection_source_version_tx(tx: &mut Transaction<'_>) -> Result<i64, XmppError> {
     next_singleton_counter_tx(tx, "dnd_projection_source_version").await
 }
 
@@ -893,7 +894,7 @@ async fn next_dnd_projection_source_version_tx(
 /// `format!`); each call site is a literal table name pinned by
 /// the schema DDL.
 async fn next_singleton_counter_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     table: &'static str,
 ) -> Result<i64, XmppError> {
     tx.execute(

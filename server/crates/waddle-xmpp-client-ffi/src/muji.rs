@@ -21,7 +21,8 @@ use jid::FullJid;
 use waddle_xmpp_client::caps::build_client_caps_element;
 use waddle_xmpp_client::messaging::{
     build_in_call_presence_state_element, build_muji_element, build_muji_session_initiate,
-    build_muji_session_terminate, SessionId, NS_CLIENT,
+    build_muji_session_terminate, InCallPresenceMarkers, MujiElementOptions, MujiSessionVideo,
+    SessionId, NS_CLIENT,
 };
 
 use crate::boundary_convert::jid_domain;
@@ -75,11 +76,17 @@ pub(crate) fn muji_presence_stanza(
     let mut builder = Element::builder("presence", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to.as_str());
     if preparing || active {
-        builder = builder.append(build_muji_element(preparing, active, active && video));
+        builder = builder.append(build_muji_element(MujiElementOptions {
+            preparing,
+            audio: active,
+            video: active && video,
+        }));
         if flags.hand_raised || flags.muted {
             builder = builder.append(build_in_call_presence_state_element(
-                flags.hand_raised,
-                flags.muted,
+                InCallPresenceMarkers {
+                    hand_raised: flags.hand_raised,
+                    muted: flags.muted,
+                },
             ));
         }
     }
@@ -100,7 +107,16 @@ pub(crate) fn muji_session_initiate_iq(
 ) -> Element {
     iq_set(
         mixer,
-        build_muji_session_initiate(sid, initiator, room_jid, video),
+        build_muji_session_initiate(
+            sid,
+            initiator,
+            room_jid,
+            if video {
+                MujiSessionVideo::WithVideo
+            } else {
+                MujiSessionVideo::AudioOnly
+            },
+        ),
     )
 }
 

@@ -216,7 +216,7 @@ pub(super) async fn dispatch_apns_device(
         }
     };
     let policy = parsed.class.transport_policy();
-    let collapse_id = ApnsCollapseId::new(item);
+    let collapse_id = ApnsCollapseId::try_new(item);
     let send = |jwt: ApnsProviderJwt| {
         let token = &target.token;
         let encoded = &encoded;

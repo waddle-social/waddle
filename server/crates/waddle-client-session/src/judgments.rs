@@ -17,7 +17,7 @@ pub struct ScoreTarget {
 pub struct Probability(u64);
 
 impl Probability {
-    pub fn new(value: f64) -> Option<Self> {
+    pub fn try_new(value: f64) -> Option<Self> {
         (value.is_finite() && (0.0..=1.0).contains(&value)).then(|| {
             Self(if value == 0.0 {
                 0.0_f64.to_bits()
@@ -34,6 +34,7 @@ impl Probability {
 
 /// Canonical display order, matching the web client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum SafetyCategory {
     IsQuestion,
     HateSpeech,
@@ -124,17 +125,17 @@ mod tests {
     #[test]
     fn probabilities_reject_invalid_values_and_normalize_zero() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
-            assert!(Probability::new(value).is_none());
+            assert!(Probability::try_new(value).is_none());
         }
-        assert_eq!(Probability::new(-0.0), Probability::new(0.0));
-        assert_eq!(Probability::new(1.0).unwrap().value(), 1.0);
+        assert_eq!(Probability::try_new(-0.0), Probability::try_new(0.0));
+        assert_eq!(Probability::try_new(1.0).unwrap().value(), 1.0);
     }
 
     #[test]
     fn question_is_independent_and_safety_ties_use_canonical_order() {
         let score = |category, probability| SafetyScore {
             category,
-            probability: Probability::new(probability).unwrap(),
+            probability: Probability::try_new(probability).unwrap(),
             taxonomy_version: "v1".into(),
         };
         let scores = SafetyScores {

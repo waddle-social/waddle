@@ -36,7 +36,7 @@ fn spawn_room(config: RoomConfig) -> ActorRef<RoomActor> {
         "channel-1".to_string(),
         config,
     );
-    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
         .expect("valid occupant-id secret");
     RoomActor::spawn(RoomActor::new(room, secret))
 }
@@ -336,8 +336,8 @@ async fn live_roster_handoffs_preserve_each_unconsumed_admin_verdict() {
     };
 
     let room_jid: BareJid = "invite-handoffs@muc.example.com".parse().expect("room JID");
-    let secret =
-        OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("occupant-id secret");
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+        .expect("occupant-id secret");
     let registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
         secret,

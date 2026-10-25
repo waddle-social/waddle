@@ -2,10 +2,8 @@
 
 use waddle_ws_test_support as ws_common;
 
-use std::{
-    str::FromStr,
-    time::{Duration, Instant},
-};
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use sqlx::Row;
 use tokio::sync::Mutex;

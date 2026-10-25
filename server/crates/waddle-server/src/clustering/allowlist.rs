@@ -29,6 +29,7 @@
 //!   outage's duration — the deliberate fail-closed trade-off (never fail
 //!   open, never mass-revoke on a transient error).
 
+use crate::db::ConnectionGuard;
 use crate::db::{Database, DatabaseError};
 use async_trait::async_trait;
 use libp2p::PeerId;
@@ -128,7 +129,7 @@ impl AllowlistStore for PostgresAllowlistStore {
 
 impl PostgresAllowlistStore {
     async fn read_peers(
-        conn: crate::db::ConnectionGuard,
+        conn: ConnectionGuard,
         query: &str,
     ) -> Result<HashSet<PeerId>, AllowlistError> {
         let mut rows = conn.query(query, ()).await?;

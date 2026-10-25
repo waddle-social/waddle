@@ -284,7 +284,7 @@ async fn xep_0461_collapsed_reply_field_round_trips_bare_to_jid_through_storage(
         .await
         .expect("open sqlite in-memory");
     let original = ArchivedReply {
-        id: RichMessageId::new("reply-target-bare").expect("non-empty reply id"),
+        id: RichMessageId::try_new("reply-target-bare").expect("non-empty reply id"),
         to: Some("juliet@capulet.lit".parse::<jid::Jid>().expect("valid jid")),
     };
     let row = reply_archived_row("archive-bare-to", "bare to", Some(original.clone()));
@@ -318,7 +318,7 @@ async fn xep_0461_collapsed_reply_field_round_trips_full_to_jid_through_storage(
         .await
         .expect("open sqlite in-memory");
     let original = ArchivedReply {
-        id: RichMessageId::new("reply-target-full").expect("non-empty reply id"),
+        id: RichMessageId::try_new("reply-target-full").expect("non-empty reply id"),
         to: Some(
             "romeo@montague.lit/orchard"
                 .parse::<jid::Jid>()
@@ -361,7 +361,7 @@ async fn xep_0461_collapsed_reply_field_round_trips_no_to_jid_through_storage() 
         .await
         .expect("open sqlite in-memory");
     let original = ArchivedReply {
-        id: RichMessageId::new("reply-target-no-to").expect("non-empty reply id"),
+        id: RichMessageId::try_new("reply-target-no-to").expect("non-empty reply id"),
         to: None,
     };
     let row = reply_archived_row("archive-no-to", "no to", Some(original.clone()));

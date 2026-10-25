@@ -1,11 +1,19 @@
-use super::*;
+use super::{
+    user_entity, Arc, ConnectionEntry, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    RemoteResourceRegisterOutcome,
+};
+use crate::clustering::claims::NodeLeaseStore;
 use crate::clustering::route_bridge::tests::{
     origin_identity, receiver_identity, services_with_claims, test_peer_id,
 };
+use crate::config::ClusteringMessagingConfig;
 use std::collections::VecDeque;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimError, ClaimSnapshot, ResumeIdentityProof, StalePredicate,
 };
+use waddle_xmpp::ownership::{ClaimStore, Entity, NodeIdentity};
 
 #[derive(Clone)]
 struct RegistrationLeaseFixture {
@@ -18,7 +26,7 @@ struct RegistrationLeaseFixture {
 }
 
 impl RegistrationLeaseFixture {
-    async fn new() -> Option<Self> {
+    async fn try_new() -> Option<Self> {
         let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
         let database = crate::db::Database::from_config(
             "registration-demand-expiry",
@@ -134,7 +142,7 @@ async fn registration_expires_heartbeat_stale_owner_without_waiting_for_watchdog
     let _serial = crate::clustering::claims::clustering_control_plane_table_lock()
         .lock()
         .await;
-    let Some(fixture) = RegistrationLeaseFixture::new().await else {
+    let Some(fixture) = RegistrationLeaseFixture::try_new().await else {
         return;
     };
     fixture.lapse_heartbeat(&fixture.remote).await;
@@ -181,7 +189,7 @@ async fn registration_demand_expiry_preserves_a_fresh_foreign_owner() {
     let _serial = crate::clustering::claims::clustering_control_plane_table_lock()
         .lock()
         .await;
-    let Some(fixture) = RegistrationLeaseFixture::new().await else {
+    let Some(fixture) = RegistrationLeaseFixture::try_new().await else {
         return;
     };
     assert_eq!(
@@ -204,7 +212,7 @@ async fn registration_demand_expiry_requires_an_active_fresh_local_lease() {
         .lock()
         .await;
     for disable in [false, true] {
-        let Some(fixture) = RegistrationLeaseFixture::new().await else {
+        let Some(fixture) = RegistrationLeaseFixture::try_new().await else {
             return;
         };
         fixture.lapse_heartbeat(&fixture.remote).await;
@@ -236,7 +244,7 @@ async fn registration_demand_expiry_skips_a_changed_owner_or_claim_epoch() {
         .lock()
         .await;
     for change_owner in [false, true] {
-        let Some(mut fixture) = RegistrationLeaseFixture::new().await else {
+        let Some(mut fixture) = RegistrationLeaseFixture::try_new().await else {
             return;
         };
         fixture.lapse_heartbeat(&fixture.remote).await;
@@ -283,7 +291,7 @@ async fn registration_demand_expiry_rechecks_renewal_after_a_node_row_lock() {
     let _serial = crate::clustering::claims::clustering_control_plane_table_lock()
         .lock()
         .await;
-    let Some(fixture) = RegistrationLeaseFixture::new().await else {
+    let Some(fixture) = RegistrationLeaseFixture::try_new().await else {
         return;
     };
     fixture.lapse_heartbeat(&fixture.remote).await;

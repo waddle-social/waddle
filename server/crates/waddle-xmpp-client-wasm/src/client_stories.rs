@@ -16,7 +16,7 @@ use waddle_xmpp_client::pubsub::{
 use waddle_xmpp_core::xep0501::{
     build_story_element, parse_story, Story, DEFAULT_EXPIRY_HOURS, NS_ATOM, PUBSUB_NODE_STORIES,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 
@@ -105,6 +105,10 @@ impl WaddleClient {
     /// Publish a new story. `media_url` is required by XEP-0501; `body`
     /// is optional text content attached to that media. `expiry_hours`
     /// defaults to 24.
+    ///
+    /// # Panics
+    /// Panics if `expiry_hours` cannot be represented as a Chrono duration, or if the
+    /// story builder fails to retain the expiry set before publishing.
     pub fn stories_publish(&self, community_jid: String, input: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {

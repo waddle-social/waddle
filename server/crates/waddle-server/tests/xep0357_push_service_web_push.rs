@@ -272,7 +272,7 @@ async fn missing_backing_retries_are_bounded_without_provider_sends() {
     let db = Database::in_memory("missing-push-backing")
         .await
         .expect("db");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(db.clone())
+    waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(db.clone())
         .await
         .expect("registration store");
     let backing = Arc::new(
@@ -509,7 +509,7 @@ async fn last_gone_device_disables_the_xep0357_registration() {
     let node = store.ensure_node(&owner, "web").await.expect("node");
     register_web_device(&store, &owner, node.node(), "web-1", "gone-device").await;
     let registrations =
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+        waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
             .await
             .expect("registration store");
     store
@@ -580,7 +580,7 @@ async fn gone_device_with_live_sibling_keeps_registration_enabled() {
     register_web_device(&store, &owner, node.node(), "web-gone", "gone-device").await;
     register_web_device(&store, &owner, node.node(), "web-live", "live-device").await;
     let registrations =
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+        waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
             .await
             .expect("registration store");
     store
@@ -736,9 +736,11 @@ async fn earlier_provider_timeout_survives_later_known_failure() {
         let node = store.ensure_node(&owner, failure).await.expect("node");
         register_web_device(&store, &owner, node.node(), "web-sticky", "sticky-device").await;
         let registrations =
-            waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
-                .await
-                .expect("registrations");
+            waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+                store.database(),
+            )
+            .await
+            .expect("registrations");
         store
             .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
             .await

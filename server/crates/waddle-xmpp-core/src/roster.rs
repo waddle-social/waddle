@@ -8,7 +8,8 @@ use jid::BareJid;
 use minidom::Element;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::{fmt, str::FromStr};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::error::CoreError;
 
@@ -27,11 +28,13 @@ pub struct RosterVersion(String);
 
 impl RosterVersion {
     /// Generate a fresh opaque version identifier.
+    #[must_use]
     pub fn generate() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
     /// Borrow the wire form for serialisation at the I/O boundary.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -87,6 +90,7 @@ pub enum RosterVersionRequest {
 impl RosterVersionRequest {
     /// Parse an inbound `ver` attribute value, where `None` means the
     /// attribute was absent and `Some(s)` carries its (possibly empty) value.
+    #[must_use]
     pub fn from_attr(attr: Option<&str>) -> Self {
         match attr {
             None => Self::Absent,
@@ -103,11 +107,13 @@ impl RosterVersionRequest {
 
     /// Whether the request signals roster-versioning support at all.
     /// `Absent` is the only case where it does not.
+    #[must_use]
     pub fn signals_support(&self) -> bool {
         !matches!(self, Self::Absent)
     }
 
     /// Return the cached version, if present.
+    #[must_use]
     pub fn cached(&self) -> Option<&RosterVersion> {
         match self {
             Self::Cached(v) => Some(v),
@@ -135,6 +141,7 @@ pub struct RosterItem {
 
 impl RosterItem {
     /// Create a new roster item with minimal information.
+    #[must_use]
     pub fn new(jid: BareJid) -> Self {
         Self {
             jid,
@@ -147,6 +154,7 @@ impl RosterItem {
     }
 
     /// Create a roster item with a name.
+    #[must_use]
     pub fn with_name(jid: BareJid, name: impl Into<String>) -> Self {
         Self {
             jid,
@@ -159,24 +167,31 @@ impl RosterItem {
     }
 
     /// Set the subscription state.
+    #[must_use]
     pub fn set_subscription(mut self, subscription: Subscription) -> Self {
         self.subscription = subscription;
         self
     }
 
     /// Set the ask state.
+    #[must_use]
     pub fn set_ask(mut self, ask: Option<AskType>) -> Self {
         self.ask = ask;
         self
     }
 
     /// Add a group.
+    #[must_use]
     pub fn add_group(mut self, group: impl Into<String>) -> Self {
         self.groups.push(group.into());
         self
     }
 
     /// Parse a roster item from an XML element.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::BadRequest` for a missing/invalid JID, invalid subscription/ask token, or duplicate groups; returns `CoreError::NotAcceptable` for a blank group name.
     pub fn from_element(elem: &Element) -> Result<Self, CoreError> {
         let jid_str = elem.attr("jid").ok_or_else(|| {
             CoreError::bad_request(Some("Roster item missing 'jid' attribute".to_string()))
@@ -228,6 +243,7 @@ impl RosterItem {
     }
 
     /// Convert this roster item to an XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         let mut builder = Element::builder("item", ROSTER_NS)
             .attr(
@@ -287,6 +303,7 @@ pub enum Subscription {
 
 impl Subscription {
     /// Get the XML attribute value for this subscription state.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Subscription::None => "none",
@@ -298,6 +315,7 @@ impl Subscription {
     }
 
     /// Check if this is a removal request.
+    #[must_use]
     pub fn is_remove(&self) -> bool {
         matches!(self, Subscription::Remove)
     }
@@ -338,6 +356,7 @@ pub enum AskType {
 
 impl AskType {
     /// Get the XML attribute value for this ask type.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             AskType::Subscribe => "subscribe",
@@ -372,6 +391,7 @@ impl FromStr for AskType {
 ///   <query xmlns='jabber:iq:roster'/>
 /// </iq>
 /// ```
+#[must_use]
 pub fn build_roster_get_iq(id: &str) -> Element {
     let query = Element::builder("query", ROSTER_NS).build();
     Element::builder("iq", "jabber:client")
@@ -390,6 +410,7 @@ pub fn build_roster_get_iq(id: &str) -> Element {
 ///   </query>
 /// </iq>
 /// ```
+#[must_use]
 pub fn build_roster_set_iq(id: &str, item: &RosterItem) -> Element {
     let query = Element::builder("query", ROSTER_NS)
         .append(item.to_element())

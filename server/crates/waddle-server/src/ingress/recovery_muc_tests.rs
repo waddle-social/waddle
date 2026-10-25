@@ -1,11 +1,22 @@
 //! Real room planning followed by maintenance, without client retransmission.
-use super::*;
-use crate::ingress::{execute::ExternalOutcome, receipt_key, IngressEffectCapture};
-use crate::ingress_uow::DeliveryProgressRepository;
-use waddle_xmpp::{
-    muc::{room_actor::Join, room_registry_actor::CreateRoom},
-    protocol::OutboundEvent,
+#[cfg(feature = "clustering")]
+use super::InMemorySmSessionRegistry;
+use super::{
+    append_count, build_interpret_deps, commit_submission, execute_effects,
+    immediate_recovery_budget, pass, persistent_sm, retarget, run_maintenance_pass_with_cursor,
+    state_for, store_detached, Arc, CanonicalMessageRepository, Duration, Effect,
+    EffectMessageIdentity, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect,
+    ImmediateSink, IngressEffectIntent, IngressFixture, IngressSubmission, MaintenanceBudget,
+    MaintenanceCursor, MaintenanceOutcome, NormalizedTarget, PlanSink, RecoveryEnvironment,
+    SmSessionRegistry, StateEnvironment, WebSocketState,
 };
+use super::{Deps, MessageKey};
+use crate::ingress::execute::ExternalOutcome;
+use crate::ingress::{receipt_key, IngressEffectCapture};
+use crate::ingress_uow::DeliveryProgressRepository;
+use waddle_xmpp::muc::room_actor::Join;
+use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::protocol::OutboundEvent;
 
 use crate::ingress::muc_occupant_progress_tests::stall as stalled_copy;
 
@@ -579,21 +590,18 @@ paired!(
 /// is classified: the only obligation left is the observer, now owned by the
 /// durable scheduler rather than synchronous recovery.
 async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
-    use crate::ingress::{
-        effects::{room::ExternalRoomEffect, PlanSuppressionPolicy},
-        PlannedEffect,
-    };
-    use waddle_extensions::{
-        observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
-        ExtensionManager, PluginId,
-    };
+    use crate::ingress::effects::room::ExternalRoomEffect;
+    use crate::ingress::effects::PlanSuppressionPolicy;
+    use crate::ingress::PlannedEffect;
+    use waddle_extensions::observer_test_support::{ObserverTestBehavior, ObserverTestPlugin};
+    use waddle_extensions::{ExtensionManager, PluginId};
 
     let sm = persistent_sm(&f).await;
     let occupant: jid::FullJid = "alice@example.com/phone".parse().expect("occupant");
     // A detached session is what makes the frozen copy REBUILDABLE and
     // deliverable inside the same attempt.
     store_detached(&sm, &occupant).await;
-    let plugin_id = PluginId::new("muc-recovery-observer").expect("plugin id");
+    let plugin_id = PluginId::try_new("muc-recovery-observer").expect("plugin id");
     let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
     let mut state = state_for(&f, sm.clone()).await;
     Arc::get_mut(&mut state)
@@ -631,8 +639,8 @@ async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
             room: room.clone(),
             plugin: plugin_id.clone(),
             correction_target: None,
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
         });

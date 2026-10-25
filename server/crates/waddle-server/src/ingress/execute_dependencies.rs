@@ -1,13 +1,12 @@
 //! Typed dependency matching and execution-time completion proofs.
-use crate::server::routes::{
-    interpret::effects::{
-        early::RoomMembershipMutation, EffectOutcome, ExternalEffect, PlanEffectDependency,
-    },
-    websocket::{
-        handlers::message::muc_invite::{InviteLedgerMutation, InviteLedgerOutcome},
-        muc_invites::RecordOutcome,
-    },
+use crate::server::routes::interpret::effects::early::RoomMembershipMutation;
+use crate::server::routes::interpret::effects::{
+    EffectOutcome, ExternalEffect, PlanEffectDependency,
 };
+use crate::server::routes::websocket::handlers::message::muc_invite::{
+    InviteLedgerMutation, InviteLedgerOutcome,
+};
+use crate::server::routes::websocket::muc_invites::RecordOutcome;
 
 pub(super) fn produces(effect: &ExternalEffect, dependency: &PlanEffectDependency) -> bool {
     match (effect, dependency) {

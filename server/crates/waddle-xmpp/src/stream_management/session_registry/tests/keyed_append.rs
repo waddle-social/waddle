@@ -1,5 +1,10 @@
-use super::*;
+use super::{
+    make_test_jid, realistic_test_session, DetachedSession, DetachedUnackedStanza, Duration,
+    FullJid, GatedGetSessionPersistence, GatedSnapshotPersistence, InMemorySmSessionRegistry,
+    Instant, SmClaimCompletion, SmSessionRegistry, Stanza, Utc,
+};
 use crate::pending_delivery::SmSessionId;
+use crate::stream_management::persistence::SmPersistenceStorage;
 use crate::stream_management::persistence::{
     InMemorySmPersistence, KeyedSnapshotOutcome, PersistedIngressAppend,
 };

@@ -1,4 +1,9 @@
-use super::*;
+//! Validation and assembly of loaded extension manifests and routes.
+
+use super::{
+    bail, CommandNode, ExtensionCapability, ExtensionManifest, ExtensionModuleConfig, HashSet,
+    PayloadNamespace, Result, FRAMEWORK_NAMESPACE,
+};
 
 pub(super) fn validate_manifest_against_module(
     module: &ExtensionModuleConfig,
@@ -12,9 +17,10 @@ pub(super) fn validate_manifest_against_module(
         );
     }
 
-    let expected_namespace = PayloadNamespace::new(module.namespace.clone()).map_err(|error| {
-        anyhow::anyhow!("extension {} namespace is invalid: {error}", module.name)
-    })?;
+    let expected_namespace =
+        PayloadNamespace::try_new(module.namespace.clone()).map_err(|error| {
+            anyhow::anyhow!("extension {} namespace is invalid: {error}", module.name)
+        })?;
     for rule in &manifest.payloads {
         if rule.root.namespace != expected_namespace {
             bail!(

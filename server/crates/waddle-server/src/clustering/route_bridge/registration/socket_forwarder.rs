@@ -1,4 +1,14 @@
-use super::super::*;
+use super::super::{
+    ask_error_proves_remote_resource_ref_stale, mpsc, Arc, ForceDetachOutcome, ForceDetachRequest,
+    NodeId, OrderedRelayDeliveryBridge, OutboundStanza, RelayAskError,
+    RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame,
+    RelayForceDetachRemoteUserResource, RelayForceDetachRemoteUserResourceReply, RelayHandle,
+    RelayRemoteResourceFrameReply, RelayRemoteResourceFrameStatus,
+    RelayRemoteResourceWriteAcceptedReply, RelayRemoteResourceWriteAcceptedStatus,
+    RelayTraceContext, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
+    RemoteResourceSocketGeneration, RemoteResourceWriteAcceptedOutboundFrame, RemoteStanza,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
 
 impl OrderedRelayDeliveryBridge {
     pub(super) fn spawn_remote_resource_forwarder(
@@ -229,7 +239,7 @@ pub(in super::super) fn remote_resource_outbound_frame(
     let ingress_append = outbound
         .ingress_append
         .clone()
-        .map(crate::ingress::identity::IngressAppendObligationRef::from_relayed);
+        .map(IngressAppendObligationRef::from_relayed);
     // Keyed authority already carries the authoritative receipt time. Keep the
     // timestamp-only live wire separate so keyed frames retain their baseline.
     let received_at = if ingress_append.is_none() {
@@ -250,9 +260,14 @@ pub(in super::super) fn remote_resource_outbound_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clustering::relay::RelayRemoteResourceForceDetachStatus;
+    use crate::clustering::route_bridge::RemoteOwnerRegistration;
+    use crate::config::ClusteringMessagingConfig;
+    use std::sync::atomic::AtomicBool;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
+    use waddle_xmpp::ownership::NodeIdentity;
     use waddle_xmpp::registry::ForceDetachOrigin;
     use waddle_xmpp_core::OccupancySessionGeneration;
 

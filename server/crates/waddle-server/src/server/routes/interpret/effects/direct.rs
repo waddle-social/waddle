@@ -1,12 +1,13 @@
 //! Typed direct-message writes deferred by ingress planning.
 use jid::BareJid;
-use waddle_xmpp::{
-    inbox::InboxEntry,
-    ingress::{InboxProjectionMutation, LinkPreviewMediaRefMutation, NotificationActivityMutation},
-    mam::{ArchiveExpectation, ArchivedMessage, ArchivedTombstone},
-    tombstone::TombstoneTarget,
+use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::ingress::{
+    InboxProjectionMutation, LinkPreviewMediaRefMutation, NotificationActivityMutation,
 };
-use waddle_xmpp_core::{mam::ThreadId, xep0359::StanzaId};
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, ArchivedTombstone};
+use waddle_xmpp::tombstone::TombstoneTarget;
+use waddle_xmpp_core::mam::ThreadId;
+use waddle_xmpp_core::xep0359::StanzaId;
 
 #[derive(Debug, Clone)]
 pub enum DurableDirectEffect {
@@ -148,11 +149,10 @@ pub use waddle_xmpp::ingress::{PlannedActiveDmCall, PlannedDmCallState};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::routes::interpret::{
-        effects::{EffectSink, PlanSink},
-        Deps,
-    };
-    use waddle_xmpp::{inbox::ConversationKind, registry::ConnectionRegistry};
+    use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+    use crate::server::routes::interpret::Deps;
+    use waddle_xmpp::inbox::ConversationKind;
+    use waddle_xmpp::registry::ConnectionRegistry;
 
     #[tokio::test]
     async fn inbox_push_dependency_uses_the_conversation_archive_authority() {

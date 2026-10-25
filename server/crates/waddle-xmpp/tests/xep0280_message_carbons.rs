@@ -90,7 +90,7 @@ async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
     registry.register_with_carbons(laptop.clone(), laptop_tx, true);
 
     let delivery_set = vec![web.clone(), phone.clone()];
-    let carbon_targets = registry.get_other_carbon_resources_for_user(&bare, &delivery_set);
+    let carbon_targets = registry.other_carbon_resources_for_user(&bare, &delivery_set);
 
     assert!(
         !carbon_targets.contains(&web),
@@ -109,7 +109,8 @@ async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
 
 #[test]
 fn xep0280_remote_carbon_intent_freezes_all_excluded_resources() {
-    use waddle_xmpp::{ingress::IngressEffectIntent, protocol::CarbonKind};
+    use waddle_xmpp::ingress::IngressEffectIntent;
+    use waddle_xmpp::protocol::CarbonKind;
     let intent = IngressEffectIntent::RelayCarbons {
         owner: "alice@example.com".parse().expect("owner"),
         exclude: vec![

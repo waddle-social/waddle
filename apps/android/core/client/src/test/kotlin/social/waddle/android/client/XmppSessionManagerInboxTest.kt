@@ -12,6 +12,8 @@ import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleInboxMessageContent
+import social.waddle.client.ffi.WaddleInboxReadFilter
 
 /**
  * XEP-0430 inbox sync through the session manager: session-ready
@@ -52,7 +54,10 @@ class XmppSessionManagerInboxTest {
         val harness = Harness(this)
         harness.loginReady(this)
 
-        assertEquals(listOf(false to true), harness.client.inbox.fetchInboxCalls.toList())
+        assertEquals(
+            listOf(WaddleInboxReadFilter.ALL to WaddleInboxMessageContent.OMIT),
+            harness.client.inbox.fetchInboxCalls.toList(),
+        )
 
         harness.manager.logout()
     }

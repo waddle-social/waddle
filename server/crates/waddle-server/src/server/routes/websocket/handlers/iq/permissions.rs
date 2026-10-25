@@ -1,7 +1,15 @@
-use super::*;
+use super::{
+    build_config_form, build_iq_error_xml_typed, build_iq_result_xml,
+    server_policy_for_managed_channel, Affiliation, Arc, BareJid, CheckPermission, Database,
+    Element, FullJid, GetDatabase, GetSnapshot, ManagedChannelServerPolicy, Object, ObjectType,
+    Permission, PermissionError, Relation, RosterStorageError, Session, SpaceAffiliation,
+    StanzaErrorCondition, StanzaErrorType, Subject, SubjectType, Tuple, WebSocketState, WriteTuple,
+    XmppError, DEPLOYMENT_MEMBERSHIP_PERMISSIONS, DEPLOYMENT_SERVER_ID,
+};
 use crate::permissions::DeleteTuple;
 use crate::server::routes::websocket::cleanup::get_room_actor_result;
 use crate::server::routes::websocket::ResolvedPrincipal;
+use std::collections::BTreeMap;
 
 pub(super) fn build_xmpp_error_response(
     request_iq: &xmpp_parsers::iq::Iq,
@@ -56,7 +64,7 @@ fn stanza_error_from_parts(
             type_: error_type.to_xmpp(),
             by: None,
             defined_condition: condition.to_xmpp(),
-            texts: std::collections::BTreeMap::new(),
+            texts: BTreeMap::new(),
             other: None,
         },
     };
@@ -411,7 +419,7 @@ pub(super) async fn muc_owner_authorized(
         .await
         .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
     if matches!(
-        snapshot.room.get_affiliation(&sender_jid.to_bare()),
+        snapshot.room.affiliation(&sender_jid.to_bare()),
         Affiliation::Owner
     ) {
         return Ok(true);

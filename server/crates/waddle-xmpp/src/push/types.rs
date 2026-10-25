@@ -57,7 +57,7 @@ pub enum PushTopicParseError {
 }
 
 impl PushTopic {
-    pub fn new(value: impl Into<Box<str>>) -> Result<Self, PushTopicParseError> {
+    pub fn try_new(value: impl Into<Box<str>>) -> Result<Self, PushTopicParseError> {
         let s: Box<str> = value.into();
         // RFC 8030 §5.4: `Topic = 1*32(topic-char)` — minimum length 1.
         if s.is_empty() {
@@ -85,7 +85,7 @@ impl PushTopic {
 impl TryFrom<&str> for PushTopic {
     type Error = PushTopicParseError;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::new(value.to_owned())
+        Self::try_new(value.to_owned())
     }
 }
 
@@ -126,7 +126,7 @@ impl VapidSub {
     /// RFC 2142 / XMPP convention.
     pub fn default_for_domain(domain: &str) -> Result<Self, VapidSubParseError> {
         let mailto = format!("postmaster@{domain}");
-        Ok(Self::Mailto(MailtoAddress::new(mailto)?))
+        Ok(Self::Mailto(MailtoAddress::try_new(mailto)?))
     }
 
     /// Render as the `sub` claim string for JWT inclusion. For the
@@ -188,7 +188,7 @@ impl MailtoAddress {
     /// [`VapidSub::as_claim`]. Control characters, NUL, CR, LF, and a
     /// missing `@` separator are still rejected; the local-part and
     /// host MUST both be non-empty.
-    pub fn new(value: impl Into<Box<str>>) -> Result<Self, VapidSubParseError> {
+    pub fn try_new(value: impl Into<Box<str>>) -> Result<Self, VapidSubParseError> {
         let s: Box<str> = value.into();
         if s.is_empty() {
             return Err(VapidSubParseError::Empty);
@@ -224,7 +224,7 @@ impl std::str::FromStr for VapidSub {
             if rest.starts_with("//") {
                 return Err(VapidSubParseError::BadMailto);
             }
-            return Ok(Self::Mailto(MailtoAddress::new(rest.to_owned())?));
+            return Ok(Self::Mailto(MailtoAddress::try_new(rest.to_owned())?));
         }
         if let Some(scheme_idx) = s.find(':') {
             let scheme = &s[..scheme_idx];
@@ -289,7 +289,7 @@ pub enum VapidJwtError {
 }
 
 impl VapidJwt {
-    pub fn new(token: &str) -> Result<Self, VapidJwtError> {
+    pub fn try_new(token: &str) -> Result<Self, VapidJwtError> {
         Ok(Self(reqwest::header::HeaderValue::from_str(token)?))
     }
 
@@ -772,14 +772,14 @@ mod tests {
 
     #[test]
     fn push_topic_accepts_valid() {
-        let t = PushTopic::new("d-abcDEF_0123").expect("valid");
+        let t = PushTopic::try_new("d-abcDEF_0123").expect("valid");
         assert_eq!(t.as_str(), "d-abcDEF_0123");
     }
 
     #[test]
     fn push_topic_rejects_colon_per_rfc_8030_5_4() {
         // RFC 8030 §5.4 topic-char does NOT include `:` — must be rejected.
-        let err = PushTopic::new("d:abc").unwrap_err();
+        let err = PushTopic::try_new("d:abc").unwrap_err();
         assert!(matches!(err, PushTopicParseError::InvalidAlphabet(1)));
     }
 
@@ -787,7 +787,7 @@ mod tests {
     fn push_topic_rejects_too_long() {
         let s: String = "a".repeat(33);
         assert_eq!(
-            PushTopic::new(s).unwrap_err(),
+            PushTopic::try_new(s).unwrap_err(),
             PushTopicParseError::TooLong(33)
         );
     }
@@ -796,21 +796,21 @@ mod tests {
     fn push_topic_accepts_exactly_32_chars() {
         // RFC 8030 §5.4: `Topic = 1*32(topic-char)`. 32 is the inclusive max.
         let s: String = "a".repeat(32);
-        let t = PushTopic::new(s.clone()).expect("32 chars is valid");
+        let t = PushTopic::try_new(s.clone()).expect("32 chars is valid");
         assert_eq!(t.as_str(), s);
     }
 
     #[test]
     fn push_topic_rejects_empty_per_rfc_8030_5_4() {
         // RFC 8030 §5.4: `Topic = 1*32(topic-char)` — minimum length 1.
-        let err = PushTopic::new("").unwrap_err();
+        let err = PushTopic::try_new("").unwrap_err();
         assert_eq!(err, PushTopicParseError::Empty);
     }
 
     #[test]
     fn push_topic_rejects_invalid_alphabet() {
         // '$' is not base64url
-        let err = PushTopic::new("hello$world").unwrap_err();
+        let err = PushTopic::try_new("hello$world").unwrap_err();
         assert!(matches!(err, PushTopicParseError::InvalidAlphabet(5)));
     }
 

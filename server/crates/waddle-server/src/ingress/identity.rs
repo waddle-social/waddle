@@ -1,16 +1,17 @@
 //! Typed admission and canonical identities for the authority transaction.
+#[cfg(feature = "clustering")]
+use crate::db::Database;
+use crate::ingress_substrate::EffectReceiptKind;
+use crate::server::routes::interpret::SmIngressAppendContext;
 use jid::BareJid;
 use serde::{Deserialize, Serialize};
-use waddle_xmpp::{
-    auth::AuthenticatedPrincipalRef,
-    ingress::{MessageKey, SmIngressId, WireHandledCount},
-    pending_delivery::SmSessionId,
-};
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
+use waddle_xmpp::ingress::{MessageKey, SmIngressId, WireHandledCount};
 #[cfg(feature = "clustering")]
-use waddle_xmpp::{
-    muc::durable::RoomClaimFenceContext,
-    ownership::{ClaimEpoch, NodeIdentity},
-};
+use waddle_xmpp::muc::durable::RoomClaimFenceContext;
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp_core::xep0359::OriginId;
 
 use super::append_authority::AppendAuthority;
@@ -69,10 +70,7 @@ pub struct IngressAppendObligationRef {
 }
 
 impl IngressAppendObligationRef {
-    pub fn from_context(
-        context: &crate::server::routes::interpret::SmIngressAppendContext,
-        sender_bare: BareJid,
-    ) -> Self {
+    pub fn from_context(context: &SmIngressAppendContext, sender_bare: BareJid) -> Self {
         Self {
             message_key: context.message_key,
             sender_bare,
@@ -86,7 +84,7 @@ impl IngressAppendObligationRef {
     /// Bind a recorded obligation to the message that discharges it. `None` unless the
     /// stanza is a message with a sender and the recorded route allocates keyed appends.
     pub fn for_message(
-        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        context: Option<&SmIngressAppendContext>,
         stanza: &waddle_xmpp::Stanza,
     ) -> Option<Self> {
         let context = context?;
@@ -100,7 +98,7 @@ impl IngressAppendObligationRef {
     /// Their original context remains available for guarded local fallback.
     #[cfg(feature = "clustering")]
     pub(crate) fn for_remote_message(
-        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        context: Option<&SmIngressAppendContext>,
         stanza: &waddle_xmpp::Stanza,
     ) -> Option<Self> {
         Self::for_message(
@@ -111,8 +109,8 @@ impl IngressAppendObligationRef {
 
     /// A context whose authority this node has already established: minted by
     /// its own ingress commit or verified against the canonical row.
-    pub fn into_verified_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {
-        crate::server::routes::interpret::SmIngressAppendContext {
+    pub fn into_verified_context(self) -> SmIngressAppendContext {
+        SmIngressAppendContext {
             message_key: self.message_key,
             receipt: self.receipt,
             received_at: self.received_at,
@@ -125,11 +123,8 @@ impl IngressAppendObligationRef {
     /// A relayed claim whose canonical read is deferred to the first consumer
     /// that trusts it (#1790). Call only after the synchronous checks passed.
     #[cfg(feature = "clustering")]
-    pub(crate) fn into_deferred_context(
-        self,
-        db: crate::db::Database,
-    ) -> crate::server::routes::interpret::SmIngressAppendContext {
-        crate::server::routes::interpret::SmIngressAppendContext {
+    pub(crate) fn into_deferred_context(self, db: Database) -> SmIngressAppendContext {
+        SmIngressAppendContext {
             message_key: self.message_key,
             receipt: self.receipt.clone(),
             received_at: self.received_at,
@@ -174,9 +169,7 @@ impl IngressAppendObligationRef {
             message_key: obligation.key.message_key,
             sender_bare: obligation.sender_bare,
             receipt: super::EffectReceiptKey {
-                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
-                    obligation.key.kind.to_storage(),
-                ),
+                kind: EffectReceiptKind::from_storage(obligation.key.kind.to_storage()),
                 semantic_identity_hash: obligation.key.semantic_identity_hash,
             },
             received_at: obligation.received_at,
@@ -215,12 +208,14 @@ pub(crate) mod stanza_lang_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use xmpp_parsers::message::Lang;
 
-    pub fn serialize<S: Serializer>(
-        language: &Option<Lang>,
+    /// Serialize serde's zero-or-one borrowed language without requiring an option wrapper.
+    pub fn serialize<'a, S: Serializer>(
+        language: impl IntoIterator<Item = &'a Lang>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         language
-            .as_ref()
+            .into_iter()
+            .next()
             .map(|language| language.0.as_str())
             .serialize(serializer)
     }

@@ -1,8 +1,11 @@
-use super::*;
+use super::{
+    validate_groupchat_rich_targets, Arc, BareJid, Deps, Jid, MamStorage, Message, RoomActor,
+};
 use kameo::actor::Spawn;
 use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
 use waddle_xmpp::muc::{MucRoom, RoomConfig};
 use waddle_xmpp::registry::ConnectionRegistry;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 #[tokio::test]
 async fn correction_authority_is_the_validated_archive_row_with_nickname_continuity() {
@@ -22,7 +25,7 @@ async fn correction_authority_is_the_validated_archive_row_with_nickname_continu
     }
     let actor = RoomActor::spawn(RoomActor::new(
         MucRoom::new(room.clone(), "w".into(), "c".into(), RoomConfig::default()),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![1; 32]).expect("secret"),
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![1; 32]).expect("secret"),
     ));
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::registry_only(&registry);

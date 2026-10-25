@@ -1,7 +1,8 @@
 //! Message Carbons (XEP-0280) helpers shared by server and client crates.
 
 use chrono::Utc;
-use minidom::{rxml::xml_ncname, Element};
+use minidom::rxml::xml_ncname;
+use minidom::Element;
 use tracing::debug;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::Message;
@@ -45,6 +46,7 @@ fn no_copy_suppresses_carbons(msg: &Message) -> bool {
 }
 
 /// Check if an IQ is a carbons enable request.
+#[must_use]
 pub fn is_carbons_enable(iq: &Iq) -> bool {
     match iq {
         Iq::Set { payload, .. } => payload.name() == "enable" && payload.ns() == CARBONS_NS,
@@ -53,6 +55,7 @@ pub fn is_carbons_enable(iq: &Iq) -> bool {
 }
 
 /// Check if an IQ is a carbons disable request.
+#[must_use]
 pub fn is_carbons_disable(iq: &Iq) -> bool {
     match iq {
         Iq::Set { payload, .. } => payload.name() == "disable" && payload.ns() == CARBONS_NS,
@@ -61,6 +64,7 @@ pub fn is_carbons_disable(iq: &Iq) -> bool {
 }
 
 /// Build a success response for carbons enable/disable.
+#[must_use]
 pub fn build_carbons_result(original_iq: &Iq) -> Iq {
     Iq::Result {
         from: original_iq.to().cloned(),
@@ -71,6 +75,7 @@ pub fn build_carbons_result(original_iq: &Iq) -> Iq {
 }
 
 /// Check whether a message is eligible for XEP-0280 carbon copying.
+#[must_use]
 pub fn should_copy_message(msg: &Message) -> bool {
     use xmpp_parsers::message::MessageType;
 
@@ -110,6 +115,10 @@ pub fn should_copy_message(msg: &Message) -> bool {
 }
 
 /// Build a "sent" carbon message wrapper.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if `from_jid` or `to_jid` is not a valid JID.
 pub fn build_sent_carbon(
     original_msg: &Message,
     from_jid: &str,
@@ -134,6 +143,10 @@ pub fn build_sent_carbon(
 }
 
 /// Build a "received" carbon message wrapper.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if `from_jid` or `to_jid` is not a valid JID.
 pub fn build_received_carbon(
     original_msg: &Message,
     from_jid: &str,

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, DurableDirectEffect, DurableEffect, Effect,
+    IngressDecisionClass, IngressEffectIntent, IngressFixture, PlannedEffect, StanzaId,
+};
 use waddle_xmpp::ingress::RetractionTombstoneMutation;
 use waddle_xmpp_core::mam::{
     ArchivedModeration, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, RichMessageId,
@@ -48,10 +51,10 @@ async fn committed_moderation_survives_planned_retraction(fixture: IngressFixtur
             retraction_id: None,
             stamp: chrono::Utc::now(),
             moderation: Some(ArchivedModeration {
-                target_id: RichMessageId::new("moderated-target").expect("target"),
+                target_id: RichMessageId::try_new("moderated-target").expect("target"),
                 moderated_by: "moderator@example.com".parse().expect("moderator"),
                 stamp: None,
-                reason: Some(RichText::new("moderation reason").expect("reason")),
+                reason: Some(RichText::try_new("moderation reason").expect("reason")),
             }),
             sender_scope: Some(fixture.principal.bare_jid().clone()),
         })),

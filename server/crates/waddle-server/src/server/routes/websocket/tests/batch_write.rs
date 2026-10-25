@@ -5,13 +5,11 @@
 //! countable stanza with an `<r/>`, and drains already-arrived inbound
 //! frames after each `<r/>` so `<a/>` acks shrink the queue mid-flood.
 
-use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
-use super::super::{
-    batch_write::{
-        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
-    },
-    state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
+use super::super::batch_write::{
+    write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
 };
+use super::super::state::{WebSocketState, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
+use super::super::transport_xml::{element_to_xml, websocket_stream_close_xml};
 use super::create_test_websocket_state;
 use futures::{stream, Sink, Stream, StreamExt as _};
 use std::convert::Infallible;
@@ -190,7 +188,7 @@ async fn authority_revocation_stops_batch_before_next_record_or_write() {
     assert_eq!(sink.sent.len(), 1);
     assert_eq!(conn.sm_state.outbound_count, 2);
     assert_eq!(conn.sm_state.queue_len(), 2);
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].stanza_xml, countable_message(1));
     assert_eq!(replay[1].stanza_xml, countable_message(2));
@@ -231,7 +229,7 @@ async fn pre_current_revocation_records_the_entire_countable_batch_for_replay() 
         sink.sent.is_empty(),
         "revocation must fence every wire write"
     );
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 3);
     assert_eq!(replay[0].stanza_xml, first);
     assert_eq!(replay[1].stanza_xml, second);
@@ -293,7 +291,7 @@ async fn revoked_next_readiness_keeps_mam_result_tail_and_fin_for_resume() {
         conn.sm_state.last_acked, 1,
         "the inbound h settled the first result"
     );
-    let replay = conn.sm_state.get_stanzas_to_resend(1);
+    let replay = conn.sm_state.stanzas_to_resend(1);
     assert_eq!(replay.len(), 2, "the tail must be retained exactly once");
     assert_eq!(replay[0].stanza_xml, second);
     assert_eq!(replay[1].stanza_xml, fin);
@@ -728,7 +726,7 @@ async fn mam_results_are_recorded_like_any_stanza_for_counter_convergence() {
     // so the server can always retransmit what the client's h lacks.
     assert_eq!(conn.sm_state.outbound_count, 5);
     assert_eq!(conn.sm_state.queue_len(), 5);
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 5);
     assert_eq!(replay[0].stanza_xml, live);
 }
@@ -766,7 +764,7 @@ async fn transport_close_mid_batch_still_records_unwritten_frames_for_replay() {
     // in the replay window so a resume delivers the tail.
     assert_eq!(conn.sm_state.outbound_count, 12);
     assert_eq!(conn.sm_state.queue_len(), 12);
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 12);
     assert_eq!(replay[11].stanza_xml, countable_message(12));
     // Only 5 stanzas + 1 <r/> actually hit the wire.
@@ -1159,7 +1157,7 @@ async fn backpressured_send_window_write_stops_promptly_on_authority_revocation(
         "the blocked ninth stanza must join the replay window on revocation"
     );
     assert_eq!(conn.sm_state.queue_len(), 9);
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 9);
     for (index, stanza) in replay.iter().enumerate() {
         assert_eq!(
@@ -1204,7 +1202,7 @@ async fn forced_detach_interrupts_parked_send_window_recovery_and_retains_tail()
     };
     assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
     assert_eq!(conn.sm_state.last_acked, 0);
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 9);
     for (stanza, frame) in replay.iter().zip(&frames) {
         assert_eq!(&stanza.stanza_xml, frame);
@@ -1249,7 +1247,7 @@ async fn forced_detach_stops_ready_pong_drain_before_late_ack_is_applied() {
         conn.sm_state.last_acked, 0,
         "a post-detach ack cannot retire replay"
     );
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].stanza_xml, frames[0]);
     assert_eq!(replay[1].stanza_xml, frames[1]);
@@ -1972,11 +1970,10 @@ async fn send_window_near_full_deferred_backlog_stays_paced_across_batches() {
 
 #[tokio::test]
 async fn live_peer_timestamp_reaches_actual_batch_sm_record_even_when_write_fails() {
-    use super::super::{
-        outbound::{handle_outbound_stanza, OutboundAuthority},
-        timers::TransportTimers,
-    };
-    use waddle_xmpp::{registry::OutboundStanza, Stanza};
+    use super::super::outbound::{handle_outbound_stanza, OutboundAuthority};
+    use super::super::timers::TransportTimers;
+    use waddle_xmpp::registry::OutboundStanza;
+    use waddle_xmpp::Stanza;
     let received_at =
         chrono::DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("receipt time");
     for fail_write in [false, true] {
@@ -2034,7 +2031,7 @@ async fn live_peer_timestamp_reaches_actual_batch_sm_record_even_when_write_fail
         )
         .await;
         assert_eq!(sent, !fail_write);
-        let replay = conn.sm_state.get_stanzas_to_resend(0);
+        let replay = conn.sm_state.stanzas_to_resend(0);
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].original_receipt_at, received_at);
         assert!(replay[0].ingress_receipts.is_empty());
@@ -2066,7 +2063,7 @@ async fn timestamped_batch_failed_write_retains_same_receipt_time_for_unsent_tai
     )
     .await;
     assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
-    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    let replay = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 3);
     assert!(replay
         .iter()

@@ -7,7 +7,10 @@
 //! already marked offered remain excluded even without an SM sequence: the
 //! crash window between offer reservation and SM custody requires stronger
 //! recovery evidence and is intentionally not resolved by this scanner.
-use super::*;
+use super::{
+    warn, Arc, BareJid, ConnectionRegistry, FlushContext, FlushOutcome, FullJid,
+    MamArchiveResolver, PendingRowId, SmSessionId,
+};
 use std::collections::BTreeMap;
 use tokio::task::JoinHandle;
 
@@ -166,7 +169,7 @@ impl PendingRecovery {
         let registry = &state.deps.protocol.connection_registry;
         let mut targets: BTreeMap<BareJid, RecoveryTarget> = BTreeMap::new();
         for resource in registry.list_connections() {
-            let Some(entry) = registry.get_entry(&resource) else {
+            let Some(entry) = registry.entry(&resource) else {
                 continue;
             };
             if !entry.is_locally_hosted()
@@ -242,6 +245,9 @@ impl PendingRecovery {
 
 #[cfg(test)]
 mod tests {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow};
+
     use super::*;
     use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
     use waddle_xmpp::registry::OutboundStanza;
@@ -286,7 +292,7 @@ mod tests {
                 .expect("durable row after initial empty presence");
             // Rediscovery must not rely on resetting the first-presence CAS.
             assert!(registry
-                .get_entry(&resource)
+                .entry(&resource)
                 .expect("entry")
                 .claim_offline_flush());
             receivers.push(receiver);

@@ -1,11 +1,7 @@
 //! Message-scoped fault injection; concurrent fixtures cannot consume a hook.
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, LazyLock, Mutex,
-    },
-};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use tokio::sync::Notify;
 use waddle_xmpp::ingress::MessageKey;

@@ -1,4 +1,19 @@
-use super::*;
+use super::{
+    bad_request_iq_error, build_disco_info_response, build_disco_info_response_with_extensions,
+    build_iq_error_xml_typed, build_pep_identity, build_room_metadata_form, build_server_role_form,
+    build_spaces_metadata_form_for_requester_with_owners, chrono, command_name_by_boundary,
+    community_service_features, debug, extension_command_metadata_form,
+    extension_features_for_disco, extension_route_disco_node, extension_route_metadata_form,
+    get_managed_channel_for_room, get_room_actor, info, internal_server_error_iq_error, iq_to_xml,
+    is_muc_room_jid, item_not_found_iq_error, muc_room_features, muc_service_features,
+    parse_disco_info_query, pep_features, push_service_features, room_space_link,
+    server_affiliation_for_requester, space_affiliation_for_requester, space_details_from_node,
+    spaces_service_bare_jid, spaces_service_features, upload_service_features, warn, Affiliation,
+    BareJid, CheckPermission, CommandBoundary, ConnectionPhase, DbQueryOne, Element, Feature,
+    FullJid, GetSnapshot, Identity, IqHandlerContext, Object, ObjectType, Permission,
+    RoomSpaceLink, Session, Subject, WebSocketState, DATA_FORMS_NS, EXTENSION_COMMAND_FORM_TYPE,
+    EXTENSION_ROUTE_FORM_TYPE, NODE_COMMANDS, NS_CHANNEL_SEARCH,
+};
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 mod account;
@@ -78,7 +93,7 @@ pub(super) async fn handle_disco_info_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
 ) -> Vec<String> {
     if ctx.payload_ns != "http://jabber.org/protocol/disco#info" {
         return Vec::new();
@@ -152,9 +167,7 @@ pub(super) async fn handle_disco_info_iq(
     if let Some(response) = spaces::handle_spaces_disco_info(
         &request,
         state,
-        authenticated_session
-            .as_ref()
-            .map(ResolvedPrincipal::from_authenticated_session),
+        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
     )
     .await
     {
@@ -187,9 +200,7 @@ pub(super) async fn handle_disco_info_iq(
         server_info::handle_server_disco_info(
             &request,
             state,
-            authenticated_session
-                .as_ref()
-                .map(ResolvedPrincipal::from_authenticated_session),
+            authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
         )
         .await,
     )

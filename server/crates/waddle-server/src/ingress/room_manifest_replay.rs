@@ -1,33 +1,30 @@
 //! A sealed room child may reach only its frozen endpoint and occupancy.
+#[cfg(feature = "clustering")]
+use crate::ingress_uow::CanonicalMessageRepository;
+use crate::ingress_uow::IngressFencing;
+use crate::server::routes::interpret::Deps;
+use crate::server::routes::interpret::FullJidDeliveryOutcome;
 use std::time::Duration;
 
 use jid::FullJid;
 use kameo::actor::ActorRef;
-use waddle_xmpp::{
-    ingress::IngressEffectIntent,
-    muc::{
-        durable::RoomClaimFenceContext,
-        room_actor::{
-            GetRoomSnapshot, OccupancyReplayGuardOutcome, RoomActor, RoomChainSnapshot,
-            RoomChildRetirementReason, RunOccupancyReplayGuardedAsync,
-            RunRoomChildRetirementGuardedAsync,
-        },
-        room_registry_actor::{
-            GetRoom, GetSingleNodeRoomRetirementAuthority, RoomRegistryActor,
-            RunAbsentRoomGuardedAsync,
-        },
-    },
-    registry::BroadcastOutcome,
-    Stanza,
+use waddle_xmpp::ingress::IngressEffectIntent;
+use waddle_xmpp::muc::durable::RoomClaimFenceContext;
+use waddle_xmpp::muc::room_actor::{
+    GetRoomSnapshot, OccupancyReplayGuardOutcome, RoomActor, RoomChainSnapshot,
+    RoomChildRetirementReason, RunOccupancyReplayGuardedAsync, RunRoomChildRetirementGuardedAsync,
 };
+use waddle_xmpp::muc::room_registry_actor::{
+    GetRoom, GetSingleNodeRoomRetirementAuthority, RoomRegistryActor, RunAbsentRoomGuardedAsync,
+};
+use waddle_xmpp::registry::BroadcastOutcome;
+use waddle_xmpp::Stanza;
 
-use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
-        CarbonReceiptRepository, DeliveryPolicyDiscardReason, IngressUnitOfWork, IngressUowError,
-    },
-    server::routes::interpret::SmIngressAppendContext,
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::{
+    CarbonReceiptRepository, DeliveryPolicyDiscardReason, IngressUnitOfWork, IngressUowError,
 };
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 use super::{EffectReceiptKey, FrozenRoomManifest};
 
@@ -105,20 +102,16 @@ async fn under_current_claim<R>(
         return Err(IngressUowError::ClaimFenceMissing);
     }
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode if fence.is_none() => Ok(action.await),
-        crate::ingress_uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
+        IngressFencing::SingleNode if fence.is_none() => Ok(action.await),
+        IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
         #[cfg(feature = "clustering")]
         crate::ingress_uow::IngressFencing::Clustered(_) => {
             let fence = fence.ok_or(IngressUowError::ClaimFenceMissing)?;
             let mut transaction = uow
                 .begin_with_timeouts(Duration::from_millis(100), PROBE_TIMEOUT)
                 .await?;
-            crate::ingress_uow::CanonicalMessageRepository::protect_room_acceptance(
-                &mut transaction,
-                room,
-                fence,
-            )
-            .await?;
+            CanonicalMessageRepository::protect_room_acceptance(&mut transaction, room, fence)
+                .await?;
             let outcome = action.await;
             transaction.commit().await?;
             Ok(outcome)
@@ -134,8 +127,8 @@ async fn enqueue_under_current_node(
     action: impl FnOnce() -> BroadcastOutcome,
 ) -> Result<BroadcastOutcome, IngressUowError> {
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode if fence.is_none() => Ok(action()),
-        crate::ingress_uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
+        IngressFencing::SingleNode if fence.is_none() => Ok(action()),
+        IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
         #[cfg(feature = "clustering")]
         crate::ingress_uow::IngressFencing::Clustered(identity) => {
             let expected = &fence.ok_or(IngressUowError::ClaimFenceMissing)?.owner;
@@ -365,7 +358,7 @@ pub(super) async fn settle_superseded(
                                     .await
                                     .ok_or(IngressUowError::AuthorityStopped)?,
                             ),
-                            crate::ingress_uow::IngressFencing::SingleNode => None,
+                            IngressFencing::SingleNode => None,
                         };
                         crate::ingress_uow::run_with_retry(5, || {
                             super::execute_uow::record_policy_progress(
@@ -444,7 +437,7 @@ pub(super) async fn release_transient_reflection(
     decision: &super::IngressDecision,
     index: usize,
     stanza: &Stanza,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
 ) -> Result<Option<Stanza>, IngressUowError> {
     use crate::ingress_uow::{
         CanonicalMessageRepository, EffectReceiptRepository, PolicyDiscardReason,
@@ -558,11 +551,11 @@ pub(super) async fn release_transient_reflection(
 pub(super) async fn queue_detached(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
-    deps: &crate::server::routes::interpret::Deps<'_>,
+    deps: &Deps<'_>,
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-) -> Result<crate::server::routes::interpret::FullJidDeliveryOutcome, IngressUowError> {
+) -> Result<FullJidDeliveryOutcome, IngressUowError> {
     use crate::server::routes::interpret::FullJidDeliveryOutcome;
     if context.dispatch_stream.is_some() {
         return Ok(FullJidDeliveryOutcome::Unavailable);
@@ -635,34 +628,34 @@ pub(super) async fn queue_detached(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, EntityGeneration, MessageKey},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
-    };
+    use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration, MessageKey};
+    use waddle_xmpp::muc::durable::AdminMutationId;
+    use waddle_xmpp::muc::room_actor::OccupancyWatermark;
     use xmpp_parsers::message::{Message, MessageType};
 
     #[tokio::test]
     async fn xep0045_newer_same_incarnation_settles_old_child_without_delivering_to_rejoined_resource(
     ) {
-        use crate::ingress::{
-            commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-            xep0045_room_manifest_tests::room_submission, RoomManifestSnapshot,
-        };
+        use crate::ingress::commit::commit_submission;
+        use crate::ingress::execute::execute_effects;
+        use crate::ingress::test_support::IngressFixture;
+        use crate::ingress::xep0045_room_manifest_tests::room_submission;
+        use crate::ingress::RoomManifestSnapshot;
         use crate::ingress_uow::{
             CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
             SendAttemptRepository, SendObligation,
         };
-        use crate::server::routes::interpret::{
-            effects::{
-                delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-                Effect, ExternalEffect, ImmediateSink, PlannedEffect, RoomExecutionPath,
-            },
-            Deps,
+        use crate::server::routes::interpret::effects::delivery::{
+            ExternalDeliveryEffect, PeerDeliveryKind,
         };
-        use waddle_xmpp::muc::{
-            room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-            room_registry_actor::CreateRoom,
+        use crate::server::routes::interpret::effects::{
+            Effect, ExternalEffect, ImmediateSink, PlannedEffect, RoomExecutionPath,
         };
+        use crate::server::routes::interpret::Deps;
+        use waddle_xmpp::muc::room_actor::{
+            Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
+        };
+        use waddle_xmpp::muc::room_registry_actor::CreateRoom;
         let fixture = IngressFixture::sqlite().await;
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let mut submission = room_submission(&fixture);

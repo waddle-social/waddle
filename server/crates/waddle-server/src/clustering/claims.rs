@@ -58,6 +58,8 @@
 //! pool. `ensure_schema` is one-time startup DDL, not hot-path liveness
 //! traffic, and runs on the main pool — mirroring `lease.rs`.
 
+use crate::db::Value;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -1251,14 +1253,14 @@ impl ClaimStore for PostgresClaimStore {
         let sql = format!(
             "DELETE FROM clustering_claims WHERE node_id = ? AND node_epoch = ? AND entity IN ({placeholders})"
         );
-        let mut params: Vec<crate::db::Value> = vec![
+        let mut params: Vec<Value> = vec![
             crate::db::Value::from(me.node_id.clone()),
             crate::db::Value::from(me.node_epoch.clone()),
         ];
         params.extend(
             entities
                 .iter()
-                .map(|entity| crate::db::Value::from(entity_key(entity))),
+                .map(|entity| Value::from(entity_key(entity))),
         );
         conn.execute(&sql, params).await.map_err(db_err)?;
         Ok(())
@@ -2184,7 +2186,7 @@ impl NodeLeaseStore for PostgresClaimStore {
             )
             .await
             .map_err(db_err)?;
-        let mut owned_keys = std::collections::HashSet::new();
+        let mut owned_keys = HashSet::new();
         while let Some(row) = rows.next().await.map_err(db_err)? {
             owned_keys.insert(row.get::<String>(0).map_err(db_err)?);
         }

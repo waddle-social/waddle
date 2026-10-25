@@ -1,10 +1,8 @@
 use std::time::{Duration, Instant};
 
 use super::{IngressUnitOfWork, IngressUowError};
-use crate::{
-    config::LineageConfig,
-    db::{Database, DatabaseConfig, DatabaseDriver},
-};
+use crate::config::LineageConfig;
+use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
 #[tokio::test(start_paused = true)]
 async fn ingress_transaction_acquisition_expiry_maps_to_timeout_without_database() {

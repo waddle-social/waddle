@@ -57,6 +57,7 @@ fn command_iq(to: &str, node: &str, iq_id: &str, fields: Vec<Field>) -> Element 
 /// `urn:waddle:group-dm:create:0` — IQ-set to the bare SERVER domain.
 /// `member_jids` must include the creator; the server dedups and
 /// requires at least two distinct JIDs.
+#[must_use]
 pub fn build_group_dm_create_iq(
     server_domain: &str,
     args: &GroupDmCreateArgs,
@@ -72,6 +73,7 @@ pub fn build_group_dm_create_iq(
 /// `urn:waddle:group-dm:rename:0` — IQ-set to the ROOM jid. `None`
 /// clears the custom name (the server treats an empty `name` value as
 /// a clear).
+#[must_use]
 pub fn build_group_dm_rename_iq(room: &BareJid, name: Option<&str>, iq_id: &str) -> Element {
     let fields = vec![
         jid_single("room_jid", room),
@@ -82,6 +84,7 @@ pub fn build_group_dm_rename_iq(room: &BareJid, name: Option<&str>, iq_id: &str)
 
 /// `urn:waddle:group-dm:leave:0` — IQ-set to the bare SERVER domain;
 /// the server retracts the leaver's bookmark.
+#[must_use]
 pub fn build_group_dm_leave_iq(server_domain: &str, room: &BareJid, iq_id: &str) -> Element {
     let fields = vec![jid_single("room_jid", room)];
     command_iq(server_domain, NODE_GROUP_DM_LEAVE, iq_id, fields)
@@ -93,6 +96,7 @@ pub fn build_group_dm_leave_iq(server_domain: &str, room: &BareJid, iq_id: &str)
 /// is omitted for [`GroupDmHistoryAccess::FromJoin`] — the server
 /// applies exactly that default when the extension is absent, and it
 /// downgrades any `full` request the inviter is not entitled to make.
+#[must_use]
 pub fn build_group_dm_invite_message(
     room: &BareJid,
     invitee: &BareJid,

@@ -1,25 +1,35 @@
 //! Append one resource before atomically committing its progress and receipt.
+use crate::ingress::FrozenRoomManifest;
+#[cfg(feature = "clustering")]
+use crate::ingress_uow::ClaimRepository;
+#[cfg(test)]
+use crate::ingress_uow::DbRetryClass;
+use crate::ingress_uow::DispatchReadiness;
+use crate::server::routes::interpret::effects::ExternalEffect;
+use crate::server::routes::interpret::DeliveryExecutionContext;
 use jid::FullJid;
+use std::collections::HashSet;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
-use crate::{
-    ingress_uow::{
-        run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryPolicyDiscardReason,
-        DeliveryProgressRepository, IngressUnitOfWork, IngressUowError,
-    },
-    server::routes::interpret::{
-        close_call_setup_from_outcome, deliver_direct_to_full_locally,
-        deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
-        effects::{
-            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-            EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
-        },
-        queue_processed_for_detached, Deps, DetachedQueueOutcome, FullJidDeliveryOutcome,
-        SmIngressAppendContext,
-    },
+use crate::ingress_uow::{
+    run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryPolicyDiscardReason,
+    DeliveryProgressRepository, IngressUnitOfWork, IngressUowError,
+};
+use crate::server::routes::interpret::effects::delivery::{
+    ExternalDeliveryEffect, PeerDeliveryKind,
+};
+use crate::server::routes::interpret::effects::{
+    EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
+};
+use crate::server::routes::interpret::{
+    close_call_setup_from_outcome, deliver_direct_to_full_locally,
+    deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
+    queue_processed_for_detached, Deps, DetachedQueueOutcome, FullJidDeliveryOutcome,
+    SmIngressAppendContext,
 };
 
-use super::super::{decision::IngressDecision, recorded::RouteProgress};
+use super::super::decision::IngressDecision;
+use super::super::recorded::RouteProgress;
 use crate::ingress::append_authority::AppendAuthority;
 
 #[cfg(test)]
@@ -57,8 +67,7 @@ pub(super) async fn execute(
         } => (vec![jid.clone()], call_setup),
         _ => return EffectOutcome::Unavailable,
     };
-    let external =
-        crate::server::routes::interpret::effects::ExternalEffect::Delivery(effect.clone());
+    let external = ExternalEffect::Delivery(effect.clone());
     let Some(progress) = decision.route_progress.iter().find(|progress| {
         progress.matches(&external) && decision.external_receipts[index].contains(&progress.receipt)
     }) else {
@@ -119,8 +128,8 @@ pub(super) async fn execute(
         )
         .await
         {
-            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
-            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            Ok(DispatchReadiness::Ready) => {}
+            Ok(DispatchReadiness::Completed) => {
                 // Another executor may have completed this same copy since
                 // this decision was frozen. Its durable proof supersedes the
                 // stale snapshot; never enqueue an older copy behind successors.
@@ -332,7 +341,7 @@ async fn append_resource(
     deps: &Deps<'_>,
     effect: &ExternalDeliveryEffect,
     resource: &FullJid,
-    sealed: Option<&crate::ingress::FrozenRoomManifest>,
+    sealed: Option<&FrozenRoomManifest>,
 ) -> ResourceDelivery {
     if let Some(context) = deps.ingress_append_context.as_ref() {
         let status = match (&deps.ingress_delivery_uow, deps.web_socket_state) {
@@ -451,13 +460,9 @@ async fn append_resource(
             FullJidDeliveryOutcome::Delivered
         }
         ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
-            let outcomes = queue_processed_for_detached(
-                deps,
-                vec![resource.clone()],
-                &std::collections::HashSet::new(),
-                stanza,
-            )
-            .await;
+            let outcomes =
+                queue_processed_for_detached(deps, vec![resource.clone()], &HashSet::new(), stanza)
+                    .await;
             if outcomes
                 .iter()
                 .any(|(_, outcome)| *outcome == DetachedQueueOutcome::AppendFailed)
@@ -467,7 +472,7 @@ async fn append_resource(
             if outcomes.contains(&(resource.clone(), DetachedQueueOutcome::Queued)) {
                 FullJidDeliveryOutcome::QueuedDetached
             } else if deps.delivery_execution_context
-                == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
+                == DeliveryExecutionContext::MaintenanceRecovery
             {
                 deliver_direct_to_full_locally(deps, resource, stanza).await
             } else {
@@ -571,13 +576,7 @@ async fn record_progress(
             tx.fencing(),
             crate::ingress_uow::IngressFencing::Clustered(_)
         ) {
-            crate::ingress_uow::ClaimRepository::assert_room_claim(
-                &mut tx,
-                room,
-                &fence.owner,
-                fence.epoch,
-            )
-            .await?;
+            ClaimRepository::assert_room_claim(&mut tx, room, &fence.owner, fence.epoch).await?;
         }
     }
     #[cfg(not(feature = "clustering"))]
@@ -614,7 +613,7 @@ async fn record_progress(
         .unwrap_or(false)
     {
         return Err(IngressUowError::Database {
-            retry_class: crate::ingress_uow::DbRetryClass::SqliteContention,
+            retry_class: DbRetryClass::SqliteContention,
         });
     }
     #[cfg(test)]

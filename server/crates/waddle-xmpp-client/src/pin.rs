@@ -9,8 +9,8 @@ use minidom::Element;
 use uuid::Uuid;
 
 use crate::messaging::namespaces::{NS_CLIENT, NS_WADDLE_PIN_V0};
-
 /// Build `<iq type='get' to='room@conf'><query xmlns='urn:waddle:pin:0'/></iq>`.
+#[must_use]
 pub fn build_pin_list_iq(room_jid: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -37,6 +37,7 @@ pub struct PinEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Message excerpt and media metadata suitable for rendering a pinned-message preview.
 pub struct PinPreview {
     /// Bare JID of the message author at pin time.
     pub author_jid: String,
@@ -53,6 +54,7 @@ pub struct PinPreview {
 /// attributes or with malformed timestamps are skipped (logged
 /// upstream); the rest are returned in document order, which the
 /// server emits in pin-time-desc.
+#[must_use]
 pub fn parse_pin_list_response(iq: &Element) -> Vec<PinEntry> {
     let Some(query) = iq.get_child("query", NS_WADDLE_PIN_V0) else {
         return Vec::new();
@@ -123,13 +125,17 @@ pub struct PinEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a pin notification adds or removes a pinned message.
 pub enum PinEventAction {
+    /// The target message was pinned.
     Pinned,
+    /// The target message was unpinned.
     Unpinned,
 }
 
 /// Parse a `<pin-event/>` element into a typed [`PinEvent`]. Returns
 /// `None` for malformed events.
+#[must_use]
 pub fn parse_pin_event_payload(elem: &Element) -> Option<PinEvent> {
     if elem.name() != "pin-event" || elem.ns() != NS_WADDLE_PIN_V0 {
         return None;
@@ -157,6 +163,7 @@ pub fn parse_pin_event_payload(elem: &Element) -> Option<PinEvent> {
 /// Extract the first `<pin-event/>` payload from a `<message>` (the
 /// system messages the server broadcasts on pin/unpin). Returns
 /// `None` when the message carries no pin-event.
+#[must_use]
 pub fn extract_pin_event_from_message(message: &Element) -> Option<PinEvent> {
     message
         .children()

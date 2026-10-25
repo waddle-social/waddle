@@ -1,4 +1,22 @@
-use super::*;
+use super::{
+    ask_error_allows_target_refresh, ask_error_is_unseen, ask_error_maybe_committed,
+    channel_diversion_for_ask_error, current_claim, definite_no_effect_outcome,
+    deliver_local_after_target_refresh_outcome, no_client_reply_outcome,
+    no_client_reply_outcome_with_commit_state,
+    no_client_reply_outcome_with_commit_state_and_join_repair, outcome_for_ask_error,
+    outcome_for_nack, Arc, FullJidDeliveryOutcome, NodeId, NodeIdentity, OrderedRelayChannel,
+    OrderedRelayClaim, OrderedRelayClaimRole, OrderedRelayDeliveryBridge,
+    OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims, OrderedRelayNack,
+    OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayReply, PreparedRemoteDelivery,
+    RelayAskError, RelayHandle, RemoteDeliveryOutcome, RemoteDeliverySeed, RemoteStanzaEnvelope,
+};
+#[cfg(test)]
+use crate::clustering::route_bridge::tests::diversion_recovery::TEST_ORDERED_RELAY;
+#[cfg(test)]
+use crate::clustering::route_bridge::TEST_CANCELLED_ENVELOPES;
+#[cfg(test)]
+use crate::ingress::execute::relay_detached_tests::CROSS_NODE_RECEIVER;
+use crate::ingress::identity::IngressAppendObligationRef;
 
 /// Failure modes of local envelope preparation.
 pub(in super::super) enum RemotePrepareError {
@@ -64,7 +82,7 @@ impl OrderedRelayDeliveryBridge {
             *ingress_append = recipient
                 .is_full()
                 .then(|| {
-                    crate::ingress::identity::IngressAppendObligationRef::for_remote_message(
+                    IngressAppendObligationRef::for_remote_message(
                         seed.ingress_append_context.as_ref(),
                         &stanza.0,
                     )
@@ -175,10 +193,7 @@ impl OrderedRelayDeliveryBridge {
         envelope: RemoteStanzaEnvelope,
     ) -> Result<OrderedRelayReply, RelayAskError> {
         #[cfg(test)]
-        if let Ok(relay) =
-            crate::clustering::route_bridge::tests::diversion_recovery::TEST_ORDERED_RELAY
-                .try_with(Arc::clone)
-        {
+        if let Ok(relay) = TEST_ORDERED_RELAY.try_with(Arc::clone) {
             return relay.deliver(owner, envelope).await;
         }
         #[cfg(test)]
@@ -186,9 +201,7 @@ impl OrderedRelayDeliveryBridge {
             return Ok(receiver.deliver(envelope).await);
         }
         #[cfg(test)]
-        if let Ok(receiver) =
-            crate::ingress::execute::relay_detached_tests::CROSS_NODE_RECEIVER.try_with(Arc::clone)
-        {
+        if let Ok(receiver) = CROSS_NODE_RECEIVER.try_with(Arc::clone) {
             return Ok(Box::pin(receiver.deliver(envelope)).await);
         }
         let mut handle =
@@ -199,7 +212,7 @@ impl OrderedRelayDeliveryBridge {
             let offered = envelope.clone();
             let result = handle.deliver_ordered(envelope).await;
             if matches!(&result, Err(RelayAskError::Cancelled)) {
-                let _ = crate::clustering::route_bridge::TEST_CANCELLED_ENVELOPES
+                let _ = TEST_CANCELLED_ENVELOPES
                     .try_with(|envelopes| envelopes.borrow_mut().push(offered));
             }
             result

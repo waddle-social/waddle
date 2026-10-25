@@ -26,7 +26,7 @@ pub(super) async fn build_online_resources(
     let pairs: Vec<(FullJid, i8)> = resources
         .into_iter()
         .filter_map(|full| {
-            let entry = registry.get_entry(&full)?;
+            let entry = registry.entry(&full)?;
             if !entry.is_presence_available() {
                 return None;
             }
@@ -67,7 +67,7 @@ pub(super) async fn collect_live_targets(
                 .to
                 .as_ref()
                 .and_then(|jid| jid.clone().try_into_full().ok())
-                .filter(|full| registry.get_entry(full).is_some());
+                .filter(|full| registry.entry(full).is_some());
             if let Some(full) = full_target {
                 vec![full]
             } else {

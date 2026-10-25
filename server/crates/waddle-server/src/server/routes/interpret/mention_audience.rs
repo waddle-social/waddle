@@ -19,7 +19,13 @@
 //! author's real JID, occupant JID, the room and the MUC service), and may
 //! enter the room.
 
-use super::*;
+use super::{
+    extract_explicit_mentions, extract_references_from_message, interpret, warn, ActorRef, Arc,
+    BareJid, BlockingStorage, Blocklist, Deps, FullJid, GetAffiliation, GetRoomSnapshot,
+    GroupchatInboxAudience, Jid, MamArchivedMessage, Message, OutboundEvent, RoomActor,
+    WebSocketState,
+};
+use crate::server::xmpp_state::XmppChannelRecord;
 use futures::stream::{self, StreamExt};
 use waddle_xmpp::mam::{ArchivedRichMessage, ArchivedRichPayload};
 use waddle_xmpp::muc::RoomConfig;
@@ -303,7 +309,7 @@ pub(crate) async fn project_moderation_to_mentioned_non_members(
 /// Where a managed channel's room-entry decision comes from. Resolved
 /// once per dispatch so per-target checks never re-read the channel row.
 enum EntryAuthority {
-    Managed(crate::server::xmpp_state::XmppChannelRecord),
+    Managed(XmppChannelRecord),
     Unmanaged,
     Unavailable,
 }
@@ -447,10 +453,10 @@ mod tests {
     fn xep0372_archived_mentions_round_trip_into_personal_targets() {
         let rich = ArchivedRichMessage {
             references: vec![waddle_xmpp::mam::ArchivedReference {
-                ref_type: waddle_xmpp::mam::RichText::new("mention").expect("type"),
+                ref_type: waddle_xmpp::mam::RichText::try_new("mention").expect("type"),
                 begin: Some(0),
                 end: Some(5),
-                uri: waddle_xmpp::mam::RichText::new("xmpp:carol@example.com"),
+                uri: waddle_xmpp::mam::RichText::try_new("xmpp:carol@example.com"),
                 anchor: None,
             }],
             mentions: vec![waddle_xmpp::mam::ArchivedMention {

@@ -1,8 +1,17 @@
 #[cfg(feature = "clustering")]
 use super::super::room_dispatch::capture_delivered_remote_room_route;
 use super::super::room_dispatch::push_sender_error_reply;
-use super::*;
+use super::{
+    available_bot_nick, available_bot_nick_with_base, chat_msg, drain_inbound, effects,
+    extract_forum_action, interpret, message_thread_id, normalize_thread_create_source,
+    parse_reply_from_message, plan_bot_groupchat_message, prepare_extension_room_message,
+    register_into_both_tiers, room_scoped_reply_to_attr, set_thread_create, waddle_id_for_room_jid,
+    Arc, BareJid, BotGroupchatDispatch, CaptureWriter, ConnectionRegistry, Deps, Element,
+    ExtensionRoomMessage, ForumAction, IngressEffectIntent, InterpretOutcome, Jid, Message,
+    OccupantSnapshot, OutboundEvent, Stanza, ThreadCreate, XmppMessageType,
+};
 use crate::ingress::IngressEffectCapture;
+use kameo::actor::Spawn;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -358,15 +367,15 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         },
     ];
     let response = ExtensionRoomMessage {
-        plugin: waddle_extensions::PluginId::new("test-bot").expect("plugin"),
-        body: DisplayText::new("bot answer").expect("body"),
-        room: RoomJid::new(room_jid.to_string()).expect("room"),
+        plugin: waddle_extensions::PluginId::try_new("test-bot").expect("plugin"),
+        body: DisplayText::try_new("bot answer").expect("body"),
+        room: RoomJid::try_new(room_jid.to_string()).expect("room"),
         preferred_nick: None,
         stanza_id: None,
-        thread_id: Some(ThreadId::new("root-msg").expect("thread")),
+        thread_id: Some(ThreadId::try_new("root-msg").expect("thread")),
         reply_to: Some(ReplyTarget {
-            id: StanzaId::new("root-msg").expect("reply id"),
-            to: Some(FullJidValue::new(alice.to_string()).expect("reply to")),
+            id: StanzaId::try_new("root-msg").expect("reply id"),
+            to: Some(FullJidValue::try_new(alice.to_string()).expect("reply to")),
         }),
         markup: vec![MessageMarkupSpan {
             kind: MessageMarkupKind::Blockquote,
@@ -376,7 +385,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         extensions: None,
     };
 
-    let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+    let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
         b"test-occupant-id-secret-32-bytes-long".to_vec(),
     )
     .expect("test secret meets length floor");
@@ -673,7 +682,7 @@ pub(crate) async fn room_observer_test_manager(
         .map(|capability| ExtensionModuleConfig {
             room_observation: (capability == ExtensionCapability::MessageObserve).then_some(
                 waddle_extensions::RoomObservationConfig {
-                    generation: waddle_extensions::ObservationGeneration::new(1)
+                    generation: waddle_extensions::ObservationGeneration::try_new(1)
                         .expect("generation"),
                     scope: waddle_extensions::RoomObservationScope::AllHostedRooms,
                     max_concurrent: 1,
@@ -727,10 +736,13 @@ async fn assert_room_observer_message_planning(
     archive_available: bool,
     expected: bool,
 ) {
+    use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
     use crate::server::routes::interpret::effects::{
-        room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
+        Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
     };
-    use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom, RoomConfig};
+    use waddle_xmpp::muc::room_actor::Join;
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::{Affiliation, Role};
 
     let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
@@ -831,7 +843,7 @@ async fn assert_room_observer_message_planning(
             sender: sender.clone(),
             plugin: plugin.clone(),
             correction_target: None,
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
             identity: state
                 .deps
                 .protocol

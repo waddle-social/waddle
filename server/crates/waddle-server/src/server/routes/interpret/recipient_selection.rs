@@ -1,5 +1,5 @@
 //! Freeze original and carbon destinations before recipient preparation.
-use super::*;
+use super::{BareJid, Deps, FullJid, Jid};
 use waddle_xmpp::registry::user_actor::ResourceRoutingState;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

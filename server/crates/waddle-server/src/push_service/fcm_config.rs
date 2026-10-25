@@ -188,7 +188,7 @@ impl FcmConfig {
                 source,
             }
         })?;
-        OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock))
+        OAuthFcmTokenSource::try_new(key, Arc::new(SystemFcmClock))
             .map_err(FcmTokenSourceLoadError::Client)
     }
 }

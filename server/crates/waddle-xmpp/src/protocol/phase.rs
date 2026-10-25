@@ -7,6 +7,8 @@
 //! access (e.g. reading the bound JID before authentication succeeds).
 
 use crate::auth::ScramServer;
+use crate::auth::ServerFinalMessage;
+use crate::XmppError;
 use jid::{BareJid, FullJid};
 use std::collections::HashSet;
 use std::fmt;
@@ -215,7 +217,7 @@ impl ScramPendingState {
     pub fn process_client_final(
         &mut self,
         client_final: &str,
-    ) -> Result<crate::auth::ServerFinalMessage, crate::XmppError> {
+    ) -> Result<ServerFinalMessage, XmppError> {
         self.scram_server
             .process_client_final(client_final, &self.stored_key, &self.server_key)
     }

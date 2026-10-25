@@ -1,12 +1,21 @@
 use minidom::Element;
-use waddle_extensions::types::*;
+use waddle_extensions::types::{
+    message_has_framework_envelope, ActionBlock, ActionId, ArtifactReference, BodyRange,
+    CommandDescriptor, CommandNode, CommandScope, DisplayText, EnrichmentId, ExtensionCapability,
+    ExtensionEffect, ExtensionEnvelope, ExtensionManifest, ExtensionPayload, FrameworkTypeError,
+    LaunchContext, LaunchDescriptor, LaunchId, MediaType, MessageEnrichment, MessageSource,
+    PayloadNamespace, PayloadRoot, PayloadRule, PayloadSurface, PluginId, PluginVersion,
+    PubSubNode, PubSubPublish, StanzaId, TextBlock, TextStyle, Timestamp, UiBlock, UiView,
+    UiViewId, WaddleId, XmlAttribute, XmlElement, XmlNode, FRAMEWORK_NAMESPACE,
+    INVOKE_COMMAND_NODE,
+};
 use xmpp_parsers::message::Message;
 
 const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const THIRD_PARTY_NS: &str = "urn:example:task-widget:1";
 
 fn text(value: &str) -> DisplayText {
-    DisplayText::new(value).expect("display text should be valid")
+    DisplayText::try_new(value).expect("display text should be valid")
 }
 
 macro_rules! id {
@@ -16,23 +25,23 @@ macro_rules! id {
 }
 
 fn artifact() -> ArtifactReference {
-    ArtifactReference::new(
+    ArtifactReference::try_new(
         format!("https://artifacts.example.com/sample/sha256/{DIGEST}/thumb.png"),
         DIGEST,
-        Some(MediaType::new("image/png").expect("media type should be valid")),
+        Some(MediaType::try_new("image/png").expect("media type should be valid")),
     )
     .expect("artifact reference should be digest pinned")
 }
 
 fn sample_namespace() -> PayloadNamespace {
-    PayloadNamespace::new(THIRD_PARTY_NS).expect("third-party namespace should be valid")
+    PayloadNamespace::try_new(THIRD_PARTY_NS).expect("third-party namespace should be valid")
 }
 
 fn sample_payload() -> ExtensionPayload {
     let namespace = sample_namespace();
-    ExtensionPayload::new(
+    ExtensionPayload::try_new(
         namespace.clone(),
-        XmlElement::new(
+        XmlElement::try_new(
             namespace,
             "link",
             vec![XmlAttribute {
@@ -41,7 +50,7 @@ fn sample_payload() -> ExtensionPayload {
                 value: "https://example.org/post".to_string(),
             }],
             vec![XmlNode::Element(
-                XmlElement::new(
+                XmlElement::try_new(
                     sample_namespace(),
                     "title",
                     Vec::new(),
@@ -57,17 +66,17 @@ fn sample_payload() -> ExtensionPayload {
 
 fn sample_manifest() -> ExtensionManifest {
     ExtensionManifest {
-        id: id!(PluginId::new, "task-widget"),
+        id: id!(PluginId::try_new, "task-widget"),
         name: text("Task Widget"),
-        version: id!(PluginVersion::new, "1.0.0"),
+        version: id!(PluginVersion::try_new, "1.0.0"),
         payloads: vec![
             PayloadRule {
                 surface: PayloadSurface::MessageEnrichment,
-                root: PayloadRoot::new(sample_namespace(), "link").expect("payload root"),
+                root: PayloadRoot::try_new(sample_namespace(), "link").expect("payload root"),
             },
             PayloadRule {
                 surface: PayloadSurface::PubSubItem,
-                root: PayloadRoot::new(sample_namespace(), "link").expect("payload root"),
+                root: PayloadRoot::try_new(sample_namespace(), "link").expect("payload root"),
             },
         ],
         capabilities: vec![
@@ -76,7 +85,7 @@ fn sample_manifest() -> ExtensionManifest {
             ExtensionCapability::PubSubPublish,
         ],
         commands: vec![CommandDescriptor {
-            node: CommandNode::new("urn:waddle:extension:1:task-widget").expect("command node"),
+            node: CommandNode::try_new("urn:waddle:extension:1:task-widget").expect("command node"),
             name: text("Task Widget"),
             scope: CommandScope::Global,
             composer_prefix: None,
@@ -85,7 +94,7 @@ fn sample_manifest() -> ExtensionManifest {
         }],
         routes: Vec::new(),
         pubsub_nodes: vec![id!(
-            PubSubNode::new,
+            PubSubNode::try_new,
             "urn:example:task-widget:1:waddle:{waddle-id}:links"
         )],
         profile: None,
@@ -95,36 +104,36 @@ fn sample_manifest() -> ExtensionManifest {
 
 #[test]
 fn payload_namespaces_allow_third_party_but_reject_official_xmpp() {
-    assert!(PayloadNamespace::new("urn:waddle:sample:1").is_ok());
-    assert!(PayloadNamespace::new("https://plugins.example.com/ns/tasks").is_ok());
-    assert!(PayloadNamespace::new("urn:example:tasks:1").is_ok());
+    assert!(PayloadNamespace::try_new("urn:waddle:sample:1").is_ok());
+    assert!(PayloadNamespace::try_new("https://plugins.example.com/ns/tasks").is_ok());
+    assert!(PayloadNamespace::try_new("urn:example:tasks:1").is_ok());
     // The framework namespace is allowed because every extension publishes
     // PubSub state items wrapped in the framework-defined `<extension-item>`
     // envelope. Manifest payload rules in the framework namespace remain
     // forbidden by `validate_manifest_against_module`, so extensions cannot
     // claim ownership of framework wire shapes.
-    let framework = PayloadNamespace::new(FRAMEWORK_NAMESPACE)
+    let framework = PayloadNamespace::try_new(FRAMEWORK_NAMESPACE)
         .expect("framework namespace is a valid payload namespace");
     assert!(framework.is_framework());
     assert!(matches!(
-        PayloadNamespace::new("urn:xmpp:sid:0"),
+        PayloadNamespace::try_new("urn:xmpp:sid:0"),
         Err(FrameworkTypeError::OfficialNamespace(_))
     ));
     assert!(matches!(
-        PayloadNamespace::new("http://jabber.org/protocol/pubsub"),
+        PayloadNamespace::try_new("http://jabber.org/protocol/pubsub"),
         Err(FrameworkTypeError::OfficialNamespace(_))
     ));
 }
 
 #[test]
 fn command_nodes_must_be_exact_framework_nodes() {
-    assert!(CommandNode::new(INVOKE_COMMAND_NODE).is_ok());
+    assert!(CommandNode::try_new(INVOKE_COMMAND_NODE).is_ok());
     assert!(matches!(
-        CommandNode::new("urn:waddle:extension:10:invoke"),
+        CommandNode::try_new("urn:waddle:extension:10:invoke"),
         Err(FrameworkTypeError::InvalidCommandNode(_))
     ));
     assert!(matches!(
-        CommandNode::new("http://jabber.org/protocol/commands"),
+        CommandNode::try_new("http://jabber.org/protocol/commands"),
         Err(FrameworkTypeError::InvalidCommandNode(_))
     ));
 }
@@ -135,7 +144,7 @@ fn artifact_references_must_be_digest_pinned_and_immutable() {
     assert_eq!(reference.sha256.as_str(), DIGEST);
 
     assert!(matches!(
-        ArtifactReference::new(
+        ArtifactReference::try_new(
             "https://artifacts.example.com/canvas/latest/render.png",
             DIGEST,
             None
@@ -143,7 +152,7 @@ fn artifact_references_must_be_digest_pinned_and_immutable() {
         Err(FrameworkTypeError::InvalidArtifactUri(_))
     ));
     assert!(matches!(
-        ArtifactReference::new(
+        ArtifactReference::try_new(
             format!("https://artifacts.example.com/canvas/sha256/{DIGEST}/render.png"),
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             None,
@@ -155,11 +164,11 @@ fn artifact_references_must_be_digest_pinned_and_immutable() {
 #[test]
 fn extension_payload_rejects_mismatched_declared_namespace() {
     let declared = sample_namespace();
-    let other = PayloadNamespace::new("urn:waddle:other-sample:1").expect("namespace");
-    let root = XmlElement::new(other, "link", Vec::new(), Vec::new()).expect("root");
+    let other = PayloadNamespace::try_new("urn:waddle:other-sample:1").expect("namespace");
+    let root = XmlElement::try_new(other, "link", Vec::new(), Vec::new()).expect("root");
 
     assert!(matches!(
-        ExtensionPayload::new(declared, root),
+        ExtensionPayload::try_new(declared, root),
         Err(FrameworkTypeError::InvalidPayloadNamespace(_))
     ));
 }
@@ -168,11 +177,11 @@ fn extension_payload_rejects_mismatched_declared_namespace() {
 fn extension_payload_rejects_invalid_xml_and_duplicate_attrs() {
     let namespace = sample_namespace();
     assert!(matches!(
-        XmlElement::new(namespace.clone(), "bad:name", Vec::new(), Vec::new()),
+        XmlElement::try_new(namespace.clone(), "bad:name", Vec::new(), Vec::new()),
         Err(FrameworkTypeError::InvalidXmlName(_))
     ));
     assert!(matches!(
-        XmlElement::new(
+        XmlElement::try_new(
             namespace,
             "link",
             vec![
@@ -192,11 +201,13 @@ fn extension_payload_rejects_invalid_xml_and_duplicate_attrs() {
         Err(FrameworkTypeError::DuplicateXmlAttribute { .. })
     ));
     assert!(matches!(
-        XmlElement::new(
+        XmlElement::try_new(
             sample_namespace(),
             "link",
             vec![XmlAttribute {
-                namespace: Some(PayloadNamespace::new("urn:example:attrs:1").expect("namespace")),
+                namespace: Some(
+                    PayloadNamespace::try_new("urn:example:attrs:1").expect("namespace")
+                ),
                 local_name: "url".to_string(),
                 value: "https://example.org/1".to_string(),
             }],
@@ -209,17 +220,17 @@ fn extension_payload_rejects_invalid_xml_and_duplicate_attrs() {
 #[test]
 fn framework_envelope_builds_generic_payload_and_fallback_ui() {
     let envelope = ExtensionEnvelope::new(vec![MessageEnrichment {
-        id: id!(EnrichmentId::new, "enrich-1"),
-        plugin: id!(PluginId::new, "task-widget"),
+        id: id!(EnrichmentId::try_new, "enrich-1"),
+        plugin: id!(PluginId::try_new, "task-widget"),
         capability: ExtensionCapability::MessageEnrich,
         payload_namespace: sample_namespace(),
-        created_at: id!(Timestamp::new, "2026-04-27T10:00:00Z"),
+        created_at: id!(Timestamp::try_new, "2026-04-27T10:00:00Z"),
         source: Some(MessageSource {
-            stanza_id: id!(StanzaId::new, "archive-id-456"),
-            body_range: Some(BodyRange::new(5, 29).expect("range should be valid")),
+            stanza_id: id!(StanzaId::try_new, "archive-id-456"),
+            body_range: Some(BodyRange::try_new(5, 29).expect("range should be valid")),
         }),
         ui: vec![UiView {
-            id: id!(UiViewId::new, "fallback"),
+            id: id!(UiViewId::try_new, "fallback"),
             title: Some(text("Example Post")),
             blocks: vec![
                 UiBlock::Text(TextBlock {
@@ -227,22 +238,22 @@ fn framework_envelope_builds_generic_payload_and_fallback_ui() {
                     style: TextStyle::Body,
                 }),
                 UiBlock::Action(ActionBlock {
-                    launch_id: id!(LaunchId::new, "save-link"),
+                    launch_id: id!(LaunchId::try_new, "save-link"),
                     label: text("Save"),
                 }),
             ],
         }],
         payloads: vec![sample_payload()],
         launches: vec![LaunchDescriptor {
-            id: id!(LaunchId::new, "save-link"),
-            plugin: id!(PluginId::new, "task-widget"),
-            action: id!(ActionId::new, "save-link"),
+            id: id!(LaunchId::try_new, "save-link"),
+            plugin: id!(PluginId::try_new, "task-widget"),
+            action: id!(ActionId::try_new, "save-link"),
             command_node: CommandNode::invoke(),
             label: text("Save link"),
             context: LaunchContext {
-                waddle_id: id!(WaddleId::new, "waddle-123"),
+                waddle_id: id!(WaddleId::try_new, "waddle-123"),
                 room: None,
-                source_stanza_id: Some(id!(StanzaId::new, "archive-id-456")),
+                source_stanza_id: Some(id!(StanzaId::try_new, "archive-id-456")),
             },
             payloads: Vec::new(),
             fallback: None,
@@ -276,9 +287,9 @@ fn framework_envelope_builds_generic_payload_and_fallback_ui() {
 
 #[test]
 fn declarative_text_and_extension_payload_text_are_not_parsed_as_xml() {
-    let payload = ExtensionPayload::new(
+    let payload = ExtensionPayload::try_new(
         sample_namespace(),
-        XmlElement::new(
+        XmlElement::try_new(
             sample_namespace(),
             "note",
             Vec::new(),
@@ -297,22 +308,22 @@ fn declarative_text_and_extension_payload_text_are_not_parsed_as_xml() {
 fn extension_effect_validation_is_manifest_authoritative() {
     let manifest = sample_manifest();
     let enrichment = MessageEnrichment {
-        id: id!(EnrichmentId::new, "enrich-1"),
-        plugin: id!(PluginId::new, "task-widget"),
+        id: id!(EnrichmentId::try_new, "enrich-1"),
+        plugin: id!(PluginId::try_new, "task-widget"),
         capability: ExtensionCapability::MessageEnrich,
         payload_namespace: sample_namespace(),
-        created_at: id!(Timestamp::new, "2026-04-27T10:00:00Z"),
+        created_at: id!(Timestamp::try_new, "2026-04-27T10:00:00Z"),
         source: None,
         ui: Vec::new(),
         payloads: vec![sample_payload()],
         launches: vec![LaunchDescriptor {
-            id: id!(LaunchId::new, "save-link"),
-            plugin: id!(PluginId::new, "task-widget"),
-            action: id!(ActionId::new, "save-link"),
+            id: id!(LaunchId::try_new, "save-link"),
+            plugin: id!(PluginId::try_new, "task-widget"),
+            action: id!(ActionId::try_new, "save-link"),
             command_node: CommandNode::invoke(),
             label: text("Save link"),
             context: LaunchContext {
-                waddle_id: id!(WaddleId::new, "waddle-123"),
+                waddle_id: id!(WaddleId::try_new, "waddle-123"),
                 room: None,
                 source_stanza_id: None,
             },
@@ -329,7 +340,7 @@ fn extension_effect_validation_is_manifest_authoritative() {
     );
 
     let mut wrong_plugin = enrichment;
-    wrong_plugin.plugin = id!(PluginId::new, "other-widget");
+    wrong_plugin.plugin = id!(PluginId::try_new, "other-widget");
     assert!(
         !ExtensionEffect::EnrichMessage(ExtensionEnvelope::new(vec![wrong_plugin]))
             .validate_for_manifest(&manifest)
@@ -337,7 +348,7 @@ fn extension_effect_validation_is_manifest_authoritative() {
 
     assert!(ExtensionEffect::PublishPubSub(PubSubPublish {
         node: id!(
-            PubSubNode::new,
+            PubSubNode::try_new,
             "urn:example:task-widget:1:waddle:room-1:links"
         ),
         item_id: None,

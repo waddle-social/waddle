@@ -4,13 +4,11 @@
 //! - /.well-known/host-meta (XEP-0156) - XMPP connection discovery
 //! - /.well-known/host-meta.json - JSON variant
 
-use axum::{
-    extract::State,
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
+use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
 use std::sync::Arc;
 
 use super::auth::AuthState;

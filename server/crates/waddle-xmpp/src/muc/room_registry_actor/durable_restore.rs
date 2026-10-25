@@ -1,5 +1,9 @@
 //! Demand recovery for committed background work, with no room creation.
-use super::*;
+use super::{
+    ActorRef, Arc, BareJid, Context, DelegatedReply, GetRoomSealState, RoomActor, RoomCreationSpec,
+    RoomPreparationOrigin, RoomPreparationSpec, RoomPreparationWaiter, RoomRegistryActor,
+    RoomRegistryError, RoomSealState, ROOM_OWNERSHIP_CALL_TIMEOUT,
+};
 
 /// Return a local open room, or restore its existing durable lifecycle.
 /// Missing durable state is terminal absence, never permission to create.

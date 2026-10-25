@@ -1,11 +1,15 @@
-use super::*;
+use super::{
+    destroy_space_channel, get_xmpp_channel, run_create, run_delete, write_channel_parent_tuple,
+    AppState, Arc, BareJid, ChannelInfo, ChannelSpaceLink, Object, ObjectType, Relation, SpaceRef,
+    SpacesCreateArgs, SpacesDeleteArgs, Subject, SubjectType,
+};
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::ListSubjects;
 use crate::server::xmpp_state::{upsert_xmpp_channel, XmppChannelUpsert};
 use waddle_xmpp::muc::PinPermission;
 
 async fn fresh_state() -> AppState {
-    let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+    let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
         .await
         .expect("pool");
     MigrationRunner::global()

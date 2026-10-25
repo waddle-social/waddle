@@ -1,7 +1,12 @@
 //! #1803 asking side: the eviction guard must clear with EVERY unexpired peer.
 use std::sync::Mutex;
 
-use super::*;
+use super::{
+    async_trait, peer_resource_reachability, Arc, ClaimError, ClusterMembership, Duration, FullJid,
+    NodeIdentity, NodeLeaseClusterMembership, NodeLeaseStore, PeerResourceReachability,
+    RelayAskError, RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure,
+    ResourcePresenceAsker, SharedNodeIdentity,
+};
 
 fn target() -> FullJid {
     "juliet@example.test/web-1803".parse().expect("full jid")

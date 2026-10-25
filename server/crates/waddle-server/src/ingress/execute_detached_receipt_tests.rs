@@ -1,11 +1,16 @@
 //! Phase C records each successful resource before settling the frozen batch.
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::ExternalOutcome;
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, EffectReceiptRepository,
+    ExternalDeliveryEffect, ImmediateSink, PlannedEffect, Stanza,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
-use waddle_xmpp::{
-    ingress::{EffectMessageIdentity, IngressEffectIntent},
-    stream_management::{DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry},
+use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
 
 fn capture_delivery(deps: &Deps<'_>, effect: ExternalDeliveryEffect) -> Vec<PlannedEffect> {

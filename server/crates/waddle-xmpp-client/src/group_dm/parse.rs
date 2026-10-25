@@ -17,17 +17,29 @@ use super::types::{GroupDmCreated, GroupDmLeft, GroupDmRenamed};
 /// Typed shape errors for group-DM command responses. These indicate
 /// a server-side bug or schema drift, never a user mistake.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum GroupDmResponseError {
     #[error("group-dm response is not a XEP-0050 command result")]
+    /// Group-dm response is not a XEP-0050 command result.
     MissingCommand,
     #[error("group-dm command did not complete")]
+    /// Group-dm command did not complete.
     NotCompleted,
     #[error("group-dm response missing result form")]
+    /// Group-dm response missing result form.
     MissingForm,
     #[error("group-dm response missing required field `{var}`")]
-    MissingField { var: String },
+    /// Group-dm response missing required field `var`.
+    MissingField {
+        #[doc = "XEP-0004 field name whose value is being accessed or validated."]
+        var: String,
+    },
     #[error("group-dm response field `{var}` is not a valid bare JID")]
-    InvalidJid { var: String },
+    /// Group-dm response field `var` is not a valid bare JID.
+    InvalidJid {
+        #[doc = "XEP-0004 field name whose value is being accessed or validated."]
+        var: String,
+    },
 }
 
 type ParseResult<T> = Result<T, GroupDmResponseError>;
@@ -74,6 +86,10 @@ fn optional_bool(form: &DataForm, var: &str) -> Option<bool> {
 }
 
 /// Parse a completed `urn:waddle:group-dm:create:0` result.
+///
+/// # Errors
+///
+/// Returns a typed response error for a missing command, unexpected result form, missing required fields, or invalid room JIDs.
 pub fn parse_group_dm_create_result(iq: &minidom::Element) -> ParseResult<GroupDmCreated> {
     let form = completed_form(iq)?;
     Ok(GroupDmCreated {
@@ -86,6 +102,10 @@ pub fn parse_group_dm_create_result(iq: &minidom::Element) -> ParseResult<GroupD
 
 /// Parse a completed `urn:waddle:group-dm:rename:0` result. An empty
 /// echoed `name` means the custom name was cleared.
+///
+/// # Errors
+///
+/// Returns a typed response error for a missing command, unexpected result form, missing required fields, or invalid room JIDs.
 pub fn parse_group_dm_rename_result(iq: &minidom::Element) -> ParseResult<GroupDmRenamed> {
     let form = completed_form(iq)?;
     Ok(GroupDmRenamed {
@@ -95,6 +115,10 @@ pub fn parse_group_dm_rename_result(iq: &minidom::Element) -> ParseResult<GroupD
 }
 
 /// Parse a completed `urn:waddle:group-dm:leave:0` result.
+///
+/// # Errors
+///
+/// Returns a typed response error for a missing command, unexpected result form, missing required fields, or invalid room JIDs.
 pub fn parse_group_dm_leave_result(iq: &minidom::Element) -> ParseResult<GroupDmLeft> {
     let form = completed_form(iq)?;
     Ok(GroupDmLeft {

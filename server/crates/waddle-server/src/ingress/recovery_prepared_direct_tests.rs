@@ -1,6 +1,13 @@
 //! XEP-0198/XEP-0334: transient full-JID copies are never rebuilt by ingress recovery.
-use super::*;
+use super::{
+    append_count, build_interpret_deps, commit_submission, execute_effects, pass, persistent_sm,
+    retarget, state_for, store_detached, Arc, CanonicalMessageRepository, Duration, Effect,
+    EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ImmediateSink,
+    IngressEffectIntent, IngressFixture, MaintenanceCursor, MaintenanceOutcome, NormalizedTarget,
+    RecoveryEnvironment, SmSessionRegistry, Stanza, StateEnvironment,
+};
 use crate::server::routes::interpret::plan_message_dispatch;
+use crate::server::routes::websocket::tests as socket_tests;
 use waddle_xmpp::protocol::{StanzaDispatcher, XmppStateMachine};
 use waddle_xmpp::xep::xep0334::{add_hint, Hint};
 

@@ -2,10 +2,13 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use crate::support::*;
+use crate::support::{bare, db_query, groupchat_candidate_for};
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification_outbox::{
+    NotificationCandidate, NotificationCandidateInsertOutcome, NotificationClass,
+    NotificationMessageHints, NotificationOutboxStore, NotificationReason, RichSummary,
+};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[tokio::test]
@@ -37,7 +40,7 @@ async fn store_initialization_rejects_candidate_schema_without_sender_provenance
     .expect("create incompatible candidate table");
     drop(conn);
 
-    match NotificationOutboxStore::new(db.clone()).await {
+    match NotificationOutboxStore::try_new(db.clone()).await {
         Ok(_) => panic!("store must not add missing sender provenance candidate columns"),
         Err(error) => assert!(
             error.to_string().contains("sender_jid"),
@@ -110,7 +113,7 @@ async fn store_initialization_migrates_legacy_candidate_reason_check() {
     .expect("insert legacy direct candidate");
     drop(conn);
 
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store initializes and migrates legacy reason check");
     let recipient = bare("charlie@example.com");
@@ -160,7 +163,7 @@ async fn store_initialization_migrates_legacy_candidate_reason_check() {
 /// `dm_mention` class variant existed still has the legacy class
 /// CHECK constraint (`dm`/`personal_mention`/`channel_mention`/
 /// `active_channel_mention`/`notify_all`). After
-/// `NotificationOutboxStore::new` runs the class-constraint
+/// `NotificationOutboxStore::try_new` runs the class-constraint
 /// migration, the new `dm_mention` variant must be insertable.
 #[tokio::test]
 async fn store_initialization_migrates_legacy_candidate_class_check() {
@@ -226,7 +229,7 @@ async fn store_initialization_migrates_legacy_candidate_class_check() {
     .expect("insert legacy direct candidate");
     drop(conn);
 
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store initializes and migrates legacy class check");
     let recipient = bare("bob@example.com");
@@ -342,7 +345,7 @@ async fn store_initialization_migrates_legacy_outbox_without_rich_summary_column
     .expect("insert legacy outbox row");
     drop(conn);
 
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store initializes and migrates legacy outbox");
 
@@ -365,7 +368,7 @@ async fn direct_message_mention_class_round_trips_through_storage() {
     let db = Database::in_memory("notification-outbox-dm-mention-roundtrip")
         .await
         .unwrap();
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store init");
     let recipient = bare("bob@example.com");
@@ -469,7 +472,7 @@ async fn store_initialization_rejects_outbox_schema_without_sender_provenance_co
     .expect("create incompatible outbox table");
     drop(conn);
 
-    match NotificationOutboxStore::new(db.clone()).await {
+    match NotificationOutboxStore::try_new(db.clone()).await {
         Ok(_) => panic!("store must not add missing sender provenance outbox columns"),
         Err(error) => assert!(
             error.to_string().contains("sender_jid"),
@@ -481,7 +484,7 @@ async fn store_initialization_rejects_outbox_schema_without_sender_provenance_co
 /// Legacy upgrade regression: a database created with an
 /// older schema that lacks the `suppressed_reason`, `noping`,
 /// `no_store`, and `no_permanent_store` columns MUST upgrade
-/// cleanly when `NotificationOutboxStore::new` runs the
+/// cleanly when `NotificationOutboxStore::try_new` runs the
 /// `add_column_if_missing` + suppressed-reason migration.
 /// Both legacy rows AND newly-inserted rows are insertable
 /// and decodable after migration.
@@ -530,7 +533,7 @@ async fn legacy_schema_upgrade_adds_suppressed_reason_and_hints() {
     .expect("insert legacy candidate");
     drop(conn);
 
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("store migrates legacy schema");
     // Insert a new candidate with the noping bit set; the column

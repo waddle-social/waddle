@@ -10,15 +10,16 @@
 //! crate owns the durable lifecycle (env-var bootstrap, fresh
 //! generation, DB persistence); the lower crate owns pure crypto.
 //!
-//! ## Safety
+//! ## Environment policy
 //!
-//! `load_or_provision` calls `std::env::remove_var(WADDLE_VAPID_PRIVATE_KEY)`
-//! after the env-supplied scalar is persisted to the DB. The unsafe call is
-//! justified by the invariant that no other code in this crate reads or
-//! writes `WADDLE_VAPID_PRIVATE_KEY`. Operators MUST NOT pass the same env
-//! variable name to other tooling expecting steady-state availability —
-//! the value lives only for the boot window.
+//! Bootstrap reads never mutate the process environment: database and telemetry
+//! workers may already be reading it. The bootstrap variable remains available
+//! to the running process after success and failure. Operators remove
+//! `WADDLE_VAPID_PRIVATE_KEY` from the deployment after the first successful
+//! boot, once the key is stored. See `docs/operations/vapid-bootstrap.md`.
 
+use crate::db::DatabaseDriver;
+use crate::db::Rows;
 use std::env;
 use std::sync::Arc;
 
@@ -53,9 +54,9 @@ const CURRENT_ROOT_KEY_VERSION: u32 = 1;
 ///
 /// Construct via [`Self::load_or_provision`], which executes the boot
 /// lifecycle:
-///   1. If `WADDLE_VAPID_PRIVATE_KEY` env var is set: parse, **DB write
-///      FIRST**, on `Ok` call `std::env::remove_var(...)`; on `Err`,
-///      leave env set and fail boot loudly.
+///   1. If `WADDLE_VAPID_PRIVATE_KEY` env var is set: parse, initialize
+///      the signer and persist. Fail boot loudly on any error. Retain the
+///      environment variable on both success and failure.
 ///   2. Else read the latest non-retired row.
 ///   3. Else generate a fresh P-256 keypair and persist.
 pub struct VapidStorage {
@@ -74,23 +75,22 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage =
-            Self::new(db.clone(), root_key)
-                .await
-                .map_err(|source| VapidLoadError::DbWrite {
-                    stage: VapidDbWriteStage::Initialize,
-                    source: Box::new(source),
-                })?;
+        let storage = Self::try_new(db.clone(), root_key)
+            .await
+            .map_err(|source| VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::Initialize,
+                source: Box::new(source),
+            })?;
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
-                InProcessVapidSigner::new(kid, secret_key)
+                InProcessVapidSigner::try_new(kid, secret_key)
                     .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
         let kid = Kid::new();
         let secret_key = p256::SecretKey::random(&mut OsRng);
         Ok(Arc::new(
-            InProcessVapidSigner::new(kid, secret_key)
+            InProcessVapidSigner::try_new(kid, secret_key)
                 .map_err(|source| VapidLoadError::SignerInit { source })?,
         ))
     }
@@ -99,27 +99,18 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage =
-            Self::new(db.clone(), root_key)
-                .await
-                .map_err(|source| VapidLoadError::DbWrite {
-                    stage: VapidDbWriteStage::Initialize,
-                    source: Box::new(source),
-                })?;
+        let storage = Self::try_new(db.clone(), root_key)
+            .await
+            .map_err(|source| VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::Initialize,
+                source: Box::new(source),
+            })?;
 
         // 1. Env-var bootstrap path.
         //
-        // Ordering matters: `env::remove_var` MUST be the last fallible
-        // operation in this branch. If it ran before any later step that
-        // can fail (signer init, DB insert), a failure would leave the
-        // process without the env var even though `load_or_provision`
-        // returns `Err`, breaking the documented invariant
-        // ("remove only after successful bootstrap").
-        //
-        // We therefore derive scalar/public bytes BEFORE the signer
-        // consumes `secret_key`, then sequence: signer-init → persist →
-        // remove_var. If any step fails, env remains set so the
-        // operator can fix and retry.
+        // Initialize the signer before persisting, so any error fails boot
+        // without persisting a key that cannot sign. Never clear the process
+        // environment: other runtime/database threads may be reading it.
         if let Ok(raw) = env::var(VAPID_ENV_VAR) {
             let raw = Zeroizing::new(raw);
             let secret_key = parse_env_scalar(raw.as_str())?;
@@ -131,26 +122,19 @@ impl VapidStorage {
                 .as_bytes()
                 .to_vec();
             // (a) signer-init (consumes secret_key — fallible).
-            let signer = InProcessVapidSigner::new(kid, secret_key)
+            let signer = InProcessVapidSigner::try_new(kid, secret_key)
                 .map_err(|source| VapidLoadError::SignerInit { source })?;
             // (b) persist (fallible).
             storage
                 .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
                 .await?;
-            // (c) all fallible steps succeeded — clear env.
-            // SAFETY: see module-level invariant — `WADDLE_VAPID_PRIVATE_KEY`
-            // is read exactly once at boot via `load_or_provision`; no other
-            // code in this crate reads or writes it.
-            unsafe {
-                env::remove_var(VAPID_ENV_VAR);
-            }
             return Ok(Arc::new(signer));
         }
 
         // 2. Read latest non-retired row.
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
-                InProcessVapidSigner::new(kid, secret_key)
+                InProcessVapidSigner::try_new(kid, secret_key)
                     .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
@@ -164,7 +148,7 @@ impl VapidStorage {
             .to_encoded_point(false)
             .as_bytes()
             .to_vec();
-        let signer = InProcessVapidSigner::new(kid, secret_key)
+        let signer = InProcessVapidSigner::try_new(kid, secret_key)
             .map_err(|source| VapidLoadError::SignerInit { source })?;
         storage
             .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
@@ -172,7 +156,7 @@ impl VapidStorage {
         Ok(Arc::new(signer))
     }
 
-    async fn new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
+    async fn try_new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
         let storage = Self {
             db,
             cipher: VapidKeyCipher::new(root_key),
@@ -186,8 +170,8 @@ impl VapidStorage {
         // `BLOB` is the SQLite byte type; Postgres requires `BYTEA`. Use the
         // configured driver to emit the dialect-correct column type.
         let blob_type = match self.db.driver() {
-            crate::db::DatabaseDriver::Sqlite => "BLOB",
-            crate::db::DatabaseDriver::Postgres => "BYTEA",
+            DatabaseDriver::Sqlite => "BLOB",
+            DatabaseDriver::Postgres => "BYTEA",
         };
         // `kid` is a UUIDv4 and already `NOT NULL UNIQUE`; using it as the
         // primary key avoids the SQLite-vs-Postgres autoincrement-integer
@@ -225,11 +209,7 @@ impl VapidStorage {
             .map_err(|e| XmppError::internal(e.to_string()))
     }
 
-    async fn run_query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, XmppError> {
+    async fn run_query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, XmppError> {
         let conn = self
             .db
             .guard()
@@ -244,8 +224,8 @@ impl VapidStorage {
     ///
     /// Taking bytes rather than the `SecretKey` itself lets callers
     /// construct the in-process signer (which consumes the `SecretKey`)
-    /// before the persist step, so `remove_var(WADDLE_VAPID_PRIVATE_KEY)`
-    /// can be deferred until ALL fallible operations succeed.
+    /// before the persist step, so signer initialization failure cannot leave
+    /// behind a newly persisted unusable key.
     ///
     /// `scalar_bytes` MUST be 32 bytes (a raw P-256 secret scalar) and
     /// is wrapped in `Zeroizing` by the caller. `public_bytes` is the
@@ -484,6 +464,11 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
 mod tests {
     use super::*;
 
+    fn root_key() -> &'static [u8; 32] {
+        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &KEY
+    }
+
     #[test]
     fn build_aad_is_length_prefixed() {
         let aad = build_aad(b"label", b"kid_bytes");
@@ -505,7 +490,7 @@ mod tests {
 
     #[test]
     fn cipher_round_trip() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"some-kid").unwrap();
         let opened = cipher.open(&sealed, AAD_LABEL, b"some-kid").unwrap();
@@ -514,7 +499,7 @@ mod tests {
 
     #[test]
     fn cipher_rejects_mismatched_kid() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"kid-a").unwrap();
         let err = cipher.open(&sealed, AAD_LABEL, b"kid-b").unwrap_err();
@@ -523,7 +508,7 @@ mod tests {
 
     #[test]
     fn cipher_rejects_mismatched_label() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, b"label-a", b"kid").unwrap();
         let err = cipher.open(&sealed, b"label-b", b"kid").unwrap_err();
@@ -532,8 +517,10 @@ mod tests {
 
     #[test]
     fn cipher_rejects_wrong_root_key() {
-        let cipher_a = VapidKeyCipher::new(b"root-key-A");
-        let cipher_b = VapidKeyCipher::new(b"root-key-B");
+        let cipher_a = VapidKeyCipher::new(root_key());
+        let mut other_root_key = *root_key();
+        other_root_key[0] ^= 1;
+        let cipher_b = VapidKeyCipher::new(&other_root_key);
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher_a.seal(plaintext, AAD_LABEL, b"kid").unwrap();
         let err = cipher_b.open(&sealed, AAD_LABEL, b"kid").unwrap_err();

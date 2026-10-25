@@ -1,15 +1,16 @@
-use super::*;
-use waddle_server::ingress::{
-    effects::{
-        delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
-        direct::ExternalDirectEffect,
-        ProjectionRef,
-    },
-    execute::execute_effects,
-    Deps, ExternalEffect, ImmediateSink, IngressStreamIdentity,
+use super::{
+    archive_plan, commit_submission, ArchiveExpectation, DurableDirectEffect, DurableEffect,
+    Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture, IngressSubmission,
+    PlannedEffect, StanzaId,
 };
+use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
+use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+use waddle_server::ingress::effects::ProjectionRef;
+use waddle_server::ingress::execute::execute_effects;
+use waddle_server::ingress::{Deps, ExternalEffect, ImmediateSink, IngressStreamIdentity};
 use waddle_server::ingress_uow::SmIngressStreamRepository;
-use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
+use waddle_xmpp::ingress::WireHandledCount;
+use waddle_xmpp::pending_delivery::SmSessionId;
 
 pub(super) async fn resumable_identity(
     fixture: &IngressFixture,
@@ -206,10 +207,8 @@ fn room_projection(
     thread: Option<&waddle_xmpp_core::mam::ThreadId>,
 ) -> IngressSubmission {
     use waddle_server::ingress::effects::room::DurableRoomEffect;
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-    };
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
     let mut submission = archive_plan(fixture, Some(origin), "room message", id);
     let room: jid::BareJid = "read-room@muc.example.com".parse().expect("room");
     let stanza_id = StanzaId::new(id, room.clone().into());
@@ -303,7 +302,7 @@ async fn displayed_marker_replay(fixture: IngressFixture) {
     use waddle_xmpp::ingress::InboxProjectionMutation;
     for thread in [
         None,
-        Some(waddle_xmpp_core::mam::ThreadId::new("discussion").expect("thread")),
+        Some(waddle_xmpp_core::mam::ThreadId::try_new("discussion").expect("thread")),
     ] {
         let suffix = if thread.is_some() {
             "thread"

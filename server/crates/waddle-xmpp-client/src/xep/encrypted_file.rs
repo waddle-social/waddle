@@ -39,6 +39,7 @@ pub const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 /// set open; we keep this closed enum to refuse unknown values at the type
 /// boundary instead of dragging strings through the rest of the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Cipher {
     /// `urn:xmpp:ciphers:aes-128-gcm-nopadding:0`
     Aes128GcmNoPadding,
@@ -47,6 +48,8 @@ pub enum Cipher {
 }
 
 impl Cipher {
+    /// Return the registered XMPP URI identifying this cipher.
+    #[must_use]
     pub fn as_uri(self) -> &'static str {
         match self {
             Cipher::Aes128GcmNoPadding => "urn:xmpp:ciphers:aes-128-gcm-nopadding:0",
@@ -54,6 +57,8 @@ impl Cipher {
         }
     }
 
+    /// Recognize a supported cipher URI; unknown ciphers return None.
+    #[must_use]
     pub fn from_uri(raw: &str) -> Option<Cipher> {
         Some(match raw {
             "urn:xmpp:ciphers:aes-128-gcm-nopadding:0" => Cipher::Aes128GcmNoPadding,
@@ -68,13 +73,16 @@ impl Cipher {
 /// servers and peers to advertise hashes Waddle does not itself produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedHash {
+    /// Hash algorithm token advertised with the digest.
     pub algo: String,
+    /// Base64-encoded digest bytes.
     pub value_b64: String,
 }
 
 /// A typed encrypted stateless file-sharing envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedFile {
+    /// Symmetric cipher used to encrypt the shared file.
     pub cipher: Cipher,
     /// Base64-encoded symmetric key.
     pub key_b64: String,
@@ -88,6 +96,7 @@ pub struct EncryptedFile {
 
 /// Build the `<encrypted/>` payload element from a typed value. Returns
 /// `None` if no source URLs were provided — XEP-0448 mandates at least one.
+#[must_use]
 pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
     if enc.sources.is_empty() {
         return None;
@@ -135,6 +144,7 @@ pub fn build_encrypted_element(enc: &EncryptedFile) -> Option<Element> {
 /// Parse an `<encrypted/>` element. Returns `None` if the element is in the
 /// wrong namespace, advertises a cipher Waddle does not implement, or is
 /// missing any of the required `<key>`, `<iv>`, or `<sources>` children.
+#[must_use]
 pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
     if !is_encrypted_element(elem) {
         return None;
@@ -183,6 +193,7 @@ pub fn parse_encrypted_element(elem: &Element) -> Option<EncryptedFile> {
 }
 
 /// Returns `true` for `<encrypted xmlns='urn:xmpp:esfs:0'/>`.
+#[must_use]
 pub fn is_encrypted_element(elem: &Element) -> bool {
     elem.is("encrypted", NS_ESFS)
 }

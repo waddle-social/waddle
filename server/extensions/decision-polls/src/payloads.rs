@@ -1,4 +1,4 @@
-use super::*;
+use super::{types, Poll, EXTENSION_ITEM_ROOT, FRAMEWORK_NS};
 
 pub(super) fn poll_extension_item(poll: &Poll) -> types::ExtensionPayload {
     let mut item = ExtensionItem::new();

@@ -1,40 +1,31 @@
 //! Maintenance regressions against committed obligations and their actual sinks.
 #[path = "recovery_prepared_direct_tests.rs"]
 mod prepared_direct;
+use crate::ingress::commit::commit_submission;
+use crate::ingress::effects::delivery::ExternalDeliveryEffect;
+use crate::ingress::effects::{Effect, PlanSink};
+use crate::ingress::execute::{execute_effects, test_hooks};
+use crate::ingress::execute_uow::STALL_DELIVERY_RESOURCE;
+use crate::ingress::maintenance::{
+    run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
+};
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{Deps, ExternalEffect, ImmediateSink, IngressSubmission, RecoveryEnvironment};
+use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
 use crate::server::routes::interpret::DeliveryExecutionContext;
-use crate::{
-    ingress::{
-        commit::commit_submission,
-        effects::{delivery::ExternalDeliveryEffect, Effect, PlanSink},
-        execute::{execute_effects, test_hooks},
-        execute_uow::STALL_DELIVERY_RESOURCE,
-        maintenance::{
-            run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
-            MaintenanceOutcome,
-        },
-        test_support::IngressFixture,
-        Deps, ExternalEffect, ImmediateSink, IngressSubmission, RecoveryEnvironment,
-    },
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-    server::routes::websocket::{
-        interpret_loop::build_interpret_deps, tests as socket_tests, WebSocketState,
-    },
+use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+use crate::server::routes::websocket::{tests as socket_tests, WebSocketState};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use waddle_xmpp::ingress::{
+    DigestContext, DigestInput, EffectMessageIdentity, IngressEffectIntent, MessageKey,
+    NormalizedTarget,
 };
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry,
 };
-use waddle_xmpp::{
-    ingress::{
-        DigestContext, DigestInput, EffectMessageIdentity, IngressEffectIntent, MessageKey,
-        NormalizedTarget,
-    },
-    stream_management::{DetachedSession, InMemorySmSessionRegistry, SmSessionRegistry},
-    Stanza,
-};
+use waddle_xmpp::Stanza;
 
 struct StateEnvironment(Arc<WebSocketState>);
 impl RecoveryEnvironment for StateEnvironment {
@@ -49,7 +40,7 @@ async fn state_for(
     fixture: &IngressFixture,
     sm: Arc<InMemorySmSessionRegistry>,
 ) -> Arc<WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -392,7 +383,7 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
                     .deps
                     .protocol
                     .connection_registry
-                    .get_entry(&resource)
+                    .entry(&resource)
                     .expect("live entry")
             )
             .await
@@ -540,35 +531,30 @@ async fn registered_remote_direct_route_stays_pending(f: IngressFixture) {
     f.close().await;
 }
 mod family_tests {
-    use crate::{
-        ingress::{
-            commit::commit_submission,
-            effects::{
-                delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-                room::ExternalRoomEffect,
-                Effect, PlanSuppressionPolicy,
-            },
-            execute::{execute_effects, test_hooks},
-            maintenance::{
-                run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
-                MaintenanceOutcome,
-            },
-            test_support::IngressFixture,
-            ExternalEffect, ImmediateSink, IngressSubmission, PlannedEffect, RecoveryEnvironment,
-        },
-        ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-        notification_outbox::{NotificationCandidate, NotificationOutboxStore},
-        pending_delivery::DatabasePendingDeliveryStorage,
-        server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState},
+    use crate::ingress::commit::commit_submission;
+    use crate::ingress::effects::delivery::{ExternalDeliveryEffect, PreparedOfflineNotification};
+    use crate::ingress::effects::room::ExternalRoomEffect;
+    use crate::ingress::effects::{Effect, PlanSuppressionPolicy};
+    use crate::ingress::execute::{execute_effects, test_hooks};
+    use crate::ingress::maintenance::{
+        run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
     };
-    use std::{sync::Arc, time::Duration};
-    use waddle_xmpp::{
-        ingress::{
-            IngressEffectIntent, IngressEffectKind, MessageKey, NotificationActivityMutation,
-            NotificationCandidateOutcome, PendingDeliveryMutation,
-        },
-        pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy},
+    use crate::ingress::test_support::IngressFixture;
+    use crate::ingress::{
+        ExternalEffect, ImmediateSink, IngressSubmission, PlannedEffect, RecoveryEnvironment,
     };
+    use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+    use crate::notification_outbox::{NotificationCandidate, NotificationOutboxStore};
+    use crate::pending_delivery::DatabasePendingDeliveryStorage;
+    use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+    use crate::server::routes::websocket::WebSocketState;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_xmpp::ingress::{
+        IngressEffectIntent, IngressEffectKind, MessageKey, NotificationActivityMutation,
+        NotificationCandidateOutcome, PendingDeliveryMutation,
+    };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 
     struct FamilyEnvironment(Arc<WebSocketState>);
     impl RecoveryEnvironment for FamilyEnvironment {
@@ -577,7 +563,7 @@ mod family_tests {
         }
     }
     pub(super) async fn family_state(fixture: &IngressFixture) -> Arc<WebSocketState> {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )
@@ -603,7 +589,7 @@ mod family_tests {
             .await
             .expect("pending storage"),
         );
-        NotificationOutboxStore::new(fixture.db.clone())
+        NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("notification schema");
         state
@@ -730,11 +716,9 @@ mod family_tests {
     /// Recovery preserves observer work for the durable scheduler, regardless
     /// of the legacy plugin's synchronous behavior.
     async fn observer_recovery(fixture: IngressFixture, warning: bool) {
-        use waddle_extensions::{
-            observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
-            ExtensionManager, PluginId,
-        };
-        let plugin_id = PluginId::new("recovery-observer").expect("plugin id");
+        use waddle_extensions::observer_test_support::{ObserverTestBehavior, ObserverTestPlugin};
+        use waddle_extensions::{ExtensionManager, PluginId};
+        let plugin_id = PluginId::try_new("recovery-observer").expect("plugin id");
         let behavior = if warning {
             ObserverTestBehavior::Warning
         } else {
@@ -743,7 +727,7 @@ mod family_tests {
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), behavior);
         // A second frozen observer and a synthetic MUC copy exercise recovery
         // when one obligation can settle while observers remain pending.
-        let sibling_id = PluginId::new("recovery-observer-sibling").expect("sibling id");
+        let sibling_id = PluginId::try_new("recovery-observer-sibling").expect("sibling id");
         let sibling = ObserverTestPlugin::new(sibling_id.clone(), ObserverTestBehavior::Success);
         let mut plugins = vec![plugin.clone()];
         if warning {
@@ -768,8 +752,10 @@ mod family_tests {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
                 correction_target: None,
-                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+                generation: waddle_extensions::ObservationGeneration::try_new(1)
+                    .expect("generation"),
+                identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
+                    .expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
@@ -781,9 +767,9 @@ mod family_tests {
                     room: room.clone(),
                     plugin: sibling_id.clone(),
                     correction_target: None,
-                    generation: waddle_extensions::ObservationGeneration::new(1)
+                    generation: waddle_extensions::ObservationGeneration::try_new(1)
                         .expect("generation"),
-                    identity: waddle_extensions::Sha256Digest::new("0".repeat(64))
+                    identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
                         .expect("identity"),
                     requester: submission.sender.to_bare(),
                     sender: submission.sender.clone(),
@@ -932,14 +918,12 @@ mod family_tests {
     /// An observer sharing a row with delegated groupchat notification
     /// recovery remains pending for the durable scheduler after delegation.
     async fn deferred_observer_with_delegated_recovery_remains_pending(fixture: IngressFixture) {
-        use waddle_extensions::{
-            observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
-            ExtensionManager, PluginId,
-        };
+        use waddle_extensions::observer_test_support::{ObserverTestBehavior, ObserverTestPlugin};
+        use waddle_extensions::{ExtensionManager, PluginId};
         crate::pubsub::DatabasePubSubStorage::open(Some(fixture.db.database_url()))
             .await
             .expect("projection schema");
-        let plugin_id = PluginId::new("recovery-warning-observer").expect("plugin id");
+        let plugin_id = PluginId::try_new("recovery-warning-observer").expect("plugin id");
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
         let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
         let mut state = family_state(&fixture).await;
@@ -969,8 +953,10 @@ mod family_tests {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
                 correction_target: None,
-                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+                generation: waddle_extensions::ObservationGeneration::try_new(1)
+                    .expect("generation"),
+                identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
+                    .expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
@@ -1252,45 +1238,32 @@ mod family_tests {
     }
 }
 mod pin_tests {
+    use crate::ingress::commit::commit_submission;
+    use crate::ingress::execute::{execute_effects, test_hooks};
+    use crate::ingress::execute_uow::STALL_DELIVERY_RESOURCE;
+    use crate::ingress::maintenance::{
+        run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
+    };
+    use crate::ingress::test_support::IngressFixture;
     use crate::ingress::{
-        commit::commit_submission,
-        execute::{execute_effects, test_hooks},
-        execute_uow::STALL_DELIVERY_RESOURCE,
-        maintenance::{
-            run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
-            MaintenanceOutcome,
-        },
-        test_support::IngressFixture,
         IngressDecision, IngressEffectCapture, IngressSubmission, RecoveryEnvironment,
     };
     use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
-    use crate::server::routes::{
-        interpret::{
-            effects::{EffectSink, ImmediateSink, PlanSink},
-            Deps,
-        },
-        websocket::{
-            handlers::message::dispatch_early_message,
-            interpret_loop::build_interpret_deps,
-            tests::{
-                create_test_websocket_state_with_db_pool_and_ingress, register_test_connection,
-            },
-            DmPairKey, WebSocketState,
-        },
+    use crate::server::routes::interpret::effects::{EffectSink, ImmediateSink, PlanSink};
+    use crate::server::routes::interpret::Deps;
+    use crate::server::routes::websocket::handlers::message::dispatch_early_message;
+    use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
+    use crate::server::routes::websocket::tests::{
+        create_test_websocket_state_with_db_pool_and_ingress, register_test_connection,
     };
-    use std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
-        time::Duration,
-    };
-    use waddle_xmpp::{
-        ingress::{DigestContext, DigestInput, IngressEffectIntent},
-        mam::{ArchivedMessage, SqlxMamStorage},
-        registry::OutboundStanza,
-        Stanza,
-    };
+    use crate::server::routes::websocket::{DmPairKey, WebSocketState};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use waddle_xmpp::ingress::{DigestContext, DigestInput, IngressEffectIntent};
+    use waddle_xmpp::mam::{ArchivedMessage, SqlxMamStorage};
+    use waddle_xmpp::registry::OutboundStanza;
+    use waddle_xmpp::Stanza;
     use waddle_xmpp_core::xep0359::StanzaId;
 
     struct StateEnvironment(Arc<WebSocketState>);
@@ -1300,7 +1273,7 @@ mod pin_tests {
         }
     }
     async fn state_for(f: &IngressFixture) -> Arc<WebSocketState> {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
             crate::db::PoolConfig,
         )
@@ -1408,9 +1381,8 @@ mod pin_tests {
             .external
             .iter()
             .find_map(|effect| {
-                use crate::server::routes::interpret::effects::{
-                    delivery::ExternalDeliveryEffect, ExternalEffect,
-                };
+                use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+                use crate::server::routes::interpret::effects::ExternalEffect;
                 match effect {
                     ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
                         jid, ..
@@ -2157,10 +2129,8 @@ async fn groupchat_inbox_push_expires_without_replaying_stale_projection(fixture
     let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(8);
     socket_tests::register_test_connection(&state, &sender, sender_tx).await;
     socket_tests::create_test_session(&state, "juliet").await;
-    use waddle_xmpp::muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
-    };
+    use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
+    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
     let actor = state
         .deps
         .protocol

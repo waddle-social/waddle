@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::{
-    body::Bytes,
-    extract::{Extension, Path},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
+use axum::body::Bytes;
+use axum::extract::{Extension, Path};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::{Json, Router};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,7 +17,8 @@ use waddle_extensions::{
     ProviderPayload, ProviderWebhook, WaddleId,
 };
 
-use crate::{db::actor::DbExecute, db_params};
+use crate::db::actor::DbExecute;
+use crate::db_params;
 
 use super::super::extension_commands::pubsub::publish_extension_pubsub;
 use super::websocket::WebSocketState;
@@ -190,7 +189,7 @@ fn build_ingress_config(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_plugin_for_provider_key(provider_key));
     let plugin =
-        PluginId::new(plugin_name).map_err(|error| IngressRegistryError::InvalidEnvVar {
+        PluginId::try_new(plugin_name).map_err(|error| IngressRegistryError::InvalidEnvVar {
             var: plugin_var,
             detail: error.to_string(),
         })?;
@@ -239,11 +238,11 @@ async fn accept_provider_webhook(
     }
 
     let provider = typed(
-        ProviderId::new(path.provider_id.clone()),
+        ProviderId::try_new(path.provider_id.clone()),
         WebhookError::InvalidProviderId,
     )?;
     let plugin = typed(
-        PluginId::new(path.plugin_id.clone()),
+        PluginId::try_new(path.plugin_id.clone()),
         WebhookError::InvalidPluginId,
     )?;
     let config = websocket_state
@@ -270,10 +269,10 @@ async fn accept_provider_webhook(
     let delivery_id = provider_header(headers, &config.delivery_header)
         .ok_or(WebhookError::MissingDeliveryId)?
         .to_string();
-    let event_type = typed(ProviderEventType::new(event_type), |error| {
+    let event_type = typed(ProviderEventType::try_new(event_type), |error| {
         WebhookError::InvalidPayload(error.to_string())
     })?;
-    let delivery_id = typed(ProviderDeliveryId::new(delivery_id), |error| {
+    let delivery_id = typed(ProviderDeliveryId::try_new(delivery_id), |error| {
         WebhookError::InvalidPayload(error.to_string())
     })?;
     let payload = parse_provider_payload(body)?;
@@ -289,7 +288,7 @@ async fn accept_provider_webhook(
 
     let event = ProviderWebhook {
         waddle_id: typed(
-            WaddleId::new(format!(
+            WaddleId::try_new(format!(
                 "provider-{}-delivery-{}",
                 provider.as_str(),
                 delivery_id.as_str()
@@ -600,7 +599,7 @@ fn flatten_json_payload(
     match value {
         serde_json::Value::Object(map) => {
             for (key, value) in map {
-                let segment = ProviderFieldName::new(key.clone())
+                let segment = ProviderFieldName::try_new(key.clone())
                     .map_err(|error| WebhookError::InvalidPayload(error.to_string()))?;
                 path.push(segment);
                 flatten_json_payload(value, path, fields)?;
@@ -609,7 +608,7 @@ fn flatten_json_payload(
         }
         serde_json::Value::Array(values) => {
             for (index, value) in values.iter().enumerate() {
-                let segment = ProviderFieldName::new(index.to_string())
+                let segment = ProviderFieldName::try_new(index.to_string())
                     .map_err(|error| WebhookError::InvalidPayload(error.to_string()))?;
                 path.push(segment);
                 flatten_json_payload(value, path, fields)?;
@@ -635,10 +634,10 @@ fn provider_field_value(value: &serde_json::Value) -> Result<ProviderFieldValue,
     match value {
         serde_json::Value::Null => Ok(ProviderFieldValue::Null),
         serde_json::Value::Bool(value) => Ok(ProviderFieldValue::Boolean(*value)),
-        serde_json::Value::Number(value) => ProviderFieldNumber::new(value.to_string())
+        serde_json::Value::Number(value) => ProviderFieldNumber::try_new(value.to_string())
             .map(ProviderFieldValue::Number)
             .map_err(|error| WebhookError::InvalidPayload(error.to_string())),
-        serde_json::Value::String(value) => ProviderFieldText::new(value.clone())
+        serde_json::Value::String(value) => ProviderFieldText::try_new(value.clone())
             .map(ProviderFieldValue::Text)
             .map_err(|error| WebhookError::InvalidPayload(error.to_string())),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
@@ -665,8 +664,8 @@ mod tests {
     #[test]
     fn verifies_configured_hmac_sha256_signature() {
         let payload = b"{\"zen\":\"typed events\"}";
-        let secret = b"secret";
-        let mut mac = HmacSha256::new_from_slice(secret).expect("hmac");
+        let secret = rand::random::<[u8; 32]>();
+        let mut mac = HmacSha256::new_from_slice(&secret).expect("hmac");
         mac.update(payload);
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
         let mut headers = HeaderMap::new();
@@ -678,14 +677,14 @@ mod tests {
         assert!(verify_hmac_sha256_signature(
             &headers,
             payload,
-            secret,
+            &secret,
             "x-provider-signature-256",
             "sha256=",
         ));
         assert!(!verify_hmac_sha256_signature(
             &headers,
             b"{}",
-            secret,
+            &secret,
             "x-provider-signature-256",
             "sha256=",
         ));
@@ -735,7 +734,7 @@ mod tests {
     #[test]
     fn host_warning_effect_marks_webhook_dispatch_failed() {
         let warning = ExtensionEffect::HostWarning(
-            waddle_extensions::DisplayText::new("extension failed").expect("warning text"),
+            waddle_extensions::DisplayText::try_new("extension failed").expect("warning text"),
         );
 
         assert!(webhook_effects_failed(&[warning]));
@@ -752,14 +751,14 @@ mod tests {
         let storage = InMemoryPubSubStorage::new();
         let owner: jid::BareJid = "extensions.waddle.social".parse().expect("owner JID");
         let namespace =
-            PayloadNamespace::new("urn:waddle:test-extension:1").expect("payload namespace");
-        let payload = ExtensionPayload::new(
+            PayloadNamespace::try_new("urn:waddle:test-extension:1").expect("payload namespace");
+        let payload = ExtensionPayload::try_new(
             namespace.clone(),
-            XmlElement::new(namespace, "route", vec![], vec![]).expect("payload root"),
+            XmlElement::try_new(namespace, "route", vec![], vec![]).expect("payload root"),
         )
         .expect("payload");
-        let node = PubSubNode::new("urn:waddle:test-extension:1:routes").expect("node");
-        let item_id = PubSubItemId::new("100").expect("item id");
+        let node = PubSubNode::try_new("urn:waddle:test-extension:1:routes").expect("node");
+        let item_id = PubSubItemId::try_new("100").expect("item id");
         let effects = vec![ExtensionEffect::PublishPubSub(PubSubPublish {
             node: node.clone(),
             item_id: Some(item_id.clone()),

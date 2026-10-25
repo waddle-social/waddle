@@ -1,4 +1,4 @@
-use super::*;
+use super::{AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
 
 use crate::types::Affiliation;
 
@@ -219,39 +219,24 @@ fn test_federated_affiliation_config_affiliation_overrides() {
 
     // Check affiliation resolution priority:
     // 1. JID-specific override wins
-    assert_eq!(
-        config.get_affiliation_for_jid(&admin_jid),
-        Affiliation::Owner
-    );
+    assert_eq!(config.affiliation_for_jid(&admin_jid), Affiliation::Owner);
     // 2. Domain-specific override
-    assert_eq!(
-        config.get_affiliation_for_jid(&user_jid),
-        Affiliation::Admin
-    );
+    assert_eq!(config.affiliation_for_jid(&user_jid), Affiliation::Admin);
     // 3. Default affiliation
-    assert_eq!(
-        config.get_affiliation_for_jid(&normal_jid),
-        Affiliation::Member
-    );
+    assert_eq!(config.affiliation_for_jid(&normal_jid), Affiliation::Member);
 
     // Remove overrides
     assert_eq!(
         config.remove_jid_affiliation(&admin_jid),
         Some(Affiliation::Owner)
     );
-    assert_eq!(
-        config.get_affiliation_for_jid(&admin_jid),
-        Affiliation::Admin
-    );
+    assert_eq!(config.affiliation_for_jid(&admin_jid), Affiliation::Admin);
 
     assert_eq!(
         config.remove_domain_affiliation("partner.example.org"),
         Some(Affiliation::Admin)
     );
-    assert_eq!(
-        config.get_affiliation_for_jid(&user_jid),
-        Affiliation::Member
-    );
+    assert_eq!(config.affiliation_for_jid(&user_jid), Affiliation::Member);
 }
 
 #[test]
@@ -366,7 +351,7 @@ fn test_federated_user_join_open_room_open_policy() {
     let jid: jid::BareJid = "user@remote.example.com".parse().unwrap();
 
     // Open room, open policy: anyone can join
-    let affiliation = config.get_affiliation_for_jid(&jid);
+    let affiliation = config.affiliation_for_jid(&jid);
     assert_eq!(affiliation, Affiliation::Member);
 
     let can_join = config.is_allowed_by_policy(&jid, FederatedPermissionPolicy::Open)
@@ -380,12 +365,12 @@ fn test_federated_user_join_members_only_room() {
     let jid: jid::BareJid = "user@remote.example.com".parse().unwrap();
 
     // Members-only room: federated users with Member affiliation can join
-    let affiliation = config.get_affiliation_for_jid(&jid);
+    let affiliation = config.affiliation_for_jid(&jid);
     assert!(affiliation >= Affiliation::Member);
 
     // With None affiliation, cannot join members-only
     let none_config = FederatedAffiliationConfig::open_none();
-    let none_affiliation = none_config.get_affiliation_for_jid(&jid);
+    let none_affiliation = none_config.affiliation_for_jid(&jid);
     assert!(none_affiliation < Affiliation::Member);
 }
 

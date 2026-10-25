@@ -1,13 +1,17 @@
 use super::regular::show_name;
 use super::subscription::{parse_subscription_state, recipient_blocks_sender, roster_storage};
-use super::*;
+use super::{
+    build_available_presence, build_subscription_presence, build_unavailable_presence, info, warn,
+    BareJid, FullJid, Jid, Stanza, SubscriptionStateMachine, SubscriptionType, WebSocketState,
+};
+use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
 pub(super) async fn handle_presence_probe(
     state: &WebSocketState,
     from: BareJid,
     to: BareJid,
     to_full: Option<FullJid>,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     if recipient_blocks_sender(state, &to, &from).await {
         info!(requester = %from, target = %to, "Blocked presence probe");
@@ -22,7 +26,7 @@ pub(super) async fn handle_presence_probe(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(&to);
+        .available_resources_for_user(&to);
     let mut detached_available = match state
         .deps
         .protocol
@@ -118,7 +122,7 @@ pub(super) async fn handle_presence_probe(
             .deps
             .protocol
             .connection_registry
-            .get_presence_state(&resource);
+            .presence_state(&resource);
         let mut probe_response = build_available_presence(
             &resource,
             &from,
@@ -167,7 +171,7 @@ async fn send_unsubscribed_probe_response(
     state: &WebSocketState,
     from: &BareJid,
     to: &BareJid,
-    ordered_relay_origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    ordered_relay_origin: Option<&OrderedRelayRouteOrigin>,
 ) {
     let stanza = Stanza::Presence(build_subscription_presence(
         SubscriptionType::Unsubscribed,

@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    authorize_invite_grant, current_admission_revision, invite_operation_id,
+    joined_members_only_invite_actor, presence_has_status, test_full_jid, test_full_jid_resource,
+    AbortMediatedInviteGrantRollback, AcknowledgeMediatedInviteOperation, AdminApplyError,
+    AdminItem, Affiliation, AffiliationMutationError, ApplyAdminItems, ApplyAffiliationChange,
+    AuthorizeMediatedInvite, BareJid, ChangeAffiliation, CommitMediatedInviteGrantRollback,
+    EnforceMembersOnlyAffiliations, GetAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant,
+    JoinWithAffiliation, MediatedInviteGrantError, MediatedInviteOperationAcknowledgement,
+    MediatedInviteRollbackAbort, MediatedInviteRollbackCommit, MediatedInviteRollbackPreparation,
+    PrepareMediatedInviteGrantRollback, ResolverAffiliationSyncOutcome, Role, RoomActorError,
+    SendError, SyncResolverAffiliation,
+};
 
 #[tokio::test]
 async fn rolled_back_unacknowledged_invite_fences_regrant_join_and_mutation_until_ack() {

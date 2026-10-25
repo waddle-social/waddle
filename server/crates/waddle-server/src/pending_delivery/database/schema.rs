@@ -1,4 +1,5 @@
-use super::*;
+use super::{debug, info, DatabaseDriver, DatabasePendingDeliveryStorage, PendingStorageError};
+use crate::db::Value;
 
 const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
 const V1014_CLAIM_RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
@@ -599,11 +600,7 @@ async fn delete_legacy_mam_query_frame_rows(
     for chunk in row_ids.chunks(LEGACY_MAM_CLEANUP_DELETE_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!("DELETE FROM pending_delivery WHERE row_id IN ({placeholders})");
-        let params = chunk
-            .iter()
-            .cloned()
-            .map(crate::db::Value::from)
-            .collect::<Vec<_>>();
+        let params = chunk.iter().cloned().map(Value::from).collect::<Vec<_>>();
         deleted += tx
             .execute(&sql, params)
             .await
@@ -670,6 +667,8 @@ mod slice5_dedup_index_tests {
 
 #[cfg(test)]
 mod ingress_v1014_claim_reset_tests {
+    use waddle_xmpp::pending_delivery::QuotaPolicy;
+
     use super::*;
 
     #[tokio::test]
@@ -824,6 +823,9 @@ pub(super) async fn initialize_promotion_receipts(
 
 #[cfg(test)]
 mod tests {
+    use crate::db::{Database, DatabaseConfig};
+    use waddle_xmpp::pending_delivery::QuotaPolicy;
+
     use super::*;
 
     #[tokio::test]

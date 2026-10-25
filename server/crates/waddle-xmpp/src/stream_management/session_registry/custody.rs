@@ -1,9 +1,10 @@
 //! Durable ingress custody is independent of the bounded SM replay cache.
 
+use crate::pending_delivery::SmSessionId;
 use crate::stream_management::persistence::{
     IngressCustodyDisposition, PersistedIngressAppend, SmPersistenceStorage,
 };
-use crate::{pending_delivery::SmSessionId, stream_management::SmIngressAppendKey};
+use crate::stream_management::SmIngressAppendKey;
 
 use super::{InMemorySmSessionRegistry, SmRegistryError};
 

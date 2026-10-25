@@ -19,7 +19,7 @@ pub struct DatabasePool {
 
 impl DatabasePool {
     #[instrument(skip_all, err)]
-    pub async fn new(
+    pub async fn try_new(
         config: DatabaseConfig,
         _pool_config: PoolConfig,
     ) -> Result<Self, DatabaseError> {
@@ -91,7 +91,7 @@ mod tests {
     async fn test_pool_creation_in_memory() {
         let config = DatabaseConfig::default();
         let pool_config = PoolConfig;
-        let pool = DatabasePool::new(config, pool_config).await.unwrap();
+        let pool = DatabasePool::try_new(config, pool_config).await.unwrap();
 
         let health = pool.health_check().await.unwrap();
         assert!(health.global_healthy);
@@ -101,7 +101,7 @@ mod tests {
     #[tokio::test]
     async fn failed_health_check_increments_the_failure_counter() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-        let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("pool");
         pool.global_actor().kill();
@@ -120,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_database_accessors() {
         let config = DatabaseConfig::default();
-        let pool = DatabasePool::new(config, PoolConfig).await.unwrap();
+        let pool = DatabasePool::try_new(config, PoolConfig).await.unwrap();
 
         assert_eq!(pool.global().name(), "global");
         let health = pool.health_check().await.unwrap();

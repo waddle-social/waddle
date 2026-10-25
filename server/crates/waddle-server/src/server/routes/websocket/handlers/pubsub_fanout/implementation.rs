@@ -1,0 +1,495 @@
+//! Implementation behind the parent module facade.
+
+use super::build_pubsub_retract_event;
+use super::BroadcastOutcome;
+use super::HashSet;
+use super::Message;
+use super::Stanza;
+use super::WebSocketState;
+use super::{build_pubsub_event, AccessModel, PubSubEvent, PubSubItem};
+use super::{info, warn};
+use super::{owner_self_caps_fan_out, roster_caps_fan_out, CapsFanOutCtx};
+use super::{BareJid, FullJid, Jid};
+
+/// Typed bundle of `fan_out_publish` inputs — keeps the public
+/// signature compact (one `state` + one struct) while still letting
+/// the helper consume each field by reference.
+pub struct FanOutRequest<'a> {
+    pub owner: &'a BareJid,
+    pub node: &'a str,
+    pub published_item: &'a PubSubItem,
+    pub item_id: &'a str,
+    pub publisher: Option<&'a BareJid>,
+    /// The publishing resource's full JID, when known. Used to
+    /// suppress the §3.4 owner-self echo back to the originator.
+    pub publisher_full: Option<&'a FullJid>,
+    /// `true` when this is a XEP-0163 PEP publish (owner is a user
+    /// JID); `false` for generic PubSub / Spaces publishes where the
+    /// §3 roster + owner-self passes would be a leak.
+    pub is_pep: bool,
+}
+
+pub struct FanOutRetractRequest<'a> {
+    pub owner: &'a BareJid,
+    pub node: &'a str,
+    pub item_id: &'a str,
+}
+
+/// Dispatch a §7.1 event notification to every deliverable subscriber.
+///
+/// `req.is_pep` distinguishes XEP-0163 PEP self-publishes (where
+/// `owner` is a user JID and the §3 roster + owner-self passes apply)
+/// from generic PubSub or Spaces publishes (where `owner` is a service
+/// component domain and the §3 passes are skipped). Without this
+/// guard, a non-PEP publish would leak to the publisher's roster
+/// contacts that happen to advertise `<node>+notify` for the
+/// (unrelated) generic node — a real authorization bypass.
+pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner: req.owner,
+            node: req.node,
+            publisher_full: req.publisher_full,
+            is_pep: req.is_pep,
+            notification: Notification::Publish {
+                item: req.published_item,
+                item_id: req.item_id,
+                publisher: req.publisher,
+            },
+        },
+    )
+    .await;
+}
+
+/// Publish and retract notifications share recipient authorization and routing.
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) enum Notification<'a> {
+    Publish {
+        item: &'a PubSubItem,
+        item_id: &'a str,
+        publisher: Option<&'a BareJid>,
+    },
+    Retract {
+        item_id: &'a str,
+        notify: bool,
+    },
+}
+
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) struct EventFanOutRequest<'a> {
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) owner: &'a BareJid,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) node: &'a str,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) publisher_full:
+        Option<&'a FullJid>,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) is_pep: bool,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) notification:
+        Notification<'a>,
+}
+
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_out_event(
+    state: &WebSocketState,
+    req: EventFanOutRequest<'_>,
+) {
+    let owner = req.owner;
+    let node = req.node;
+    let publisher_full = req.publisher_full;
+    let is_pep = req.is_pep;
+    let storage = &state.deps.protocol.pubsub_storage;
+
+    let node_cfg = match storage.get_node(owner, node).await {
+        Ok(Some(record)) => record.config,
+        Ok(None) => {
+            warn!(
+                owner = %owner,
+                node,
+                "Fan-out skipped: node disappeared before config fetch"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node,
+                error = %error,
+                "Fan-out skipped: node config fetch failed"
+            );
+            return;
+        }
+    };
+
+    // Private PEP nodes carve out of roster + CAPS fan-out even though
+    // the published payload is broadcast at the pubsub layer. Whitelist
+    // `access_model` only gates the items-fetch path; without this
+    // check a contact with `+notify` for the node's namespace would
+    // still receive headline events (issue #1094: MDS read-state
+    // leaked to the whole roster this way). Derived from the node's
+    // actual `access_model` — NOT a node-name allowlist — so any
+    // whitelist-configured node (XEP-0490 MDS, XEP-0402 bookmarks,
+    // story reads, status preference, DND, DM bookmarks, ...) is
+    // private by construction: the §3 roster pass runs only for
+    // Open/Presence/Roster nodes; Whitelist/Authorize nodes reach the
+    // owner's own resources exclusively (§3.4 owner-self pass).
+    let is_private_pep_node = is_pep
+        && matches!(
+            node_cfg.access_model,
+            AccessModel::Whitelist | AccessModel::Authorize
+        );
+
+    let subscribers = match storage.list_deliverable_subscribers(owner, node).await {
+        Ok(subs) => subs,
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node,
+                error = %error,
+                "Fan-out skipped: subscriber list fetch failed"
+            );
+            return;
+        }
+    };
+
+    // XEP-0163 §3 fan-out is presence-driven, not subscription-driven —
+    // an empty deliverable-subscriber list does NOT terminate fan-out.
+    // We still need to iterate the publisher's roster for from/both
+    // contacts whose CAPS advertise `<node>+notify`.
+
+    let from = Jid::from(owner.clone());
+    let event: Message = match req.notification {
+        Notification::Publish {
+            item,
+            item_id,
+            publisher,
+        } => {
+            // §7.1.5: include publisher only when it differs from the owner.
+            // §7.1.3.5: honor deliver_payloads only for published items.
+            let event_item = PubSubItem {
+                id: Some(item_id.to_string()),
+                publisher: publisher.filter(|p| *p != owner).cloned(),
+                payload: node_cfg
+                    .deliver_payloads
+                    .then(|| item.payload.clone())
+                    .flatten(),
+            };
+            let event = PubSubEvent::new(node.to_string(), vec![event_item]);
+            build_pubsub_event(&from, &from, &event)
+        }
+        Notification::Retract { item_id, notify } => {
+            if !node_cfg.notify_retract && !notify {
+                return;
+            }
+            build_pubsub_retract_event(&from, &from, node, item_id)
+        }
+    };
+
+    let mut intended: u32 = 0;
+    let mut delivered: u32 = 0;
+    let mut dropped_full: u32 = 0;
+    let mut dropped_closed: u32 = 0;
+    let mut not_connected: u32 = 0;
+
+    // Track resources reached via the explicit-subscribers loop so the
+    // roster + CAPS phase doesn't double-deliver to the same client.
+    // We also pre-seed the publishing resource itself (when known) so
+    // the §3.4 owner-self pass doesn't echo a headline event back to
+    // the same FullJid that just received the publish IQ result —
+    // matches Prosody/ejabberd behavior.
+    let mut already_delivered: HashSet<FullJid> = HashSet::new();
+    if let Some(publisher_full) = publisher_full {
+        already_delivered.insert(publisher_full.clone());
+    }
+
+    for sub in subscribers {
+        if is_private_pep_node
+            && !private_node_subscriber_allowed(
+                state,
+                owner,
+                node,
+                &node_cfg,
+                &sub.subscriber.to_bare(),
+            )
+            .await
+        {
+            continue;
+        }
+
+        let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
+            Ok(full) => vec![full.clone()],
+            Err(bare) => {
+                // §6.1.6: notify all resources of the bare JID. Live
+                // resources go through the connection registry; detached
+                // (XEP-0198 resumable) sessions are enumerated explicitly
+                // so events still reach them via the per-resource SM
+                // stash even when the user has no live socket at publish
+                // time.
+                let mut all = waddle_xmpp::registry::get_resources_for_user(
+                    &state.deps.protocol.user_registry,
+                    bare,
+                )
+                .await;
+                match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .detached_resources_for_user(bare)
+                    .await
+                {
+                    Ok(detached) => all.extend(detached),
+                    Err(error) => warn!(
+                        bare = %bare,
+                        error = %error,
+                        "Failed to enumerate detached resources for bare-JID fan-out"
+                    ),
+                }
+                all
+            }
+        };
+
+        if target_resources.is_empty() {
+            // Bare-JID subscriber fully offline (no live, no resumable),
+            // or a full-JID we never see live. Headline messages MUST
+            // NOT go to offline storage (RFC 6121 §8.5.2.1.4); the
+            // subscriber catches up via `<items/>` on reconnect.
+            intended += 1;
+            not_connected += 1;
+            continue;
+        }
+
+        for resource in target_resources {
+            intended += 1;
+            already_delivered.insert(resource.clone());
+            let mut message = event.clone();
+            message.to = Some(Jid::from(resource.clone()));
+            let stanza = Stanza::Message(message);
+
+            match state
+                .deps
+                .protocol
+                .connection_registry
+                .try_send_to(&resource, stanza.clone())
+            {
+                BroadcastOutcome::Delivered => delivered += 1,
+                BroadcastOutcome::DroppedFull => dropped_full += 1,
+                BroadcastOutcome::DroppedClosed => match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(
+                        &resource,
+                        &stanza,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => dropped_closed += 1,
+                    Err(error) => {
+                        warn!(
+                            resource = %resource,
+                            error = %error,
+                            "Failed to record fan-out stanza for detached resource after closed live send"
+                        );
+                        dropped_closed += 1;
+                    }
+                },
+                BroadcastOutcome::NotConnected => match state
+                    .deps
+                    .protocol
+                    .sm_session_registry
+                    .record_stanza_for_detached_bound_resource(
+                        &resource,
+                        &stanza,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => not_connected += 1,
+                    Err(error) => {
+                        warn!(
+                            resource = %resource,
+                            error = %error,
+                            "Failed to record fan-out stanza for detached resource"
+                        );
+                        not_connected += 1;
+                    }
+                },
+            }
+        }
+    }
+
+    // XEP-0163 §3: presence-driven fan-out. Two passes follow the
+    // explicit-subscribers loop:
+    //
+    // - Roster pass: every roster from/both contact of the publisher,
+    //   filtered by per-resource cached CAPS for `<node>+notify`. This
+    //   is the §3 mainline. XEP-0191 blocking is honored both directions
+    //   (publisher blocking contact, contact blocking publisher).
+    //
+    // - Self pass: the publisher's own *other* resources (PEP §3.4 —
+    //   account owner is among the appropriate subscribers). Same +notify
+    //   filter. The publishing resource itself is pre-seeded into
+    //   `already_delivered` above so it does NOT receive a headline
+    //   echo of the item it just authored.
+    //
+    // Resources mid-resolution (presence with `<c/>` arrived but the
+    // disco#info round-trip hasn't completed) carry no ver mapping and
+    // are skipped here. Replaying the last item to such a resource on
+    // resolution-complete is `send_last_published_item` territory — not
+    // yet wired through the runtime; tracked for a follow-up PR.
+    let notify_filter = format!("{node}+notify");
+    let ctx = CapsFanOutCtx {
+        from: &from,
+        event: &event,
+        notify_filter: &notify_filter,
+    };
+    // Codex P1 review (PR #439): the §3 roster + owner-self passes
+    // are XEP-0163 PEP-specific. For non-PEP publishes (generic
+    // PubSub on a service component, Spaces) `owner` is a service
+    // domain and the publisher's roster bears no authorization
+    // relationship to the published node — running the passes there
+    // would leak the event to roster contacts that advertise
+    // `<node>+notify` for an unrelated node URI.
+    let (roster_metrics, self_metrics) = if is_pep {
+        let roster = if is_private_pep_node {
+            FanOutMetrics::default()
+        } else {
+            roster_caps_fan_out(state, owner, &ctx, &mut already_delivered).await
+        };
+        let self_ = owner_self_caps_fan_out(state, owner, &ctx, &mut already_delivered).await;
+        (roster, self_)
+    } else {
+        (FanOutMetrics::default(), FanOutMetrics::default())
+    };
+    intended += roster_metrics.intended + self_metrics.intended;
+    delivered += roster_metrics.delivered + self_metrics.delivered;
+    dropped_full += roster_metrics.dropped_full + self_metrics.dropped_full;
+    dropped_closed += roster_metrics.dropped_closed + self_metrics.dropped_closed;
+    not_connected += roster_metrics.not_connected + self_metrics.not_connected;
+
+    debug_assert_eq!(
+        intended,
+        delivered + dropped_full + dropped_closed + not_connected,
+        "fan-out accounting must cover every dispatch attempt exactly once"
+    );
+
+    info!(
+        owner = %owner,
+        node,
+        intended,
+        delivered,
+        dropped_full,
+        dropped_closed,
+        not_connected,
+        roster_caps_intended = roster_metrics.intended,
+        roster_caps_delivered = roster_metrics.delivered,
+        self_caps_intended = self_metrics.intended,
+        self_caps_delivered = self_metrics.delivered,
+        "PubSub event fan-out complete"
+    );
+}
+
+/// Whether an explicit subscriber of a private (Whitelist/Authorize)
+/// PEP node is entitled to event notifications.
+///
+/// XEP-0060 §4.5 + §8.9: on a Whitelist node the owner whitelists an
+/// entity by affiliating it (member/publisher), and that entity's
+/// server-approved subscription MUST then be notified (§7.1) — the
+/// access model suppresses the implicit XEP-0163 §3 roster fan-out,
+/// not deliveries the owner explicitly authorized.
+///
+/// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
+/// decision arm as the subscribe/read gate — so the fan-out
+/// entitlement can never diverge from it: the XEP-0402 bookmarks
+/// owner-only carve-out and the Authorize arm apply identically here.
+/// This matters because an XEP-0060 §8.8 owner subscriptions-set
+/// writes subscription rows WITHOUT a can_subscribe check — a row's
+/// existence is not authorization. The node config fetched once at the
+/// top of `fan_out_publish` is reused, so the only per-subscriber
+/// storage hit is the affiliation lookup. Fails closed on lookup
+/// errors — withholding one event beats leaking to a subscriber we
+/// cannot vet.
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn private_node_subscriber_allowed(
+    state: &WebSocketState,
+    owner: &BareJid,
+    node: &str,
+    node_cfg: &waddle_xmpp::pubsub::NodeConfig,
+    subscriber: &BareJid,
+) -> bool {
+    if subscriber == owner {
+        return true;
+    }
+    match crate::pubsub_authz::effective_affiliation(
+        &state.deps.protocol.pubsub_storage,
+        owner,
+        node,
+        subscriber,
+        true,
+    )
+    .await
+    {
+        Ok(affiliation) => crate::pubsub_authz::can_subscribe_with_config(
+            node_cfg,
+            affiliation,
+            owner,
+            node,
+            subscriber,
+            true,
+        ),
+        Err(error) => {
+            warn!(
+                owner = %owner,
+                node,
+                subscriber = %subscriber,
+                error = %error,
+                "Subscriber authorization lookup failed during private-node fan-out; failing closed"
+            );
+            false
+        }
+    }
+}
+
+/// Service-node retractions use only explicit subscriptions.
+pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
+    fan_out_retract_with_options(state, req, None, false, false).await;
+}
+
+/// PEP retractions also reach roster contacts and the owner's other resources.
+pub async fn fan_out_pep_retract(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    publisher_full: Option<&FullJid>,
+    notify: bool,
+) {
+    fan_out_retract_with_options(state, req, publisher_full, true, notify).await;
+}
+
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) async fn fan_out_retract_with_options(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    publisher_full: Option<&FullJid>,
+    is_pep: bool,
+    notify: bool,
+) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner: req.owner,
+            node: req.node,
+            publisher_full,
+            is_pep,
+            notification: Notification::Retract {
+                item_id: req.item_id,
+                notify,
+            },
+        },
+    )
+    .await;
+}
+
+#[derive(Default)]
+pub(in crate::server::routes::websocket::handlers::pubsub_fanout) struct FanOutMetrics {
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) intended: u32,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) delivered: u32,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) dropped_full: u32,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) dropped_closed: u32,
+    pub(in crate::server::routes::websocket::handlers::pubsub_fanout) not_connected: u32,
+}

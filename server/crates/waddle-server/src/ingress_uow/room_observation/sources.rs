@@ -1,6 +1,9 @@
+use crate::db::Rows;
+use crate::ingress_uow::DbRetryClass;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use uuid::Uuid;
 use waddle_extensions::{
     ConfiguredRoomObserver, MessageRevision, ObservationGeneration, OriginId, PluginId,
@@ -44,6 +47,7 @@ fn canonical_scope(scope: &RoomObservationScope) -> RoomObservationScope {
             rooms.dedup();
             RoomObservationScope::Rooms(rooms)
         }
+        _ => scope.clone(),
     }
 }
 
@@ -84,7 +88,7 @@ async fn assert_source_locks(
 ) -> Result<(), ObservationError> {
     if !locked.contains(&root) {
         return Err(ObservationError::RetryableDatabase(
-            crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+            DbRetryClass::CanonicalLockContention,
         ));
     }
     let mut rows = tx
@@ -100,7 +104,7 @@ async fn assert_source_locks(
             MessageKey::from_storage(Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?);
         if !locked.contains(&key) {
             return Err(ObservationError::RetryableDatabase(
-                crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+                DbRetryClass::CanonicalLockContention,
             ));
         }
     }
@@ -128,7 +132,7 @@ async fn roots_for_target(
 
 async fn settle_publications(
     tx: &mut IngressUowTransaction<'_>,
-    mut rows: crate::db::Rows,
+    mut rows: Rows,
     now_ms: i64,
 ) -> Result<(), ObservationError> {
     let mut ids = Vec::new();
@@ -177,7 +181,7 @@ pub(super) async fn sync_configured(
         roots.extend(live_generation_roots(tx, &observer.plugin, generation).await?);
     }
     let canonical_locks = prelock_sources(tx, &roots, &[]).await?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for observer in configured {
         if !seen.insert(observer.plugin.clone()) {
             return Err(ObservationError::ConfigurationConflict);
@@ -401,12 +405,12 @@ pub(super) async fn stale_source_work(
     settle_publications(tx, publications, now_ms).await?;
     for (plugin, generation, identity, room, message_key) in pending {
         let subscription = RoomObservationSubscription {
-            plugin: PluginId::new(plugin).map_err(|_| ObservationError::Codec)?,
-            generation: ObservationGeneration::new(
+            plugin: PluginId::try_new(plugin).map_err(|_| ObservationError::Codec)?,
+            generation: ObservationGeneration::try_new(
                 u64::try_from(generation).map_err(|_| ObservationError::Codec)?,
             )
             .map_err(|_| ObservationError::Codec)?,
-            identity: Sha256Digest::new(identity).map_err(|_| ObservationError::Codec)?,
+            identity: Sha256Digest::try_new(identity).map_err(|_| ObservationError::Codec)?,
             room: room.parse().map_err(|_| ObservationError::Codec)?,
         };
         let message_key = MessageKey::from_storage(
@@ -455,11 +459,11 @@ async fn stale_generation(
         for (old_generation, identity, room, message_key) in pending {
             let subscription = RoomObservationSubscription {
                 plugin: plugin.clone(),
-                generation: ObservationGeneration::new(
+                generation: ObservationGeneration::try_new(
                     u64::try_from(old_generation).map_err(|_| ObservationError::Codec)?,
                 )
                 .map_err(|_| ObservationError::Codec)?,
-                identity: Sha256Digest::new(identity).map_err(|_| ObservationError::Codec)?,
+                identity: Sha256Digest::try_new(identity).map_err(|_| ObservationError::Codec)?,
                 room: room.parse().map_err(|_| ObservationError::Codec)?,
             };
             let message_key = MessageKey::from_storage(
@@ -475,7 +479,7 @@ fn current_stanza_id(message: &Message, room: &BareJid) -> Option<StanzaId> {
     xep0359::extract_stanza_ids(message)
         .into_iter()
         .find(|id| id.by == *room)
-        .and_then(|id| StanzaId::new(id.id).ok())
+        .and_then(|id| StanzaId::try_new(id.id).ok())
 }
 
 fn source_for_new_message(
@@ -486,9 +490,9 @@ fn source_for_new_message(
     body: &str,
     now: DateTime<Utc>,
 ) -> Result<RoomMessageSource, ObservationError> {
-    let digest = Sha256Digest::new(hex::encode(Sha256::digest(body.as_bytes())))
+    let digest = Sha256Digest::try_new(hex::encode(Sha256::digest(body.as_bytes())))
         .map_err(|_| ObservationError::Codec)?;
-    let observed_at = Timestamp::new(now.to_rfc3339()).map_err(|_| ObservationError::Codec)?;
+    let observed_at = Timestamp::try_new(now.to_rfc3339()).map_err(|_| ObservationError::Codec)?;
     Ok(RoomMessageSource {
         room: room.clone(),
         revision_stanza_id: stanza_id.clone(),
@@ -618,10 +622,10 @@ pub(super) async fn capture(
             );
             stored.source.revision_stanza_id = stanza_id.clone();
             stored.source.body_digest =
-                Sha256Digest::new(hex::encode(Sha256::digest(body.as_bytes())))
+                Sha256Digest::try_new(hex::encode(Sha256::digest(body.as_bytes())))
                     .map_err(|_| ObservationError::Codec)?;
             stored.source.observed_at =
-                Timestamp::new(now.to_rfc3339()).map_err(|_| ObservationError::Codec)?;
+                Timestamp::try_new(now.to_rfc3339()).map_err(|_| ObservationError::Codec)?;
             tx.transaction_mut().execute(
                 "UPDATE extension_room_sources SET revision = ?, revision_stanza_id = ?, source_json = ? WHERE source_key = ? AND retracted = 0",
                 crate::db_params![i64::try_from(stored.source.revision.get()).map_err(|_| ObservationError::Codec)?, stanza_id.as_str(), serde_json::to_string(&stored.source)?, stored.key.to_storage().to_string()],
@@ -639,7 +643,7 @@ pub(super) async fn capture(
         (stored.key, stored.source)
     } else {
         let Some(origin) =
-            xep0359::extract_origin_id(message).and_then(|id| OriginId::new(id.id).ok())
+            xep0359::extract_origin_id(message).and_then(|id| OriginId::try_new(id.id).ok())
         else {
             for subscription in &subscriptions {
                 terminal_receipt(tx, subscription, key, "missing_origin_id", now_ms).await?;

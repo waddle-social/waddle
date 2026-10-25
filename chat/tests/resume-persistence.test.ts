@@ -1201,12 +1201,12 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     (client as unknown as {
       xmpp: {
         disconnect: () => Promise<void>;
-        get_resume_state: () => PersistedSmResumeState;
+        resume_state: () => PersistedSmResumeState;
         try_request_stream_management_ack_for_pagehide: () => "accepted";
       };
     }).xmpp = {
       disconnect: () => socketClose.promise,
-      get_resume_state: () => ({ previd: "must-not-persist", inboundH: 1, outboundH: 1 }),
+      resume_state: () => ({ previd: "must-not-persist", inboundH: 1, outboundH: 1 }),
       try_request_stream_management_ack_for_pagehide: () => {
         acknowledgementRequests += 1;
         return "accepted";
@@ -1864,9 +1864,9 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       persistence,
     );
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
+      xmpp: { resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
-      get_resume_state: () => ({
+      resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
@@ -1890,7 +1890,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
     );
     (client as unknown as {
       xmpp: {
-        get_resume_state: () => {
+        resume_state: () => {
           previd: string;
           inboundH: number;
           outboundH: number;
@@ -1900,7 +1900,7 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
         };
       };
     }).xmpp = {
-      get_resume_state: () => ({
+      resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,
@@ -2027,9 +2027,9 @@ describe("createLocalStorageResumePersistence — localStorage adapter", () => {
       persistence,
     );
     (client as unknown as {
-      xmpp: { get_resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
+      xmpp: { resume_state: () => { previd: string; inboundH: number; outboundH: number; maxResumeSeconds: number; hasUnackedOutbound: boolean } };
     }).xmpp = {
-      get_resume_state: () => ({
+      resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,

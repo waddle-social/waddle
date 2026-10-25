@@ -1,3 +1,12 @@
+use crate::auth::AuthenticatedPrincipalRef;
+use crate::ownership::CurrentNodeIdentityGuard;
+use crate::ownership::ExactReleaseOutcome;
+use crate::pending_delivery::SmSessionId;
+use crate::stream_management::persistence::IngressCustodyDisposition;
+use crate::stream_management::persistence::PersistedIngressAppend;
+use crate::stream_management::SmDrainedIngressAppend;
+use crate::stream_management::SmIngressAppendKey;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -119,10 +128,9 @@ pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_
 pub struct InMemorySmSessionRegistry {
     pub(super) sessions: RwLock<HashMap<String, DetachedSession>>,
     pub(super) claimed_sessions: RwLock<HashMap<String, DetachedSession>>,
-    pub(super) stale_snapshots: RwLock<HashSet<crate::pending_delivery::SmSessionId>>,
-    pub(super) promotion_snapshots: RwLock<
-        HashMap<crate::pending_delivery::SmSessionId, super::reconciliation::PromotionSnapshot>,
-    >,
+    pub(super) stale_snapshots: RwLock<HashSet<SmSessionId>>,
+    pub(super) promotion_snapshots:
+        RwLock<HashMap<SmSessionId, super::reconciliation::PromotionSnapshot>>,
     pub(super) stream_locks: Vec<StreamLockBucket>,
     pub(super) max_sessions: usize,
     /// Recently applied XEP-0424/0425 tombstones, kept for the
@@ -705,7 +713,7 @@ impl InMemorySmSessionRegistry {
             }
         }
         if let Some(storage) = &self.persistence {
-            let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+            let session_id = SmSessionId::new(stream_id.to_string());
             superseded.sort_by(|left, right| {
                 left.owner()
                     .node_id
@@ -842,7 +850,7 @@ impl InMemorySmSessionRegistry {
                 acquisitions.retain(|(id, _, _)| id != stream_id);
             }
             if let Some(storage) = &self.persistence {
-                let session_id = crate::pending_delivery::SmSessionId::new(stream_id.to_string());
+                let session_id = SmSessionId::new(stream_id.to_string());
                 superseded.sort_by(|left, right| {
                     left.owner()
                         .node_id
@@ -948,7 +956,7 @@ impl InMemorySmSessionRegistry {
     pub async fn store_session_with_principal(
         &self,
         session: DetachedSession,
-        principal: crate::auth::AuthenticatedPrincipalRef,
+        principal: AuthenticatedPrincipalRef,
     ) -> Result<Vec<DetachedSession>, SmRegistryError> {
         if self.persistence.is_none() {
             return Err(SmRegistryError::Internal(
@@ -966,8 +974,8 @@ impl InMemorySmSessionRegistry {
     pub async fn store_session_with_drained_ingress_appends(
         &self,
         session: DetachedSession,
-        principal: crate::auth::AuthenticatedPrincipalRef,
-        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
+        principal: AuthenticatedPrincipalRef,
+        drained_appends: Vec<SmDrainedIngressAppend>,
     ) -> Result<super::StoredDetachedSession, SmRegistryError> {
         if self.persistence.is_none() {
             return Err(SmRegistryError::Internal(
@@ -984,14 +992,12 @@ impl InMemorySmSessionRegistry {
     pub async fn session_principal(
         &self,
         stream_id: &str,
-    ) -> Result<Option<crate::auth::AuthenticatedPrincipalRef>, SmRegistryError> {
+    ) -> Result<Option<AuthenticatedPrincipalRef>, SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(None);
         };
         storage
-            .get_session_principal(&crate::pending_delivery::SmSessionId::new(
-                stream_id.to_string(),
-            ))
+            .get_session_principal(&SmSessionId::new(stream_id.to_string()))
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))
     }
@@ -1242,7 +1248,7 @@ impl InMemorySmSessionRegistry {
             );
             let epoch = match self.claim_store.ensure_claimed(&entity, &identity).await {
                 Ok(epoch) => epoch,
-                Err(crate::ownership::ClaimError::AlreadyClaimed) => {
+                Err(ClaimError::AlreadyClaimed) => {
                     // Another (live) node already holds this entity's
                     // claim — never hydrate a second in-memory copy. The
                     // orphan reaper, not this pass, is what reclaims a row
@@ -1616,7 +1622,7 @@ impl InMemorySmSessionRegistry {
             return Ok(ReclaimedHydrationOutcome::MissingDurable);
         };
 
-        let session_id = crate::pending_delivery::SmSessionId::new(stream_id.clone());
+        let session_id = SmSessionId::new(stream_id.clone());
         let persisted = match storage.get_session(&session_id).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -1741,7 +1747,7 @@ impl InMemorySmSessionRegistry {
         storage: &dyn super::super::persistence::SmPersistenceStorage,
         entity: &Entity,
         caller_fence: &super::super::persistence::SmClaimFence,
-        session_id: &crate::pending_delivery::SmSessionId,
+        session_id: &SmSessionId,
     ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
         // Poisoned headers/queues cannot produce a DetachedSession. Settle by
         // immutable stream identity and fence before the guarded source delete.
@@ -1948,7 +1954,7 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         fence: &super::super::persistence::SmClaimFence,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+    ) -> Result<ExactReleaseOutcome, SmRegistryError> {
         let stream_lock = self.stream_lock(&entity.id)?;
         let _stream_guard = stream_lock.lock().await;
         match self.stream_liveness(&entity.id) {
@@ -1957,7 +1963,7 @@ impl InMemorySmSessionRegistry {
                 // Never let terminal cleanup release its claim.
                 self.clear_pending_reclaimed_hydration(entity, fence, reservation);
                 self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
-                return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+                return Ok(ExactReleaseOutcome::NotOwned);
             }
             None => {
                 if !self.try_record_terminal_reclaimed_fence(&entity.id, fence.clone(), reservation)
@@ -2016,7 +2022,7 @@ impl InMemorySmSessionRegistry {
             pending.remove(&(entity.id.clone(), fence.clone()));
         }
         if let Some(storage) = &self.persistence {
-            let session_id = crate::pending_delivery::SmSessionId::new(entity.id.clone());
+            let session_id = SmSessionId::new(entity.id.clone());
             storage.evict_claim_cache(&session_id, fence);
         }
         self.clear_pending_reclaimed_hydration(entity, fence, reservation);
@@ -2035,10 +2041,10 @@ impl InMemorySmSessionRegistry {
         entity: &Entity,
         attempted_owner: &NodeIdentity,
         reservation: ReclaimedClaimReservation,
-    ) -> Result<crate::ownership::ExactReleaseOutcome, SmRegistryError> {
+    ) -> Result<ExactReleaseOutcome, SmRegistryError> {
         if entity.entity_type != EntityType::SmSession {
             self.cancel_reclaimed_claim_fence_reservation(&entity.id, reservation);
-            return Ok(crate::ownership::ExactReleaseOutcome::NotOwned);
+            return Ok(ExactReleaseOutcome::NotOwned);
         }
         let snapshot = match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -2103,12 +2109,10 @@ impl InMemorySmSessionRegistry {
             return Ok(());
         };
         storage
-            .delete_session(&crate::pending_delivery::SmSessionId::new(
-                stream_id.to_string(),
-            ))
+            .delete_session(&SmSessionId::new(stream_id.to_string()))
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        self.forget_snapshot_reconciliation(&crate::pending_delivery::SmSessionId::new(stream_id));
+        self.forget_snapshot_reconciliation(&SmSessionId::new(stream_id));
         Ok(())
     }
 
@@ -2120,7 +2124,7 @@ impl InMemorySmSessionRegistry {
         let Some(storage) = &self.persistence else {
             return Ok(());
         };
-        let stream = crate::pending_delivery::SmSessionId::new(stream_id);
+        let stream = SmSessionId::new(stream_id);
         storage
             .delete_promotion_session(&stream, expected_fence)
             .await
@@ -2132,28 +2136,25 @@ impl InMemorySmSessionRegistry {
     pub(super) async fn persist_delete_session_with_authority(
         &self,
         stream_id: &str,
-        authority: &crate::ownership::CurrentNodeIdentityGuard,
+        authority: &CurrentNodeIdentityGuard,
     ) -> Result<(), SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(());
         };
         storage
-            .delete_session_with_authority(
-                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
-                authority,
-            )
+            .delete_session_with_authority(&SmSessionId::new(stream_id.to_string()), authority)
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-        self.forget_snapshot_reconciliation(&crate::pending_delivery::SmSessionId::new(stream_id));
+        self.forget_snapshot_reconciliation(&SmSessionId::new(stream_id));
         Ok(())
     }
 
     pub(super) async fn persist_detached_session_snapshot(
         &self,
         session: &DetachedSession,
-        principal: Option<&crate::auth::AuthenticatedPrincipalRef>,
-        drained_appends: Vec<crate::stream_management::SmDrainedIngressAppend>,
-    ) -> Result<Vec<crate::stream_management::SmIngressAppendKey>, SmRegistryError> {
+        principal: Option<&AuthenticatedPrincipalRef>,
+        drained_appends: Vec<SmDrainedIngressAppend>,
+    ) -> Result<Vec<SmIngressAppendKey>, SmRegistryError> {
         let Some(storage) = &self.persistence else {
             return Ok(Vec::new());
         };
@@ -2168,22 +2169,19 @@ impl InMemorySmSessionRegistry {
                 entry.ingress_receipts.clone(),
             )?);
         }
-        let accepting_stream = crate::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        let accepting_stream = SmSessionId::new(session.stream_id.clone());
         let appended_at = chrono::Utc::now();
         let appends = drained_appends
             .into_iter()
-            .map(
-                |append| crate::stream_management::persistence::PersistedIngressAppend {
-                    key: append.ticket.key,
-                    accepting_stream: accepting_stream.clone(),
-                    sequence: append.sequence,
-                    appended_at,
-                    payload: append.payload,
-                    original_receipt_at: append.original_receipt_at,
-                    disposition:
-                        crate::stream_management::persistence::IngressCustodyDisposition::Pending,
-                },
-            )
+            .map(|append| PersistedIngressAppend {
+                key: append.ticket.key,
+                accepting_stream: accepting_stream.clone(),
+                sequence: append.sequence,
+                appended_at,
+                payload: append.payload,
+                original_receipt_at: append.original_receipt_at,
+                disposition: IngressCustodyDisposition::Pending,
+            })
             .collect::<Vec<_>>();
         match principal {
             // Only a principal-bearing detach drains a socket queue.
@@ -2239,10 +2237,7 @@ impl InMemorySmSessionRegistry {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
         storage
-            .delete_unacked(
-                &crate::pending_delivery::SmSessionId::new(stream_id.to_string()),
-                sequences,
-            )
+            .delete_unacked(&SmSessionId::new(stream_id.to_string()), sequences)
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
     }
@@ -2263,11 +2258,7 @@ impl InMemorySmSessionRegistry {
             return Ok(0);
         }
         storage
-            .delete_promotion_unacked(
-                &crate::pending_delivery::SmSessionId::new(&session.stream_id),
-                sequences,
-                &fence,
-            )
+            .delete_promotion_unacked(&SmSessionId::new(&session.stream_id), sequences, &fence)
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))
     }
@@ -2287,7 +2278,7 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
     ) -> Result<Arc<tokio::sync::Mutex<()>>, SmRegistryError> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = DefaultHasher::new();
         stream_id.hash(&mut hasher);
         let shard = (hasher.finish() as usize) % self.stream_locks.len();
         let mut locks = self.stream_locks[shard]

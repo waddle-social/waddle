@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    apply_groupchat_retraction_tombstone, interpret, lookup_groupchat_retraction_target,
+    seed_groupchat_archive_row, Arc, ConnectionRegistry, Deps, InboxStorage, MamStorage,
+    OutboundEvent,
+};
+use waddle_xmpp::mam::ArchivedMessage as MamArchivedMessage;
+use xmpp_parsers::message::MessageType as XmppMessageType;
 
 // XEP-0424 — groupchat retraction lookup (#281)
 // -----------------------------------------------------------------
@@ -205,13 +211,13 @@ async fn xep_0424_retraction_retry_preserves_existing_moderation_tombstone() {
     seed_groupchat_archive_row(&mam, &room, archive_pk, "original-wire-id").await;
 
     let moderation_tombstone = ArchivedTombstone {
-        retraction_id: RichMessageId::new("moderation-archive-id"),
+        retraction_id: RichMessageId::try_new("moderation-archive-id"),
         stamp: chrono::Utc::now(),
         moderation: Some(ArchivedModeration {
-            target_id: RichMessageId::new(archive_pk).expect("non-empty target id"),
+            target_id: RichMessageId::try_new(archive_pk).expect("non-empty target id"),
             moderated_by: "room-owner@example.com".parse().expect("moderator JID"),
             stamp: Some(chrono::Utc::now()),
-            reason: RichText::new("room policy violation"),
+            reason: RichText::try_new("room policy violation"),
         }),
         sender_scope: None,
     };

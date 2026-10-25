@@ -1,25 +1,21 @@
 //! Typed results shared by assumed planning and immediate execution.
-use waddle_xmpp::{
-    inbox::{storage::InboxStorageError, InboxEntry},
-    mam::{storage::MamStorageError, StoreOutcome},
-    Stanza,
-};
+#[cfg(feature = "clustering")]
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError;
+use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome;
+use crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError;
+use std::collections::HashMap;
+use waddle_xmpp::inbox::storage::InboxStorageError;
+use waddle_xmpp::inbox::InboxEntry;
+use waddle_xmpp::mam::storage::MamStorageError;
+use waddle_xmpp::mam::StoreOutcome;
+use waddle_xmpp::Stanza;
 
 #[derive(Debug)]
 pub enum EffectOutcome {
     Membership(super::MembershipOutcome),
-    MucUserDelivery(
-        Result<
-            super::invite::MucUserDeliveryProof,
-            crate::server::routes::websocket::handlers::message::muc_invite::MucUserDeliveryError,
-        >,
-    ),
-    InviteLedger(
-        Result<
-            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome,
-            crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError,
-        >,
-    ),
+    MucUserDelivery(Result<super::invite::MucUserDeliveryProof, MucUserDeliveryError>),
+    InviteLedger(Result<InviteLedgerOutcome, InviteLedgerError>),
     Completed,
     /// Resources that accepted the committed inbox projection push.
     InboxPush(Vec<jid::FullJid>),
@@ -31,7 +27,7 @@ pub enum EffectOutcome {
     #[cfg(feature = "clustering")]
     RelayFrames {
         frames: Vec<Stanza>,
-        completion: crate::ingress::execute::RelayFrameReceiptCompletion,
+        completion: RelayFrameReceiptCompletion,
     },
     Archive(Result<StoreOutcome, MamStorageError>),
     Inbox(Result<InboxEntry, InboxStorageError>),
@@ -72,7 +68,9 @@ pub enum SettledCompletion {
 
 impl super::PlannedEffect {
     pub(super) fn assumed_outcome(&self, projection: ProjectionRef) -> EffectOutcome {
-        use super::{direct::DurableDirectEffect, room::DurableRoomEffect, DurableEffect, Effect};
+        use super::direct::DurableDirectEffect;
+        use super::room::DurableRoomEffect;
+        use super::{DurableEffect, Effect};
         match &self.effect {
             Effect::External(super::ExternalEffect::RoomMembershipMutation(mutation)) => {
                 let previous_affiliation = match mutation {
@@ -98,10 +96,10 @@ impl super::PlannedEffect {
                 }
             })),
             Effect::External(super::ExternalEffect::InviteLedger(mutation)) => {
-                use crate::server::routes::websocket::{
-                    handlers::message::muc_invite::{InviteLedgerMutation, InviteLedgerOutcome},
-                    muc_invites::RecordOutcome,
+                use crate::server::routes::websocket::handlers::message::muc_invite::{
+                    InviteLedgerMutation, InviteLedgerOutcome,
                 };
+                use crate::server::routes::websocket::muc_invites::RecordOutcome;
                 EffectOutcome::InviteLedger(Ok(match mutation {
                     InviteLedgerMutation::Record { recorded_at, .. } => {
                         InviteLedgerOutcome::Recorded(RecordOutcome::New {
@@ -159,7 +157,7 @@ pub enum DurableOutcome {
 /// Outcomes belong to one plan and one committed transaction attempt.
 #[derive(Debug, Default)]
 pub struct AppliedDurableEffects {
-    outcomes: std::collections::HashMap<ProjectionRef, DurableOutcome>,
+    outcomes: HashMap<ProjectionRef, DurableOutcome>,
 }
 
 impl AppliedDurableEffects {

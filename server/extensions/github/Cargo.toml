@@ -13,3 +13,6 @@ crate-type = ["cdylib"]
 serde.workspace = true
 serde_json.workspace = true
 wit-bindgen = "0.57.1"
+
+[lints]
+workspace = true

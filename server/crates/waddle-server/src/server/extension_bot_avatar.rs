@@ -12,7 +12,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use minidom::Element;
@@ -41,7 +42,7 @@ pub(crate) struct BotAvatar {
 }
 
 impl BotAvatar {
-    fn new(image: AvatarBytes) -> Result<Self, BotAvatarError> {
+    fn try_new(image: AvatarBytes) -> Result<Self, BotAvatarError> {
         // Reading the header also rejects a body that merely starts with a
         // PNG signature.
         let (width, height) = image::ImageReader::new(Cursor::new(&image.bytes))
@@ -219,7 +220,7 @@ async fn fetch_bot_avatar(
 ) -> Result<BotAvatar, BotAvatarError> {
     let url = reference.uri.as_str().parse()?;
     let image = fetch_artifact_avatar_bytes(&url, &reference.sha256, policy).await?;
-    BotAvatar::new(image)
+    BotAvatar::try_new(image)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -266,7 +267,7 @@ pub(crate) mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, mime))
             .mount(server)
             .await;
-        ArtifactReference::new(format!("{}{artifact_path}", server.uri()), digest, None)
+        ArtifactReference::try_new(format!("{}{artifact_path}", server.uri()), digest, None)
             .expect("artifact reference")
     }
 
@@ -385,7 +386,7 @@ pub(crate) mod tests {
             chunk(&mut png, b"IHDR", &header);
             chunk(&mut png, b"IDAT", &[]);
             chunk(&mut png, b"IEND", &[]);
-            BotAvatar::new(AvatarBytes {
+            BotAvatar::try_new(AvatarBytes {
                 bytes: png,
                 mime: "image/png".to_owned(),
             })

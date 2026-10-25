@@ -1,8 +1,8 @@
 //! Duplicate policy is computed from the frozen sender and typed delivery shape.
-use super::{
-    delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, room::ExternalRoomEffect,
-    Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
-};
+use super::delivery::ExternalDeliveryEffect;
+use super::direct::ExternalDirectEffect;
+use super::room::ExternalRoomEffect;
+use super::{Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect};
 use jid::FullJid;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::message::Message;

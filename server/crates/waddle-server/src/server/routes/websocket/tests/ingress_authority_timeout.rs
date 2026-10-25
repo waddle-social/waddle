@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    connection, create_test_session, create_test_websocket_state,
+    create_test_websocket_state_with_extension_manager, empty_extension_manager, handle_xmpp_frame,
+    offered_message, Arc, SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
+};
 
 async fn count(state: &WebSocketState, sql: &str) -> i64 {
     let database = state
@@ -91,7 +95,7 @@ async fn committed_external_effect_timeout_preserves_wire_ack_and_pending_rows()
         .expect("Phase-C budget must terminate pending external work")
         .expect("dispatch task");
     assert!(frames.is_empty(), "timed-out error frame was never written");
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert!(conn.sm_state.is_resumable());
     ack(&state, &mut conn, 1).await;
@@ -164,7 +168,7 @@ async fn ingress_planning_backstop_meters_timeout_once() {
     tokio::time::resume();
     let (conn, frames) = dispatch.await.expect("dispatch");
     assert!(frames.is_empty());
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
     assert_eq!(
         metrics.counter_sum("ingress.decisions", &[("class", "timeout")]),
@@ -183,7 +187,7 @@ async fn ingress_committed_frame_meters_decision_once() {
     let state = create_test_websocket_state().await;
     let mut conn = connection(&state, true).await;
     handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert_eq!(metrics.counter_sum("ingress.decisions", &[]), Some(1));
     assert_eq!(
         metrics
@@ -226,7 +230,7 @@ async fn ingress_stalled_commit_backstop_meters_timeout_once() {
     tokio::time::resume();
     let (conn, frames) = dispatch.await.expect("dispatch");
     assert!(frames.is_empty());
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
     assert_eq!(
         metrics.counter_sum("ingress.decisions", &[("class", "timeout")]),

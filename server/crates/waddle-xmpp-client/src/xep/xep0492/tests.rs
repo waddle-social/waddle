@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    build_dm_bookmark_element, build_fetch_dm_bookmarks_iq, build_publish_dm_bookmark_iq,
+    build_retract_dm_bookmark_iq, dm_notify_is_default, merge_notify, merge_notify_into_extensions,
+    read_dm_bookmark_notify, read_fallback_mode, read_rich_payload_opt_in, surface_bookmark_notify,
+    surface_dm_notify, ConversationKind, NotifyMode, RichPushSummary, DM_BOOKMARK_MAX_ITEMS,
+    NS_NOTIFICATION_SETTINGS, NS_PUSH_RICH_PAYLOAD, NS_WADDLE_DM_BOOKMARKS,
+};
 use crate::pep::NS_PUBSUB;
 use jid::BareJid;
 use minidom::Element;
@@ -40,7 +46,8 @@ fn find_notify_in_extensions(extensions: &Element) -> Option<&Element> {
 
 #[test]
 fn merge_into_empty_extensions_emits_single_fallback_child() {
-    let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention, false);
+    let extensions =
+        merge_notify_into_extensions(None, NotifyMode::OnMention, RichPushSummary::OptOut);
     let elem = find_notify_in_extensions(&extensions).expect("notify present");
     assert_eq!(elem.name(), "notify");
     assert_eq!(elem.ns(), NS_NOTIFICATION_SETTINGS);
@@ -73,7 +80,7 @@ fn read_fallback_returns_none_when_only_identity_scoped() {
 
 #[test]
 fn merge_inserts_notify_into_empty_extensions() {
-    let merged = merge_notify_into_extensions(None, NotifyMode::Never, false);
+    let merged = merge_notify_into_extensions(None, NotifyMode::Never, RichPushSummary::OptOut);
     assert_eq!(merged.name(), "extensions");
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
@@ -88,7 +95,11 @@ fn merge_replaces_existing_fallback_only() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::OnMention,
+        RichPushSummary::OptOut,
+    );
 
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     // Identity-scoped sibling preserved verbatim.
@@ -130,7 +141,11 @@ fn merge_moves_advanced_under_new_fallback_when_name_changes() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Never,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
 
     assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
@@ -157,7 +172,7 @@ fn merge_never_emits_same_namespace_extensions_children() {
     // i.e. children MUST be in a namespace other than
     // `urn:xmpp:bookmarks:1`. Our writer must never produce a
     // child in the bookmarks namespace.
-    let merged = merge_notify_into_extensions(None, NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(None, NotifyMode::Always, RichPushSummary::OptOut);
     for child in merged.children() {
         assert_ne!(
             child.ns(),
@@ -189,7 +204,11 @@ fn merge_collapses_multiple_no_attrs_fallbacks() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::OnMention,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
 
     // Exactly one no-attrs fallback element on output.
@@ -238,7 +257,11 @@ fn merge_preserves_advanced_when_mode_unchanged() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     let always_elem = notify
         .children()
@@ -270,7 +293,11 @@ fn merge_emits_children_in_xsd_sequence_order() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
 
     let names: Vec<&str> = notify.children().map(|c| c.name()).collect();
@@ -292,7 +319,11 @@ fn merge_preserves_duplicate_foreign_notify_children_verbatim() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Never, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Never,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     let rules: Vec<&Element> = notify
         .children()
@@ -333,7 +364,11 @@ fn merge_collapses_multiple_notify_siblings() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::OnMention,
+        RichPushSummary::OptOut,
+    );
 
     // Exactly one `<notify/>` wrapper.
     let notify_wrappers: Vec<_> = merged
@@ -380,7 +415,11 @@ fn merge_preserves_unrelated_extensions_siblings() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::OnMention, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::OnMention,
+        RichPushSummary::OptOut,
+    );
 
     // Sibling extension preserved.
     assert!(merged
@@ -399,7 +438,7 @@ fn merge_with_opt_in_round_trips_rich_payload() {
     // under the fallback, and the reader recovers it. This is the
     // exact wire shape the server's `parse_rich_payload_opt_in`
     // consumes (#719).
-    let extensions = merge_notify_into_extensions(None, NotifyMode::Always, true);
+    let extensions = merge_notify_into_extensions(None, NotifyMode::Always, RichPushSummary::OptIn);
     let notify = find_notify_in_extensions(&extensions).expect("notify present");
     assert!(read_rich_payload_opt_in(notify));
 
@@ -438,7 +477,11 @@ fn opt_out_removes_rich_payload_but_keeps_foreign_advanced() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
 
     assert!(!read_rich_payload_opt_in(notify));
@@ -468,7 +511,11 @@ fn opt_out_drops_advanced_left_empty() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     let fallback = notify
         .children()
@@ -483,8 +530,9 @@ fn opt_out_drops_advanced_left_empty() {
 fn opt_in_is_idempotent() {
     // Re-merging an already-opted-in setting MUST NOT accumulate a
     // second `<rich-payload/>` (§3 ¶3 — no duplicate elements).
-    let once = merge_notify_into_extensions(None, NotifyMode::Always, true);
-    let twice = merge_notify_into_extensions(Some(&once), NotifyMode::Always, true);
+    let once = merge_notify_into_extensions(None, NotifyMode::Always, RichPushSummary::OptIn);
+    let twice =
+        merge_notify_into_extensions(Some(&once), NotifyMode::Always, RichPushSummary::OptIn);
     let notify = find_notify_in_extensions(&twice).expect("notify present");
     let advanced = notify
         .children()
@@ -519,7 +567,11 @@ fn opt_out_strips_rich_payload_from_identity_scoped_setting() {
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, false);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptOut,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
 
     // The opt-in is now fully cleared — no setting carries it.
@@ -561,7 +613,11 @@ fn opt_in_preserves_identity_scoped_foreign_rules_but_centralizes_rich_payload()
                     </notify>\
                     </extensions>";
     let extensions: Element = extensions_xml.parse().expect("valid xml");
-    let merged = merge_notify_into_extensions(Some(&extensions), NotifyMode::Always, true);
+    let merged = merge_notify_into_extensions(
+        Some(&extensions),
+        NotifyMode::Always,
+        RichPushSummary::OptIn,
+    );
     let notify = find_notify_in_extensions(&merged).expect("notify present");
     assert!(read_rich_payload_opt_in(notify));
     let never = notify
@@ -590,8 +646,13 @@ fn opt_in_preserves_identity_scoped_foreign_rules_but_centralizes_rich_payload()
 fn opt_in_carries_through_mode_change() {
     // Changing the fallback name (always → never) while opting in
     // re-parents the opt-in under the new fallback (§3 ¶1).
-    let always_opted = merge_notify_into_extensions(None, NotifyMode::Always, true);
-    let now_never = merge_notify_into_extensions(Some(&always_opted), NotifyMode::Never, true);
+    let always_opted =
+        merge_notify_into_extensions(None, NotifyMode::Always, RichPushSummary::OptIn);
+    let now_never = merge_notify_into_extensions(
+        Some(&always_opted),
+        NotifyMode::Never,
+        RichPushSummary::OptIn,
+    );
     let notify = find_notify_in_extensions(&now_never).expect("notify present");
     assert_eq!(read_fallback_mode(notify), Some(NotifyMode::Never));
     assert!(read_rich_payload_opt_in(notify));
@@ -602,7 +663,7 @@ fn opt_in_carries_through_mode_change() {
 #[test]
 fn merge_notify_from_none_emits_single_fallback() {
     // The DM carrier's first-write path: no existing `<notify/>`.
-    let notify = merge_notify(None, NotifyMode::Never, false);
+    let notify = merge_notify(None, NotifyMode::Never, RichPushSummary::OptOut);
     assert_eq!(notify.name(), "notify");
     assert_eq!(notify.ns(), NS_NOTIFICATION_SETTINGS);
     let children: Vec<_> = notify.children().collect();
@@ -623,7 +684,11 @@ fn merge_notify_replaces_fallback_and_preserves_siblings() {
                 </notify>"
         .parse()
         .expect("valid xml");
-    let merged = merge_notify(Some(&existing), NotifyMode::OnMention, false);
+    let merged = merge_notify(
+        Some(&existing),
+        NotifyMode::OnMention,
+        RichPushSummary::OptOut,
+    );
     assert_eq!(read_fallback_mode(&merged), Some(NotifyMode::OnMention));
     assert!(merged.children().any(|c| {
         c.name() == "never"
@@ -644,10 +709,10 @@ fn merge_notify_replaces_fallback_and_preserves_siblings() {
 
 #[test]
 fn merge_notify_round_trips_rich_payload_opt_in() {
-    let merged = merge_notify(None, NotifyMode::Always, true);
+    let merged = merge_notify(None, NotifyMode::Always, RichPushSummary::OptIn);
     assert!(read_rich_payload_opt_in(&merged));
     // Re-merging is idempotent (no duplicate `<rich-payload/>`).
-    let again = merge_notify(Some(&merged), NotifyMode::Always, true);
+    let again = merge_notify(Some(&merged), NotifyMode::Always, RichPushSummary::OptIn);
     let advanced = again
         .children()
         .find(|c| c.name() == "always")
@@ -665,35 +730,36 @@ fn merge_notify_and_extensions_share_one_core() {
     // The refactor MUST keep MUC and DM byte-identical for the
     // `<notify/>` child: the `<extensions/>` wrapper's notify must
     // equal the bare `merge_notify` output for the same inputs.
-    let extensions = merge_notify_into_extensions(None, NotifyMode::OnMention, true);
+    let extensions =
+        merge_notify_into_extensions(None, NotifyMode::OnMention, RichPushSummary::OptIn);
     let from_extensions = find_notify_in_extensions(&extensions).expect("notify present");
-    let bare = merge_notify(None, NotifyMode::OnMention, true);
+    let bare = merge_notify(None, NotifyMode::OnMention, RichPushSummary::OptIn);
     assert_eq!(from_extensions, &bare);
 }
 
 #[test]
 fn dm_notify_is_default_true_for_plain_default() {
     // always + no opt-in + no foreign → default, retract the item.
-    let notify = merge_notify(None, NotifyMode::Always, false);
+    let notify = merge_notify(None, NotifyMode::Always, RichPushSummary::OptOut);
     assert!(dm_notify_is_default(&notify, NotifyMode::Always));
 }
 
 #[test]
 fn dm_notify_is_default_false_for_on_mention() {
-    let notify = merge_notify(None, NotifyMode::OnMention, false);
+    let notify = merge_notify(None, NotifyMode::OnMention, RichPushSummary::OptOut);
     assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
 }
 
 #[test]
 fn dm_notify_is_default_false_for_never() {
-    let notify = merge_notify(None, NotifyMode::Never, false);
+    let notify = merge_notify(None, NotifyMode::Never, RichPushSummary::OptOut);
     assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
 }
 
 #[test]
 fn dm_notify_is_default_false_with_rich_opt_in() {
     // always + opt-in → an override (#719), keep the item.
-    let notify = merge_notify(None, NotifyMode::Always, true);
+    let notify = merge_notify(None, NotifyMode::Always, RichPushSummary::OptIn);
     assert!(!dm_notify_is_default(&notify, NotifyMode::Always));
 }
 
@@ -756,7 +822,7 @@ fn dm_notify_is_default_false_without_fallback() {
 
 #[test]
 fn build_and_read_dm_bookmark_round_trip() {
-    let notify = merge_notify(None, NotifyMode::Never, false);
+    let notify = merge_notify(None, NotifyMode::Never, RichPushSummary::OptOut);
     let payload = build_dm_bookmark_element(&notify);
     assert_eq!(payload.name(), "dm-bookmark");
     assert_eq!(payload.ns(), NS_WADDLE_DM_BOOKMARKS);
@@ -817,7 +883,7 @@ fn build_fetch_dm_bookmarks_iq_targets_dm_node_without_to() {
 #[test]
 fn build_publish_dm_bookmark_iq_uses_jid_id_and_hosts_notify() {
     let jid: BareJid = "bob@example.com".parse().expect("valid jid");
-    let notify = merge_notify(None, NotifyMode::Never, false);
+    let notify = merge_notify(None, NotifyMode::Never, RichPushSummary::OptOut);
     let iq = build_publish_dm_bookmark_iq(&jid, &notify, "req-dm-pub");
     assert_eq!(iq.attr("type"), Some("set"));
     assert!(iq.attr("to").is_none());
@@ -841,7 +907,7 @@ fn build_publish_dm_bookmark_iq_uses_jid_id_and_hosts_notify() {
 #[test]
 fn build_publish_dm_bookmark_iq_pins_canonical_publish_options() {
     let jid: BareJid = "bob@example.com".parse().expect("valid jid");
-    let notify = merge_notify(None, NotifyMode::Never, false);
+    let notify = merge_notify(None, NotifyMode::Never, RichPushSummary::OptOut);
     let iq = build_publish_dm_bookmark_iq(&jid, &notify, "req-dm-pub-opts");
     let form = iq
         .get_child("pubsub", NS_PUBSUB)

@@ -1,9 +1,9 @@
 //! Typed pending-delivery storage operations under the ingress canonical lock.
 use super::IngressUowTransaction;
+use crate::db::DatabaseDriver;
 use crate::pending_delivery::database;
-use waddle_xmpp::pending_delivery::{
-    storage::PendingStorageError, InsertOutcome, PendingRow, PendingRowId, QuotaPolicy,
-};
+use waddle_xmpp::pending_delivery::storage::PendingStorageError;
+use waddle_xmpp::pending_delivery::{InsertOutcome, PendingRow, PendingRowId, QuotaPolicy};
 
 pub(crate) struct PendingReceiptRepository;
 
@@ -28,7 +28,7 @@ impl PendingReceiptRepository {
         recipient: &jid::BareJid,
         stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     ) -> Result<Option<ArchivedPendingCustody>, super::IngressUowError> {
-        let postgres = tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres;
+        let postgres = tx.transaction_mut().driver() == DatabaseDriver::Postgres;
         if postgres {
             // Same recipient lock as insert_in_transaction, including the
             // absent-row case and competing canonical message transactions.

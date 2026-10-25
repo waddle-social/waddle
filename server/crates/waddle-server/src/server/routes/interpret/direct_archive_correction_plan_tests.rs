@@ -1,15 +1,18 @@
 use super::super::effects::{EffectSink, PlanFailure, PlanSink};
-use super::*;
-use crate::ingress::{
-    commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
-    IngressStreamIdentity,
+use super::{
+    archive_direct, resolve_direct_correction_target_message_id, Deps, IngressEffectIntent,
+    StanzaId,
 };
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
+use crate::ingress::{IngressDecisionClass, IngressStreamIdentity};
 use crate::ingress_uow::SmIngressStreamRepository;
-use waddle_xmpp::{
-    ingress::WireHandledCount,
-    mam::{MamStorage, SqlxMamStorage},
-    pending_delivery::SmSessionId,
-};
+use std::sync::Arc;
+use waddle_xmpp::ingress::WireHandledCount;
+use waddle_xmpp::mam::{MamStorage, SqlxMamStorage};
+use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::protocol::MessageRef;
+use waddle_xmpp::registry::ConnectionRegistry;
 
 async fn correction_second_read_failure(fixture: IngressFixture) {
     let mam: Arc<dyn MamStorage> = Arc::new(

@@ -1,10 +1,14 @@
-use super::*;
+use super::{
+    Element, NotificationOutboxJob, NotificationOutboxStore, STATUS_FAILED, STATUS_IN_PROGRESS,
+    STATUS_PUBLISHED,
+};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress, MessageEnvelope};
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
     EffectReceiptRepository,
 };
+use crate::notification_outbox::codec::encode_sender_jids;
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target_named};
 use sha2::{Digest, Sha256};
 use waddle_xmpp::ingress::{
@@ -80,7 +84,7 @@ async fn pending_parent(fixture: &IngressFixture, job: &NotificationOutboxJob, i
 }
 
 async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     for index in 0..3 {
@@ -222,7 +226,7 @@ async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixtur
 }
 
 async fn orphaned_failed_unknown_row_keeps_its_evidence(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     enqueue_jobs_for_test(
@@ -322,7 +326,7 @@ async fn malformed_snapshot_cannot_overwrite_concurrent_repair_or_claim(
     fixture: IngressFixture,
     repair: bool,
 ) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     enqueue_jobs_for_test(

@@ -1,5 +1,13 @@
 //! Shared retry rounds must give later recipients a chance to unblock.
-use super::*;
+use super::{
+    body, build_interpret_deps, commit_submission, effects, execute_effects, groupchat_submission,
+    plan_broadcast, shared_state, CreateRoom, DeliveryProgressRepository, Duration, Effect,
+    EffectReceiptRepository, ExternalEffect, ExternalOutcome, ImmediateSink, IngressEffectIntent,
+    IngressFixture, Join,
+};
+use crate::ingress::DispatchProbeBudget;
+use crate::server::routes::interpret::tests::room_dispatch::ObserverConfiguration;
+use crate::server::routes::websocket::tests as socket_tests;
 
 #[tokio::test]
 async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repeating_effects() {
@@ -14,7 +22,7 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
         .protocol
         .extension_manager =
         crate::server::routes::interpret::tests::room_dispatch::room_observer_test_manager(
-            crate::server::routes::interpret::tests::room_dispatch::ObserverConfiguration::Observer,
+            ObserverConfiguration::Observer,
         )
         .await;
     let room: jid::BareJid = "fair-recheck@muc.example.com".parse().expect("room");
@@ -136,7 +144,7 @@ async fn sqlite_xep0045_later_blocked_recipient_gets_fair_rechecks_without_repea
         later.clone(),
     );
     let predecessor_completed = tokio::sync::Notify::new();
-    let budget = crate::ingress::DispatchProbeBudget::default();
+    let budget = DispatchProbeBudget::default();
     let mut successor_deps = deps.clone();
     successor_deps.dispatch_probe_budget = Some(budget.clone());
     let predecessor_execution = async {

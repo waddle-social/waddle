@@ -2,12 +2,18 @@
 //! receipt obligations on the retained XEP-0198 replay entry, and discharges
 //! them only once the replay reaches the wire (RFC 0018 §3: receipts follow
 //! confirmed effects, and a canonical row terminalizes when they are complete).
-use super::*;
+use super::{
+    write_ingress_response_batch_with_admission, write_response_batch_with_admission,
+    BatchAuthority, BatchSmPolicy, BatchWriteOutcome, Message, ResponseFrame, WebSocketState,
+    WsConnState,
+};
 use crate::server::routes::websocket::tests::{
     create_test_session, create_test_websocket_state, create_test_websocket_state_with_db_pool,
 };
 use std::sync::Arc;
 use waddle_xmpp::pending_delivery::SmSessionId;
+use waddle_xmpp::protocol::ConnectionPhase;
+use waddle_xmpp::Stanza;
 
 async fn connection(state: &WebSocketState) -> WsConnState {
     let mut conn = WsConnState::new();
@@ -144,7 +150,7 @@ async fn replayed_frame_receipt_case(state: Arc<WebSocketState>) {
     );
     drop(responses);
 
-    let retained = conn.sm_state.get_stanzas_to_resend(0);
+    let retained = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(retained.len(), 1);
     assert_eq!(
         retained[0].ingress_receipts.len(),
@@ -195,7 +201,7 @@ async fn postgres_state() -> Option<(Arc<WebSocketState>, sqlx::PgPool, String)>
     url.query_pairs_mut()
         .append_pair("options", &format!("-c search_path={schema}"));
     let pool = Arc::new(
-        crate::db::DatabasePool::new(
+        crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string()),
             crate::db::PoolConfig,
         )
@@ -784,7 +790,7 @@ async fn ingress_post_registration_resume_settles_replayed_receipt() {
     );
     drop(responses);
 
-    let retained = conn.sm_state.get_stanzas_to_resend(0);
+    let retained = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(retained.len(), 1);
     assert_eq!(
         retained[0].ingress_receipts.len(),

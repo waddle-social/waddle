@@ -1,11 +1,18 @@
 use super::submission::IngressSubmission;
+use crate::ingress_uow::CanonicalMessageRepository;
+#[cfg(feature = "clustering")]
+use crate::ingress_uow::ClaimRepository;
+use crate::ingress_uow::IngressFencing;
+use crate::ingress_uow::IngressUnitOfWork;
+#[cfg(feature = "clustering")]
+use crate::ingress_uow::RoomClaimFence;
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 
 /// Cluster integration stays dark until remote children can complete. The
 /// test-only scope exercises guarded manifests without enabling production.
-pub(super) fn new_manifests_enabled(uow: &crate::ingress_uow::IngressUnitOfWork) -> bool {
+pub(super) fn new_manifests_enabled(uow: &IngressUnitOfWork) -> bool {
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode => true,
+        IngressFencing::SingleNode => true,
         #[cfg(feature = "clustering")]
         crate::ingress_uow::IngressFencing::Clustered(_) => {
             super::commit::commit_hooks::allow_clustered_room_manifests()
@@ -19,9 +26,8 @@ pub(super) async fn assert_snapshot_coordinates(
     tx: &mut IngressUowTransaction<'_>,
     submission: &IngressSubmission,
 ) -> Result<(), IngressUowError> {
-    use crate::server::routes::interpret::effects::{
-        room::RoomFenceRequirement, RoomExecutionPath,
-    };
+    use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
     let RoomExecutionPath::Local {
         room,
         fence,
@@ -38,8 +44,7 @@ pub(super) async fn assert_snapshot_coordinates(
             Ok(())
         };
     };
-    crate::ingress_uow::CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates)
-        .await
+    CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates).await
 }
 
 pub(super) async fn seal(
@@ -48,9 +53,8 @@ pub(super) async fn seal(
     submission: &IngressSubmission,
 ) -> Result<Option<super::FrozenRoomManifest>, IngressUowError> {
     use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
-    use crate::server::routes::interpret::effects::{
-        room::RoomFenceRequirement, RoomExecutionPath,
-    };
+    use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+    use crate::server::routes::interpret::effects::RoomExecutionPath;
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
     let envelope = CanonicalMessageRepository::load_envelope(tx, key)
         .await?
@@ -205,7 +209,7 @@ pub(super) fn child_receipts(
 }
 
 #[cfg(feature = "clustering")]
-pub(super) type RoomProof<'a> = Option<crate::ingress_uow::RoomClaimFence<'a>>;
+pub(super) type RoomProof<'a> = Option<RoomClaimFence<'a>>;
 #[cfg(not(feature = "clustering"))]
 pub(super) type RoomProof<'a> = std::marker::PhantomData<&'a ()>;
 
@@ -217,9 +221,8 @@ pub(super) async fn assert_room<'a>(
     #[cfg(feature = "clustering")]
     {
         use super::identity::IngressStreamIdentity;
-        use crate::server::routes::interpret::effects::{
-            room::RoomFenceRequirement, RoomExecutionPath,
-        };
+        use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+        use crate::server::routes::interpret::effects::RoomExecutionPath;
         let mut proof = None;
         if let IngressStreamIdentity::Relayed {
             room, room_fence, ..
@@ -227,13 +230,8 @@ pub(super) async fn assert_room<'a>(
         {
             validate_room_context(room, room_fence)?;
             proof = Some(
-                crate::ingress_uow::ClaimRepository::assert_room_claim(
-                    tx,
-                    room,
-                    &room_fence.owner,
-                    room_fence.epoch,
-                )
-                .await?,
+                ClaimRepository::assert_room_claim(tx, room, &room_fence.owner, room_fence.epoch)
+                    .await?,
             );
         }
         if !validate_local {
@@ -248,19 +246,14 @@ pub(super) async fn assert_room<'a>(
                 RoomFenceRequirement::Guarded(context) => {
                     validate_room_context(room, context)?;
                     proof = Some(
-                        crate::ingress_uow::ClaimRepository::assert_room_claim(
-                            tx,
-                            room,
-                            &context.owner,
-                            context.epoch,
-                        )
-                        .await
-                        .map_err(|error| match error {
-                            IngressUowError::ClaimFenceMissing => {
-                                IngressUowError::RoomGenerationStale
-                            }
-                            other => other,
-                        })?,
+                        ClaimRepository::assert_room_claim(tx, room, &context.owner, context.epoch)
+                            .await
+                            .map_err(|error| match error {
+                                IngressUowError::ClaimFenceMissing => {
+                                    IngressUowError::RoomGenerationStale
+                                }
+                                other => other,
+                            })?,
                     );
                 }
                 RoomFenceRequirement::Unfenced

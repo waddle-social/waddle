@@ -52,12 +52,17 @@ pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
 /// `urn:waddle:roomconfig:pinpermission` values. Wire values mirror
 /// `waddle_xmpp::muc::PinPermission` server-side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RoomPinPermission {
+    /// Only room owners and administrators may pin messages.
     AdminsOnly,
+    /// Any room occupant may pin messages.
     Anyone,
 }
 
 impl RoomPinPermission {
+    /// Return the canonical value used in the room-configuration data form.
+    #[must_use]
     pub fn as_form_value(self) -> &'static str {
         match self {
             Self::AdminsOnly => "admins-only",
@@ -65,6 +70,8 @@ impl RoomPinPermission {
         }
     }
 
+    /// Recognize a room pin-permission token; unknown values return None.
+    #[must_use]
     pub fn from_form_value(value: &str) -> Option<Self> {
         match value {
             "admins-only" => Some(Self::AdminsOnly),
@@ -82,7 +89,9 @@ impl RoomPinPermission {
 /// option values into the submit would corrupt the round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomConfigField {
+    /// XEP-0004 field name whose value is being accessed or validated.
     pub var: String,
+    /// Values associated with this field.
     pub values: Vec<String>,
 }
 
@@ -91,11 +100,13 @@ pub struct RoomConfigField {
 /// unmodified settings losslessly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomConfigForm {
+    /// Fields carried by the data form or provider payload.
     pub fields: Vec<RoomConfigField>,
 }
 
 impl RoomConfigForm {
     /// First value of `var`, if the field is present and non-empty.
+    #[must_use]
     pub fn value(&self, var: &str) -> Option<&str> {
         self.fields
             .iter()
@@ -106,6 +117,7 @@ impl RoomConfigForm {
     }
 
     /// XEP-0004 boolean interpretation of `var`.
+    #[must_use]
     pub fn bool_value(&self, var: &str) -> Option<bool> {
         match self.value(var)? {
             "1" | "true" => Some(true),
@@ -135,9 +147,13 @@ impl RoomConfigForm {
 /// a present-but-empty roomdesc as authoritative).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomConfigPatch {
+    /// Human-readable name advertised to clients.
     pub name: Option<String>,
+    /// Longer human-readable description.
     pub description: Option<String>,
+    /// Whether the room uses forum-style conversations.
     pub forum: Option<bool>,
+    /// Policy controlling which room occupants may pin messages.
     pub pin_permission: Option<RoomPinPermission>,
 }
 
@@ -173,6 +189,7 @@ fn bool_form_value(value: bool) -> &'static str {
 
 /// §10.2 example 163: `<iq type='get'><query xmlns='muc#owner'/></iq>`
 /// requesting the current configuration form.
+#[must_use]
 pub fn build_muc_owner_config_get_iq(room_jid: &BareJid) -> Element {
     let id = format!("muc-owner-get-{}", next_id());
     Element::builder("iq", CLIENT_NS)
@@ -194,6 +211,7 @@ pub fn build_muc_owner_config_get_iq(room_jid: &BareJid) -> Element {
 /// configurable options "MUST return an empty query element", and a
 /// subsequent submit of the (FORM_TYPE-only) form doubles as the
 /// §10.1.2 unlock so a freshly created room is never stranded locked.
+#[must_use]
 pub fn parse_muc_owner_config_form(iq: &Element) -> Option<RoomConfigForm> {
     let query = iq.get_child("query", NS_MUC_OWNER)?;
     let Some(form) = query.get_child("x", NS_DATA_FORMS) else {
@@ -220,6 +238,7 @@ pub fn parse_muc_owner_config_form(iq: &Element) -> Option<RoomConfigForm> {
 /// value `http://jabber.org/protocol/muc#roomconfig`; any FORM_TYPE
 /// field inside `form` is skipped so the discriminator can never
 /// drift or duplicate.
+#[must_use]
 pub fn build_muc_owner_config_submit_iq(room_jid: &BareJid, form: &RoomConfigForm) -> Element {
     let id = format!("muc-owner-set-{}", next_id());
     let mut x = Element::builder("x", NS_DATA_FORMS)
@@ -276,6 +295,7 @@ fn hidden_form_type_field() -> Element {
 /// <destroy><reason/></destroy></query></iq>`. The alternate-venue
 /// `jid` attribute is not offered — Waddle rooms have no successor
 /// venue semantics.
+#[must_use]
 pub fn build_muc_owner_destroy_iq(room_jid: &BareJid, reason: Option<&str>) -> Element {
     let id = format!("muc-owner-destroy-{}", next_id());
     let mut destroy = Element::builder("destroy", NS_MUC_OWNER);

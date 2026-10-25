@@ -1,4 +1,4 @@
-use super::*;
+use super::{sync_extension_grants, ExtensionManager, GrantSync};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_extensions::{ExtensionCapability, ExtensionConfig, ExtensionModuleConfig, PluginId};
@@ -39,8 +39,8 @@ fn config(can_send: bool, rooms: &[&str]) -> ExtensionConfig {
 }
 
 async fn startup_sync(fixture: IngressFixture) {
-    let plugin = PluginId::new("message-hook-fixture").expect("plugin");
-    let removed = PluginId::new("removed-plugin").expect("removed plugin");
+    let plugin = PluginId::try_new("message-hook-fixture").expect("plugin");
+    let removed = PluginId::try_new("removed-plugin").expect("removed plugin");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let old_room: jid::BareJid = "old@muc.example.com".parse().expect("old room");
     let mut tx = fixture.uow.begin().await.expect("seed transaction");

@@ -1,22 +1,20 @@
-use super::super::{
-    cleanup::{
-        cleanup_force_detach_connection_shutdown, finish_socket_cleanup, ConnectionShutdownOutcome,
-    },
-    frame::handle_xmpp_frame,
-    registration::{register_bound_connection_after_frame, RegistrationAfterFrame},
-    state::WsConnState,
-    tests::{create_test_session, create_test_websocket_state_with_clustering},
-    transport_xml::element_to_xml,
+use super::super::cleanup::{
+    cleanup_force_detach_connection_shutdown, finish_socket_cleanup, ConnectionShutdownOutcome,
 };
+use super::super::frame::handle_xmpp_frame;
+use super::super::registration::{register_bound_connection_after_frame, RegistrationAfterFrame};
+use super::super::state::WsConnState;
+use super::super::tests::{create_test_session, create_test_websocket_state_with_clustering};
+use super::super::transport_xml::element_to_xml;
 use crate::clustering::ClusteringHandles;
 use jid::FullJid;
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use waddle_xmpp::{
-    protocol::ConnectionPhase,
-    registry::ForceDetachOutcome,
-    stream_management::{InMemorySmSessionRegistry, SM_NS},
-};
+use waddle_xmpp::protocol::ConnectionPhase;
+use waddle_xmpp::registry::ForceDetachOutcome;
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SM_NS};
 use xmpp_parsers::minidom::Element;
 
 async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles) {

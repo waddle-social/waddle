@@ -57,7 +57,7 @@ mod tests {
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
     fn test_registry() -> RoomRegistry {
-        let secret = OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+        let secret = OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("test occupant-id secret meets length floor");
         RoomRegistry::spawn(
             "muc.example.com".to_string(),

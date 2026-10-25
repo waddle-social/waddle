@@ -18,7 +18,11 @@
 //! The admin Users panel already unions both tables for the same reason (see
 //! `admin/users_list.rs`); this is the single-row existence counterpart.
 
+use crate::db::actor::RowValues;
+use crate::db::Value;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use kameo::actor::ActorRef;
 use tracing::warn;
@@ -99,7 +103,7 @@ async fn prune_roster_contacts(actor: &ActorRef<DbActor>) -> Result<(), AuthErro
         vec![],
     )
     .await?;
-    let mut accounts = std::collections::HashMap::new();
+    let mut accounts = HashMap::new();
     for row in items {
         let owner = text(&row, 0)?;
         let contact = text(&row, 1)?;
@@ -204,8 +208,8 @@ async fn backfill_account_keys(actor: &ActorRef<DbActor>) -> Result<(), AuthErro
 async fn query(
     actor: &ActorRef<DbActor>,
     sql: &str,
-    params: Vec<crate::db::Value>,
-) -> Result<Vec<crate::db::actor::RowValues>, AuthError> {
+    params: Vec<Value>,
+) -> Result<Vec<RowValues>, AuthError> {
     actor
         .ask(DbQuery {
             sql: sql.to_string(),
@@ -218,7 +222,7 @@ async fn query(
 async fn execute(
     actor: &ActorRef<DbActor>,
     sql: &str,
-    params: Vec<crate::db::Value>,
+    params: Vec<Value>,
 ) -> Result<u64, AuthError> {
     actor
         .ask(DbExecute {
@@ -229,7 +233,7 @@ async fn execute(
         .map_err(|error| AuthError::DatabaseError(error.to_string()))
 }
 
-fn text(row: &[crate::db::Value], index: usize) -> Result<String, AuthError> {
+fn text(row: &[Value], index: usize) -> Result<String, AuthError> {
     row_value(row, index)
         .and_then(ValueExt::as_string)
         .map_err(|error| AuthError::DatabaseError(error.to_string()))
@@ -353,7 +357,7 @@ pub(crate) async fn search_local_accounts(
         .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
 
     let mut entries = Vec::with_capacity(rows.len());
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for row in rows {
         let username = row_value(&row, 0)
             .and_then(ValueExt::as_string)

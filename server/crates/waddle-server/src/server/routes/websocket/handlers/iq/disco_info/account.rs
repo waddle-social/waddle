@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    build_disco_info_response, build_pep_identity, internal_server_error_iq_error,
+    item_not_found_iq_error, pep_features, warn, BareJid, ConnectionPhase, DiscoInfoRequest,
+    DiscoInfoResponse, Feature, Identity, WebSocketState,
+};
 
 pub(super) async fn handle_account_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,

@@ -9,14 +9,17 @@
 
 use jid::BareJid;
 use waddle_server::db::Database;
-use waddle_server::notification_activity::*;
+use waddle_server::notification_activity::{
+    NoopActivityReader, NotificationActivityReader, NotificationActivityStore,
+    NotificationChatState, NotificationPresenceShow,
+};
 
 fn bare(value: &str) -> BareJid {
     value.parse().expect("valid bare jid")
 }
 
 async fn store() -> NotificationActivityStore {
-    NotificationActivityStore::new(
+    NotificationActivityStore::try_new(
         Database::in_memory("notification-activity-test")
             .await
             .expect("in-memory db"),

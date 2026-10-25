@@ -1,6 +1,10 @@
 //! Bounded detached queue writes; no snapshot replacement on the append path.
 
-use super::*;
+use super::{
+    serialize_stanza, DatabaseSmPersistence, KeyedSnapshotOutcome, PersistedDetachedAppend,
+    SmPersistenceError,
+};
+use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
 pub(super) async fn append(
     storage: &DatabaseSmPersistence,
@@ -22,7 +26,7 @@ pub(super) async fn append(
         })?;
         if crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &proof.key)
             .await?
-            == crate::sm_persistence::ingress_append::NewDeliveryAuthorization::AlreadyResolved
+            == NewDeliveryAuthorization::AlreadyResolved
         {
             return Ok(KeyedSnapshotOutcome::ObligationAlreadyResolved);
         }

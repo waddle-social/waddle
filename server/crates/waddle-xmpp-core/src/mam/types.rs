@@ -1,4 +1,8 @@
+//! Typed MAM queries, archive entries, and pagination results.
+
 use super::ArchiveOrdinal;
+use crate::types::Affiliation;
+use crate::types::Role;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -11,78 +15,124 @@ use crate::xep0201::ThreadInfo;
 use crate::xep0359::{OriginId, StanzaId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RichMessageId(pub String);
+/// Message identifier retained in an archived rich payload; the constructor rejects blank text.
+pub struct RichMessageId(
+    /// Stored message identifier; direct tuple construction bypasses the nonblank constructor check.
+    pub String,
+);
 
 impl RichMessageId {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Create `RichMessageId` from non-blank text, returning `None` for empty or whitespace-only input.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RichText(pub String);
+/// Text retained in an archived rich payload; the constructor rejects blank text.
+pub struct RichText(
+    /// Stored text; direct tuple construction bypasses the nonblank constructor check.
+    pub String,
+);
 
 impl RichText {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Create `RichText` from non-blank text, returning `None` for empty or whitespace-only input.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Reply target metadata retained for an archived message.
 pub struct ArchivedReply {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: RichMessageId,
+    /// XMPP address of the recipient.
     pub to: Option<Jid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Body reference and resource target retained from an archived message.
 pub struct ArchivedReference {
+    /// Reference type advertised by the sender.
     pub ref_type: RichText,
+    /// Inclusive character offset in the message body.
     pub begin: Option<u32>,
+    /// Exclusive character offset in the message body.
     pub end: Option<u32>,
+    /// URI identifying the referenced resource.
     pub uri: Option<RichText>,
+    /// Anchor identifying a location within the referenced resource.
     pub anchor: Option<RichText>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mention identity, body range, and notification flags retained in the archive.
 pub struct ArchivedMention {
+    /// Inclusive character offset in the message body.
     pub begin: Option<u32>,
+    /// Exclusive character offset in the message body.
     pub end: Option<u32>,
+    /// XMPP address identifying the referenced entity.
     pub jid: Option<BareJid>,
+    /// Room-scoped opaque occupant identity supplied by the MUC service.
     pub occupant_id: Option<RichText>,
+    /// Mention annotations retained from the original message.
     pub mentions: Option<RichText>,
+    /// URI identifying the referenced resource.
     pub uri: Option<RichText>,
+    /// Whether this mention is marked active.
     pub active: bool,
+    /// Whether the mention suppresses a notification to its target.
     pub noping: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Complete reaction update targeting an archived message.
 pub struct ArchivedReactionSet {
+    /// Identifier of the message or item this operation affects.
     pub target_id: RichMessageId,
+    /// Complete set of reaction emoji strings for the target message.
     pub emojis: Vec<RichText>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Sender retraction metadata retained for an archived message.
 pub struct ArchivedRetraction {
+    /// Identifier of the message or item this operation affects.
     pub target_id: RichMessageId,
+    /// Timestamp attached to the protocol operation.
     pub stamp: Option<DateTime<Utc>>,
+    /// Identifier of the retraction message, when one was supplied.
     pub retraction_id: Option<RichMessageId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Moderator retraction metadata retained for an archived message.
 pub struct ArchivedModeration {
+    /// Identifier of the message or item this operation affects.
     pub target_id: RichMessageId,
+    /// XMPP address of the moderator responsible for the operation.
     pub moderated_by: Jid,
+    /// Timestamp attached to the protocol operation.
     pub stamp: Option<DateTime<Utc>>,
+    /// Human-readable explanation for the operation.
     pub reason: Option<RichText>,
 }
 
@@ -121,12 +171,19 @@ pub struct ArchivedTombstone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mutation or tombstone payload associated with an archived message.
+#[non_exhaustive]
 pub enum ArchivedRichPayload {
+    /// A replacement body for an earlier message.
     Correction {
+        /// Identifier of the message whose body is corrected.
         replaces_id: RichMessageId,
     },
+    /// An archived sender-initiated message retraction.
     Retraction(ArchivedRetraction),
+    /// An archived moderator-initiated message retraction.
     Moderation(ArchivedModeration),
+    /// An archived complete reaction set targeting an earlier message.
     Reactions(ArchivedReactionSet),
     /// In-place tombstone produced by XEP-0424 retraction or
     /// XEP-0425 moderation. The original row's `body` and
@@ -149,11 +206,15 @@ pub enum ArchivedRichPayload {
 pub struct ArchivedOccupantId(String);
 
 impl ArchivedOccupantId {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Create `ArchivedOccupantId` from non-blank text, returning `None` for empty or whitespace-only input.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -162,7 +223,7 @@ impl ArchivedOccupantId {
 /// XEP-0313 §MUC Archives real-JID disclosure for an archived
 /// groupchat row: "In the case of non-anonymous rooms … the archive
 /// message will use extended message information in an `<x/>` element
-/// qualified by the 'http://jabber.org/protocol/muc#user' namespace
+/// qualified by the `http://jabber.org/protocol/muc#user` namespace
 /// and containing an `<item/>` child with a 'jid' attribute
 /// specifying the occupant's full JID."
 ///
@@ -174,16 +235,21 @@ pub struct ArchivedMucSender {
     /// The sender's real JID (full JID for live occupants).
     pub jid: Jid,
     /// XEP-0045 affiliation at message time.
-    pub affiliation: crate::types::Affiliation,
+    pub affiliation: Affiliation,
     /// XEP-0045 role at message time.
-    pub role: crate::types::Role,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Rich message annotations retained independently of the archived stanza XML.
 pub struct ArchivedRichMessage {
+    /// Optional typed payload carried by this item.
     pub payload: Option<ArchivedRichPayload>,
+    /// Reply metadata retained from the archived message.
     pub reply: Option<ArchivedReply>,
+    /// References retained from the original message body.
     pub references: Vec<ArchivedReference>,
+    /// Mention annotations retained from the original message.
     pub mentions: Vec<ArchivedMention>,
     /// Client-authored message subjects keyed by their wire `xml:lang`
     /// value (`""` is the default language).
@@ -212,6 +278,7 @@ impl ArchivedRichMessage {
     /// logical message even though its resource (and possibly its
     /// affiliation/role) changed. Comparing the identity fields would
     /// break dedup and duplicate the row in the archive.
+    #[must_use]
     pub fn content_only(&self) -> Self {
         Self {
             occupant_id: None,
@@ -222,6 +289,7 @@ impl ArchivedRichMessage {
 
     /// True when this payload is an XEP-0424 / XEP-0425 tombstone — the
     /// terminal state an archive row never leaves.
+    #[must_use]
     pub fn is_tombstoned(&self) -> bool {
         matches!(
             self.payload.as_ref(),
@@ -232,6 +300,7 @@ impl ArchivedRichMessage {
     /// True when this payload carries no client-authored content
     /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.payload.is_none()
             && self.reply.is_none()
@@ -248,6 +317,7 @@ impl ArchivedRichMessage {
     /// the server-stamped occupant-id / real-JID" compare equal to a
     /// row that carried no `rich_payload` at all — the two are the same
     /// logical message for dedup purposes.
+    #[must_use]
     pub fn dedup_content(&self) -> Option<Self> {
         let content = self.content_only();
         (!content.is_empty()).then_some(content)
@@ -255,14 +325,19 @@ impl ArchivedRichMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Non-blank conversation thread identifier used by archive queries.
 pub struct ThreadId(String);
 
 impl ThreadId {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Create `ThreadId` from non-blank text, returning `None` for empty or whitespace-only input.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -423,6 +498,7 @@ impl ArchivedMessage {
     /// not pull in this fixture constructor.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
+    #[must_use]
     pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),

@@ -1,4 +1,6 @@
-use super::*;
+use super::{Element, Feature, WebSocketState};
+use crate::push_service::commands::DISABLE_DEVICE_NODE;
+use crate::push_service::commands::REGISTER_DEVICE_NODE;
 
 pub(super) const EXTENSION_ROUTE_FORM_TYPE: &str = "urn:waddle:extension:1:routes";
 pub(super) const EXTENSION_COMMAND_FORM_TYPE: &str = "urn:waddle:extension:1:command";
@@ -31,9 +33,7 @@ impl CommandBoundary {
             || node.starts_with("urn:waddle:extension:1:")
         {
             Self::Extensions
-        } else if node == crate::push_service::commands::REGISTER_DEVICE_NODE
-            || node == crate::push_service::commands::DISABLE_DEVICE_NODE
-        {
+        } else if node == REGISTER_DEVICE_NODE || node == DISABLE_DEVICE_NODE {
             Self::PushService
         } else if node == waddle_xmpp::admin::NS_GROUP_DM_RENAME {
             Self::MucRoom
@@ -206,8 +206,8 @@ mod tests {
         composer_execute: bool,
     ) -> waddle_extensions::CommandDescriptor {
         waddle_extensions::CommandDescriptor {
-            node: waddle_extensions::CommandNode::new(node).expect("command node"),
-            name: waddle_extensions::DisplayText::new("Test Command").expect("display text"),
+            node: waddle_extensions::CommandNode::try_new(node).expect("command node"),
+            name: waddle_extensions::DisplayText::try_new("Test Command").expect("display text"),
             scope,
             composer_prefix: composer_prefix.map(str::to_string),
             inline_field: inline_field.map(str::to_string),
@@ -216,34 +216,34 @@ mod tests {
     }
 
     fn plugin(id: &str) -> waddle_extensions::PluginId {
-        waddle_extensions::PluginId::new(id).expect("plugin id")
+        waddle_extensions::PluginId::try_new(id).expect("plugin id")
     }
 
     fn profile() -> waddle_extensions::ExtensionProfile {
         waddle_extensions::ExtensionProfile {
-            display_name: waddle_extensions::DisplayText::new("GitHub").expect("display name"),
+            display_name: waddle_extensions::DisplayText::try_new("GitHub").expect("display name"),
             description: Some(
-                waddle_extensions::DisplayText::new("Repository events")
+                waddle_extensions::DisplayText::try_new("Repository events")
                     .expect("profile description"),
             ),
             accent: Some("#238636".to_string()),
             avatar: None,
-            bot_hat_label: Some(waddle_extensions::DisplayText::new("Bot").expect("hat label")),
+            bot_hat_label: Some(waddle_extensions::DisplayText::try_new("Bot").expect("hat label")),
         }
     }
 
     fn route() -> waddle_extensions::ExtensionRouteDescriptor {
         waddle_extensions::ExtensionRouteDescriptor {
             plugin: plugin("github"),
-            id: waddle_extensions::RouteId::new("routes").expect("route id"),
-            label: waddle_extensions::DisplayText::new("GitHub Routes").expect("route label"),
+            id: waddle_extensions::RouteId::try_new("routes").expect("route id"),
+            label: waddle_extensions::DisplayText::try_new("GitHub Routes").expect("route label"),
             scope: waddle_extensions::ExtensionRouteScope::Channel,
             surface: waddle_extensions::ExtensionRouteSurface::List,
-            state_node: waddle_extensions::PubSubNode::new(
+            state_node: waddle_extensions::PubSubNode::try_new(
                 "urn:waddle:web-integration:1:github:routes",
             )
             .expect("state node"),
-            payload_namespace: waddle_extensions::PayloadNamespace::new(
+            payload_namespace: waddle_extensions::PayloadNamespace::try_new(
                 "urn:waddle:web-integration:1",
             )
             .expect("payload namespace"),

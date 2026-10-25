@@ -1,9 +1,12 @@
 //! Per-resource completion beneath a recorded remote carbon obligation.
+use crate::db::Database;
+use crate::ingress_substrate::MessageEnvelope;
 use jid::FullJid;
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{CanonicalMessageRepository, IngressUnitOfWork, IngressUowError};
-use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
+use crate::db::DatabaseDriver;
+use crate::ingress::decision::EffectReceiptKey;
 
 pub(crate) struct CarbonReceiptRepository;
 
@@ -11,7 +14,7 @@ impl CarbonReceiptRepository {
     /// A lost owner reply must not erase a resource merely because its socket
     /// disappeared. Include unresolved starts and durable acceptance evidence.
     pub(crate) async fn attempted_resources(
-        db: &crate::db::Database,
+        db: &Database,
         message: MessageKey,
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<FullJid>, IngressUowError> {
@@ -60,11 +63,11 @@ impl CarbonReceiptRepository {
 
     /// Read immutable canonical carbon authority without taking a writer lock.
     pub(crate) async fn load_authority(
-        db: &crate::db::Database,
+        db: &Database,
         message: MessageKey,
     ) -> Result<
         (
-            crate::ingress_substrate::MessageEnvelope,
+            MessageEnvelope,
             Vec<waddle_xmpp::ingress::IngressEffectIntent>,
         ),
         IngressUowError,

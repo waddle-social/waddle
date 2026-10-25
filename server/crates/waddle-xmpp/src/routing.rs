@@ -171,13 +171,13 @@ impl StanzaRouter {
     /// Determine the routing destination for a JID.
     ///
     /// Returns whether the JID is local, local MUC, or remote.
-    pub fn get_destination(&self, jid: &Jid) -> RoutingDestination {
+    pub fn destination(&self, jid: &Jid) -> RoutingDestination {
         let domain = jid.domain().as_str();
-        self.get_destination_for_domain(domain)
+        self.destination_for_domain(domain)
     }
 
     /// Determine the routing destination for a domain string.
-    pub fn get_destination_for_domain(&self, domain: &str) -> RoutingDestination {
+    pub fn destination_for_domain(&self, domain: &str) -> RoutingDestination {
         if domain == self.config.local_domain {
             RoutingDestination::Local
         } else if domain == self.config.muc_domain {
@@ -194,7 +194,7 @@ impl StanzaRouter {
     /// Check if a JID is local to this server.
     pub fn is_local_jid(&self, jid: &Jid) -> bool {
         matches!(
-            self.get_destination(jid),
+            self.destination(jid),
             RoutingDestination::Local
                 | RoutingDestination::LocalMuc
                 | RoutingDestination::LocalSpaces
@@ -203,12 +203,12 @@ impl StanzaRouter {
 
     /// Check if a JID is for the local MUC service.
     pub fn is_muc_jid(&self, jid: &Jid) -> bool {
-        matches!(self.get_destination(jid), RoutingDestination::LocalMuc)
+        matches!(self.destination(jid), RoutingDestination::LocalMuc)
     }
 
     /// Check if a JID is outside the local WebSocket-served domains.
     pub fn is_remote_jid(&self, jid: &Jid) -> bool {
-        matches!(self.get_destination(jid), RoutingDestination::Remote { .. })
+        matches!(self.destination(jid), RoutingDestination::Remote { .. })
     }
 
     /// Route a presence stanza to its destination.
@@ -241,7 +241,7 @@ impl StanzaRouter {
             }
         };
 
-        match self.get_destination(to_jid) {
+        match self.destination(to_jid) {
             RoutingDestination::Local => self.route_presence_local(presence).await,
             RoutingDestination::LocalMuc | RoutingDestination::LocalSpaces => {
                 // MUC/Spaces presence should be handled by their respective services
@@ -335,7 +335,7 @@ impl StanzaRouter {
             }
         };
 
-        match self.get_destination(&to_jid) {
+        match self.destination(&to_jid) {
             RoutingDestination::Local => self.route_iq_local(iq).await,
             RoutingDestination::LocalMuc => self.route_iq_local_muc(iq, Some(sender_jid)).await,
             RoutingDestination::LocalSpaces => {

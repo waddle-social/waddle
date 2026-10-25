@@ -1,4 +1,32 @@
-use super::*;
+use super::GetOrRestoreDurableRoom;
+use super::{
+    AbortDestroyRoomAttempt, AckDestroyCompletion, ActorRef, BareJid, ChannelId, ClaimEpoch,
+    ClaimStore, Context, CreateInstantRoom, CreateRoom, DemoteRoomIfExactActor, DemoteRoomIfOwner,
+    DestroyAttemptPhase, DestroyCompletion, DestroyRoom, DestroyRoomIfInactive, DestroyRoomOutcome,
+    DestroyRoomReason, DestroyRoomWithAttempt, DrainRoomOwnershipForShutdown, Entity, EntityType,
+    GetOrCreateRoom, GetOrCreateRoomWithLiveRoster, GetOrRestoreRoom,
+    GetPendingReclaimedRoomBacklog, GetPendingRoomReleaseBacklog, GetRoom, GetRoomSealState,
+    GetSingleNodeRoomRetirementAuthority, GuardedDestroyOutcome, HashMap, HashSet,
+    InProcessClaimStore, IsCurrentIdentityPendingRoomReleaseOnly, IsCurrentRoomPendingRelease,
+    IsMucJid, IsPendingRoomReleaseOnly, ListPendingReclaimedRooms, ListPendingRoomReleaseJids,
+    ListRooms, ListRoomsOwnedBy, LiveRoomRestore, LocalRoomJids, MarkHandoffPendingForTest,
+    MarkRegistryProgress, MucRoom, NodeIdentity, OccupantIdSecret, PendingReclaimedRoom,
+    PendingReclaimedRoomBacklog, PendingReclaimedState, PendingRoomOwnershipResponsibility,
+    PendingRoomReleaseState, ReapSealedRoom, ReclaimedRoomOutcome, ReconcileReclaimedRoom,
+    RegisterDestroyCompletion, RememberPendingReclaimedRoom, RequeueDestroyCompletion,
+    ReservePendingReclaimedRoom, RetainedDestroyAttempt, RetireUnresponsiveRoomIfExactActor,
+    RetryPendingRoomReleases, RetryUnpublishedPreparationDestroy, RoomAcquisition, RoomActor,
+    RoomConfig, RoomCount, RoomCreation, RoomCreationSpec, RoomDurableMutation, RoomEntry,
+    RoomExists, RoomOwnershipDrainOutcome, RoomRegistryActor, RoomRegistryError, RoomSealState,
+    RunAbsentRoomGuardedAsync, SealForDestroy, SealGuard, SealRoomForDestroySnapshot,
+    SharedNodeIdentity, TakeDestroyCompletionAttempt, TakeDestroyCompletions,
+    UnpublishedDestroyPhase, UnpublishedPreparationDestroyOutcome, UnsealDestroy, WaddleId,
+    WireClusteringClaims, HANDOFF_PENDING_WINDOW, MAX_PENDING_RECLAIMED_ROOMS,
+    MAX_PENDING_ROOM_OWNERSHIP_RESPONSIBILITIES, MAX_PENDING_ROOM_RELEASES,
+    MAX_ROOM_PREPARATION_WAITERS, PENDING_ROOM_RETRY_BATCH, PENDING_ROOM_RETRY_DELAY,
+    PRE_ACQUIRE_CONVERGENCE_BUDGET, RECLAIMED_ROOM_RELEASE_TIMEOUT, ROOM_OWNERSHIP_CALL_TIMEOUT,
+    SNAPSHOT_PRESEAL_RECONCILE_DELAY,
+};
 use kameo::actor::Spawn;
 use kameo::error::SendError;
 
@@ -4966,7 +4994,7 @@ mod ownership_claims_tests {
                     generation: leave_attempt.order(),
                     nick_generation: None,
                     outcome: crate::muc::room_actor::DepartureReceiptOutcome::Suppressed {
-                        nick: crate::muc::MucOccupantNick::new("ghost".to_string())
+                        nick: crate::muc::MucOccupantNick::try_new("ghost".to_string())
                             .expect("valid nick"),
                         affiliation: crate::Affiliation::Member,
                     },
@@ -5403,7 +5431,7 @@ mod ownership_claims_tests {
                 .await
                 .expect("successor snapshot")
                 .room
-                .get_occupant("alice")
+                .occupant("alice")
                 .is_some(),
             "the transplanted roster survives the handoff"
         );

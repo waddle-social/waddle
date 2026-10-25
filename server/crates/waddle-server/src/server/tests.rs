@@ -1,12 +1,16 @@
-use super::*;
+use super::{
+    bootstrap_membership, extension_commands, fixed_account, health, http, AppState, XmppConfig,
+};
 use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::ServerConfig;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::{routing::get, Router};
-use base64::prelude::*;
+use axum::routing::get;
+use axum::Router;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::prelude::Engine;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -17,7 +21,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_MUTEX
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 /// XmppConfig for unit tests: uses in-memory SQLite for all storage backends.
@@ -33,7 +37,7 @@ fn test_xmpp_config() -> XmppConfig {
 async fn create_test_state() -> Arc<AppState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
-    let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
+    let db_pool = DatabasePool::try_new(config, pool_config).await.unwrap();
 
     // Run migrations
     let runner = MigrationRunner::global();

@@ -1,10 +1,16 @@
-use super::*;
+//! JavaScript client methods for in-call signals and call-thread state.
+
+use super::{
+    future_to_promise, js_error, send_iq_command, send_iq_command_stanza_aware,
+    send_stanza_command, to_js_value, wasm_bindgen, Element, JsValue, Promise,
+    WaddleCallSessionTerminateOutcome, WaddleClient, WaddleClientInner, WaddleExternalService,
+};
 use waddle_xmpp_client::messaging::{
     build_finish, build_finish_migrated, build_muji_session_initiate, build_muji_session_terminate,
     build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
     build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, wrap_jmi_message, CallMedia,
-    JingleReason, SessionId,
+    JingleReason, MujiSessionVideo, SessionId, TieBreak,
 };
 
 #[cfg(test)]
@@ -112,6 +118,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send an XEP-0353 proceed signal to a full peer JID; rejects an invalid JID or failed send.
     pub fn send_call_proceed(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -133,6 +140,7 @@ impl WaddleClient {
         })
     }
 
+    /// Reject the identified call proposal at the proposing peer's full JID.
     pub fn send_call_reject(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -142,12 +150,17 @@ impl WaddleClient {
         })
     }
 
+    /// Reject a simultaneous proposal with the XEP-0353 tie-break marker.
     pub fn send_call_reject_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(
                 &peer_full_jid,
-                build_reject_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+                build_reject_with_options(
+                    &sid(sid_str),
+                    Some(JingleReason::Expired),
+                    TieBreak::Marked,
+                ),
             )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -170,18 +183,24 @@ impl WaddleClient {
         })
     }
 
+    /// Retract a simultaneous proposal with the XEP-0353 tie-break marker.
     pub fn send_call_retract_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(
                 &peer_full_jid,
-                build_retract_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+                build_retract_with_options(
+                    &sid(sid_str),
+                    Some(JingleReason::Expired),
+                    TieBreak::Marked,
+                ),
             )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
         })
     }
 
+    /// Send the XEP-0353 finish bookend for a completed call to the peer's full JID.
     pub fn send_call_finish(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -191,6 +210,7 @@ impl WaddleClient {
         })
     }
 
+    /// Finish the old call while identifying the new session to which it migrated.
     pub fn send_call_finish_migrated(
         &self,
         peer_full_jid: String,
@@ -312,7 +332,16 @@ impl WaddleClient {
             let mixer = calls_mixer_jid(initiator.domain().as_str());
 
             let sid = sid(sid_str);
-            let jingle = build_muji_session_initiate(&sid, &initiator, &room_jid, video);
+            let jingle = build_muji_session_initiate(
+                &sid,
+                &initiator,
+                &room_jid,
+                if video {
+                    MujiSessionVideo::WithVideo
+                } else {
+                    MujiSessionVideo::AudioOnly
+                },
+            );
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
@@ -400,7 +429,7 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq_id = waddle_xmpp_client::request::StanzaId::new(iq_id)
+            let iq_id = waddle_xmpp_client::request::StanzaId::try_new(iq_id)
                 .map_err(|err| js_error(err.to_string()))?;
             let mixer = calls_mixer_jid(stored_full_jid(&inner)?.domain().as_str());
 
@@ -419,6 +448,8 @@ impl WaddleClient {
         })
     }
 
+    /// Terminate a DM Jingle session; rejects unknown reason tokens, invalid full JIDs,
+    /// or failed IQs.
     pub fn send_call_session_terminate(
         &self,
         peer_full_jid: String,
@@ -444,6 +475,8 @@ impl WaddleClient {
         })
     }
 
+    /// Terminate a DM Jingle session and resolve to a typed success, orphaned-session, or
+    /// stanza-error outcome.
     pub fn send_call_session_terminate_with_outcome(
         &self,
         peer_full_jid: String,
@@ -616,8 +649,11 @@ mod tests {
     fn jmi_tie_break_response_targets_full_jid_and_carries_expired_reason() {
         use waddle_xmpp_client::messaging::{build_retract_with_options, JingleReason, SessionId};
 
-        let body =
-            build_retract_with_options(&SessionId("c1".into()), Some(JingleReason::Expired), true);
+        let body = build_retract_with_options(
+            &SessionId("c1".into()),
+            Some(JingleReason::Expired),
+            TieBreak::Marked,
+        );
         let stanza = super::message_with_jmi_to_full("bob@waddle.test/phone", body)
             .expect("full JID accepted");
         let retract = stanza

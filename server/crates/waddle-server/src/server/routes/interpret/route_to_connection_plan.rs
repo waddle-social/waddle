@@ -1,5 +1,9 @@
 pub(super) use super::super::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
-use super::*;
+use super::{
+    bounce_for_account_rejection, bounce_undeliverable_iq, close_call_setup_from_outcome,
+    deliver_peer_to_live_only, warn, BareJid, DefinedCondition, Deps, ErrorType, FullJid,
+    FullJidDeliveryOutcome, IngressEffectIntent, PendingCallSetupRoute, Stanza, StanzaError,
+};
 
 pub(super) fn record(deps: &Deps<'_>, effect: ExternalDeliveryEffect) {
     super::super::effects::delivery::record(deps, effect);

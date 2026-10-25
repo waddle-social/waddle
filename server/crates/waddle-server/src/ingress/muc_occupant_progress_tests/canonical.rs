@@ -1,7 +1,16 @@
-use super::*;
+use super::{
+    build_interpret_deps, commit_submission, execute_effects, interpret, plan_broadcast,
+    terminalize_if_complete, CreateRoom, DigestContext, DigestInput, Duration,
+    ExternalDeliveryEffect, ExternalEffect, ImmediateSink, IngressCanonicalRef,
+    IngressEffectCapture, IngressEffectIntent, IngressFixture, IngressStreamIdentity, Join,
+    NormalizedTarget, OutboundEvent, PlanSink,
+};
+use crate::ingress::effects;
+use crate::ingress::recovery_rebuild::RecoveryInput;
 use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::effects::Effect;
 use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::tests as socket_tests;
 
 async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool) {
     #[cfg(feature = "clustering")]
@@ -423,7 +432,7 @@ async fn system_sources_keep_separate_payloads(fixture: IngressFixture) {
             message.from = Some(room.clone().into());
             message.bodies.insert(Default::default(), body.into());
             waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
-            StoredMessagePayload::new(message).expect("system payload")
+            StoredMessagePayload::try_new(message).expect("system payload")
         });
         submission
             .plan
@@ -511,7 +520,7 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
     use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration};
     let room: jid::BareJid = "observer@muc.example.com".parse().expect("room");
     let occupant: jid::FullJid = "juliet@example.com/absent".parse().expect("occupant");
-    let plugin = waddle_extensions::PluginId::new("message-hook-fixture").expect("plugin");
+    let plugin = waddle_extensions::PluginId::try_new("message-hook-fixture").expect("plugin");
     let stamp = waddle_xmpp_core::xep0359::StanzaId::new("observer-id", room.clone().into());
     let mut submission = fixture.submission(Some("observer-no-live-copy"), "observed content");
     let request = submission.plan.sanitized_message.clone();
@@ -537,8 +546,8 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
             plugin: plugin.clone(),
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: None,
         },
     ];
@@ -609,19 +618,17 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             .await
             .expect("restore absent observer on replay");
         let observer = submission.plan.intents.last().expect("observer intent");
-        let recovered = crate::ingress::recovery_rebuild::rebuild(
-            crate::ingress::recovery_rebuild::RecoveryInput {
-                key: decision.message_key.expect("key"),
-                envelope: &envelope,
-                created_at: chrono::Utc::now(),
-                recorded: &submission.plan.intents,
-                unreceipted: std::slice::from_ref(observer),
-                route_progress: vec![],
-                host_owned_resources: vec![],
-                departed_occupants: vec![],
-                blocked_recipients: &[],
-            },
-        )
+        let recovered = crate::ingress::recovery_rebuild::rebuild(RecoveryInput {
+            key: decision.message_key.expect("key"),
+            envelope: &envelope,
+            created_at: chrono::Utc::now(),
+            recorded: &submission.plan.intents,
+            unreceipted: std::slice::from_ref(observer),
+            route_progress: vec![],
+            host_owned_resources: vec![],
+            departed_occupants: vec![],
+            blocked_recipients: &[],
+        })
         .expect("rebuild observer");
         for restored in [&replay, &recovered.decision] {
             let (observed, restored_request) = restored

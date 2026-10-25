@@ -14,7 +14,7 @@ use minidom::Element;
 use crate::messaging_verbs::{
     account_bare_jid, chat_state_wire_name, correction_stanza, mds_publish_iq, moderation_iq,
     pin_direct_stanza, pin_room_stanza, reaction_stanza, unpin_direct_stanza, unpin_room_stanza,
-    verb_message_type,
+    verb_message_type, WaddleMessageAudience,
 };
 use crate::{
     WaddleChatState, WaddleClient, WaddleClientEvent, WaddleConfig, WaddleError,
@@ -72,7 +72,7 @@ fn bare(value: &str) -> BareJid {
 }
 
 fn stanza_id(value: &str) -> waddle_xmpp_client::request::StanzaId {
-    waddle_xmpp_client::request::StanzaId::new(value).expect("test stanza id")
+    waddle_xmpp_client::request::StanzaId::try_new(value).expect("test stanza id")
 }
 
 /// The origin-id every chat/groupchat verb stanza must carry
@@ -96,7 +96,7 @@ mod xep0444 {
             &jid("bob@waddle.test"),
             "target-1",
             &["👍".to_string(), "❤️".to_string()],
-            false,
+            WaddleMessageAudience::Direct,
         );
         assert_eq!(stanza.name(), "message");
         assert_eq!(stanza.attr("to"), Some("bob@waddle.test"));
@@ -122,7 +122,7 @@ mod xep0444 {
             &jid("room@muc.waddle.test"),
             "target-2",
             &["🎉".to_string()],
-            true,
+            WaddleMessageAudience::Muc,
         );
         assert_eq!(stanza.attr("type"), Some("groupchat"));
         assert_eq!(stanza.attr("to"), Some("room@muc.waddle.test"));
@@ -132,7 +132,12 @@ mod xep0444 {
     fn empty_emoji_set_clears_reactions() {
         // XEP-0444 §3.2: an empty <reactions/> retracts all of the
         // sender's reactions on the target message.
-        let stanza = reaction_stanza(&jid("bob@waddle.test"), "target-3", &[], false);
+        let stanza = reaction_stanza(
+            &jid("bob@waddle.test"),
+            "target-3",
+            &[],
+            WaddleMessageAudience::Direct,
+        );
         let reactions = stanza
             .get_child("reactions", NS_REACTIONS)
             .expect("reactions payload");
@@ -148,7 +153,7 @@ mod xep0444 {
                 "bob@waddle.test".to_string(),
                 "target-1".to_string(),
                 vec!["👍".to_string()],
-                false,
+                WaddleMessageAudience::Direct,
             )
             .await;
         assert!(!sent);
@@ -164,7 +169,7 @@ mod xep0444 {
                 "not a jid".to_string(),
                 "target-1".to_string(),
                 vec!["👍".to_string()],
-                true,
+                WaddleMessageAudience::Muc,
             )
             .await;
         assert!(!sent);
@@ -191,7 +196,7 @@ mod xep0308 {
             &jid("bob@waddle.test"),
             "fixed typo",
             "orig-1",
-            false,
+            WaddleMessageAudience::Direct,
             &SendMessageOptions::default(),
         )
         .expect("correction builds");
@@ -214,7 +219,7 @@ mod xep0308 {
             &jid("room@muc.waddle.test"),
             "fixed",
             "orig-2",
-            true,
+            WaddleMessageAudience::Muc,
             &SendMessageOptions::default(),
         )
         .expect("correction builds");
@@ -231,7 +236,7 @@ mod xep0308 {
                 "bob@waddle.test".to_string(),
                 "orig-1".to_string(),
                 "fixed".to_string(),
-                false,
+                WaddleMessageAudience::Direct,
                 None,
             )
             .await;
@@ -248,7 +253,7 @@ mod xep0308 {
                 "not a jid".to_string(),
                 "orig-1".to_string(),
                 "fixed".to_string(),
-                true,
+                WaddleMessageAudience::Muc,
                 None,
             )
             .await;
@@ -271,7 +276,7 @@ mod xep0424 {
     fn retraction_stanza_carries_retract_and_marked_fallback() {
         let stanza = build_retraction_message(
             jid("room@muc.waddle.test").as_str(),
-            verb_message_type(true),
+            verb_message_type(WaddleMessageAudience::Muc),
             "target-sid",
             None,
         );
@@ -295,7 +300,7 @@ mod xep0424 {
     fn retraction_stanza_uses_chat_type_for_dm() {
         let stanza = build_retraction_message(
             jid("bob@waddle.test").as_str(),
-            verb_message_type(false),
+            verb_message_type(WaddleMessageAudience::Direct),
             "target-sid",
             None,
         );
@@ -308,7 +313,11 @@ mod xep0424 {
         let listener = RecordingListener::default();
         let client = test_client(listener.clone());
         let sent = client
-            .send_retraction("bob@waddle.test".to_string(), "sid-1".to_string(), false)
+            .send_retraction(
+                "bob@waddle.test".to_string(),
+                "sid-1".to_string(),
+                WaddleMessageAudience::Direct,
+            )
             .await;
         assert!(!sent);
         assert_eq!(listener.errors(), vec!["Not connected"]);
@@ -404,7 +413,7 @@ mod xep0085 {
             let stanza = build_chat_state_message(
                 jid("bob@waddle.test").as_str(),
                 chat_state_wire_name(state),
-                verb_message_type(false),
+                verb_message_type(WaddleMessageAudience::Direct),
                 None,
             )
             .expect("mapped state passes the builder's validator");
@@ -420,7 +429,7 @@ mod xep0085 {
         let stanza = build_chat_state_message(
             jid("room@muc.waddle.test").as_str(),
             chat_state_wire_name(WaddleChatState::Composing),
-            verb_message_type(true),
+            verb_message_type(WaddleMessageAudience::Muc),
             None,
         )
         .expect("state builds");
@@ -436,7 +445,7 @@ mod xep0085 {
             .send_chat_state(
                 "bob@waddle.test".to_string(),
                 WaddleChatState::Composing,
-                false,
+                WaddleMessageAudience::Direct,
             )
             .await;
         assert!(!sent);
@@ -456,7 +465,7 @@ mod xep0333 {
         let stanza = build_displayed_message(
             jid("bob@waddle.test").as_str(),
             "msg-42",
-            verb_message_type(false),
+            verb_message_type(WaddleMessageAudience::Direct),
             None,
         );
         assert_eq!(stanza.attr("type"), Some("chat"));
@@ -475,7 +484,7 @@ mod xep0333 {
         let stanza = build_displayed_message(
             jid("room@muc.waddle.test").as_str(),
             "msg-43",
-            verb_message_type(true),
+            verb_message_type(WaddleMessageAudience::Muc),
             None,
         );
         assert_eq!(stanza.attr("type"), Some("groupchat"));
@@ -486,7 +495,11 @@ mod xep0333 {
         let listener = RecordingListener::default();
         let client = test_client(listener.clone());
         let sent = client
-            .send_displayed("bob@waddle.test".to_string(), "msg-42".to_string(), false)
+            .send_displayed(
+                "bob@waddle.test".to_string(),
+                "msg-42".to_string(),
+                WaddleMessageAudience::Direct,
+            )
             .await;
         assert!(!sent);
         assert_eq!(listener.errors(), vec!["Not connected"]);

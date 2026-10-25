@@ -1,6 +1,6 @@
+use dashmap::RwLock;
 use jid::FullJid;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use waddle_xmpp::ownership::{ClaimSnapshot, NodeIdentity};
 
@@ -12,15 +12,14 @@ const WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Shares the warning budget across all rooms and replacements of a full JID.
 #[derive(Debug, Default)]
 pub(super) struct RemoteMucCleanupWarnings {
-    last_warnings: Mutex<HashMap<FullJid, Instant>>,
+    // Diagnostic throttling only: updates insert complete timestamps or remove entries.
+    // No cleanup authority or user callbacks live under this non-poisoning lock.
+    last_warnings: RwLock<HashMap<FullJid, Instant>>,
 }
 
 impl RemoteMucCleanupWarnings {
     pub(super) fn should_warn(&self, jid: &FullJid, now: Instant) -> bool {
-        let mut warnings = self
-            .last_warnings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut warnings = self.last_warnings.write();
         warnings.retain(|_, last| now.saturating_duration_since(*last) < WARNING_INTERVAL);
         if let std::collections::hash_map::Entry::Vacant(entry) = warnings.entry(jid.clone()) {
             entry.insert(now);
@@ -174,6 +173,21 @@ mod tests {
     }
 
     #[test]
+    fn warning_budget_still_expires_after_a_writer_unwinds() {
+        let warnings = RemoteMucCleanupWarnings::default();
+        let jid = "user@example.test/resource".parse::<FullJid>().unwrap();
+        let now = Instant::now();
+        assert!(warnings.should_warn(&jid, now));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = warnings.last_warnings.write();
+            panic!("fault while holding the warning budget");
+        }));
+        assert!(panic.is_err());
+        assert!(!warnings.should_warn(&jid, now + Duration::from_secs(299)));
+        assert!(warnings.should_warn(&jid, now + Duration::from_secs(300)));
+    }
+
+    #[test]
     fn checking_warnings_prunes_expired_sessions() {
         let warnings = RemoteMucCleanupWarnings::default();
         let expired = "user@example.test/expired".parse::<FullJid>().unwrap();
@@ -181,7 +195,7 @@ mod tests {
         let now = Instant::now();
         assert!(warnings.should_warn(&expired, now));
         assert!(warnings.should_warn(&current, now + Duration::from_secs(300)));
-        let records = warnings.last_warnings.lock().unwrap();
+        let records = warnings.last_warnings.read();
         assert_eq!(records.len(), 1);
         assert!(records.contains_key(&current));
     }

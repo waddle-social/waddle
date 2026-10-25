@@ -1,5 +1,9 @@
-use super::*;
-use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use super::{
+    execute_effects, terminalize_if_complete, Deps, Duration, Effect, EffectReceiptKey,
+    ExternalDirectEffect, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
+};
+use crate::ingress::commit::commit_submission;
+use crate::ingress::test_support::IngressFixture;
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{
@@ -145,7 +149,8 @@ async fn allow_call_receipt(fixture: &IngressFixture) {
 }
 
 async fn confirmed_proceed_state_supersedes_pending_transition(fixture: IngressFixture) {
-    use crate::server::routes::interpret::{effects::PlanSink, interpret};
+    use crate::server::routes::interpret::effects::PlanSink;
+    use crate::server::routes::interpret::interpret;
     use waddle_xmpp::protocol::OutboundEvent;
 
     let mut submission = fixture.submission(Some("call-proceed-retry"), "stored proceed");

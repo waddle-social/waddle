@@ -1,12 +1,15 @@
 //! Serialize acceptance with a per-archive frontier, rather than retaining one
 //! deduplication key for every message ever sent on a long-lived connection.
 
+use crate::ingress::IngressEffectKind;
+use crate::pending_delivery::SmSessionId;
 use std::collections::BTreeMap;
 
 use tokio::sync::mpsc::error::TrySendError;
 
 use super::{ConnectionEntry, ConnectionRegistry, OutboundStanza};
-use crate::{mam::ArchiveOrdinal, stream_management::SmIngressAppendKey};
+use crate::mam::ArchiveOrdinal;
+use crate::stream_management::SmIngressAppendKey;
 
 #[derive(Debug, Default)]
 pub(super) struct ArchiveDispatchFrontiers {
@@ -22,12 +25,9 @@ impl ConnectionEntry {
         outbound: OutboundStanza,
     ) -> Result<(), TrySendError<()>> {
         if outbound.ingress_append.as_ref().is_some_and(|obligation| {
-            [
-                crate::ingress::IngressEffectKind::Carbons,
-                crate::ingress::IngressEffectKind::RelayCarbons,
-            ]
-            .iter()
-            .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage())
+            [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
+                .iter()
+                .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage())
         }) && !self.is_carbons_enabled()
         {
             // A frozen audience is only an upper bound. Check current opt-in
@@ -100,10 +100,7 @@ fn queue_error(error: TrySendError<OutboundStanza>) -> TrySendError<()> {
 }
 
 impl ConnectionRegistry {
-    pub fn local_sm_stream(
-        &self,
-        resource: &jid::FullJid,
-    ) -> Option<crate::pending_delivery::SmSessionId> {
+    pub fn local_sm_stream(&self, resource: &jid::FullJid) -> Option<SmSessionId> {
         self.connections
             .get(resource)
             .filter(|entry| entry.is_locally_hosted())
@@ -114,14 +111,12 @@ impl ConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ingress::MessageKey,
-        registry::{BroadcastOutcome, ConnectionRegistry},
-        stream_management::{
-            ArchiveDispatchPosition, SmIngressReceiptKind, SmRelayedAppendObligation,
-        },
-        Stanza,
+    use crate::ingress::MessageKey;
+    use crate::registry::{BroadcastOutcome, ConnectionRegistry};
+    use crate::stream_management::{
+        ArchiveDispatchPosition, SmIngressReceiptKind, SmRelayedAppendObligation,
     };
+    use crate::Stanza;
 
     fn copy(resource: &jid::FullJid, key: MessageKey, ordinal: i64) -> OutboundStanza {
         let mut message = xmpp_parsers::message::Message::new(Some(resource.clone().into()));
@@ -160,7 +155,7 @@ mod tests {
                 let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
                 registry.register_with_carbons(resource.clone(), sender, true);
                 let entry = registry
-                    .get_entry(&resource)
+                    .entry(&resource)
                     .expect("registered recipient resource");
                 let mut outbound = copy(&resource, MessageKey::new(), 1);
                 let obligation = outbound
@@ -202,7 +197,7 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         registry.register(resource.clone(), sender);
         let owner = registry
-            .get_entry(&resource)
+            .entry(&resource)
             .expect("registered recipient resource")
             .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);
@@ -239,7 +234,7 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         registry.register(resource.clone(), sender);
         let owner = registry
-            .get_entry(&resource)
+            .entry(&resource)
             .expect("registered recipient resource")
             .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);

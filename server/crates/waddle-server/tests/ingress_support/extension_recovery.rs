@@ -1,36 +1,30 @@
 //! Shared extension admission setup for the dedicated offline recovery suites.
 use crate::ingress_support::IngressFixture;
 use waddle_extensions::PluginId;
-use waddle_server::{
-    ingress::{ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
+use waddle_server::ingress::{
+    ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission,
 };
+use waddle_server::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_xmpp::ingress::{DigestContext, DigestInput, TransportGeneration};
 
-use waddle_server::{
-    ingress::{
-        effects::{
-            delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
-            Effect, ExternalEffect,
-        },
-        PlannedEffect,
-    },
-    notification_outbox::NotificationCandidate,
+use waddle_server::ingress::effects::delivery::{
+    ExternalDeliveryEffect, PreparedOfflineNotification,
 };
-use waddle_xmpp::{
-    ingress::{
-        IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-        PendingDeliveryMutation,
-    },
-    pending_delivery::{PendingPayload, PendingRow, PendingRowId},
+use waddle_server::ingress::effects::{Effect, ExternalEffect};
+use waddle_server::ingress::PlannedEffect;
+use waddle_server::notification_outbox::NotificationCandidate;
+use waddle_xmpp::ingress::{
+    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
+    PendingDeliveryMutation,
 };
+use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId};
 
 pub async fn extension_submission(
     fixture: &IngressFixture,
     origin: &str,
     body: &str,
 ) -> IngressSubmission {
-    let plugin = PluginId::new("offline-recovery-plugin").expect("plugin");
+    let plugin = PluginId::try_new("offline-recovery-plugin").expect("plugin");
     let mut tx = fixture.uow.begin().await.expect("grant transaction");
     ExtensionGrantRepository::sync_configured(
         &mut tx,

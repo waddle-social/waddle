@@ -1,3 +1,5 @@
+//! Browser WebSocket transport and event adaptation for the XMPP runtime.
+
 #![cfg(feature = "wasm")]
 
 use futures::channel::mpsc::{self, Receiver};
@@ -6,8 +8,10 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
 #[derive(Debug)]
+/// Browser WebSocket owner retaining event callbacks for the lifetime of the connection.
 pub struct WasmWebSocket {
     ws: web_sys::WebSocket,
+    /// Receive endpoint for driver-delivered events.
     pub rx: Receiver<WasmTransportEvent>,
     _onopen: Closure<dyn FnMut()>,
     _onmessage: Closure<dyn FnMut(web_sys::MessageEvent)>,
@@ -16,14 +20,30 @@ pub struct WasmWebSocket {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Browser WebSocket events delivered to the client driver.
+#[non_exhaustive]
 pub enum WasmTransportEvent {
+    /// The browser WebSocket connection opened.
     Open,
+    /// An incoming text WebSocket frame; parsing occurs in the driver.
     Message(String),
-    Close { code: u16, reason: String },
+    /// The transport closed and supplied its status and reason.
+    Close {
+        #[doc = "Protocol status or close code accompanying the event."]
+        code: u16,
+        #[doc = "Human-readable explanation for the operation."]
+        reason: String,
+    },
+    /// The operation failed; inspect the associated error details.
     Error,
 }
 
 impl WasmWebSocket {
+    /// Open a browser WebSocket using the `xmpp` subprotocol and install event callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the browser exception if WebSocket construction fails.
     pub fn connect(url: &str) -> Result<Self, wasm_bindgen::JsValue> {
         let protocols = Array::new();
         protocols.push(&wasm_bindgen::JsValue::from_str("xmpp"));
@@ -93,14 +113,26 @@ impl WasmWebSocket {
         })
     }
 
+    /// Borrow the browser WebSocket so the host can inspect its transport state.
+    #[must_use]
     pub fn web_socket(&self) -> &web_sys::WebSocket {
         &self.ws
     }
 
+    /// Write an encoded XMPP frame to the browser WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the browser exception if the socket cannot accept the frame.
     pub fn send(&self, frame: &str) -> Result<(), wasm_bindgen::JsValue> {
         self.ws.send_with_str(frame)
     }
 
+    /// Request closure of the browser WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the browser exception if closing the socket fails.
     pub fn close(&self) -> Result<(), wasm_bindgen::JsValue> {
         self.ws.close()
     }

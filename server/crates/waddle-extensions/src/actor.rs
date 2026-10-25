@@ -1,36 +1,44 @@
+//! Actor-facing extension invocation and observation request contracts.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::warn;
+use xmpp_parsers::jid::FullJid;
 
 use crate::host_tools::{
-    DenyingExtensionHostTools, ExtensionHostTools, InvocationContext, InvocationKind,
+    DeliveryInvocation, DenyingExtensionHostTools, ExtensionHostTools, InvocationContext,
+    InvocationKind,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::observer_test_support::ObserverTestPlugin;
 use crate::runtime::LoadedExtension;
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::{ArtifactReference, ExtensionProfile};
 use crate::types::{
-    DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent, ExtensionManifest, WaddleId,
+    ConfiguredRoomObserver, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent,
+    ExtensionManifest, ExtensionResponse, ObservationFailure, RoomMessageObserve, WaddleId,
 };
-use xmpp_parsers::jid::FullJid;
 
 /// Host admission is distinct from any error after entering the runtime.
 pub(crate) enum ObservationInvocationError {
     NotInvoked,
-    Invoked(crate::types::ObservationFailure),
+    Invoked(ObservationFailure),
 }
 
 /// An extension loaded into wasmtime and ready to handle typed framework events.
 pub struct WasmExtensionActor {
     manifest: ExtensionManifest,
     #[cfg(any(test, feature = "test-support"))]
-    observer_test: Option<Arc<crate::observer_test_support::ObserverTestPlugin>>,
+    observer_test: Option<Arc<ObserverTestPlugin>>,
     extension: Arc<LoadedExtension>,
     config: String,
     host_tools: Arc<dyn ExtensionHostTools>,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,
     provider_room_grants: Vec<xmpp_parsers::jid::BareJid>,
-    room_observer: Option<crate::types::ConfiguredRoomObserver>,
+    room_observer: Option<ConfiguredRoomObserver>,
     observation_permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -47,6 +55,12 @@ impl WasmExtensionActor {
     /// Load the extension and run its lifecycle `init` to obtain the extension info.
     ///
     /// `config` is the JSON config payload to forward to the guest's `init` function.
+    ///
+    /// # Errors
+    ///
+    /// Returns an initialization error for deadline/resource exhaustion, component traps,
+    /// guest-reported failure, or a manifest that cannot be converted to validated host
+    /// types.
     pub async fn initialize(extension: LoadedExtension, config: &str) -> Result<Self> {
         let manifest = extension.call_init(config).await?;
         Ok(Self {
@@ -65,21 +79,18 @@ impl WasmExtensionActor {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_observer_test(
-        mut self,
-        plugin: Arc<crate::observer_test_support::ObserverTestPlugin>,
-    ) -> Self {
+    pub(crate) fn with_observer_test(mut self, plugin: Arc<ObserverTestPlugin>) -> Self {
         self.manifest.id = plugin.id.clone();
         self.observer_test = Some(plugin);
         self
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_profile_avatar(&mut self, avatar: crate::types::ArtifactReference) {
+    pub(crate) fn set_profile_avatar(&mut self, avatar: ArtifactReference) {
         let display_name = self.manifest.name.clone();
         self.manifest
             .profile
-            .get_or_insert(crate::types::ExtensionProfile {
+            .get_or_insert(ExtensionProfile {
                 display_name,
                 description: None,
                 accent: None,
@@ -89,21 +100,31 @@ impl WasmExtensionActor {
             .avatar = Some(avatar);
     }
 
+    /// Install the host service implementation used by future invocations; capabilities
+    /// still require explicit grants.
+    #[must_use]
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
         self
     }
 
+    /// Replace the operator-granted capability set used to authorize host calls and
+    /// returned effects.
+    #[must_use]
     pub fn with_grants(mut self, grants: HashSet<ExtensionCapability>) -> Self {
         self.grants = grants;
         self
     }
 
+    /// Replace the HTTPS origin allowlist used by outbound HTTP calls during guest execution.
+    #[must_use]
     pub fn with_allowed_http_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_http_origins = origins;
         self
     }
 
+    /// Replace the rooms that provider webhook invocations may target without a user requester.
+    #[must_use]
     pub fn with_provider_room_grants(mut self, rooms: Vec<xmpp_parsers::jid::BareJid>) -> Self {
         self.provider_room_grants = rooms;
         self
@@ -113,10 +134,7 @@ impl WasmExtensionActor {
         &self.provider_room_grants
     }
 
-    pub(crate) fn with_room_observer(
-        mut self,
-        observer: Option<crate::types::ConfiguredRoomObserver>,
-    ) -> Self {
+    pub(crate) fn with_room_observer(mut self, observer: Option<ConfiguredRoomObserver>) -> Self {
         if let Some(observer) = &observer {
             self.observation_permits = Arc::new(tokio::sync::Semaphore::new(
                 observer.max_concurrent as usize,
@@ -126,15 +144,15 @@ impl WasmExtensionActor {
         self
     }
 
-    pub(crate) fn room_observer(&self) -> Option<&crate::types::ConfiguredRoomObserver> {
+    pub(crate) fn room_observer(&self) -> Option<&ConfiguredRoomObserver> {
         self.room_observer.as_ref()
     }
 
     pub(crate) async fn observe_room_message(
         &self,
-        event: crate::types::RoomMessageObserve,
+        event: RoomMessageObserve,
         delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
-    ) -> Result<crate::types::ExtensionResponse, ObservationInvocationError> {
+    ) -> Result<ExtensionResponse, ObservationInvocationError> {
         let _permit = self
             .observation_permits
             .clone()
@@ -142,7 +160,7 @@ impl WasmExtensionActor {
             .map_err(|_| ObservationInvocationError::NotInvoked)?;
         let context = InvocationContext {
             // This is a display/runtime context only, never tenant authority.
-            waddle_id: WaddleId::new("room-observation").expect("static context"),
+            waddle_id: WaddleId::try_new("room-observation").expect("static context"),
             plugin_id: self.manifest.id.clone(),
             requester: None,
             source_room: Some(event.source.room.clone()),
@@ -154,7 +172,7 @@ impl WasmExtensionActor {
                 .call_handle_event_typed_with_delivery(
                     ExtensionEvent::RoomMessageObserve(event),
                     Arc::clone(&self.host_tools),
-                    crate::host_tools::DeliveryInvocation {
+                    DeliveryInvocation {
                         context,
                         capability,
                     },
@@ -178,10 +196,15 @@ impl WasmExtensionActor {
         result.map_err(ObservationInvocationError::Invoked)
     }
 
+    /// Clone the manifest returned by this component's successful initialization.
+    #[must_use]
     pub fn manifest(&self) -> ExtensionManifest {
         self.manifest.clone()
     }
 
+    /// Whether the operator granted this capability; test fixtures additionally honor
+    /// observation revocation.
+    #[must_use]
     pub fn has_grant(&self, capability: ExtensionCapability) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if capability == ExtensionCapability::MessageObserve
@@ -195,15 +218,26 @@ impl WasmExtensionActor {
         self.grants.contains(&capability)
     }
 
+    /// Whether the effect matches both the manifest's declarations and this actor's
+    /// granted capabilities.
+    #[must_use]
     pub fn validate_effect(&self, effect: &ExtensionEffect) -> bool {
         effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
     }
 
+    /// Run an event in the default `local` community and return only permitted effects;
+    /// guest failures become host warnings.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed nonblank `local` community identifier violates the
+    /// identifier constructor invariant.
     pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
-        self.handle_event_for_waddle(event, WaddleId::new("local").expect("static waddle id"))
+        self.handle_event_for_waddle(event, WaddleId::try_new("local").expect("static waddle id"))
             .await
     }
 
+    /// Run an event in the specified community, deriving requester authority from the event.
     pub async fn handle_event_for_waddle(
         &self,
         event: ExtensionEvent,
@@ -213,6 +247,15 @@ impl WasmExtensionActor {
             .await
     }
 
+    /// Run an event using explicit requester authority when supplied, otherwise deriving
+    /// it from the event. Guest failures become warnings; undeclared effects, room-result
+    /// effects, and durable observation events are excluded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if construction of the nonempty host-warning diagnostic violates the
+    /// display-text invariant. Test-support fixtures can also panic if their
+    /// recorded-invocation mutex was poisoned.
     pub async fn handle_event_for_waddle_with_requester(
         &self,
         event: ExtensionEvent,
@@ -269,7 +312,7 @@ impl WasmExtensionActor {
                     "extension handle-event failed; continuing fail-open"
                 );
                 vec![ExtensionEffect::HostWarning(
-                    DisplayText::new(message).expect("host warning is non-empty"),
+                    DisplayText::try_new(message).expect("host warning is non-empty"),
                 )]
             }
         }

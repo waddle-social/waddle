@@ -25,6 +25,7 @@
 //! - Get mentions-only for low-priority rooms
 //! - Per-room customization in the channel sidebar
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use minidom::Element;
@@ -171,7 +172,7 @@ impl RoomNotificationSetting {
 /// Collection of notification settings across rooms.
 #[derive(Debug, Default)]
 pub struct NotificationSettings {
-    settings: std::collections::HashMap<String, NotificationLevel>,
+    settings: HashMap<String, NotificationLevel>,
 }
 
 impl NotificationSettings {

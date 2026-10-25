@@ -4,7 +4,20 @@ use minidom::Element;
 use crate::messaging::{MucAffiliation, MucRole};
 
 use super::parsing::resolve_component_services;
-use super::*;
+use super::{
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
+    build_muc_admin_role_set_iq, build_roster_get_iq, build_user_search_form_iq,
+    build_user_search_iq, build_waddle_inbox_mark_read_iq, parse_disco_info_result,
+    parse_disco_items_result, parse_muc_admin_affiliation_query, parse_roster_result,
+    parse_space_channels_result, parse_upload_slot, parse_user_search_form,
+    parse_user_search_result, room_bots_from_disco_items, space_from_disco_item, DiscoDataField,
+    DiscoDataForm, DiscoIdentity, DiscoInfoResult, DiscoItem, DiscoveredChannel,
+    DiscoveredChannelType, MucAdminAffiliationItem, RoomBot, SpaceNode, UserSearchQuery,
+    WaddleInboxMarkRead, BOOKMARKS_NS, CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS, DISCO_ITEMS_NS,
+    MUC_ADMIN_NS, MUC_NS, NODE_WADDLE_ROOM_BOTS, PUBSUB_METADATA_FORM_TYPE, PUBSUB_NS, ROSTER_NS,
+    SPACES_NS, STANDALONE_SPACE_ID, UPLOAD_NS, USER_SEARCH_NS, WADDLE_GROUP_DM_FEATURE_NS,
+    WADDLE_INBOX_NS, WADDLE_ROOM_METADATA_FORM_TYPE,
+};
 
 #[test]
 fn parse_disco_info_result_extracts_features() {
@@ -278,7 +291,7 @@ fn space_from_disco_item_requires_spaces_metadata() {
 
 #[test]
 fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
-    let space_id = SpaceNode::new("general").expect("space node");
+    let space_id = SpaceNode::try_new("general").expect("space node");
     let iq = Element::builder("iq", CLIENT_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
@@ -353,7 +366,7 @@ fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
 #[test]
 fn space_channel_autojoin_defaults_to_false_when_attr_absent() {
     // XEP-0402 §2.2 default (web parity: `bookmark.autojoin ?? false`).
-    let space_id = SpaceNode::new("general").expect("space node");
+    let space_id = SpaceNode::try_new("general").expect("space node");
     let iq = Element::builder("iq", CLIENT_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
@@ -1012,7 +1025,7 @@ mod bookmark_merge {
     }
 
     fn standalone() -> SpaceNode {
-        SpaceNode::new(STANDALONE_SPACE_ID).expect("standalone id")
+        SpaceNode::try_new(STANDALONE_SPACE_ID).expect("standalone id")
     }
 
     fn bookmarks_response(items: Vec<BookmarkItem>) -> Element {

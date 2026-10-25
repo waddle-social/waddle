@@ -1,15 +1,12 @@
 //! Commit notification work and its recorded obligations under one canonical lock.
-use crate::{
-    ingress::decision::IngressDecision,
-    ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork,
-        IngressUowError, RecoveryCompletion, RecoveryReceiptRepository,
-    },
-    notification_outbox::NotificationCandidateInsertOutcome,
-    server::routes::interpret::effects::{
-        room::ExternalRoomEffect, EffectOutcome, SettledCompletion, SettledOutcome,
-    },
+use crate::ingress::decision::IngressDecision;
+use crate::ingress_uow::{
+    settle_recorded, CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork,
+    IngressUowError, RecoveryCompletion, RecoveryReceiptRepository,
 };
+use crate::notification_outbox::NotificationCandidateInsertOutcome;
+use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
+use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
 use waddle_xmpp::ingress::{
     GroupchatNotificationRecoveryAction, GroupchatNotificationRecoveryMutation,
     IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
@@ -132,7 +129,7 @@ async fn store(
                     .thread_id
                     .clone()
                     .map(|thread| {
-                        waddle_xmpp_core::mam::ThreadId::new(thread)
+                        waddle_xmpp_core::mam::ThreadId::try_new(thread)
                             .ok_or(IngressUowError::EffectIntentConflict)
                     })
                     .transpose()?,

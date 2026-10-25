@@ -2,6 +2,7 @@
 //! mirroring the inbox schema migration shape.
 
 use super::{DatabaseSpacesMetadataStore, SpacesMetadataError};
+use crate::db::DatabaseDriver;
 use crate::space_identity::projected_space_node_from_jid_text;
 
 pub(super) async fn initialize(
@@ -120,7 +121,7 @@ async fn rebuild_legacy_space_jid_primary_key(
         .await
         .map_err(|error| SpacesMetadataError::Storage(error.to_string()))?;
     let copy_sql = match store.db.driver() {
-        crate::db::DatabaseDriver::Sqlite => {
+        DatabaseDriver::Sqlite => {
             r#"
             INSERT OR IGNORE INTO spaces_metadata_new (
                 space_node, space_jid, name, description, icon_url, created_at, updated_at
@@ -130,7 +131,7 @@ async fn rebuild_legacy_space_jid_primary_key(
             WHERE space_node <> ''
             "#
         }
-        crate::db::DatabaseDriver::Postgres => {
+        DatabaseDriver::Postgres => {
             r#"
             INSERT INTO spaces_metadata_new (
                 space_node, space_jid, name, description, icon_url, created_at, updated_at
@@ -170,8 +171,8 @@ async fn primary_key_column(
     store: &DatabaseSpacesMetadataStore,
 ) -> Result<Option<String>, SpacesMetadataError> {
     match store.db.driver() {
-        crate::db::DatabaseDriver::Sqlite => sqlite_primary_key_column(store).await,
-        crate::db::DatabaseDriver::Postgres => postgres_primary_key_column(store).await,
+        DatabaseDriver::Sqlite => sqlite_primary_key_column(store).await,
+        DatabaseDriver::Postgres => postgres_primary_key_column(store).await,
     }
 }
 

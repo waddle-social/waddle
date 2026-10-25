@@ -1,8 +1,18 @@
 //! Rewrites must not renew the original database-clock resume window.
 
-use super::*;
+use super::{
+    async_trait, current_claim_epoch, fixed_occupancy_session, fixture, fixture_principal,
+    fixture_session, fixture_unacked, full, live_stealer, node_identity, seed_node,
+    sm_session_entity, stale_caller_supplied_time, Arc, ClaimEpoch, ClaimError, ClaimStore,
+    DateTime, Entity, Fixture, IngressCustodyDisposition, KeyedSnapshotOutcome, NodeIdentity,
+    PersistedDetachedAppend, PersistedIngressAppend, PostgresClaimStore,
+    PostgresFencedSmPersistence, SmClaimFence, SmPersistenceError, SmPersistenceStorage,
+    SmSessionId, StalePredicate, Utc,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration as StdDuration;
 use waddle_xmpp::ownership::{ClaimSnapshot, ExactReleaseOutcome, ResumeIdentityProof};
+use waddle_xmpp::stream_management::SmSessionRegistry;
 use waddle_xmpp::stream_management::{
     DetachedSession, InMemorySmSessionRegistry, PromotionCaptureCustody, SmIngressAppendKey,
     SmIngressReceiptKind, SmKeyedAppendOutcome,

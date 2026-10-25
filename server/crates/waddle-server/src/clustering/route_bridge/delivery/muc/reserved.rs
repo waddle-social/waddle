@@ -1,9 +1,23 @@
-use super::*;
+use super::{
+    build_interpret_deps, current_claim, no_client_reply_outcome,
+    no_client_reply_outcome_with_commit_state, remote_replies_from_frames, room_entity,
+    synthetic_session_for_full_jid, Arc, FullJidDeliveryOutcome, MucProxyOrigin,
+    OrderedRelayDeliveryServices, OrderedRelayMucProxyKind, OrderedRelayMucProxyOutcome,
+    OrderedRelayNackReason, OrderedRelayRouteOrigin, RemoteDeliveryOutcome, RemoteStanza, Stanza,
+    WebSocketState, ORDERED_RECEIVER_DELIVERY_TIMEOUT,
+};
+use crate::ingress::execute::ExecutionReport;
+use crate::ingress::identity::IngressRelayAdmission;
+use crate::ingress::IngressAuthority;
+use crate::ingress::IngressPrincipal;
+use crate::notification_activity::NotificationPresenceShow;
+use crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext;
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 /// Owner-side receipts retained until the relay reply is accepted by its sender.
 pub(crate) struct RelayFrameCompletion {
-    pub authority: Arc<crate::ingress::IngressAuthority>,
-    pub report: crate::ingress::execute::ExecutionReport,
+    pub authority: Arc<IngressAuthority>,
+    pub report: ExecutionReport,
 }
 
 pub(in super::super::super) async fn deliver_reserved_muc_proxy(
@@ -12,7 +26,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_proxy(
     kind: OrderedRelayMucProxyKind,
     origin: MucProxyOrigin,
     stanza: &Stanza,
-    admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+    admission: Option<&IngressRelayAdmission>,
     completion: &mut Option<RelayFrameCompletion>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     let Some(state) = services.web_socket_state.upgrade() else {
@@ -131,7 +145,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
     let presence_show = presence
         .show
         .clone()
-        .map(crate::notification_activity::NotificationPresenceShow::from_xep0045);
+        .map(NotificationPresenceShow::from_xep0045);
     let synthetic_session = synthetic_session_for_full_jid(&sender_jid);
     let frames = tokio::time::timeout(
         ORDERED_RECEIVER_DELIVERY_TIMEOUT,
@@ -142,9 +156,9 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
             &sender_jid,
             nick,
             presence_show,
-            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+            MucJoinConnectionContext {
                 occupancy_session,
-                authenticated_session: &Some(synthetic_session),
+                authenticated_session: Some(&synthetic_session),
                 registry_owner: None,
             },
         ),
@@ -260,7 +274,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
     message: &xmpp_parsers::message::Message,
-    admission: Option<&crate::ingress::identity::IngressRelayAdmission>,
+    admission: Option<&IngressRelayAdmission>,
     completion: &mut Option<RelayFrameCompletion>,
 ) -> Result<Vec<RemoteStanza>, OrderedRelayNackReason> {
     use crate::ingress::{ImmediateSink, IngressStreamIdentity, IngressSubmission};
@@ -280,11 +294,9 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
     let sender_entity = room_entity(room_jid);
     let deps = build_interpret_deps(
         state,
-        Some(
-            crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session(
-                &synthetic_session,
-            ),
-        ),
+        Some(ResolvedPrincipal::from_authenticated_session(
+            &synthetic_session,
+        )),
     )
     .with_ordered_relay_origin(Some(OrderedRelayRouteOrigin::room(room_jid)));
     let authority = &state.deps.protocol.ingress;
@@ -322,7 +334,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_groupchat(
                 room: room_jid.clone(),
                 room_fence,
             },
-            principal: crate::ingress::IngressPrincipal::Authenticated(admission.principal.clone()),
+            principal: IngressPrincipal::Authenticated(admission.principal.clone()),
             sender: sender.clone(),
             target,
             plan,

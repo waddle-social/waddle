@@ -5,6 +5,7 @@
 //! projections. Dropping an uncommitted [`IngressUowTransaction`] rolls it
 //! back through [`crate::db::Transaction`].
 
+use crate::db::DatabaseError;
 mod archive_dispatch;
 mod delivery_progress;
 pub(crate) use archive_dispatch::{
@@ -62,12 +63,10 @@ pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
 use std::time::Duration;
 
-use crate::{
-    config::LineageConfig,
-    db::{lineage, Database, DatabaseDriver, Transaction},
-    ingress_substrate::{
-        acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
-    },
+use crate::config::LineageConfig;
+use crate::db::{lineage, Database, DatabaseDriver, Transaction};
+use crate::ingress_substrate::{
+    acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -254,7 +253,7 @@ impl IngressUnitOfWork {
 
 async fn acquire_transaction_with_timeout<'a>(
     lock: Duration,
-    acquisition: impl std::future::Future<Output = Result<Transaction<'a>, crate::db::DatabaseError>>,
+    acquisition: impl std::future::Future<Output = Result<Transaction<'a>, DatabaseError>>,
 ) -> Result<Transaction<'a>, IngressUowError> {
     Ok(tokio::time::timeout(lock, acquisition)
         .await

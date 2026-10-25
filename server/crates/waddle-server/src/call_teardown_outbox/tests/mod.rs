@@ -1,3 +1,9 @@
+use super::{
+    drain, drain_due, retry_delay_ms, CallTeardownLastError, CallTeardownPersistenceSupervisor,
+    CallTeardownProducingNode, CallTeardownRetryOutcome, CallTeardownRetryReason,
+    CallTeardownStatus, ClaimToken, BASE_RETRY_DELAY_MS, FAILED_RETENTION_MS, MAX_ATTEMPTS,
+    MAX_RETRY_DELAY_MS,
+};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -11,22 +17,20 @@ use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
 use waddle_xmpp_core::OccupancySessionGeneration;
 
-use super::*;
+use super::{CallTeardownIntent, CallTeardownOutboxStore, TeardownTarget};
 use crate::db::Database;
-use crate::server::routes::websocket::{
-    get_room_actor,
-    handlers::presence::handle_muc_join as handle_muc_join_real,
-    tests::{
-        create_test_server_owner_session, create_test_websocket_state_with_clustering,
-        create_test_websocket_state_with_sfu, snapshot_room,
-    },
+use crate::server::routes::websocket::get_room_actor;
+use crate::server::routes::websocket::handlers::presence::handle_muc_join as handle_muc_join_real;
+use crate::server::routes::websocket::tests::{
+    create_test_server_owner_session, create_test_websocket_state_with_clustering,
+    create_test_websocket_state_with_sfu, snapshot_room,
 };
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
 
 async fn store(name: &str) -> CallTeardownOutboxStore {
-    CallTeardownOutboxStore::new(Database::in_memory(name).await.unwrap())
+    CallTeardownOutboxStore::try_new(Database::in_memory(name).await.unwrap())
         .await
         .unwrap()
 }
@@ -38,7 +42,7 @@ async fn handle_muc_join_with_occupancy_session(
     sender_jid: &FullJid,
     nick: &str,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    connection: (OccupancySessionGeneration, &Option<crate::auth::Session>),
+    connection: (OccupancySessionGeneration, Option<&crate::auth::Session>),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;
     handle_muc_join_real(
@@ -63,7 +67,7 @@ async fn handle_muc_join_with_occupancy_session(
 /// loss — #1612 review round 9).
 fn unfenced_participant_intent() -> CallTeardownIntent {
     CallTeardownIntent {
-        call_id: CallId::new("alice@example.test:call-1").unwrap(),
+        call_id: CallId::try_new("alice@example.test:call-1").unwrap(),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").unwrap(),
             participant_sid: None,
@@ -78,15 +82,15 @@ fn unfenced_participant_intent() -> CallTeardownIntent {
 
 fn participant_intent() -> CallTeardownIntent {
     CallTeardownIntent {
-        call_id: CallId::new("alice@example.test:call-1").unwrap(),
+        call_id: CallId::try_new("alice@example.test:call-1").unwrap(),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").unwrap(),
-            participant_sid: Some(ParticipantSid::new("PA_test").unwrap()),
+            participant_sid: Some(ParticipantSid::try_new("PA_test").unwrap()),
         },
         generation: Some(CallGeneration::try_from(1).unwrap()),
         occupant: None,
         unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-        room_sid: Some(RoomSid::new("RM_test").unwrap()),
+        room_sid: Some(RoomSid::try_new("RM_test").unwrap()),
         session: None,
     }
 }
@@ -181,7 +185,7 @@ fn fixture_config() -> waddle_sfu::SfuConfig {
             .expect("test API secret"),
         webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test webhook secret"),
-        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("test URL"))
+        ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("test URL"))
             .expect("test websocket URL"),
         turn_host: waddle_sfu::TurnHost::new("turn.test"),
         turn_tls_port: 443,

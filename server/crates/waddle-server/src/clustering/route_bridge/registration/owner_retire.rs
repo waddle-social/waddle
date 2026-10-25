@@ -1,5 +1,13 @@
-use super::super::*;
+use super::super::{
+    ask_error_proves_remote_resource_ref_stale, Arc, ForceDetachRequest,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, RelayAskError,
+    RelayForceDetachRemoteUserResource, RelayForceDetachRemoteUserResourceReply, RelayHandle,
+    RelayRemoteResourceForceDetachStatus, RelayTraceContext, RemoteOwnerRegistration,
+    RemoteResourceRegistrationId,
+};
 use super::owner::{unregister_remote_owner_actor_entry, RemoteOwnerActorUnregisterOutcome};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -336,11 +344,17 @@ impl OrderedRelayDeliveryBridge {
 #[cfg(test)]
 mod local_actor_retirement_tests {
     use super::*;
-    use crate::clustering::route_bridge::{
-        remote_registration_request_from_entry,
-        tests::{origin_identity, receiver_identity, services_with_claims, test_peer_id},
+    use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
+    use crate::clustering::route_bridge::remote_registration_request_from_entry;
+    use crate::clustering::route_bridge::tests::{
+        origin_identity, receiver_identity, services_with_claims, test_peer_id,
     };
+    use crate::clustering::NodeId;
+    use crate::config::ClusteringMessagingConfig;
+    use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
+    use tokio_util::sync::CancellationToken;
+    use waddle_xmpp::registry::ConnectionEntry;
     use waddle_xmpp::registry::SocketCleanupState;
 
     async fn assert_cancelled_unregister_remains_retryable(resumed: bool) {

@@ -2,6 +2,7 @@
 
 use super::publish_jobs::MAX_PUBLISH_JOBS_PER_NODE;
 use super::DatabasePushServiceStore;
+use crate::db::Value;
 use crate::db::{Database, DatabaseDriver, DatabaseError};
 use waddle_xmpp::telemetry::attributes::PushQueue;
 use waddle_xmpp::XmppError;
@@ -104,7 +105,7 @@ impl DatabasePushServiceStore {
             .filter(|_| registration_schema);
         let mut params = crate::db_params![];
         let registrations = if let Some(boundary) = local_service {
-            params.push(crate::db::Value::from(boundary.service_jid.to_string()));
+            params.push(Value::from(boundary.service_jid.to_string()));
             "SELECT CAST(COALESCE(SUM(CASE WHEN n.node IS NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS missing_nodes,
                 CAST(COALESCE(SUM(CASE WHEN n.node IS NOT NULL AND n.status <> 'active' THEN 1 ELSE 0 END), 0) AS BIGINT) AS inactive_nodes
              FROM push_registrations r LEFT JOIN push_nodes n ON n.node = r.node AND n.owner_bare_jid = r.owner_bare_jid
@@ -112,7 +113,7 @@ impl DatabasePushServiceStore {
         } else {
             "SELECT 0 AS missing_nodes, 0 AS inactive_nodes"
         };
-        params.push(crate::db::Value::from(MAX_PUBLISH_JOBS_PER_NODE * 9 / 10));
+        params.push(Value::from(MAX_PUBLISH_JOBS_PER_NODE * 9 / 10));
         let sql = format!(
             "WITH node_inventory AS (SELECT node, COUNT(*) AS retained,
                 SUM(CASE WHEN status = 'failed' AND uncertain_send = 1 AND terminal_disposition IS NULL THEN 1 ELSE 0 END) AS parked,
@@ -168,10 +169,10 @@ mod tests {
     async fn push_queue_observation_tracks_retained_capacity_and_unsettled_lineage(
         fixture: IngressFixture,
     ) {
-        let provider = DatabasePushServiceStore::new(fixture.db.clone())
+        let provider = DatabasePushServiceStore::try_new(fixture.db.clone())
             .await
             .expect("provider");
-        let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("outbox");
         let owner = owner();

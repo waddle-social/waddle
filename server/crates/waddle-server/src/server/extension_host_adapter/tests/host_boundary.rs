@@ -1,14 +1,16 @@
 //! Real plugin host boundary: committed work survives both response deadlines.
 use super::super::ExtensionHostAdapter;
 use super::direct_ingress::{adapter, invocation, plugin, request};
-use crate::{db::DatabaseDriver, ingress::test_support::IngressFixture};
-use std::{sync::Arc, time::Duration};
+use crate::db::DatabaseDriver;
+use crate::ingress::test_support::IngressFixture;
+use std::sync::Arc;
+use std::time::Duration;
 use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
 use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
 fn context() -> host::InvocationContext {
     host::InvocationContext {
-        waddle_id: WaddleId::new("host-boundary").expect("waddle"),
+        waddle_id: WaddleId::try_new("host-boundary").expect("waddle"),
         plugin_id: plugin(),
         requester: Some("romeo@example.com".parse().expect("requester")),
         source_room: None,
@@ -20,7 +22,7 @@ fn context() -> host::InvocationContext {
 fn host_request() -> host::SendMessageRequest {
     host::SendMessageRequest {
         target: host::MessageTarget::Direct("juliet@example.com".parse().expect("recipient")),
-        body: DisplayText::new("extension direct body").expect("body"),
+        body: DisplayText::try_new("extension direct body").expect("body"),
         thread_id: None,
         reply_to: None,
         markup: vec![],
@@ -228,10 +230,8 @@ async fn extension_host_boundary_cancel_is_denied_postgres() {
 
 #[tokio::test]
 async fn extension_host_boundary_known_rejection_survives_receipt_failure() {
-    use crate::ingress::{
-        nested::{NestedOutcome, SettlementOutcome},
-        IngressDecisionClass,
-    };
+    use crate::ingress::nested::{NestedOutcome, SettlementOutcome};
+    use crate::ingress::IngressDecisionClass;
     let mut outcome = NestedOutcome::Committed {
         decision_class: IngressDecisionClass::Accepted,
         archive_ids: vec![],
@@ -328,10 +328,8 @@ async fn extension_host_boundary_direct_plan_failure_postgres() {
 
 #[tokio::test]
 async fn extension_host_boundary_nested_refusal_stays_typed() {
-    use crate::ingress::{
-        nested::{NestedOutcome, NestedRefusal},
-        IngressDecisionClass,
-    };
+    use crate::ingress::nested::{NestedOutcome, NestedRefusal};
+    use crate::ingress::IngressDecisionClass;
     let error = super::super::settlement::finish_nested(&mut NestedOutcome::Refused(
         NestedRefusal::Decision(IngressDecisionClass::Storage),
     ))
@@ -393,10 +391,8 @@ fn extension_host_boundary_rejection_error_types() {
 
 #[tokio::test]
 async fn extension_host_boundary_decision_error_codes() {
-    use crate::ingress::{
-        nested::{NestedOutcome, NestedRefusal},
-        IngressDecisionClass,
-    };
+    use crate::ingress::nested::{NestedOutcome, NestedRefusal};
+    use crate::ingress::IngressDecisionClass;
     for (class, expected) in [
         (
             IngressDecisionClass::AuthorizationDenied,

@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    archived_inner_message, build_fin_iq, build_query_form_iq, build_result_messages,
+    is_mam_query_form_request, is_mam_query_response_message, parse_mam_query, ArchivedMessage,
+    ArchivedMucSender, ArchivedOccupantId, ArchivedReply, ArchivedRichMessage, MamFilterStanzaId,
+    MamResult, RichMessageId, RichText, ThreadId, CLIENT_NS, DATA_FORMS_NS, FORWARD_NS,
+    FULLTEXT_MAM_FIELD, MAM_NS, MAX_FILTER_STANZA_IDS, MAX_FILTER_STANZA_ID_LEN, MUC_USER_NS,
+    OCCUPANT_ID_NS, REPLY_NS, RSM_NS, STANZA_ID_FILTER_FIELD, STANZA_ID_NS,
+    WADDLE_MAM_THREAD_FIELD, XDATA_VALIDATE_NS,
+};
 use chrono::Datelike;
 use jid::Jid;
 use minidom::Element;
@@ -6,7 +14,7 @@ use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Message, MessageType};
 
 fn filter_id(s: &str) -> MamFilterStanzaId {
-    MamFilterStanzaId::new(s).expect("valid test fixture id")
+    MamFilterStanzaId::try_new(s).expect("valid test fixture id")
 }
 
 use crate::xep0201::ThreadInfo;
@@ -443,10 +451,10 @@ fn builds_result_message_from_legacy_fields() {
     let archived = ArchivedMessage {
         id: "msg-123".to_string(),
         thread: Some(ThreadInfo::root(
-            ThreadId::new("thread-1").expect("non-empty thread id"),
+            ThreadId::try_new("thread-1").expect("non-empty thread id"),
         )),
         reply: Some(ArchivedReply {
-            id: RichMessageId::new("parent-1").expect("non-empty reply id"),
+            id: RichMessageId::try_new("parent-1").expect("non-empty reply id"),
             to: Some("alice@example.com".parse::<Jid>().expect("valid jid")),
         }),
         origin_id: Some(OriginId::new("origin-1")),
@@ -495,8 +503,8 @@ fn nested_thread_archived_for_replay(stanza_xml: Option<String>) -> ArchivedMess
             "bob@example.com".parse::<Jid>().expect("valid jid"),
         )),
         thread: Some(ThreadInfo::child(
-            ThreadId::new("child-thread").expect("non-empty thread id"),
-            ThreadId::new("root-thread").expect("non-empty parent id"),
+            ThreadId::try_new("child-thread").expect("non-empty thread id"),
+            ThreadId::try_new("root-thread").expect("non-empty parent id"),
         )),
         message_type: MessageType::Chat,
         stanza_xml,
@@ -628,8 +636,8 @@ fn xep_0201_groupchat_stanza_xml_replay_reinstalls_thread_and_strips_to() {
                 .expect("valid jid"),
         )),
         thread: Some(ThreadInfo::child(
-            ThreadId::new("root-thread").expect("non-empty thread id"),
-            ThreadId::new("parent-thread").expect("non-empty parent id"),
+            ThreadId::try_new("root-thread").expect("non-empty thread id"),
+            ThreadId::try_new("parent-thread").expect("non-empty parent id"),
         )),
         message_type: MessageType::Groupchat,
         stanza_xml: Some(
@@ -873,7 +881,7 @@ fn stanza_xml_preserves_reply_fallback() {
             "<message xmlns='jabber:client' from='room@conference.example.com/bob' type='groupchat' id='reply-1'><body>&gt; Alice wrote:\n&gt; Hello!\nI agree!</body><reply xmlns='urn:xmpp:reply:0' id='orig-1' to='room@conference.example.com/alice'/><fallback xmlns='urn:xmpp:fallback:0' for='urn:xmpp:reply:0'><body start='0' end='22'/></fallback></message>".to_string(),
         ),
         reply: Some(ArchivedReply {
-            id: RichMessageId::new("orig-1").expect("non-empty reply id"),
+            id: RichMessageId::try_new("orig-1").expect("non-empty reply id"),
             to: Some(jid("room@conference.example.com/alice")),
         }),
         rich: Some(ArchivedRichMessage {
@@ -1202,7 +1210,7 @@ fn result_envelope_from_is_the_queried_archive_jid() {
 #[test]
 fn typed_fallback_emits_occupant_id_and_muc_user_item() {
     let rich = ArchivedRichMessage {
-        occupant_id: ArchivedOccupantId::new("stable-occupant-id"),
+        occupant_id: ArchivedOccupantId::try_new("stable-occupant-id"),
         muc_sender: Some(ArchivedMucSender {
             jid: jid("crone1@shakespeare.lit/desktop"),
             affiliation: crate::types::Affiliation::Owner,
@@ -1245,7 +1253,7 @@ fn typed_fallback_emits_occupant_id_and_muc_user_item() {
 #[test]
 fn typed_fallback_omits_muc_identity_for_non_groupchat_rows() {
     let rich = ArchivedRichMessage {
-        occupant_id: ArchivedOccupantId::new("stray-id"),
+        occupant_id: ArchivedOccupantId::try_new("stray-id"),
         muc_sender: Some(ArchivedMucSender {
             jid: jid("alice@example.com/web"),
             affiliation: crate::types::Affiliation::Member,

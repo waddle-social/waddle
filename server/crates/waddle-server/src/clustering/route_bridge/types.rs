@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    Arc, AtomicBool, BTreeMap, BTreeSet, CarbonKind, ConnectionEntry, DeliveryKind, Duration,
+    Entity, FullJidDeliveryOutcome, Future, Keypair, MucProxyOrigin, NodeId, NodeIdentity,
+    OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDeliveryServices, OrderedRelayMucProxyKind,
+    OrderedRelayPayload, Ordering, OriginInboundSequence, Pin, PresenceState, RemoteElement,
+    RemoteStanza, RemoteStanzaEnvelope, RosterItem, RosterVersion, Stanza,
+};
+use crate::ingress::execute::RelayFrameReceiptCompletion;
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::ingress::IngressCanonicalRef;
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 pub(super) fn stanza_message_id(stanza: &Stanza) -> &str {
     match stanza {
@@ -190,7 +200,7 @@ impl From<RemoteCarbonKind> for CarbonKind {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RemoteUserSideEffect {
     Carbons {
-        ingress_append: Option<Box<crate::ingress::identity::IngressAppendObligationRef>>,
+        ingress_append: Option<Box<IngressAppendObligationRef>>,
         owner: jid::BareJid,
         message: RemoteStanza,
         kind: RemoteCarbonKind,
@@ -217,7 +227,7 @@ pub struct RemoteResourceOutboundFrame {
     pub kind: DeliveryKind,
     /// The origin's recorded obligation, unverified. The socket node authorizes
     /// it before live enqueue and again if the frame enters XEP-0198 custody.
-    pub ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+    pub ingress_append: Option<IngressAppendObligationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -235,12 +245,12 @@ pub enum RemoteResourceRouteTarget {
     ProcessedDirectMessage {
         target: jid::FullJid,
         stanza: RemoteStanza,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
     },
     FullJid {
         target: jid::FullJid,
         stanza: RemoteStanza,
-        ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        ingress_append: Option<IngressAppendObligationRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
@@ -249,7 +259,7 @@ pub enum RemoteResourceRouteTarget {
         stanza: RemoteStanza,
     },
     MucProxy {
-        canonical: Option<crate::ingress::IngressCanonicalRef>,
+        canonical: Option<IngressCanonicalRef>,
         principal: Option<waddle_xmpp::auth::AuthenticatedPrincipalRef>,
         #[serde(with = "crate::ingress::identity::stanza_lang_serde")]
         stanza_lang: Option<xmpp_parsers::message::Lang>,
@@ -545,8 +555,7 @@ impl RelayOriginSigner {
 }
 
 pub(super) struct PreparedRemoteDelivery {
-    pub(super) ingress_append_context:
-        Option<crate::server::routes::interpret::SmIngressAppendContext>,
+    pub(super) ingress_append_context: Option<SmIngressAppendContext>,
     pub(super) services: Arc<OrderedRelayDeliveryServices>,
     pub(super) target_entity: Entity,
     pub(super) previous_owner: NodeIdentity,
@@ -558,7 +567,7 @@ pub(super) struct PreparedRemoteDelivery {
 }
 
 pub(super) struct RemoteDeliveryOutcome {
-    pub(super) frame_completion: Option<crate::ingress::execute::RelayFrameReceiptCompletion>,
+    pub(super) frame_completion: Option<RelayFrameReceiptCompletion>,
     pub(super) delivery: FullJidDeliveryOutcome,
     pub(super) client_replies: Vec<Stanza>,
     pub(super) maybe_committed: bool,
@@ -581,8 +590,7 @@ pub(super) fn caller_delivery_outcome(outcome: RemoteDeliveryOutcome) -> FullJid
 }
 
 pub(super) struct RemoteDeliverySeed {
-    pub(super) ingress_append_context:
-        Option<crate::server::routes::interpret::SmIngressAppendContext>,
+    pub(super) ingress_append_context: Option<SmIngressAppendContext>,
     pub(super) services: Arc<OrderedRelayDeliveryServices>,
     pub(super) target_entity: Entity,
     pub(super) previous_owner: NodeIdentity,

@@ -1,5 +1,10 @@
 //! Run ready plugin observers fairly and persist each completion immediately.
-use super::*;
+use super::{
+    classify_outcome, completed_receipts, dependencies, meter_unresolved, proven_receipts,
+    Database, Deps, EffectOutcome, EffectReceiptKey, EffectReceiptRepository,
+    ExecutionPersistenceFailure, ExecutionReport, ExternalEffect, ExternalOutcome, FrameObligation,
+    ImmediateSink, IngressDecision, PlannedEffect,
+};
 use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
 
 pub(super) fn is_observer(effect: &ExternalEffect) -> bool {

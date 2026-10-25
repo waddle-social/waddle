@@ -1,34 +1,69 @@
-use super::*;
+//! Bounded extension XML trees and custom payload serialization.
 
+use super::{
+    validate_xml_local_name, Deserialize, Element, FrameworkTypeError, PayloadNamespace, Serialize,
+    EXTENSION_ITEM_LOCAL_NAME, MAX_XML_ATTRIBUTES, MAX_XML_CHILDREN, MAX_XML_DEPTH,
+    MAX_XML_SERIALIZED_BYTES, MAX_XML_TEXT_BYTES,
+};
+use std::collections::HashSet;
+
+/// Unprefixed XML attribute name and text; namespaced attributes are unsupported by the serializer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct XmlAttribute {
+    /// XML namespace URI of the element or attribute.
     pub namespace: Option<PayloadNamespace>,
+    /// Local XML name without a namespace prefix.
     pub local_name: String,
+    /// Text value written to the unprefixed XML attribute.
     pub value: String,
 }
 
+/// Child element or text node in the bounded extension XML tree.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum XmlNode {
+    /// Nested namespace-qualified element.
     Element(XmlElement),
+    /// Text content preserved as a child node.
     Text(String),
 }
 
+/// Namespace-qualified extension XML element with ordered children and unprefixed attributes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct XmlElement {
+    /// XML namespace URI of the element or attribute.
     pub namespace: PayloadNamespace,
+    /// Local XML name without a namespace prefix.
     pub local_name: String,
+    /// Unprefixed XML attributes attached to this element.
     pub attributes: Vec<XmlAttribute>,
+    /// Element and text children retained in document order.
     pub children: Vec<XmlNode>,
 }
 
+/// Validated extension XML root and matching advertised namespace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionPayload {
+    /// XML namespace URI of the element or attribute.
     pub namespace: PayloadNamespace,
+    /// Root XML element whose namespace matches the payload namespace.
     pub root: XmlElement,
 }
 
 impl ExtensionPayload {
-    pub fn new(namespace: PayloadNamespace, root: XmlElement) -> Result<Self, FrameworkTypeError> {
+    /// Validate the root namespace and bounded XML tree, then enforce the content-size budget.
+    /// Limits are depth 16 below the root, 64 attributes and 256 children per
+    /// element, 16 KiB per text node, and a 64 KiB aggregate sum of names,
+    /// namespaces, attributes, and text bytes. XML serialization overhead is
+    /// not included in that aggregate sum.
+    ///
+    /// # Errors
+    ///
+    /// Returns a framework error when the advertised namespace differs from the root, any
+    /// XML tree validation fails, or the aggregate content-size budget exceeds 64 KiB.
+    pub fn try_new(
+        namespace: PayloadNamespace,
+        root: XmlElement,
+    ) -> Result<Self, FrameworkTypeError> {
         if root.namespace != namespace {
             return Err(FrameworkTypeError::InvalidPayloadNamespace(
                 root.namespace.as_str().to_string(),
@@ -44,26 +79,39 @@ impl ExtensionPayload {
         Ok(payload)
     }
 
+    /// Serialize this extension model into the framework's typed XML element tree.
+    ///
+    /// # Panics
+    /// Panics if public attribute fields were manually constructed or mutated to
+    /// contain invalid XML local names. In debug builds, namespaced attributes
+    /// also panic. Values accepted by the validated constructors satisfy these
+    /// serialization preconditions.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         self.root.to_minidom()
     }
 
     /// Parse a `minidom::Element` back into an `ExtensionPayload`.
     ///
-    /// Used by the host's `pubsub-get-items` bridge when materialising
-    /// stored PubSub items into the typed payload extensions exchange
-    /// across the WIT boundary. The element's namespace becomes the
-    /// payload namespace; nested elements with a different namespace
-    /// are rejected (extensions only own their declared namespace).
+    /// Used by the host's PubSub bridge to expose stored application XML.
+    /// The element's namespace becomes the payload namespace; child elements
+    /// keep their own namespace and undergo the same namespace/name checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns a framework error for an invalid or official element namespace, invalid
+    /// local names, duplicate attributes after namespace removal, tree limits, or the
+    /// aggregate payload-size budget.
     pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
         let root = XmlElement::from_minidom(element)?;
-        Self::new(root.namespace.clone(), root)
+        Self::try_new(root.namespace.clone(), root)
     }
 
     /// Returns true when this payload is the framework-defined
     /// `<extension-item>` PubSub envelope. The host accepts these from any
     /// extension that has been granted `PubSubPublish`, without requiring the
     /// manifest to declare the framework namespace.
+    #[must_use]
     pub fn is_framework_item(&self) -> bool {
         self.namespace.is_framework()
             && self.root.namespace.is_framework()
@@ -76,7 +124,13 @@ impl ExtensionPayload {
 }
 
 impl XmlElement {
-    pub fn new(
+    /// Validate an XML element name, attributes, child trees, and per-node size/depth limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a framework error for unsupported local names, namespaced or duplicate
+    /// attributes, or excessive depth, attribute/child counts, or text-node bytes.
+    pub fn try_new(
         namespace: PayloadNamespace,
         local_name: impl Into<String>,
         attributes: Vec<XmlAttribute>,
@@ -107,7 +161,7 @@ impl XmlElement {
                 limit: "children per element",
             });
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for attr in &self.attributes {
             validate_xml_local_name(attr.local_name.clone())?;
             if attr.namespace.is_some() {
@@ -187,11 +241,16 @@ impl XmlElement {
                 .sum::<usize>()
     }
 
-    /// Parse a `minidom::Element` into a typed `XmlElement`. Rejects
-    /// namespaced attributes (extensions don't use them) and validates
-    /// limits + name shape via `XmlElement::new`.
+    /// Parse a `minidom::Element` into a typed tree, preserving child namespaces
+    /// and validating names and tree limits through `XmlElement::try_new`.
+    /// Attribute namespace information is discarded by this conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a framework error for invalid or official element namespaces, unsupported
+    /// local names, duplicate attributes after namespace removal, or tree limits.
     pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
-        let namespace = PayloadNamespace::new(element.ns())?;
+        let namespace = PayloadNamespace::try_new(element.ns())?;
         let attributes = element
             .attrs()
             .iter()
@@ -214,6 +273,6 @@ impl XmlElement {
                 }
             }
         }
-        Self::new(namespace, element.name().to_string(), attributes, children)
+        Self::try_new(namespace, element.name().to_string(), attributes, children)
     }
 }

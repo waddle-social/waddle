@@ -2517,7 +2517,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         RoomClaimFenceContext::new(entity.clone(), identity.clone(), expected_epoch);
 
     let occupant_id_secret =
-        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+        OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("valid test occupant-id secret");
     let room_registry = RoomRegistry::spawn(
         "muc.example.com".to_string(),
@@ -3259,7 +3259,8 @@ async fn send_partial_fanout_with_origin(
     id: &str,
     origin: uuid::Uuid,
 ) {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     let mut message = fanout_message(room, id, None);
     message.append_child(
         Element::builder("origin-id", waddle_xmpp::xep::NS_SID)
@@ -3364,7 +3365,8 @@ async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: 
 }
 
 fn fanout_message(room: &jid::BareJid, id: &str, body: Option<&str>) -> minidom::Element {
-    use minidom::{rxml::xml_ncname, Element};
+    use minidom::rxml::xml_ncname;
+    use minidom::Element;
     let payload = match body {
         Some(body) => Element::builder("body", waddle_xmpp::ns::JABBER_CLIENT)
             .append(body)

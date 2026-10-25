@@ -9,6 +9,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleMessageAudience
 
 /**
  * Successor-account regression coverage for the Android operation seams.
@@ -59,13 +60,13 @@ class AndroidAttemptFencingTest {
             assertEquals(
                 ActiveSession.LeaseInvocation.Stale,
                 active.invokeIfCurrent(retiredLease) {
-                it.sendReaction("room@muc.waddle.test", "reaction-1", listOf("👍"), true)
+                it.sendReaction("room@muc.waddle.test", "reaction-1", listOf("👍"), WaddleMessageAudience.MUC)
             }
             )
             assertEquals(
                 ActiveSession.LeaseInvocation.Stale,
                 active.invokeIfCurrent(retiredLease) {
-                it.sendCorrection("peer@waddle.test", "correction-1", "fixed", false, null)
+                it.sendCorrection("peer@waddle.test", "correction-1", "fixed", WaddleMessageAudience.DIRECT, null)
             }
             )
 

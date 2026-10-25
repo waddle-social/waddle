@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, IngressDecisionClass, IngressEffectIntent, IngressFixture,
+};
 
 async fn intent_repair_and_divergence(fixture: IngressFixture) {
     use waddle_xmpp::ingress::EffectMessageIdentity;

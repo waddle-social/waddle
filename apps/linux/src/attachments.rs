@@ -278,7 +278,7 @@ pub struct Transfers {
 impl Transfers {
     /// `server` is the account's own server; loopback HTTP is allowed only
     /// when it is itself on loopback.
-    pub fn new(server: &Url) -> Result<Self, reqwest::Error> {
+    pub fn try_new(server: &Url) -> Result<Self, reqwest::Error> {
         let allow_loopback = is_loopback(server);
         let builder = || {
             reqwest::Client::builder()
@@ -631,7 +631,7 @@ mod tests {
         });
         crate::install_crypto_provider();
         let server = Url::parse(&format!("http://{address}/")).expect("url");
-        let transfers = Transfers::new(&server).expect("client");
+        let transfers = Transfers::try_new(&server).expect("client");
         let result = transfers.fetch(&format!("http://{address}/file")).await;
         assert!(
             matches!(result, Err(TransferError::Status(status)) if status.as_u16() == 302),

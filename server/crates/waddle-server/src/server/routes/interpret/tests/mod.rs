@@ -2,11 +2,30 @@ use super::bot::{
     available_bot_nick, available_bot_nick_with_base, plan_bot_groupchat_message,
     prepare_extension_room_message, BotGroupchatDispatch,
 };
+#[cfg(feature = "clustering")]
+use super::dispatch_to_room;
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
-use super::*;
-use kameo::actor::Spawn;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOriginKind;
+use super::{
+    apply_archive_id_rewrites, apply_groupchat_retraction_tombstone, archive_lookup,
+    direct_archive, groupchat_archive, interpret_with_depth, parse_reply_from_message,
+    plan_message_dispatch, waddle_id_for_room_jid, ArchiveIdRewrite, CarbonKind, DefinedCondition,
+    ErrorType, ExtensionRoomMessage, FromStr, FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot,
+    InMemorySmSessionRegistry, InboundEvent, IngressEffectIntent, InterpretOutcome,
+    MamArchivedMessage, MessageRef, OccupantSnapshot, RoomRegistryActor, SmIngressAppendContext,
+    StanzaError, XmppStateMachine, MAX_RECIPIENT_PASS_DEPTH,
+};
+
+use super::{
+    effects, extract_forum_action, interpret, Arc, BareJid, BlockingStorage, ConnectionRegistry,
+    Deps, ForumAction, InboxStorage, Jid, MamStorage, Message, OutboundEvent, StanzaDispatcher,
+    XmppMessageType,
+};
 use std::io;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;
@@ -74,7 +93,7 @@ async fn register_into_both_tiers(
 ) {
     connection_registry.register_with_carbons(jid.clone(), sender, false);
     let entry = connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("entry just registered into the DashMap");
     let registered =
         crate::server::dual_registration::mirror_register(user_registry, jid.clone(), entry).await;

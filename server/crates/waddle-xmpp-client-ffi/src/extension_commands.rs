@@ -68,6 +68,7 @@ fn scope_to_ffi(scope: core::ExtensionCommandScope) -> WaddleExtensionCommandSco
     match scope {
         core::ExtensionCommandScope::Global => WaddleExtensionCommandScope::Global,
         core::ExtensionCommandScope::Channel => WaddleExtensionCommandScope::Channel,
+        _ => WaddleExtensionCommandScope::Channel,
     }
 }
 

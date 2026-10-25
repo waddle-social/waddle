@@ -1,3 +1,6 @@
+use crate::ownership::NodeIdentity;
+use crate::stream_management::SmIngressFrameReceipt;
+use crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -20,7 +23,7 @@ use crate::Stanza;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachedUnackedStanza {
     /// Ingress obligations confirmed only after this ordered replay prefix is written.
-    pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
+    pub ingress_receipts: Vec<SmIngressFrameReceipt>,
     /// XEP-0198 outbound sequence number assigned to this stanza.
     pub sequence: u32,
     /// Immutable wire XML captured by the production serializer. This is a
@@ -76,7 +79,7 @@ impl PromotionCaptureCustody {
     }
 
     pub(super) fn acquiring(
-        owner: crate::ownership::NodeIdentity,
+        owner: NodeIdentity,
         predecessor_fence: Option<super::super::persistence::SmClaimFence>,
     ) -> Self {
         Self::Acquiring(std::sync::Arc::new(FreshPromotionAdmission {
@@ -125,7 +128,7 @@ impl PromotionCaptureCustody {
         }
     }
 
-    pub(super) fn begin_first_claim(&self, owner: &crate::ownership::NodeIdentity) -> bool {
+    pub(super) fn begin_first_claim(&self, owner: &NodeIdentity) -> bool {
         match self {
             Self::NeverClaimed(admission) => admission.first_owner.set(owner.clone()).is_ok(),
             Self::Claimed(_) | Self::ExistingSource(_) | Self::Acquiring(_) | Self::Unproven => {
@@ -134,7 +137,7 @@ impl PromotionCaptureCustody {
         }
     }
 
-    pub(super) fn first_claim_owner(&self) -> Option<&crate::ownership::NodeIdentity> {
+    pub(super) fn first_claim_owner(&self) -> Option<&NodeIdentity> {
         match self {
             Self::NeverClaimed(admission) | Self::Acquiring(admission) => {
                 admission.first_owner.get()
@@ -150,7 +153,7 @@ impl PromotionCaptureCustody {
 #[derive(Debug)]
 pub struct FreshPromotionAdmission {
     fence: std::sync::OnceLock<super::super::persistence::SmClaimFence>,
-    first_owner: std::sync::OnceLock<crate::ownership::NodeIdentity>,
+    first_owner: std::sync::OnceLock<NodeIdentity>,
     predecessor_fence: Option<super::super::persistence::SmClaimFence>,
 }
 
@@ -315,7 +318,7 @@ impl DetachedSession {
         original_receipt_at: DateTime<Utc>,
     ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
-        if self.unacked_stanzas.len() >= crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE {
+        if self.unacked_stanzas.len() >= DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
             self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);
@@ -364,8 +367,7 @@ impl DetachedSession {
         });
         self.unacked_stanzas
             .sort_by_key(|entry| entry.sequence.wrapping_sub(self.last_acked));
-        while self.unacked_stanzas.len() > crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE
-        {
+        while self.unacked_stanzas.len() > DEFAULT_MAX_UNACKED_QUEUE_SIZE {
             let evicted = self.unacked_stanzas.remove(0);
             self.note_detached_eviction(evicted.sequence);
             self.mark_replay_gap_through(evicted.sequence);

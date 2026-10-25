@@ -3,12 +3,11 @@
 use std::time::Duration;
 
 use jid::FullJid;
-use waddle_xmpp::pending_delivery::{storage::PendingStorageError, PendingRow};
+use waddle_xmpp::pending_delivery::storage::PendingStorageError;
+use waddle_xmpp::pending_delivery::PendingRow;
 
-use crate::{
-    ingress_uow::{ArchiveDispatchRepository, DispatchReadiness, IngressUowError},
-    pending_delivery::{PendingDispatchGate, PendingDispatchReadiness},
-};
+use crate::ingress_uow::{ArchiveDispatchRepository, DispatchReadiness, IngressUowError};
+use crate::pending_delivery::{PendingDispatchGate, PendingDispatchReadiness};
 
 #[async_trait::async_trait]
 impl PendingDispatchGate for super::IngressAuthority {

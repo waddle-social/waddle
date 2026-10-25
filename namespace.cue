@@ -48,16 +48,16 @@ schema.#Project & {
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env: _nativeRustEnv
+			env:    _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 
 		clippy: schema.#Task & {
-			command: "cargo"
-			args: ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+			command: "bash"
+			args: ["-euo", "pipefail", "-c", "python3 scripts/check-poison-recovery.py && python3 scripts/check-rust-structure.py --server-only && exec cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env: _nativeRustEnv
+			env:    _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 
@@ -66,7 +66,7 @@ schema.#Project & {
 			args: ["test", "--doc", "--workspace", "--all-features", "--locked"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
-			env: _nativeRustEnv
+			env:    _nativeRustEnv
 			hermetic: sandbox: "dir"
 		}
 	}

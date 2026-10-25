@@ -1,17 +1,22 @@
+#[cfg(feature = "clustering")]
+use crate::clustering::relay::RelayExtensionRoomSend;
 use async_trait::async_trait;
 use jid::{BareJid, DomainRef, Jid, NodeRef};
 use waddle_extensions::types::PubSubNode as ExtensionPubSubNode;
 use waddle_extensions::{host_tools as ext_host, DisplayText};
 use waddle_xmpp::mam::MamQuery;
 
-use crate::{
-    auth::Session,
-    db::{actor::DbQueryOne, row_value, ValueExt},
-};
+use crate::auth::Session;
+use crate::db::actor::DbQueryOne;
+use crate::db::{row_value, ValueExt};
 
+use super::conversions::{
+    ext_archived_message, ext_muc_affiliation, ext_muc_role, ext_presence_show,
+    ext_roster_subscription, host_tool_error,
+};
 use super::{
-    conversions::*, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
-    HostMessageTarget, HostSendMessage,
+    ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation, HostMessageTarget,
+    HostSendMessage,
 };
 
 #[async_trait]
@@ -29,7 +34,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .into_iter()
             .map(|channel| ext_host::ChannelSummary {
                 room: channel.room,
-                name: DisplayText::new(channel.name).ok(),
+                name: DisplayText::try_new(channel.name).ok(),
                 description: None,
             })
             .collect();
@@ -50,7 +55,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .filter_map(|space| {
                 Some(ext_host::SpaceSummary {
                     service: space.service,
-                    node: ExtensionPubSubNode::new(space.node).ok()?,
+                    node: ExtensionPubSubNode::try_new(space.node).ok()?,
                     name: None,
                     description: None,
                     channels: Vec::new(),
@@ -75,7 +80,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .map(|member| ext_host::RoomMember {
                 room: request.room.clone(),
                 jid: member.occupant_jid,
-                nick: DisplayText::new(member.nick).ok(),
+                nick: DisplayText::try_new(member.nick).ok(),
                 role: ext_muc_role(member.role),
                 affiliation: ext_muc_affiliation(member.affiliation),
             })
@@ -100,7 +105,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
                 show: ext_presence_show(presence.show),
                 status: presence
                     .status
-                    .and_then(|status| DisplayText::new(status).ok()),
+                    .and_then(|status| DisplayText::try_new(status).ok()),
                 priority: i32::from(presence.priority),
             })
             .collect();
@@ -120,13 +125,13 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             .into_iter()
             .map(|entry| ext_host::RosterEntry {
                 jid: entry.jid,
-                name: entry.name.and_then(|name| DisplayText::new(name).ok()),
+                name: entry.name.and_then(|name| DisplayText::try_new(name).ok()),
                 subscription: ext_roster_subscription(entry.subscription),
                 ask: entry.ask.map(|_| ext_host::RosterAsk::Subscribe),
                 groups: entry
                     .groups
                     .into_iter()
-                    .filter_map(|group| DisplayText::new(group).ok())
+                    .filter_map(|group| DisplayText::try_new(group).ok())
                     .collect(),
             })
             .collect();
@@ -159,10 +164,10 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             with: with.map(jid::Jid::from),
             thread_id: query
                 .thread_id
-                .and_then(|thread_id| waddle_xmpp::mam::ThreadId::new(thread_id.as_str())),
+                .and_then(|thread_id| waddle_xmpp::mam::ThreadId::try_new(thread_id.as_str())),
             fulltext: query
                 .text
-                .and_then(|text| waddle_xmpp::mam::RichText::new(text.into_string())),
+                .and_then(|text| waddle_xmpp::mam::RichText::try_new(text.into_string())),
             max: Some(query.max_results),
             filter_before_id: None,
             filter_after_id: None,
@@ -197,7 +202,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         context: &ext_host::InvocationContext,
         request: ext_host::SendMessageRequest,
     ) -> Result<ext_host::SendMessageResponse, ext_host::HostToolError> {
-        let offered_id = waddle_extensions::StanzaId::new(uuid::Uuid::new_v4().to_string())
+        let offered_id = waddle_extensions::StanzaId::try_new(uuid::Uuid::new_v4().to_string())
             .map_err(|error| {
                 host_tool_error(ExtensionHostAdapterError::Protocol(error.to_string()))
             })?;
@@ -227,7 +232,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
         let node_name = request.node.as_str();
         if !manifest.declares_pubsub_node(&request.node) {
             return Err(ext_host::HostToolError::denied(
-                DisplayText::new(format!(
+                DisplayText::try_new(format!(
                     "pubsub node {node_name} is outside extension {} declared nodes",
                     context.plugin_id.as_str()
                 ))
@@ -261,7 +266,7 @@ impl ext_host::ExtensionHostTools for ExtensionHostAdapter {
             })?;
         let mut items = Vec::with_capacity(stored.len());
         for entry in stored {
-            let Ok(id) = waddle_extensions::PubSubItemId::new(entry.id) else {
+            let Ok(id) = waddle_extensions::PubSubItemId::try_new(entry.id) else {
                 continue;
             };
             let Some(xml) = entry.payload_xml.as_deref() else {
@@ -298,7 +303,7 @@ impl ExtensionHostAdapter {
                 return self
                     .send_room_routed(
                         &invocation,
-                        crate::clustering::relay::RelayExtensionRoomSend {
+                        RelayExtensionRoomSend {
                             context: context.clone(),
                             room,
                             offered_id,

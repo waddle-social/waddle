@@ -1,4 +1,9 @@
 //! No-store exact-resource messages have one live attempt, never a ledger retry.
+use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress_uow::CanonicalMessageRepository;
+use crate::ingress_uow::IngressUnitOfWork;
+use crate::ingress_uow::IngressUowError;
+use crate::ingress_uow::IngressUowTransaction;
 use jid::FullJid;
 use waddle_xmpp::xep::xep0334::{add_hint, has_hint, Hint};
 use xmpp_parsers::message::Message;
@@ -37,14 +42,11 @@ pub(super) fn protects_plan(plan: &super::IngressPlan) -> bool {
 /// Omitting durable custody must not widen the existing intake size limit.
 /// Encode only an ephemeral validation copy through the same intent codec;
 /// the admitted plan continues to carry `prepared: None` into persistence.
-pub(super) fn validate_capture(
-    plan: &super::IngressPlan,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
-    use crate::server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, Effect};
-    use waddle_xmpp::{
-        ingress::{IngressEffectIntent, StoredMessagePayload},
-        Stanza,
-    };
+pub(super) fn validate_capture(plan: &super::IngressPlan) -> Result<(), IngressUowError> {
+    use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
+    use crate::server::routes::interpret::effects::Effect;
+    use waddle_xmpp::ingress::{IngressEffectIntent, StoredMessagePayload};
+    use waddle_xmpp::Stanza;
     if !protects_plan(plan) {
         return Ok(());
     }
@@ -78,10 +80,8 @@ pub(super) fn validate_capture(
             };
             let mut validation = intent.clone();
             if let IngressEffectIntent::RouteDirect { prepared, .. } = &mut validation {
-                *prepared = Some(StoredMessagePayload::new(message.clone()).map_err(|_| {
-                    crate::ingress_uow::IngressUowError::Plan(
-                        super::effects::PlanFailure::InvalidPreparedMessage,
-                    )
+                *prepared = Some(StoredMessagePayload::try_new(message.clone()).map_err(|_| {
+                    IngressUowError::Plan(super::effects::PlanFailure::InvalidPreparedMessage)
                 })?);
             }
             validation.with_encoded_v1(|_, _| ())?;
@@ -91,12 +91,11 @@ pub(super) fn validate_capture(
 }
 
 pub(super) async fn received_at(
-    uow: &crate::ingress_uow::IngressUnitOfWork,
+    uow: &IngressUnitOfWork,
     key: waddle_xmpp::ingress::MessageKey,
-) -> Result<chrono::DateTime<chrono::Utc>, crate::ingress_uow::IngressUowError> {
+) -> Result<chrono::DateTime<chrono::Utc>, IngressUowError> {
     let mut tx = uow.begin().await?;
-    let received_at =
-        crate::ingress_uow::CanonicalMessageRepository::created_at(&mut tx, key).await?;
+    let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     tx.commit().await?;
     Ok(received_at)
 }
@@ -111,13 +110,13 @@ pub(crate) fn forbids_direct_handoff(message: &Message, fanout: &[FullJid]) -> b
     })
 }
 
-pub(super) fn envelope(message: &Message) -> crate::ingress_substrate::MessageEnvelope {
+pub(super) fn envelope(message: &Message) -> MessageEnvelope {
     let mut metadata = Message::new(message.to.clone());
     metadata.from = message.from.clone();
     metadata.id = message.id.clone();
     metadata.type_ = message.type_.clone();
     add_hint(&mut metadata, Hint::NoStore);
-    crate::ingress_substrate::MessageEnvelope::new(metadata)
+    MessageEnvelope::new(metadata)
 }
 
 pub(super) fn protects_intent(
@@ -131,11 +130,11 @@ pub(super) fn protects_intent(
 
 /// Preserve actual delivery/custody evidence before recording policy completion.
 pub(super) async fn settle(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     intent: &waddle_xmpp::ingress::IngressEffectIntent,
     receipt: &super::EffectReceiptKey,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), IngressUowError> {
     use crate::ingress_uow::{
         DeliveryProgressRepository, EffectReceiptRepository, PolicyDiscardReason,
         SendAttemptRepository, SendAttemptStatus, SendObligation,

@@ -12,6 +12,7 @@ import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.calls.LogoutCallTeardown
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.client.ffi.WaddleCallMedia
+import social.waddle.client.ffi.WaddleMessageAudience
 import social.waddle.client.ffi.WaddleSendMessageOutcome
 
 /**
@@ -79,7 +80,13 @@ class ActiveSessionGatewayTest {
 
         val correction = async {
             active.invoke {
-                it.sendCorrection("bob@waddle.test", "m1", "fixed", false, null)
+                it.sendCorrection(
+                    "bob@waddle.test",
+                    "m1",
+                    "fixed",
+                    WaddleMessageAudience.DIRECT,
+                    null,
+                )
             }
         }
         runCurrent()
@@ -110,7 +117,13 @@ class ActiveSessionGatewayTest {
         active.revokeOutboundAuthority()
 
         val result = active.invoke {
-            it.sendCorrection("bob@waddle.test", "m1", "must not send", false, null)
+            it.sendCorrection(
+                "bob@waddle.test",
+                "m1",
+                "must not send",
+                WaddleMessageAudience.DIRECT,
+                null,
+            )
         }
         assertEquals(ActiveSession.Invocation.NotConnected, result)
         assertTrue(oldClient.correctionCalls.isEmpty())

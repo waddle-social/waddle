@@ -1,6 +1,10 @@
 //! Incremental queue writes retain the caller's exact ownership fence.
 
-use super::*;
+use super::{
+    serialize_stanza, KeyedSnapshotOutcome, PersistedDetachedAppend, PostgresFencedSmPersistence,
+    SmClaimFence, SmPersistenceError,
+};
+use crate::sm_persistence::ingress_append::NewDeliveryAuthorization;
 
 impl PostgresFencedSmPersistence {
     pub(super) async fn append_detached_under(
@@ -23,7 +27,7 @@ impl PostgresFencedSmPersistence {
             })?;
             if crate::sm_persistence::ingress_append::authorize_new_delivery(&mut tx, &proof.key)
                 .await?
-                == crate::sm_persistence::ingress_append::NewDeliveryAuthorization::AlreadyResolved
+                == NewDeliveryAuthorization::AlreadyResolved
             {
                 return Ok(KeyedSnapshotOutcome::ObligationAlreadyResolved);
             }

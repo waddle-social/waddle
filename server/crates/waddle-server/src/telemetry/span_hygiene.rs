@@ -25,11 +25,9 @@
 use std::time::Duration;
 
 use opentelemetry::{KeyValue, Value};
-use opentelemetry_sdk::{
-    error::OTelSdkResult,
-    trace::{SpanData, SpanExporter},
-    Resource,
-};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+use opentelemetry_sdk::Resource;
 
 /// Attribute keys removed from every exported span.
 const DROPPED_ATTRIBUTE_KEYS: &[&str] = &["actor.id"];
@@ -108,7 +106,7 @@ mod tests {
 
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
-    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 
     use super::*;
 

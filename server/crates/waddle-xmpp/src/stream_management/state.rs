@@ -1,3 +1,5 @@
+use crate::stream_management::PromotionCaptureCustody;
+use crate::Stanza;
 use std::time::Instant;
 
 use tracing::warn;
@@ -328,15 +330,15 @@ impl StreamManagementState {
     pub fn ingress_replay_payload(
         &self,
         sequence: u32,
-    ) -> Option<(crate::Stanza, chrono::DateTime<chrono::Utc>)> {
+    ) -> Option<(Stanza, chrono::DateTime<chrono::Utc>)> {
         let entry = self
             .unacked_queue
-            .get_all_unacked()
+            .all_unacked()
             .into_iter()
             .find(|entry| entry.sequence == sequence)?;
         let element = entry.stanza_xml.parse::<minidom::Element>().ok()?;
         let message = xmpp_parsers::message::Message::try_from(element).ok()?;
-        Some((crate::Stanza::Message(message), entry.original_receipt_at))
+        Some((Stanza::Message(message), entry.original_receipt_at))
     }
 
     /// Attach receipt obligations to the most recently recorded replay entry.
@@ -445,7 +447,7 @@ impl StreamManagementState {
     }
 
     /// Get the current inbound count for sending in an <a/> response.
-    pub fn get_inbound_count(&self) -> u32 {
+    pub fn inbound_count(&self) -> u32 {
         self.inbound_count
     }
 
@@ -458,7 +460,7 @@ impl StreamManagementState {
     /// Callers must complete these before removing their replay carriers.
     pub fn ingress_receipts_through(&self, h: u32) -> Vec<super::SmIngressFrameReceipt> {
         self.unacked_queue
-            .get_all_unacked()
+            .all_unacked()
             .into_iter()
             .filter(|entry| !sequence_gt(entry.sequence, h))
             .flat_map(|entry| entry.ingress_receipts)
@@ -470,8 +472,8 @@ impl StreamManagementState {
     /// `client_h` is the last sequence number the client acknowledged receiving.
     /// Returns stanzas with sequence > client_h, each paired with its
     /// original receipt time for the XEP-0203 replay stamp.
-    pub fn get_stanzas_to_resend(&self, client_h: u32) -> Vec<super::ReplayStanza> {
-        self.unacked_queue.get_unacked_after(client_h)
+    pub fn stanzas_to_resend(&self, client_h: u32) -> Vec<super::ReplayStanza> {
+        self.unacked_queue.unacked_after(client_h)
     }
 
     /// Highest evicted outbound sequence that the client has not acked yet.
@@ -592,7 +594,7 @@ impl StreamManagementState {
         self.clear_ack_request_tracking();
 
         Some(DetachedSession {
-            promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
+            promotion_custody: PromotionCaptureCustody::unproven(),
             stream_id: self.stream_id.clone()?,
             user_id: snapshot.user_id,
             jid: snapshot.jid,
@@ -601,7 +603,7 @@ impl StreamManagementState {
             outbound_count: self.outbound_count,
             last_acked: self.last_acked,
             replay_gap_through: self.replay_gap_through,
-            unacked_stanzas: self.unacked_queue.get_all_unacked(),
+            unacked_stanzas: self.unacked_queue.all_unacked(),
             max_resume_time: self.max_resume_time,
             detached_at: Instant::now(),
             carbons_enabled: snapshot.carbons_enabled,
@@ -746,7 +748,7 @@ mod tests {
         assert_eq!(state.queue_len(), 1);
 
         // Get stanzas to resend after client says h=1 (needs 2 and 3)
-        let resend = state.get_stanzas_to_resend(1);
+        let resend = state.stanzas_to_resend(1);
         assert_eq!(resend.len(), 1); // Only 3 is left in queue after ack(2)
     }
 
@@ -784,7 +786,7 @@ mod tests {
         // The retained queue no longer contains the evicted stanza; the
         // replay-gap marker added below is what prevents a successful resume
         // for clients that still need it.
-        let resend = state.get_stanzas_to_resend(0);
+        let resend = state.stanzas_to_resend(0);
         assert_eq!(resend.len(), 3, "evicted seq=1 must be absent from replay");
         assert!(!resend
             .iter()

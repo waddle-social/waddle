@@ -5,6 +5,7 @@
 //! available at disco time.
 
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 /// Activity state for a room. This is a local model, not a XEP-0502 stanza.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,7 @@ impl RoomActivity {
 /// Tracks activity across multiple rooms locally.
 #[derive(Debug, Default)]
 pub struct ActivityTracker {
-    rooms: std::collections::HashMap<String, RoomActivity>,
+    rooms: HashMap<String, RoomActivity>,
 }
 
 impl ActivityTracker {

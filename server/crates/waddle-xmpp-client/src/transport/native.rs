@@ -1,3 +1,5 @@
+//! Native WebSocket connection, TLS verification, framing, and shutdown.
+
 use futures::future::BoxFuture;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
@@ -25,6 +27,11 @@ const WEBSOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime-owned factory for a WebSocket transport implementation.
 pub trait WebSocketTransportFactory: Send + Sync {
+    /// Establish a WebSocket transport using the endpoint, origin, timeout, and TLS settings from the client configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if request or TLS setup fails, the connection deadline expires, or the network/WebSocket/TLS handshake fails.
     fn connect<'a>(
         &'a self,
         config: &'a ClientConfig,
@@ -33,24 +40,45 @@ pub trait WebSocketTransportFactory: Send + Sync {
 
 /// Minimal async boundary for the WebSocket transport layer.
 pub trait WebSocketTransport: Send + Sync {
+    /// Return the transport kind exposed by this implementation.
     fn kind(&self) -> TransportKind {
         TransportKind::WebSocket
     }
 
+    /// Return framing and feature capabilities supported by this transport.
     fn capabilities(&self) -> TransportCapabilities {
         TransportCapabilities::default()
     }
 
+    /// Remove and return already queued transport events without waiting for network input.
     fn drain_events(&mut self) -> Vec<TransportEvent>;
 
+    /// Encode and write an XMPP transport message, updating transport events as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed-transport, framing-size, write-timeout, or WebSocket write error.
     fn send<'a>(&'a mut self, message: TransportMessage) -> BoxFuture<'a, ClientResult<()>>;
 
+    /// Await the next transport event, returning None when the stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns a WebSocket read error or an invalid/oversized XMPP frame error.
     fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
 
     /// Cleanly end the XMPP session, then close its WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stream-close encoding/write or WebSocket-close error.
     fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
 
     /// Close only the WebSocket, leaving the XMPP session unfinished for resume.
+    ///
+    /// # Errors
+    ///
+    /// Returns a WebSocket-close error.
     fn close_transport<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
 }
 

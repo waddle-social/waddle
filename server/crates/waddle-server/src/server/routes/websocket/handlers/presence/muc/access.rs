@@ -1,7 +1,12 @@
-use super::*;
+use super::{
+    debug, get_room_actor, get_xmpp_channel, warn, Affiliation, BareJid, CheckPermission, Element,
+    GetSnapshot, Object, ObjectType, Permission, Subject, WebSocketState, XmppChannelRecord,
+    DEPLOYMENT_SERVER_ID,
+};
 use crate::permissions::{
     DeleteTuple, ListRelations, PermissionError, Relation, SubjectType, Tuple, WriteTuple,
 };
+use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) async fn resolve_managed_channel_affiliation(
     state: &WebSocketState,
@@ -442,7 +447,7 @@ async fn check_channel_permission(
 
 pub(super) async fn server_permission_allowed(
     state: &WebSocketState,
-    principal: Option<crate::server::routes::websocket::ResolvedPrincipal<'_>>,
+    principal: Option<ResolvedPrincipal<'_>>,
     permission: Permission,
 ) -> Result<bool, ()> {
     let Some(principal) = principal else {

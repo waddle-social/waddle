@@ -274,7 +274,7 @@ pub(super) fn participant_registration_expectation(
     full_jid: &FullJid,
 ) -> Option<waddle_sfu::ParticipantRegistrationExpectation> {
     let sfu = state.deps.protocol.sfu.as_ref()?;
-    let call = waddle_sfu::CallId::new(room.to_string()).ok()?;
+    let call = waddle_sfu::CallId::try_new(room.to_string()).ok()?;
     let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
     sfu.participant_registration_expectation(&call, &identity)
 }
@@ -300,7 +300,7 @@ pub(super) async fn initiate_still_current(
     }
     if let (Some(sfu), Ok(call_id), Some(registration)) = (
         state.deps.protocol.sfu.as_ref(),
-        waddle_sfu::CallId::new(room.to_string()),
+        waddle_sfu::CallId::try_new(room.to_string()),
         registration,
     ) {
         let _ = sfu.rollback_participant_registration(
@@ -324,7 +324,7 @@ pub(super) fn muji_session_terminate_session(iq: &Iq) -> Option<waddle_sfu::Sess
     if !matches!(jingle.action, Action::SessionTerminate) {
         return None;
     }
-    waddle_sfu::SessionBinding::new(jingle.sid.0).ok()
+    waddle_sfu::SessionBinding::try_new(jingle.sid.0).ok()
 }
 
 async fn verify_room_membership(

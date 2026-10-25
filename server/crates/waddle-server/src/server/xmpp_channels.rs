@@ -1,3 +1,4 @@
+use crate::db::actor::RowValues;
 use kameo::actor::ActorRef;
 use serde::Serialize;
 use waddle_xmpp::muc::PinPermission;
@@ -57,34 +58,26 @@ pub(crate) struct XmppChannelUpsert {
     pub public_room: bool,
 }
 
-fn db_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<String, String> {
+fn db_string(row: &RowValues, index: usize, name: &str) -> Result<String, String> {
     row_value(row, index)
         .and_then(ValueExt::as_string)
         .map_err(|e| format!("Failed to get {name}: {e}"))
 }
 
-fn db_optional_string(
-    row: &crate::db::actor::RowValues,
-    index: usize,
-    name: &str,
-) -> Result<Option<String>, String> {
+fn db_optional_string(row: &RowValues, index: usize, name: &str) -> Result<Option<String>, String> {
     row_value(row, index)
         .and_then(ValueExt::as_optional_string)
         .map_err(|e| format!("Failed to get {name}: {e}"))
 }
 
-fn db_i32(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<i32, String> {
+fn db_i32(row: &RowValues, index: usize, name: &str) -> Result<i32, String> {
     match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
         crate::db::Value::Integer(value) => Ok(*value as i32),
         other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
     }
 }
 
-fn db_bool(row: &crate::db::actor::RowValues, index: usize, name: &str) -> Result<bool, String> {
+fn db_bool(row: &RowValues, index: usize, name: &str) -> Result<bool, String> {
     match row_value(row, index).map_err(|e| format!("Failed to get {name}: {e}"))? {
         crate::db::Value::Integer(value) => Ok(*value != 0),
         other => Err(format!("Failed to get {name}: unexpected value {other:?}")),
@@ -106,7 +99,7 @@ fn canonical_channel_type(channel_type: &str) -> &str {
     }
 }
 
-fn parse_channel_record(row: &crate::db::actor::RowValues) -> Result<XmppChannelRecord, String> {
+fn parse_channel_record(row: &RowValues) -> Result<XmppChannelRecord, String> {
     let pin_permission_raw = db_string(row, 6, "pin_permission")?;
     let pin_permission = PinPermission::from_form_value(&pin_permission_raw).ok_or_else(|| {
         format!("Failed to get pin_permission: unexpected value {pin_permission_raw:?}")
@@ -279,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_write_persists_canonical_group_dm_type() {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

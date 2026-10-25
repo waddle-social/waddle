@@ -7,7 +7,13 @@
 
 use jid::BareJid;
 use minidom::Element;
-use waddle_server::notification_settings_projection::*;
+use waddle_server::notification_settings_projection::{
+    derive_bookmark_projection_mutation, derive_dm_bookmark_projection_mutation,
+    validate_dm_bookmark_publish, validate_xep0402_bookmark_publish, ConversationKind,
+    NotificationSettingsProjection, NotificationSettingsProjectionError,
+    NotificationSettingsProjectionMutation, NotificationSettingsProjectionStore,
+    NotificationSettingsSource,
+};
 use waddle_xmpp::xep::NotificationLevel;
 
 fn bare(value: &str) -> BareJid {

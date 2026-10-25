@@ -1,16 +1,16 @@
-use super::super::{
-    cleanup::{
-        cleanup_connection_shutdown, cleanup_force_detach_connection_shutdown,
-        cleanup_muc_presence_for_jid,
-    },
-    frame::{handle_xmpp_frame, settle_inbound_dispatch},
-    frame_backstop::InboundDisposition,
-    handlers,
-    interpret_loop::build_interpret_deps,
-    replay::drive_interpret_loop,
-    state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
-    stream_management::is_countable_stanza,
-    transport_xml::{build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml},
+use super::super::cleanup::{
+    cleanup_connection_shutdown, cleanup_force_detach_connection_shutdown,
+    cleanup_muc_presence_for_jid,
+};
+use super::super::frame::{handle_xmpp_frame, settle_inbound_dispatch};
+use super::super::frame_backstop::InboundDisposition;
+use super::super::handlers;
+use super::super::interpret_loop::build_interpret_deps;
+use super::super::replay::drive_interpret_loop;
+use super::super::state::{WsConnState, TERMINAL_RECOVERY_QUEUE_CAP};
+use super::super::stream_management::is_countable_stanza;
+use super::super::transport_xml::{
+    build_stream_features_xml, element_to_xml, sasl_success_xml, stanza_to_xml,
 };
 use super::{
     create_test_server_owner_session, create_test_session, create_test_websocket_state,
@@ -22,22 +22,21 @@ use super::{
     store_resumable_detached_session,
 };
 use crate::auth::Session;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use jid::{BareJid, FullJid};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
-use waddle_xmpp::{
-    ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity},
-    protocol::{Blocklist, ConnectionPhase, InboundEvent},
-    registry::{
-        ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
-        GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
-    },
-    stream_management::{InMemorySmSessionRegistry, SmSessionRegistry, SM_NS},
-    telemetry::attributes::SmEvictionPath,
-    Stanza,
+use waddle_xmpp::ownership::{ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+use waddle_xmpp::protocol::{Blocklist, ConnectionPhase, InboundEvent};
+use waddle_xmpp::registry::{
+    ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    GetUser, OutboundStanza, RegisterUserResource, UserRegistryError, WireUserClusteringClaims,
 };
+use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry, SM_NS};
+use waddle_xmpp::telemetry::attributes::SmEvictionPath;
+use waddle_xmpp::Stanza;
 use xmpp_parsers::minidom::Element;
 
 struct HangingEnsureClaimStore {
@@ -1442,14 +1441,14 @@ fn timed_out_inbound_stanza_preserves_sender_responsibility() {
         &mut state,
     );
 
-    assert_eq!(state.get_inbound_count(), 0);
+    assert_eq!(state.inbound_count(), 0);
     assert!(!completion.has_pending());
     assert!(completion.has_unhandled_hole());
 
     // A late ordered-relay completion cannot turn the cancelled dispatch into
     // an acknowledgement: the sender must retain and replay this stanza.
     completion.complete(sequence, &mut state);
-    assert_eq!(state.get_inbound_count(), 0);
+    assert_eq!(state.inbound_count(), 0);
 }
 
 #[tokio::test]
@@ -1509,7 +1508,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
         &mut conn.sm_state,
     );
 
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
     assert!(
         !conn.phase.is_closing(),
@@ -1866,7 +1865,7 @@ async fn force_detach_busy_child_retries_and_converges_without_janitor() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered entry");
     state
         .deps
@@ -2024,7 +2023,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
         .deps
         .protocol
         .connection_registry
-        .get_entry(&old_jid)
+        .entry(&old_jid)
         .expect("registered entry");
     state
         .deps
@@ -3214,7 +3213,7 @@ async fn ownership_moved_before_terminal_cleanup_still_promotes_without_touching
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .and_then(|entry| entry.sm_stream_id()),
         Some(replacement_stream),
         "terminal recovery must not mutate the replacement registry entry"
@@ -6731,7 +6730,7 @@ async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_sta
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .is_none(),
         "rejected staging performs no registration"
     );
@@ -7173,7 +7172,7 @@ async fn sm_enable_after_bind_returns_enabled_and_tracks_counters() {
         &mut conn,
     )
     .await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
 
     // Subsequent <r/> should now report h=1.
     let ack2 = handle_xmpp_frame(
@@ -7304,7 +7303,7 @@ async fn replaced_connection_commits_written_enable_without_publishing_stale_ali
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .expect("replacement entry")
             .sm_stream_id()
             .is_none(),
@@ -7385,7 +7384,7 @@ async fn replacement_after_enable_publication_terminalizes_only_the_old_stream_c
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .expect("replacement entry")
             .sm_stream_id(),
         Some(replacement_stream),
@@ -7870,7 +7869,7 @@ async fn sm_live_ack_with_impossible_handled_count_closes_stream_without_purging
     // Nothing was purged: both stanzas remain replayable and the
     // claimed pending_delivery row survives.
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(0).len(),
+        conn.sm_state.stanzas_to_resend(0).len(),
         2,
         "bogus ack must not purge the replay queue"
     );
@@ -7913,7 +7912,7 @@ async fn sm_live_ack_with_valid_handled_count_purges_queue_and_rows() {
     assert!(responses.is_empty(), "valid ack yields no response frames");
     assert!(!conn.phase.is_closing(), "valid ack must not close");
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(0).len(),
+        conn.sm_state.stanzas_to_resend(0).len(),
         1,
         "acked prefix must be purged, unacked tail retained"
     );
@@ -7959,7 +7958,7 @@ async fn sm_live_ack_at_exact_outbound_count_is_accepted() {
     assert!(responses.is_empty(), "h == send-count is a valid full ack");
     assert!(!conn.phase.is_closing());
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(0).len(),
+        conn.sm_state.stanzas_to_resend(0).len(),
         0,
         "full ack empties the replay queue"
     );
@@ -8039,7 +8038,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
     );
     assert!(!conn.phase.is_closing(), "wrapped valid ack must not close");
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(u32::MAX).len(),
+        conn.sm_state.stanzas_to_resend(u32::MAX).len(),
         2,
         "pre-wrap stanza purged; post-wrap stanzas retained"
     );
@@ -8148,7 +8147,7 @@ async fn sm_live_ack_in_regressed_half_space_is_ignored_without_purge() {
     );
     assert!(!conn.phase.is_closing(), "ignored ack must not close");
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(1).len(),
+        conn.sm_state.stanzas_to_resend(1).len(),
         1,
         "ignored ack must not purge the replay queue"
     );
@@ -8284,14 +8283,13 @@ async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect()
     use super::super::stream_management::{
         finalize_sm_after_registry_registration, SmRegistrationFinalization,
     };
-    use waddle_xmpp::{
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, SmSessionId,
-        },
-        stream_management::{
-            persistence::{InMemorySmPersistence, SmPersistenceStorage},
-            DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
-        },
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{
+        DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
     };
 
     let source = Arc::new(InMemorySmPersistence::new());
@@ -8488,14 +8486,11 @@ async fn sm_resume_ack_survives_failed_completion_then_expiry_and_reconnect() {
     use super::super::stream_management::{
         finalize_sm_after_registry_registration, SmRegistrationFinalization,
     };
-    use waddle_xmpp::{
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, SmSessionId,
-        },
-        stream_management::{
-            persistence::SmPersistenceStorage, DetachedSessionSnapshot, PromotionCaptureCustody,
-            StreamManagementState,
-        },
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    use waddle_xmpp::stream_management::{
+        DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
     };
 
     let source = Arc::new(FailDeleteSmPersistence::new());
@@ -8725,7 +8720,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
     let resumed = Element::from_str(&responses[0]).expect("resumed xml");
     assert_eq!(resumed.name(), "resumed");
     assert_eq!(resumed.attr("h"), Some("9"));
-    assert_eq!(conn.sm_state.get_inbound_count(), 9);
+    assert_eq!(conn.sm_state.inbound_count(), 9);
     assert_eq!(resumed.attr("previd"), Some(stream_id.as_str()));
 
     let replay_count = responses.len() - 1;
@@ -10292,7 +10287,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
         &jid,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -10414,7 +10409,7 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("entry just registered");
     assert!(
         crate::server::dual_registration::mirror_register(
@@ -10498,7 +10493,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
         &jid,
         "alice",
         None,
-        (conn.occupancy_session, &Some(owner_session.clone())),
+        (conn.occupancy_session, Some(&owner_session.clone())),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -10619,7 +10614,7 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
         &jid,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
 
@@ -10669,7 +10664,7 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
         &jid,
         "alice",
         None,
-        &Some(owner_session),
+        Some(&owner_session),
     )
     .await;
 
@@ -10741,7 +10736,7 @@ async fn terminal_cleanup_without_replacement_still_tears_down_room_membership()
         &jid,
         "alice",
         None,
-        (conn.occupancy_session, &Some(owner_session)),
+        (conn.occupancy_session, Some(&owner_session)),
     )
     .await;
 
@@ -10827,7 +10822,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         &jid,
         "alice",
         None,
-        (occupancy_session, &Some(owner_session.clone())),
+        (occupancy_session, Some(&owner_session.clone())),
     )
     .await;
     assert!(snapshot_room(state.as_ref(), &room_jid)
@@ -11056,7 +11051,7 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
         &jid,
         "alice",
         None,
-        &Some(owner_session.clone()),
+        Some(&owner_session.clone()),
     )
     .await;
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(4);
@@ -11791,7 +11786,7 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("live presence state after resume");
     assert!(
         presence_state.payloads.contains(&idle),
@@ -11942,7 +11937,7 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered entry after resume");
     assert!(
         !entry.claim_pending_subscribes_flush(),
@@ -12023,7 +12018,7 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered entry after resume");
     assert!(
         !entry.claim_pending_subscribes_flush(),
@@ -12099,7 +12094,7 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered entry after resume");
     assert!(
         entry.claim_pending_subscribes_flush(),
@@ -12159,7 +12154,7 @@ async fn sm_live_ack_behind_last_acked_is_ignored_without_purging() {
         "stale ack must not move last_acked"
     );
     assert_eq!(
-        conn.sm_state.get_stanzas_to_resend(0).len(),
+        conn.sm_state.stanzas_to_resend(0).len(),
         2,
         "stale ack must not purge the replay queue"
     );
@@ -12258,8 +12253,10 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
 mod terminal_ordering_release_tests {
     use super::*;
     use crate::pending_delivery::DatabasePendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::storage::{
+        PendingClaimToken, PendingDeliveryStorage, PendingStorageError,
+    };
     use waddle_xmpp::pending_delivery::{
-        storage::{PendingClaimToken, PendingDeliveryStorage, PendingStorageError},
         InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
     };
     use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
@@ -13661,7 +13658,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .expect("winner route")
             .sm_stream_id(),
         Some(stream_id)
@@ -13695,7 +13692,7 @@ async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snaps
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("owner entry");
     assert!(entry.wire_resume_control(jid.clone(), Arc::clone(&owner.live_resume_control)));
     let mut detach_requests = entry

@@ -1,10 +1,16 @@
+use crate::db::DatabaseDriver;
+use crate::ingress_uow::DbRetryClass;
+use crate::ingress_uow::DeliveryEffectRepository;
+use crate::ingress_uow::EffectDeliveryBinding;
+use crate::ingress_uow::EffectDescendantRepository;
 use jid::BareJid;
 use uuid::Uuid;
 use waddle_extensions::{
     ConfiguredRoomObserver, DisplayText, ObservationFailure, ObservationSkip, RoomMessageSource,
     RoomObservationOutcome, RoomObservationScope, RoomObservationSubscription,
 };
-use waddle_xmpp::{ingress::MessageKey, ownership::NodeIdentity};
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::ownership::NodeIdentity;
 
 use crate::db::Row;
 use crate::ingress_uow::IngressUowTransaction;
@@ -52,7 +58,7 @@ fn decode_work(
         ),
         subscription: subscription.clone(),
         source: serde_json::from_str(&source_json)?,
-        body: DisplayText::new(body).map_err(|_| ObservationError::Codec)?,
+        body: DisplayText::try_new(body).map_err(|_| ObservationError::Codec)?,
         attempt: u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
     })
 }
@@ -196,6 +202,7 @@ fn failure_category(failure: ObservationFailure) -> &'static str {
         ObservationFailure::DeadlineExceeded => "deadline_exceeded",
         ObservationFailure::InvalidResult => "invalid_result",
         ObservationFailure::SourceMismatch => "source_mismatch",
+        _ => "unknown",
     }
 }
 
@@ -204,6 +211,7 @@ fn skip_category(skip: ObservationSkip) -> &'static str {
         ObservationSkip::MissingOriginId => "missing_origin_id",
         ObservationSkip::SubscriptionUnavailable => "subscription_unavailable",
         ObservationSkip::NoResult => "no_result",
+        _ => "unknown",
     }
 }
 
@@ -219,7 +227,7 @@ pub(super) async fn lock_canonical_keys(
     let mut keys = keys.to_vec();
     keys.sort_by_key(MessageKey::to_storage);
     keys.dedup();
-    let sql = if tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres {
+    let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
         "SELECT message_key FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE NOWAIT"
     } else {
         "SELECT message_key FROM ingress_messages WHERE message_key = ?"
@@ -233,9 +241,7 @@ pub(super) async fn lock_canonical_keys(
                 crate::db::DatabaseError::Internal(sqlx::Error::Database(database))
                     if database.code().as_deref() == Some("55P03") =>
                 {
-                    ObservationError::RetryableDatabase(
-                        crate::ingress_uow::DbRetryClass::CanonicalLockContention,
-                    )
+                    ObservationError::RetryableDatabase(DbRetryClass::CanonicalLockContention)
                 }
                 _ => ObservationError::from(error),
             })?;
@@ -374,14 +380,10 @@ pub(super) async fn validate_started(
     {
         return Ok(false);
     }
-    let key = crate::ingress_uow::DeliveryEffectRepository::bind_effect(
-        tx,
-        work.message_key,
-        &work.effect_key(),
-    )
-    .await
-    .map_err(ObservationError::from)?;
-    Ok(key == crate::ingress_uow::EffectDeliveryBinding::Bound(work.delivery_key()))
+    let key = DeliveryEffectRepository::bind_effect(tx, work.message_key, &work.effect_key())
+        .await
+        .map_err(ObservationError::from)?;
+    Ok(key == EffectDeliveryBinding::Bound(work.delivery_key()))
 }
 
 pub(super) async fn start(
@@ -395,13 +397,9 @@ pub(super) async fn start(
     {
         return Ok(false);
     }
-    crate::ingress_uow::DeliveryEffectRepository::bind_effect(
-        tx,
-        work.message_key,
-        &work.effect_key(),
-    )
-    .await
-    .map_err(ObservationError::from)?;
+    DeliveryEffectRepository::bind_effect(tx, work.message_key, &work.effect_key())
+        .await
+        .map_err(ObservationError::from)?;
     Ok(tx.transaction_mut().execute(
         "UPDATE extension_room_observation_work SET status = 'started' WHERE id = ? AND lease_id = ? AND status = 'leased' AND lease_until_ms > ?",
         crate::db_params![work.id.to_string(), work.lease.to_string(), now_ms],
@@ -445,7 +443,7 @@ pub(super) async fn finish(
                     .get(0)?;
                 drop(rows);
                 let publication_id = Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?;
-                crate::ingress_uow::EffectDescendantRepository::attach(
+                EffectDescendantRepository::attach(
                     tx,
                     work.message_key,
                     &work.effect_key(),
@@ -506,6 +504,7 @@ pub(super) async fn finish(
         RoomObservationOutcome::NotApplicable(skip) => {
             ("terminal", skip_category(*skip), now_ms, None)
         }
+        _ => return Ok(false),
     };
     // Retention measures settled history from this commit; a retry stays
     // active and therefore carries no settlement time.
@@ -567,6 +566,7 @@ pub(super) async fn due_rooms(
                 Ok(rooms)
             }
         }
+        _ => Ok(Vec::new()),
     }
 }
 

@@ -14,7 +14,9 @@ fn xep_0249_direct_invite_payload_matches_schema_shape() {
         Some("Hey Hecate, this is the place for all good witches!".to_string()),
         "cauldronburn",
     );
-    invite.set_continue(ThreadId::new("e0ffe42b28561960c6b12b944a092794b9683a38"));
+    invite.set_continue(ThreadId::try_new(
+        "e0ffe42b28561960c6b12b944a092794b9683a38",
+    ));
 
     let elem = build_direct_invite(&invite);
 

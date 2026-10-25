@@ -29,7 +29,7 @@ pub struct CallTeardownOutboxStore {
 }
 
 impl CallTeardownOutboxStore {
-    pub async fn new(db: Database) -> Result<Self, CallTeardownOutboxError> {
+    pub async fn try_new(db: Database) -> Result<Self, CallTeardownOutboxError> {
         Self::new_with_node_identity(db, SharedNodeIdentity::new(NodeIdentity::local())).await
     }
 

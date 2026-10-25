@@ -1,4 +1,14 @@
-use super::*;
+use super::{
+    caller_delivery_outcome, current_claim, current_fresh_local_relay_claim,
+    defer_until_relay_completion, deliver_local_after_target_refresh_outcome,
+    payload_for_recipient, remote_resource_origin, replies_for_origin_handoff, route_origin_claim,
+    stanza_message_id, user_entity, Arc, DeliveryKind, FullJidDeliveryOutcome, NodeId,
+    OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDeliveryBridge, OrderedRelayPayload,
+    OrderedRelayRecipient, OrderedRelayRouteOrigin, OriginInboundSequence, RemoteDeliveryFuture,
+    RemoteDeliverySeed, RemoteResourceRouteTarget, RemoteStanza, Stanza,
+};
+use crate::ingress::identity::IngressAppendObligationRef;
+use crate::server::routes::interpret::SmIngressAppendContext;
 
 impl OrderedRelayDeliveryBridge {
     /// Return `Some` only when this exact full-JID target is currently owned
@@ -16,7 +26,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<SmIngressAppendContext>,
     ) -> RemoteDeliveryFuture<'a> {
         self.try_deliver_full_jid_remote_at(
             target,
@@ -34,7 +44,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<SmIngressAppendContext>,
         received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> RemoteDeliveryFuture<'a> {
         self.deliver_full_jid_remote_kind(
@@ -52,7 +62,7 @@ impl OrderedRelayDeliveryBridge {
         target: &'a jid::FullJid,
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
-        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<SmIngressAppendContext>,
     ) -> RemoteDeliveryFuture<'a> {
         self.deliver_full_jid_remote_kind(
             target,
@@ -70,7 +80,7 @@ impl OrderedRelayDeliveryBridge {
         stanza: &'a Stanza,
         origin: &'a OrderedRelayRouteOrigin,
         call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
-        ingress_append_context: Option<crate::server::routes::interpret::SmIngressAppendContext>,
+        ingress_append_context: Option<SmIngressAppendContext>,
         delivery: (DeliveryKind, Option<chrono::DateTime<chrono::Utc>>),
     ) -> RemoteDeliveryFuture<'a> {
         let (kind, received_at) = delivery;
@@ -84,32 +94,49 @@ impl OrderedRelayDeliveryBridge {
                         remote_origin,
                         if kind == DeliveryKind::DirectFrame {
                             RemoteResourceRouteTarget::ProcessedDirectMessage {
-                                target: target.clone(), stanza: RemoteStanza(stanza.clone()),
-                                ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_remote_message(ingress_append_context.as_ref(), stanza),
+                                target: target.clone(),
+                                stanza: RemoteStanza(stanza.clone()),
+                                ingress_append: IngressAppendObligationRef::for_remote_message(
+                                    ingress_append_context.as_ref(),
+                                    stanza,
+                                ),
                             }
                         } else {
-                        RemoteResourceRouteTarget::FullJid {
-                            target: target.clone(),
-                            stanza: RemoteStanza(stanza.clone()),
-                            ingress_append: match (stanza, ingress_append_context.as_ref().filter(|context| context.authority.permits_remote_obligation())) {
-                                (Stanza::Message(message), Some(context)) => message
-                                    .from
-                                    .as_ref()
-                                    .map(|sender| {
-                                        crate::ingress::identity::IngressAppendObligationRef::from_context(
-                                            context, sender.to_bare(),
-                                        )
-                                    })
-                                    .filter(|obligation| obligation.kind_is_append_eligible()),
-                                _ => None,
-                            },
+                            RemoteResourceRouteTarget::FullJid {
+                                target: target.clone(),
+                                stanza: RemoteStanza(stanza.clone()),
+                                ingress_append: match (
+                                    stanza,
+                                    ingress_append_context.as_ref().filter(|context| {
+                                        context.authority.permits_remote_obligation()
+                                    }),
+                                ) {
+                                    (Stanza::Message(message), Some(context)) => message
+                                        .from
+                                        .as_ref()
+                                        .map(|sender| {
+                                            IngressAppendObligationRef::from_context(
+                                                context,
+                                                sender.to_bare(),
+                                            )
+                                        })
+                                        .filter(|obligation| obligation.kind_is_append_eligible()),
+                                    _ => None,
+                                },
 
-                            received_at: if ingress_append_context.as_ref().is_some_and(|context| context.authority.permits_remote_obligation()) {
-                                None
-                            } else {
-                                received_at.or_else(|| ingress_append_context.as_ref().and_then(|context| context.received_at))
-                            },
-} },
+                                received_at: if ingress_append_context.as_ref().is_some_and(
+                                    |context| context.authority.permits_remote_obligation(),
+                                ) {
+                                    None
+                                } else {
+                                    received_at.or_else(|| {
+                                        ingress_append_context
+                                            .as_ref()
+                                            .and_then(|context| context.received_at)
+                                    })
+                                },
+                            }
+                        },
                         stanza,
                         origin,
                         call_setup,

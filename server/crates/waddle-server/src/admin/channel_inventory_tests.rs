@@ -1,11 +1,16 @@
 //! Regression tests for durable admin inventory and filtered pagination.
-use super::*;
+use super::{
+    run_list, upsert_xmpp_channel, Affiliation, AppState, Arc, BareJid, ChannelSpaceLink,
+    ChannelType, ChannelsListArgs, ChannelsListResult, CreateRoom,
+    CreateRoomWithInitialAffiliations, ListRooms, PinPermission, Role, RoomConfig, SpaceNode,
+    XmppChannelUpsert,
+};
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
 use waddle_xmpp::muc::room_actor::{Join, OccupancySessionGeneration};
 
 async fn fresh_state() -> AppState {
-    let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+    let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
         .await
         .expect("database pool");
     MigrationRunner::global()

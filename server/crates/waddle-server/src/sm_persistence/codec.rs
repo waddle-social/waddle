@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    DateTime, FullJid, PersistedSession, PersistedUnackedStanza, Show, SmPersistenceError,
+    SmSessionId, Stanza, Utc,
+};
+use crate::db::Row;
+use crate::db::Rows;
 use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };
@@ -27,7 +32,7 @@ pub(crate) fn encode_session_principal(
 }
 
 pub(crate) fn decode_session_principal(
-    row: &crate::db::Row,
+    row: &Row,
 ) -> Result<Option<AuthenticatedPrincipalRef>, SmPersistenceError> {
     let bare_jid: Option<String> = row
         .get(0)
@@ -88,7 +93,7 @@ pub(crate) fn decode_session_principal(
     )))
 }
 
-pub(crate) fn decode_session(row: &crate::db::Row) -> Result<PersistedSession, SmPersistenceError> {
+pub(crate) fn decode_session(row: &Row) -> Result<PersistedSession, SmPersistenceError> {
     let stream_id: String = row
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -212,9 +217,7 @@ fn decode_occupancy_session(
     )
 }
 
-pub(crate) fn decode_unacked(
-    row: &crate::db::Row,
-) -> Result<PersistedUnackedStanza, SmPersistenceError> {
+pub(crate) fn decode_unacked(row: &Row) -> Result<PersistedUnackedStanza, SmPersistenceError> {
     let stream_id: String = row
         .get(0)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -257,7 +260,7 @@ pub(crate) fn decode_unacked(
 /// (0..=18, `presence_payloads` at 18).
 /// Used by `list_all_sessions_with_unacked` (issue #209 PR #405).
 pub(super) fn decode_unacked_join_row(
-    row: &crate::db::Row,
+    row: &Row,
     sequence_i64: i64,
 ) -> Result<PersistedUnackedStanza, SmPersistenceError> {
     let stream_id: String = row
@@ -454,7 +457,7 @@ fn decode_ingress_receipts(
 /// Decode metadata for broad maintenance scans without letting one poison row
 /// hide healthy streams. Exact-key and exact-JID lookups stay fail closed.
 pub(crate) async fn decode_session_scan(
-    mut rows: crate::db::Rows,
+    mut rows: Rows,
     scan: &'static str,
 ) -> Result<Vec<PersistedSession>, SmPersistenceError> {
     let mut sessions = Vec::new();

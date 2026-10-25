@@ -144,7 +144,7 @@ mod tests {
     }
 
     async fn fresh_state() -> AppState {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()
@@ -475,13 +475,13 @@ mod tests {
             ) -> Result<Affiliation, XmppError> {
                 boom("set_affiliation")
             }
-            async fn get_affiliation(
+            async fn affiliation(
                 &self,
                 _owner: &BareJid,
                 _node_name: &str,
                 _entity: &BareJid,
             ) -> Result<Affiliation, XmppError> {
-                boom("get_affiliation")
+                boom("affiliation")
             }
             async fn list_node_affiliations(
                 &self,

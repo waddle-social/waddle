@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
+    FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance, PendingFlushReserveError,
+    SendResult, Stanza,
+};
 use jid::Jid;
 use std::time::Duration;
 use xmpp_parsers::message::{Message, MessageType};
@@ -235,15 +239,15 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
     assert!(Arc::ptr_eq(&owner, &entry.carbons_enabled));
     assert!(registry.is_carbons_enabled(&jid));
     assert_eq!(
-        registry.get_roster_interested_resources_for_user(&bare),
+        registry.roster_interested_resources_for_user(&bare),
         vec![jid.clone()]
     );
     assert_eq!(
-        registry.get_blocklist_interested_resources_for_user(&bare),
+        registry.blocklist_interested_resources_for_user(&bare),
         vec![jid.clone()]
     );
     assert_eq!(
-        registry.get_available_resources_for_user(&bare),
+        registry.available_resources_for_user(&bare),
         vec![(jid.clone(), 7)]
     );
 
@@ -296,7 +300,7 @@ fn test_register_replacement_does_not_inherit_roster_interest() {
     registry.register(jid.clone(), tx2);
     assert!(!registry.is_roster_interested(&jid));
     assert!(registry
-        .get_roster_interested_resources_for_user(&bare)
+        .roster_interested_resources_for_user(&bare)
         .is_empty());
 }
 
@@ -315,7 +319,7 @@ fn test_blocklist_interest_tracks_only_requesting_resources() {
     registry.mark_blocklist_interested(&web);
 
     assert_eq!(
-        registry.get_blocklist_interested_resources_for_user(&bare),
+        registry.blocklist_interested_resources_for_user(&bare),
         vec![web]
     );
 }
@@ -331,7 +335,7 @@ fn test_register_with_stream_state_seeds_blocklist_interest() {
 
     assert!(registry.is_blocklist_interested(&jid));
     assert_eq!(
-        registry.get_blocklist_interested_resources_for_user(&bare),
+        registry.blocklist_interested_resources_for_user(&bare),
         vec![jid]
     );
 }
@@ -587,12 +591,12 @@ fn test_update_presence_and_get_available_resources() {
     registry.register(jid2.clone(), tx2);
 
     // Default is unavailable until initial presence is sent.
-    assert!(registry.get_available_resources_for_user(&bare).is_empty());
+    assert!(registry.available_resources_for_user(&bare).is_empty());
 
     assert!(registry.update_presence(&jid1, true, 5));
     assert!(registry.update_presence(&jid2, true, -1));
 
-    let mut resources = registry.get_available_resources_for_user(&bare);
+    let mut resources = registry.available_resources_for_user(&bare);
     resources.sort_by_key(|a| a.0.to_string());
     assert_eq!(resources.len(), 2);
     assert_eq!(resources[0].0, jid1);
@@ -668,7 +672,7 @@ fn test_presence_state_tracking() {
     registry.register(jid.clone(), tx);
 
     // No state initially
-    assert!(registry.get_presence_state(&jid).is_none());
+    assert!(registry.presence_state(&jid).is_none());
 
     // Store presence state, including the resource's extension payloads
     // (relayed verbatim on probe/subscription delivery — issue #1101).
@@ -686,7 +690,7 @@ fn test_presence_state_tracking() {
         vec![idle_payload.clone()],
     );
 
-    let state = registry.get_presence_state(&jid).expect("should exist");
+    let state = registry.presence_state(&jid).expect("should exist");
     assert_eq!(state.show.as_deref(), Some("away"));
     assert_eq!(state.status.as_deref(), Some("Gone fishing"));
     assert_eq!(state.priority, 5);
@@ -694,7 +698,7 @@ fn test_presence_state_tracking() {
 
     // Update with different values — and no payloads (return from idle).
     registry.update_presence_state(&jid, None, None, 0, Vec::new());
-    let state = registry.get_presence_state(&jid).expect("should exist");
+    let state = registry.presence_state(&jid).expect("should exist");
     assert!(state.show.is_none());
     assert!(state.status.is_none());
     assert!(state.payloads.is_empty());
@@ -702,7 +706,7 @@ fn test_presence_state_tracking() {
 
     // Clean up on unregister
     registry.unregister(&jid);
-    assert!(registry.get_presence_state(&jid).is_none());
+    assert!(registry.presence_state(&jid).is_none());
 }
 
 /// XEP-0198 + XEP-0280: when a stream resumes the client expects its
@@ -931,10 +935,7 @@ fn sm_stream_clear_preserves_reassigned_owner() {
         }
 
         assert_eq!(registry.sm_stream_owner(&stream_id), Some(successor_jid));
-        assert_eq!(
-            registry.get_entry(&previous_jid).unwrap().sm_stream_id(),
-            None
-        );
+        assert_eq!(registry.entry(&previous_jid).unwrap().sm_stream_id(), None);
     }
 }
 
@@ -1070,7 +1071,7 @@ fn sm_stream_cleanup_keeps_connection_locked_until_reverse_owner_is_pruned() {
     assert!(removed.is_some());
     assert!(registry.is_owned_by(&jid, &new_owner));
     assert_eq!(
-        registry.get_entry(&jid).unwrap().sm_stream_id(),
+        registry.entry(&jid).unwrap().sm_stream_id(),
         Some(stream_id.clone())
     );
     assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid));
@@ -1094,7 +1095,7 @@ fn unregister_if_sm_stream_id_spares_a_replacement_session() {
     registry.register(jid.clone(), s1_tx);
     let s1_stream = SmSessionId::new("s1-stream".to_string());
     registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("s1 entry")
         .set_sm_stream_id(Some(s1_stream.clone()));
 
@@ -1104,7 +1105,7 @@ fn unregister_if_sm_stream_id_spares_a_replacement_session() {
     registry.register(jid.clone(), s2_tx);
     let s2_stream = SmSessionId::new("s2-stream".to_string());
     registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("s2 entry")
         .set_sm_stream_id(Some(s2_stream.clone()));
 
@@ -1155,7 +1156,7 @@ fn update_presence_if_owner_refuses_stale_owner() {
         !registry.update_presence_if_owner(&jid, &stale_owner, true, 9),
         "a stale owner must not update presence"
     );
-    let entry = registry.get_entry(&jid).expect("replacement entry");
+    let entry = registry.entry(&jid).expect("replacement entry");
     assert_eq!(
         entry.presence_priority(),
         3,
@@ -1200,7 +1201,7 @@ fn update_presence_state_if_owner_refuses_stale_owner() {
         "a stale owner must not write presence state"
     );
     let state = registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("replacement presence state");
     assert_eq!(state.show.as_deref(), Some("dnd"));
     assert_eq!(state.status.as_deref(), Some("busy"));
@@ -1236,13 +1237,13 @@ fn clear_presence_state_if_owner_refuses_stale_owner() {
         "a stale owner must not clear presence state"
     );
     assert!(
-        registry.get_presence_state(&jid).is_some(),
+        registry.presence_state(&jid).is_some(),
         "the replacement's presence state must survive the stale-owner clear"
     );
 
     // The live owner's clear lands.
     assert!(registry.clear_presence_state_if_owner(&jid, &live_owner));
-    assert!(registry.get_presence_state(&jid).is_none());
+    assert!(registry.presence_state(&jid).is_none());
 }
 
 /// Owner-gated presence-state write against an unregistered JID is
@@ -1260,7 +1261,7 @@ fn update_presence_state_if_owner_refuses_absent_entry() {
         0,
         Vec::new(),
     ));
-    assert!(registry.get_presence_state(&jid).is_none());
+    assert!(registry.presence_state(&jid).is_none());
 }
 
 #[test]
@@ -1371,7 +1372,7 @@ fn pending_flush_reservation_checks_channel_even_when_owner_is_reused() {
     let reservation = registry
         .try_reserve_pending_flush(&jid, Some(&owner))
         .expect("reserve original connection");
-    let mut replacement = registry.get_entry(&jid).expect("registered entry");
+    let mut replacement = registry.entry(&jid).expect("registered entry");
     let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
     replacement.sender = replacement_sender;
     registry.register_entry(jid, replacement);
@@ -1545,13 +1546,13 @@ fn terminal_ordering_retry_lease_is_independent_of_replacement_connection() {
     let jid = test_jid("retry");
     let (sender, _receiver) = mpsc::channel(1);
     registry.register(jid.clone(), sender);
-    let original = registry.get_entry(&jid).expect("original entry");
+    let original = registry.entry(&jid).expect("original entry");
     let original_lease = original
         .try_acquire_terminal_ordering_retry()
         .expect("original slot");
     let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
     registry.register(jid.clone(), replacement_sender);
-    let replacement = registry.get_entry(&jid).expect("replacement entry");
+    let replacement = registry.entry(&jid).expect("replacement entry");
     let replacement_lease = replacement
         .try_acquire_terminal_ordering_retry()
         .expect("independent replacement slot");

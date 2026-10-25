@@ -1,6 +1,7 @@
 //! A current inventory, independent of retry activity or historical counters.
 
 use super::{NotificationOutboxError, NotificationOutboxStore};
+use crate::db::DatabaseError;
 use waddle_xmpp::telemetry::attributes::PushQueue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,9 +39,10 @@ impl NotificationOutboxStore {
              FROM notification_outbox o"
         );
         let mut rows = self.query(&sql, ()).await?;
-        let row = rows.next().await?.ok_or_else(|| {
-            crate::db::DatabaseError::QueryFailed("push outbox aggregate missing".into())
-        })?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| DatabaseError::QueryFailed("push outbox aggregate missing".into()))?;
         let parked: i64 = row.get(0)?;
         let unresolved_failed: i64 = row.get(1)?;
         Ok(PushOutboxQueueObservation {

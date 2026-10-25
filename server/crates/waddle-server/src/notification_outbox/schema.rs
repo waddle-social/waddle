@@ -1,7 +1,9 @@
 //! Durable schema DDL, CHECK-constraint matching, and startup migrations
 //! for `notification_candidates` and `notification_outbox`.
 
-use super::*;
+use super::{DatabaseError, NotificationOutboxError, NotificationOutboxStore, SuppressedReason};
+use crate::db::DatabaseDriver;
+use crate::db::Transaction;
 
 // Database-local two-key namespace. All outbox schemas share this gate so
 // different search_paths cannot split ownership of the same resolved tables.
@@ -248,7 +250,7 @@ impl NotificationOutboxStore {
                 )));
             }
         }
-        if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+        if self.db.driver() == DatabaseDriver::Postgres {
             // Dropping a caller must not release the session gate while a
             // separately pooled DDL statement is still executing.
             let store = self.clone();
@@ -465,17 +467,17 @@ impl NotificationOutboxStore {
     /// Assign them in bounded batches without changing frozen candidate data.
     async fn adopt_legacy_candidate_ids(&self) -> Result<(), NotificationOutboxError> {
         let sql = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 "UPDATE notification_candidates SET delivery_id = gen_random_uuid()::text WHERE ctid IN (SELECT ctid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 // Each row receives an independent UUIDv4 scheduler identity.
                 "UPDATE notification_candidates SET delivery_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2, 3) || '-8' || substr(lower(hex(randomblob(2))), 2, 3) || '-' || lower(hex(randomblob(6))) WHERE rowid IN (SELECT rowid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
             }
         };
         loop {
             let mut tx = self.db.begin_immediate().await?;
-            if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+            if self.db.driver() == DatabaseDriver::Postgres {
                 tx.execute("SET LOCAL lock_timeout = '100ms'", ()).await?;
                 tx.execute("SET LOCAL statement_timeout = '500ms'", ())
                     .await?;
@@ -493,11 +495,11 @@ impl NotificationOutboxStore {
         i64_type: &str,
     ) -> Result<(), NotificationOutboxError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 self.migrate_postgres_notification_candidates_reason_constraint()
                     .await
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 self.migrate_sqlite_notification_candidates_reason_constraint(i64_type)
                     .await
             }
@@ -574,11 +576,11 @@ impl NotificationOutboxStore {
         i64_type: &str,
     ) -> Result<(), NotificationOutboxError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 self.migrate_postgres_notification_candidates_class_constraint()
                     .await
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 self.migrate_sqlite_notification_candidates_class_constraint(i64_type)
                     .await
             }
@@ -655,11 +657,11 @@ impl NotificationOutboxStore {
         i64_type: &str,
     ) -> Result<(), NotificationOutboxError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 self.migrate_postgres_notification_candidates_suppressed_reason_constraint()
                     .await
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 self.migrate_sqlite_notification_candidates_suppressed_reason_constraint(i64_type)
                     .await
             }
@@ -751,11 +753,11 @@ impl NotificationOutboxStore {
         i64_type: &str,
     ) -> Result<(), NotificationOutboxError> {
         match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 self.migrate_postgres_notification_outbox_class_constraint()
                     .await
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 self.migrate_sqlite_notification_outbox_class_constraint(i64_type)
                     .await
             }
@@ -984,10 +986,10 @@ impl NotificationOutboxStore {
         column_def: &str,
     ) -> Result<(), NotificationOutboxError> {
         let alter_sql = match self.db.driver() {
-            crate::db::DatabaseDriver::Postgres => {
+            DatabaseDriver::Postgres => {
                 format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
             }
-            crate::db::DatabaseDriver::Sqlite => {
+            DatabaseDriver::Sqlite => {
                 format!("ALTER TABLE {table} ADD COLUMN {column_def}")
             }
         };
@@ -1076,9 +1078,9 @@ fn predicate_tokens(sql: &str) -> Vec<String> {
 }
 
 async fn migrate_coalescing_index_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
 ) -> Result<(), NotificationOutboxError> {
-    let (namespace, table_oid) = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let (namespace, table_oid) = if tx.driver() == DatabaseDriver::Postgres {
         let mut rows = tx.query("SELECT n.nspname,c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass('notification_outbox')",()).await?;
         let row = rows.next().await?.ok_or_else(|| {
             DatabaseError::QueryFailed("outbox relation missing during schema migration".to_owned())
@@ -1219,9 +1221,19 @@ mod startup_tests;
 
 #[cfg(test)]
 mod tests {
+    use crate::db::Database;
+    use crate::notification_outbox::types::STATUS_QUEUED;
+    use crate::notification_outbox::{
+        NotificationCandidate, NotificationCandidateInsertOutcome, WADDLE_PUSH_CONTEXT_NS,
+    };
+    use jid::Jid;
+    use minidom::Element;
+    use waddle_xmpp::xep::NS_DATA_FORMS;
+    use waddle_xmpp_core::xep0359::StanzaId;
+
     use super::*;
     use crate::notification_outbox::drain::record_candidate_suppressed_reason_tx;
-    use crate::notification_outbox::test_support::*;
+    use crate::notification_outbox::test_support::{bare, store};
 
     #[test]
     fn postgres_reason_constraint_match_accepts_current_definition() {
@@ -1439,7 +1451,7 @@ mod tests {
         drop(rows);
 
         // Drive the migration helpers directly against our scoped
-        // table. This sidesteps the full `NotificationOutboxStore::new`
+        // table. This sidesteps the full `NotificationOutboxStore::try_new`
         // initialization (which targets the hard-coded
         // `notification_candidates` table name). We migrate BOTH the
         // class and reason anonymous CHECK constraints because the
@@ -1709,7 +1721,7 @@ mod tests {
         )
         .await
         .expect("current db");
-        let store = NotificationOutboxStore::new(db).await.expect("store");
+        let store = NotificationOutboxStore::try_new(db).await.expect("store");
         let mut rows = store
             .query(
                 "SELECT last_message_body, reaction, noping FROM notification_candidates                  WHERE stanza_id = ?",
@@ -1792,7 +1804,7 @@ mod tests {
                 crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", possible.to_string(), "dm", String::from(&payload), "bob@example.com/phone", "frozen body", String::from(&payload), String::from(&options), possible, STATUS_QUEUED],
             ).await.expect("legacy frozen job");
         }
-        let store = NotificationOutboxStore::new(db)
+        let store = NotificationOutboxStore::try_new(db)
             .await
             .expect("CHECK rebuild");
         for _ in 0..2 {
@@ -1837,7 +1849,7 @@ mod tests {
             "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, 1)",
             crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", "dm", String::from(&context), STATUS_QUEUED],
         ).await.expect("unclassified legacy job");
-        let store = NotificationOutboxStore::new(db).await.expect("upgrade");
+        let store = NotificationOutboxStore::try_new(db).await.expect("upgrade");
         let jobs = store.pending_outbox_jobs().await.expect("legacy jobs");
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].approved_payload.is_none());

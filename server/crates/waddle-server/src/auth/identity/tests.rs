@@ -1,4 +1,4 @@
-use super::*;
+use super::{AuthProviderConfig, IdentityClaims, IdentityService, Utc};
 use crate::auth::{AuthProviderKind, AuthProviderTokenEndpointAuthMethod};
 use crate::db::{Database, MigrationRunner};
 use kameo::actor::Spawn;

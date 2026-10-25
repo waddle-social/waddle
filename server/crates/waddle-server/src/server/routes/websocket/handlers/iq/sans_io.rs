@@ -1,4 +1,22 @@
-use super::*;
+#[cfg(test)]
+use super::iq_to_xml;
+use super::{
+    bad_request_iq_error, build_iq_error_xml_typed, forbidden_iq_error,
+    internal_server_error_iq_error, is_time_query, is_version_query, not_authorized_iq_error,
+    service_unavailable_iq_error, stanza_to_xml, warn, ConnectionPhase, DatabaseBlockingStorage,
+    FullJid, IqConnState, IqHandlerContext, Jid, ProtocolStanzaContext, Session, Stanza,
+    WebSocketState, CARBONS_NS,
+};
+use crate::call_teardown_outbox::CallTeardownIntent;
+use crate::call_teardown_outbox::CallTeardownOutboxError;
+use crate::call_teardown_outbox::TeardownTarget;
+#[cfg(feature = "clustering")]
+use crate::clustering::ordered_relay::MucProxyOrigin;
+#[cfg(feature = "clustering")]
+use crate::clustering::route_bridge::RemoteResourceStateUpdate;
+use crate::server::routes::interpret::effects::ImmediateSink;
+use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::interpret::Deps;
 use crate::server::routes::websocket::ResolvedPrincipal;
 
 pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundEvent]) -> bool {
@@ -34,7 +52,7 @@ pub(super) fn events_contain_iq_error(events: &[waddle_xmpp::protocol::OutboundE
 pub(super) async fn handle_sans_io_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
@@ -52,7 +70,7 @@ pub(super) async fn handle_sans_io_iq(
 async fn handle_sans_io_iq_with_relay_override(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
     muji_relay_override: Option<MujiRelayOutcome>,
@@ -311,12 +329,11 @@ async fn handle_sans_io_iq_with_relay_override(
             }
         }
         let muji_clear_after = muji_terminate_room.filter(|_| !events_contain_iq_error(&events));
-        let deps = crate::server::routes::interpret::Deps {
+        let deps = Deps {
             dispatch_probe_budget: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
-            delivery_execution_context:
-                crate::server::routes::interpret::DeliveryExecutionContext::Live,
+            delivery_execution_context: DeliveryExecutionContext::Live,
             connection_registry: &state.deps.protocol.connection_registry,
             user_registry: Some(&state.deps.protocol.user_registry),
             sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
@@ -326,7 +343,6 @@ async fn handle_sans_io_iq_with_relay_override(
             room_registry: Some(&state.deps.protocol.room_registry),
             web_socket_state: Some(state),
             authenticated_principal: authenticated_session
-                .as_ref()
                 .map(ResolvedPrincipal::from_authenticated_session),
             local_domain: state.deps.auth_state.xmpp_domain.as_str(),
             blocking_storage: Some(&state.deps.protocol.blocking_storage),
@@ -339,7 +355,7 @@ async fn handle_sans_io_iq_with_relay_override(
             host_sender: None,
             host_copy_consumer: None,
             ingress_append_context: None,
-            effects: &crate::server::routes::interpret::effects::ImmediateSink,
+            effects: &ImmediateSink,
         };
         let outcome = crate::server::routes::interpret::interpret(events, &deps).await;
         if let Some(room_jid) = muji_clear_after {
@@ -792,9 +808,7 @@ async fn relay_muji_to_room_owner(
             room_jid,
             &stanza,
             OrderedRelayMucProxyKind::MujiJingleIq,
-            crate::clustering::ordered_relay::MucProxyOrigin::Connection(
-                *conn_state.occupancy_session,
-            ),
+            MucProxyOrigin::Connection(*conn_state.occupancy_session),
             origin,
             None,
         )
@@ -910,8 +924,8 @@ async fn enqueue_muji_relay_teardown_fallback(
     departed: &jid::FullJid,
     occupant: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     session: Option<&waddle_sfu::SessionBinding>,
-) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
-    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+) -> Result<(), CallTeardownOutboxError> {
+    let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
             tracing::warn!(
@@ -928,9 +942,9 @@ async fn enqueue_muji_relay_teardown_fallback(
     // which the created-after-the-registration timestamp fence alone
     // cannot see.
     let intents = [
-        crate::call_teardown_outbox::CallTeardownIntent {
+        CallTeardownIntent {
             call_id: call_id.clone(),
-            target: crate::call_teardown_outbox::TeardownTarget::MujiPresenceClear {
+            target: TeardownTarget::MujiPresenceClear {
                 room_jid: room_jid.clone(),
                 departed: departed.clone(),
                 participant_sid: None,
@@ -941,9 +955,9 @@ async fn enqueue_muji_relay_teardown_fallback(
             room_sid: None,
             session: session.cloned(),
         },
-        crate::call_teardown_outbox::CallTeardownIntent {
+        CallTeardownIntent {
             call_id,
-            target: crate::call_teardown_outbox::TeardownTarget::Participant {
+            target: TeardownTarget::Participant {
                 identity: departed.clone(),
                 participant_sid: None,
             },
@@ -1098,7 +1112,7 @@ async fn mirror_remote_carbons_update(
             .update_remote_user_resource_if_owner(
                 jid,
                 owner,
-                crate::clustering::route_bridge::RemoteResourceStateUpdate::Carbons { enabled },
+                RemoteResourceStateUpdate::Carbons { enabled },
             )
             .await;
     }
@@ -1172,7 +1186,7 @@ mod tests {
                 capabilities,
             ));
             Ok(JoinToken {
-                url: WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                url: WebsocketUrl::try_new("wss://livekit.test/".parse().expect("valid url"))
                     .expect("valid ws url"),
                 room: call_id.clone(),
                 identity: identity.clone(),
@@ -1249,7 +1263,7 @@ mod tests {
         fn ws_url(&self) -> &WebsocketUrl {
             static URL: std::sync::OnceLock<WebsocketUrl> = std::sync::OnceLock::new();
             URL.get_or_init(|| {
-                WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+                WebsocketUrl::try_new("wss://livekit.test/".parse().expect("valid url"))
                     .expect("valid ws url")
             })
         }
@@ -1408,7 +1422,7 @@ mod tests {
         let room: jid::BareJid = "general@muc.example.com".parse().expect("room JID");
         let alice: jid::FullJid = "alice@example.com/web".parse().expect("full JID");
         let occupant = waddle_xmpp_core::OccupancySessionGeneration::mint();
-        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        let session = waddle_sfu::SessionBinding::try_new("muji-fallback-sid").expect("binding");
         super::enqueue_muji_relay_teardown_fallback(
             &state,
             &room,
@@ -1478,7 +1492,7 @@ mod tests {
                 response_to: Some("alice@example.com/web"),
             },
             &state,
-            &authenticated_session,
+            authenticated_session.as_ref(),
             &phase,
             &mut conn_state,
             Some(super::MujiRelayOutcome::ProcessLocally {
@@ -1525,7 +1539,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session,
-                authenticated_session: &Some(owner_session),
+                authenticated_session: Some(&owner_session),
                 registry_owner: None,
             },
         )
@@ -1550,7 +1564,7 @@ mod tests {
             .expect("muji update")
             .expect("occupant update");
 
-        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        let session = waddle_sfu::SessionBinding::try_new("muji-fallback-sid").expect("binding");
         let frames = super::resolve_muji_relay_outcome(
             &state,
             &room,
@@ -1616,7 +1630,7 @@ mod tests {
             .await
             .expect("drop outbox table");
 
-        let session = waddle_sfu::SessionBinding::new("muji-fallback-sid").expect("binding");
+        let session = waddle_sfu::SessionBinding::try_new("muji-fallback-sid").expect("binding");
         let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let frames = super::resolve_muji_relay_outcome(
             &state,
@@ -1799,7 +1813,7 @@ mod tests {
                 "example.com",
                 "muc.example.com",
                 state.as_ref(),
-                &None,
+                None,
                 &ready_phase(&alice),
             )
             .await;
@@ -1867,7 +1881,7 @@ mod tests {
                 "example.com",
                 "muc.example.com",
                 state.as_ref(),
-                &None,
+                None,
                 &ready_phase(&alice),
             )
             .await;
@@ -1996,7 +2010,7 @@ mod tests {
                 "example.com",
                 "muc.example.com",
                 state.as_ref(),
-                &None,
+                None,
                 &ready_phase(&alice),
             )
             .await;
@@ -2049,7 +2063,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session,
-                authenticated_session: &Some(owner_session),
+                authenticated_session: Some(&owner_session),
                 registry_owner: None,
             },
         )
@@ -2071,7 +2085,7 @@ mod tests {
                 "example.com",
                 "muc.example.com",
                 state.as_ref(),
-                &None,
+                None,
                 &ready_phase(&alice),
             )
             .await;
@@ -2116,7 +2130,7 @@ mod tests {
                 "example.com",
                 "muc.example.com",
                 state.as_ref(),
-                &None,
+                None,
                 &ready_phase(&alice),
             )
             .await;

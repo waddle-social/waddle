@@ -13,47 +13,92 @@ use minidom::Element;
 /// Namespace constant — kept local to the client so the wasm bindings
 /// don't need a transitive dep on `waddle-xmpp`.
 pub const NS_INBOX: &str = "urn:xmpp:inbox:1";
+/// Protocol token `urn:waddle:inbox:0`.
 pub const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
 const NS_MAM: &str = "urn:xmpp:mam:2";
 
+/// Conversations included in an inbox query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InboxReadFilter {
+    /// Include both read and unread conversations.
+    #[default]
+    All,
+    /// Include only conversations with unread messages.
+    UnreadOnly,
+}
+
+/// Whether an inbox query embeds each conversation's latest archived message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InboxMessageContent {
+    /// Request entries and counts without archived message payloads.
+    Omit,
+    /// Include the latest archived message for each entry.
+    #[default]
+    Include,
+}
+
 /// Source surface for one streamed XEP-0430 inbox `<entry/>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InboxStreamEntrySource {
+    /// An entry streamed in response to an explicit query.
     QueryResponse,
+    /// An unsolicited service notification.
     Push,
 }
 
 /// Typed projection of one streamed `<entry/>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxStreamEntry {
+    /// Typed source data used by the invocation.
     pub source: InboxStreamEntrySource,
+    /// Identifier of the query associated with this value.
     pub query_id: Option<String>,
+    /// Other participant in the direct-message conversation.
     pub partner: String,
+    /// Discriminator selecting the interpretation of this payload.
     pub kind: Option<String>,
+    /// Identifier of the last stanza associated with this value.
     pub last_stanza_id: String,
+    /// Last update time reported by the service.
     pub last_updated: Option<i64>,
+    /// Number of unread messages or the unread state reported by the service.
     pub unread: u32,
+    /// Preview content suitable for display without loading the full item.
     pub preview: Option<String>,
+    /// Conversation thread identifier.
     pub thread_id: Option<String>,
+    /// Display title reported for the conversation thread.
     pub thread_title: Option<String>,
+    /// Number of replies reported for this thread.
     pub reply_count: Option<u32>,
+    /// Identity of the user who authored this content.
     pub author: Option<String>,
 }
 
 /// Counts carried in the closing `<fin/>` element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InboxFinCounts {
+    /// Total number of matching entries reported by the service.
     pub total: u32,
+    /// Number of unread messages or the unread state reported by the service.
     pub unread: u32,
+    /// Whether every conversation is marked unread.
     pub all_unread: u32,
 }
 
 /// Closing fin payload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboxFin {
+    /// Counts grouped by the corresponding status or affiliation.
     pub counts: InboxFinCounts,
+    /// First identifier in the result-set page.
     pub rsm_first: Option<String>,
+    /// Last identifier in the result-set page.
     pub rsm_last: Option<String>,
+    /// Total number of matching entries reported by the archive.
     pub rsm_count: Option<u32>,
 }
 
@@ -63,7 +108,9 @@ pub struct InboxFin {
 /// (cfg-gated) and the wasm driver's pending-query reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboxPage {
+    /// Entries returned in their protocol-defined order.
     pub entries: Vec<InboxStreamEntry>,
+    /// Final MAM query metadata received from the archive.
     pub fin: InboxFin,
 }
 
@@ -73,6 +120,7 @@ pub struct InboxPage {
 /// `<entry xmlns='urn:xmpp:inbox:1'/>` query response nor a Waddle
 /// `<push xmlns='urn:waddle:inbox:0'/>` wrapper — those flow through
 /// the other typed handlers (MAM/PEP/messaging) unchanged.
+#[must_use]
 pub fn parse_inbox_stream_message(message: &Element) -> Option<InboxStreamEntry> {
     if message.name() != "message" {
         return None;
@@ -160,6 +208,7 @@ pub fn parse_inbox_stream_message(message: &Element) -> Option<InboxStreamEntry>
 }
 
 /// Parse the closing `<iq type='result'><fin/></iq>`.
+#[must_use]
 pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
     if iq.name() != "iq" {
         return None;
@@ -198,15 +247,28 @@ pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
 /// request. The default attribute values match XEP-0430 defaults
 /// (`unread-only='false'`, `messages='true'`) and the helper writes
 /// them explicitly so the wire form is unambiguous on the receiver.
-pub fn build_inbox_query_iq_element(id: &str, unread_only: bool, messages: bool) -> Element {
+#[must_use]
+pub fn build_inbox_query_iq_element(
+    id: &str,
+    read_filter: InboxReadFilter,
+    message_content: InboxMessageContent,
+) -> Element {
     let inbox = Element::builder("inbox", NS_INBOX)
         .attr(
             minidom::rxml::xml_ncname!("unread-only").to_owned(),
-            if unread_only { "true" } else { "false" },
+            if read_filter == InboxReadFilter::UnreadOnly {
+                "true"
+            } else {
+                "false"
+            },
         )
         .attr(
             minidom::rxml::xml_ncname!("messages").to_owned(),
-            if messages { "true" } else { "false" },
+            if message_content == InboxMessageContent::Include {
+                "true"
+            } else {
+                "false"
+            },
         )
         .build();
     Element::builder("iq", "jabber:client")

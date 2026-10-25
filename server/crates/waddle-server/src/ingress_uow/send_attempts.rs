@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use jid::FullJid;
 use uuid::Uuid;
-use waddle_xmpp::{ingress::MessageKey, ownership::NodeIdentity};
+use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::ownership::NodeIdentity;
 
 use super::{CanonicalMessageRepository, IngressUowError, IngressUowTransaction};
-use crate::{db::DatabaseDriver, ingress::decision::EffectReceiptKey};
+use crate::db::DatabaseDriver;
+use crate::ingress::decision::EffectReceiptKey;
 
 /// One resource within a recorded effect. The caller must authorize the resource
 /// against the frozen intent before claiming; the foreign key validates only the

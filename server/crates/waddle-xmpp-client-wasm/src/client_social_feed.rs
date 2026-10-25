@@ -18,7 +18,7 @@ use waddle_xmpp_client::pubsub::{
 use waddle_xmpp_core::xep0472::{
     build_feed_entry_element, parse_feed_entry, FeedEntry, NS_ATOM, PUBSUB_NODE_FEED,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, JsValue};
 
 use super::{js_error, send_iq_command, service_bare_jid, to_js_value, WaddleClient};
 
@@ -136,6 +136,10 @@ impl WaddleClient {
     /// enforces publish authorisation via XEP-0060 affiliations;
     /// callers without Publisher access receive a Forbidden stanza
     /// error which surfaces as a rejected Promise.
+    ///
+    /// # Panics
+    /// Panics if the feed builder fails to retain the publication timestamp set
+    /// immediately before publishing; this indicates a broken internal builder invariant.
     pub fn feed_publish(&self, spaces_jid: String, entry: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {

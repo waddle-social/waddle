@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    create_test_server_owner_session, create_test_websocket_state_with_clustering, drain_due,
+    fixture_config, handle_muc_join_with_occupancy_session, occupant_generation,
+    participant_intent, state_with_executor, store, unfenced_participant_intent, Arc, BareJid,
+    CallId, CallTeardownIntent, CallTeardownLastError, CallTeardownRetryOutcome,
+    CallTeardownRetryReason, CallTeardownStatus, ClaimStore, Entity, EntityType, FromStr, FullJid,
+    Identity, InProcessClaimStore, MediaCapabilities, NodeIdentity, ObservedCallSids,
+    ParticipantSid, RecordingAdmin, RoomSid, SfuService, SharedNodeIdentity, TeardownTarget,
+    FAILED_RETENTION_MS, MAX_ATTEMPTS,
+};
 use waddle_sfu::SfuReconciler;
 
 #[tokio::test]
@@ -12,7 +21,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
     let failed_id = store
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("alice@example.test:failed-call").expect("call id"),
+                call_id: CallId::try_new("alice@example.test:failed-call").expect("call id"),
                 target: TeardownTarget::Room,
                 generation: None,
                 occupant: None,
@@ -27,7 +36,7 @@ async fn prune_failed_also_prunes_done_rows_after_retention() {
     let fresh_done_id = store
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("alice@example.test:fresh-done").expect("call id"),
+                call_id: CallId::try_new("alice@example.test:fresh-done").expect("call id"),
                 target: TeardownTarget::Room,
                 generation: None,
                 occupant: None,
@@ -251,7 +260,7 @@ async fn unowned_room_scoped_intent_older_than_a_day_dead_letters() {
         .call_teardown_outbox
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("room@muc.example.test").expect("room call id"),
+                call_id: CallId::try_new("room@muc.example.test").expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
                 occupant: None,
@@ -294,7 +303,7 @@ async fn old_room_scoped_intent_survives_transient_registry_unavailability() {
         .call_teardown_outbox
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("room@muc.example.test").expect("room call id"),
+                call_id: CallId::try_new("room@muc.example.test").expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
                 occupant: None,
@@ -352,7 +361,7 @@ async fn old_room_scoped_intent_survives_a_live_foreign_owner_claim() {
         .call_teardown_outbox
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new(room_jid.to_string()).expect("room call id"),
+                call_id: CallId::try_new(room_jid.to_string()).expect("room call id"),
                 target: TeardownTarget::Room,
                 generation: None,
                 occupant: None,
@@ -404,10 +413,10 @@ async fn live_registration_predating_the_intent_still_executes_removal() {
         &alice,
         "alice",
         None,
-        (occupant_generation(), &Some(owner_session.clone())),
+        (occupant_generation(), Some(&owner_session.clone())),
     )
     .await;
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
     sfu.register_call_participant(&call_id, &identity);
     let _intent_id = state
@@ -451,7 +460,7 @@ async fn existing_participant_reobservation_does_not_reopen_the_swallow_window()
         Arc::clone(&admin) as Arc<_>,
     ));
     let state = state_with_executor(Arc::clone(&sfu)).await;
-    let call_id = CallId::new("alice@example.test:restamped-registration").expect("call id");
+    let call_id = CallId::try_new("alice@example.test:restamped-registration").expect("call id");
     let identity =
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
 
@@ -508,7 +517,7 @@ async fn later_local_token_mint_skips_an_older_queued_participant_eject() {
         Arc::clone(&admin) as Arc<_>,
     ));
     let state = state_with_executor(Arc::clone(&sfu)).await;
-    let call_id = CallId::new("alice@example.test:later-mint-skip").expect("call id");
+    let call_id = CallId::try_new("alice@example.test:later-mint-skip").expect("call id");
     let identity =
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
 
@@ -576,7 +585,7 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
         Arc::clone(&admin) as Arc<_>,
     ));
     let state = state_with_executor(Arc::clone(&sfu)).await;
-    let call_id = CallId::new("alice@example.test:no-later-mint").expect("call id");
+    let call_id = CallId::try_new("alice@example.test:no-later-mint").expect("call id");
     let identity =
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
 
@@ -617,7 +626,7 @@ async fn no_later_local_token_mint_executes_the_queued_participant_eject() {
 
 #[tokio::test]
 async fn ownerless_occupant_teardown_without_participant_sid_stays_queued_after_reconcile() {
-    for room_sid in [None, Some(RoomSid::new("RM_departed").unwrap())] {
+    for room_sid in [None, Some(RoomSid::try_new("RM_departed").unwrap())] {
         let admin = Arc::new(RecordingAdmin::default());
         let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
             fixture_config(),
@@ -632,7 +641,7 @@ async fn ownerless_occupant_teardown_without_participant_sid_stays_queued_after_
             .protocol
             .call_teardown_outbox
             .enqueue(CallTeardownIntent {
-                call_id: CallId::new("unowned-occupant@muc.example.test").unwrap(),
+                call_id: CallId::try_new("unowned-occupant@muc.example.test").unwrap(),
                 target: TeardownTarget::Participant {
                     identity: "alice@example.test/device".parse().unwrap(),
                     participant_sid: None,
@@ -641,7 +650,7 @@ async fn ownerless_occupant_teardown_without_participant_sid_stays_queued_after_
                 occupant: Some(occupant_generation()),
                 unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
                 room_sid,
-                session: Some(waddle_sfu::SessionBinding::new("departed-session").unwrap()),
+                session: Some(waddle_sfu::SessionBinding::try_new("departed-session").unwrap()),
             })
             .await
             .unwrap();
@@ -687,12 +696,12 @@ async fn owned_occupant_teardown_without_participant_sid_still_executes() {
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session)),
+        (occupant, Some(&owner_session)),
     )
     .await;
-    let call_id = CallId::new(room_jid.to_string()).unwrap();
+    let call_id = CallId::try_new(room_jid.to_string()).unwrap();
     let identity = Identity::from_jid(alice);
-    let session = waddle_sfu::SessionBinding::new("departed-session").unwrap();
+    let session = waddle_sfu::SessionBinding::try_new("departed-session").unwrap();
     sfu.register_call_participant_with_session(&call_id, &identity, &session, occupant);
     state
         .deps
@@ -740,10 +749,10 @@ async fn confirmed_departure_without_sid_preserves_a_later_restored_participant(
         &alice,
         "alice",
         None,
-        (occupant_generation(), &Some(owner_session)),
+        (occupant_generation(), Some(&owner_session)),
     )
     .await;
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice);
     let now_ms = crate::time::now_ms();
     let store = &state.deps.protocol.call_teardown_outbox;
@@ -827,14 +836,14 @@ async fn restored_participant_teardown_requires_matching_sid_and_no_later_mint()
             Arc::clone(&admin) as Arc<_>,
         ));
         let state = state_with_executor(Arc::clone(&sfu)).await;
-        let call_id = CallId::new("restored-participant@muc.example.test").unwrap();
+        let call_id = CallId::try_new("restored-participant@muc.example.test").unwrap();
         let identity = Identity::from_jid("alice@example.test/device".parse().unwrap());
         sfu.register_call_participant_observed(
             &call_id,
             &identity,
             &ObservedCallSids::new(
                 None,
-                observed_sid.map(|sid| ParticipantSid::new(sid).unwrap()),
+                observed_sid.map(|sid| ParticipantSid::try_new(sid).unwrap()),
             ),
         );
         let token = mint_token.then(|| {
@@ -850,7 +859,7 @@ async fn restored_participant_teardown_requires_matching_sid_and_no_later_mint()
                     call_id: call_id.clone(),
                     target: TeardownTarget::Participant {
                         identity: identity.as_jid().clone(),
-                        participant_sid: Some(ParticipantSid::new("PA_departed").unwrap()),
+                        participant_sid: Some(ParticipantSid::try_new("PA_departed").unwrap()),
                     },
                     generation: None,
                     occupant: Some(occupant_generation()),
@@ -897,11 +906,12 @@ async fn confirmed_departure_does_not_override_newer_occupant_or_session_binding
             Arc::clone(&admin) as Arc<_>,
         ));
         let state = state_with_executor(Arc::clone(&sfu)).await;
-        let call_id = CallId::new("alice@example.test:bound-replacement").expect("call id");
+        let call_id = CallId::try_new("alice@example.test:bound-replacement").expect("call id");
         let identity = Identity::from_jid("alice@example.test/device".parse().expect("jid"));
         let occupant = occupant_generation();
-        let current_session = waddle_sfu::SessionBinding::new("current-session").expect("session");
-        let old_session = waddle_sfu::SessionBinding::new("departed-session").expect("session");
+        let current_session =
+            waddle_sfu::SessionBinding::try_new("current-session").expect("session");
+        let old_session = waddle_sfu::SessionBinding::try_new("departed-session").expect("session");
         sfu.register_call_participant_with_session(
             &call_id,
             &identity,
@@ -963,7 +973,7 @@ async fn unconfirmed_departure_or_later_token_mint_keeps_restored_registration()
         ));
         let state = state_with_executor(Arc::clone(&sfu)).await;
         let call_id =
-            CallId::new("alice@example.test:restored-without-authority").expect("call id");
+            CallId::try_new("alice@example.test:restored-without-authority").expect("call id");
         let identity = Identity::from_jid("alice@example.test/device".parse().expect("jid"));
         sfu.register_call_participant_observed(&call_id, &identity, &ObservedCallSids::none());
         if mint_token {
@@ -1022,15 +1032,15 @@ async fn sid_fenced_room_scoped_intent_executes_when_room_has_no_claim() {
         .call_teardown_outbox
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("orphaned@muc.example.test").expect("room call id"),
+                call_id: CallId::try_new("orphaned@muc.example.test").expect("room call id"),
                 target: TeardownTarget::Participant {
                     identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
-                    participant_sid: Some(ParticipantSid::new("PA_orphaned").expect("sid")),
+                    participant_sid: Some(ParticipantSid::try_new("PA_orphaned").expect("sid")),
                 },
                 generation: None,
                 occupant: None,
                 unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-                room_sid: Some(RoomSid::new("RM_orphaned").expect("room sid")),
+                room_sid: Some(RoomSid::try_new("RM_orphaned").expect("room sid")),
                 session: None,
             },
             now_ms - 1,
@@ -1072,7 +1082,8 @@ async fn unfenced_room_scoped_intent_stays_gated_without_a_claim() {
         .call_teardown_outbox
         .enqueue_at(
             CallTeardownIntent {
-                call_id: CallId::new("orphaned-unfenced@muc.example.test").expect("room call id"),
+                call_id: CallId::try_new("orphaned-unfenced@muc.example.test")
+                    .expect("room call id"),
                 target: TeardownTarget::Participant {
                     identity: FullJid::from_str("alice@example.test/device").expect("full JID"),
                     participant_sid: None,
@@ -1080,7 +1091,7 @@ async fn unfenced_room_scoped_intent_stays_gated_without_a_claim() {
                 generation: None,
                 occupant: None,
                 unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-                room_sid: Some(RoomSid::new("RM_orphaned_unfenced").expect("room sid")),
+                room_sid: Some(RoomSid::try_new("RM_orphaned_unfenced").expect("room sid")),
                 session: None,
             },
             now_ms - 1,

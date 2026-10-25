@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    decode_message, encode_message, BareJid, ClientConfig, DefaultTransportFactory, Element,
+    StreamClose, StreamId, StreamOpen, TransportEvent, TransportMessage, TransportState,
+    WebSocketTransportFactory,
+};
 use crate::bootstrap::NS_CLIENT;
 use crate::ClientError;
 use std::str::FromStr;
@@ -22,12 +26,12 @@ use url::Url;
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 fn config() -> ClientConfig {
-    ClientConfig::new(
+    ClientConfig::try_new(
         ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
-        WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
-        OAuthBearerConfig::new(
+        WebSocketConfig::try_new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
+        OAuthBearerConfig::try_new(
             BareJid::from_str("alice@example.com").unwrap(),
-            ClientResource::new("macbook").unwrap(),
+            ClientResource::try_new("macbook").unwrap(),
             AccessToken::new("token"),
         )
         .unwrap(),
@@ -197,7 +201,7 @@ async fn concrete_transport_connects_and_emits_typed_frames() {
 
     let mut live_config = config();
     live_config.transport =
-        WebSocketConfig::new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
+        WebSocketConfig::try_new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
 
     let factory = DefaultTransportFactory;
     let mut transport = factory.connect(&live_config).await.unwrap();
@@ -295,7 +299,7 @@ async fn concrete_transport_rejects_self_signed_tls_certificates() {
     });
 
     let mut live_config = config();
-    live_config.transport = WebSocketConfig::new(
+    live_config.transport = WebSocketConfig::try_new(
         Url::parse(&format!("wss://localhost:{}/xmpp", address.port())).unwrap(),
     )
     .unwrap();
@@ -327,7 +331,7 @@ async fn recoverable_teardown_sends_only_websocket_close() {
     });
     let mut live_config = config();
     live_config.transport =
-        WebSocketConfig::new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
+        WebSocketConfig::try_new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
     let mut transport = DefaultTransportFactory.connect(&live_config).await.unwrap();
     transport.drain_events();
     transport.close_transport().await.unwrap();
@@ -373,7 +377,7 @@ async fn intentional_teardown_sends_xmpp_close_before_websocket_close() {
     });
     let mut live_config = config();
     live_config.transport =
-        WebSocketConfig::new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
+        WebSocketConfig::try_new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
     let mut transport = DefaultTransportFactory.connect(&live_config).await.unwrap();
     transport.close().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), peer)

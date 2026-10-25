@@ -1,6 +1,7 @@
 //! Execution of claimed teardown intents against the node-local SFU and
 //! XMPP room actor graph.
 
+use crate::server::routes::call_thread_end::CallThreadCompletionFence;
 use std::collections::HashSet;
 
 use jid::BareJid;
@@ -545,14 +546,12 @@ async fn execute_intent(
             crate::server::routes::call_thread_end::maybe_broadcast_call_thread_ended_for(
                 state,
                 room_jid,
-                Some(
-                    crate::server::routes::call_thread_end::CallThreadCompletionFence {
-                        thread_id,
-                        anchor_origin_id,
-                        started: *started,
-                        ended: *ended,
-                    },
-                ),
+                Some(CallThreadCompletionFence {
+                    thread_id,
+                    anchor_origin_id,
+                    started: *started,
+                    ended: *ended,
+                }),
             ),
         )
         .await

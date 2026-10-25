@@ -244,7 +244,7 @@ internal class RoomAdminVerbs(
         inviteeJid: String,
         fullHistory: Boolean,
     ): RoomAdminResult = adminCallForCurrent { client ->
-        client.inviteToGroupDm(bareJid(roomJid), bareJid(inviteeJid), fullHistory)
+        client.inviteToGroupDm(bareJid(roomJid), bareJid(inviteeJid), groupDmHistory(fullHistory))
     }
 
     /** Re-discover the space/channel topology into the room store. */

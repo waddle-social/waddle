@@ -40,3 +40,6 @@ memory-stats = "1"
 [[example]]
 name = "profile_all_extensions"
 path = "examples/profile_all_extensions.rs"
+
+[lints]
+workspace = true

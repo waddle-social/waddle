@@ -2,6 +2,7 @@
 //! the Push Service node/device state and the user-server
 //! `push_registrations` store.
 
+use crate::db::Transaction;
 use jid::BareJid;
 use minidom::Element;
 use waddle_xmpp::push::{PushError, PushSubscription};
@@ -25,7 +26,7 @@ fn push_error_to_xmpp_error(error: PushError) -> XmppError {
 }
 
 pub(super) async fn ensure_active_registration_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     push_service_jid: &str,
     node: &str,
@@ -64,7 +65,7 @@ pub(super) async fn ensure_active_registration_tx(
 }
 
 async fn validate_first_party_enable_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
     now_ms: i64,
@@ -261,7 +262,7 @@ mod tests {
             .await
             .expect("device");
         let registration_store =
-            crate::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            crate::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
                 .await
                 .expect("registration store");
         registration_store
@@ -346,7 +347,7 @@ mod tests {
             .await
             .expect("device");
         let registration_store =
-            crate::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            crate::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
                 .await
                 .expect("registration store");
         registration_store

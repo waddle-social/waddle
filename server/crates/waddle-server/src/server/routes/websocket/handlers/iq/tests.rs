@@ -1,5 +1,5 @@
 use super::extension_forms::extension_namespaces_for_disco;
-use super::*;
+use super::Feature;
 
 #[cfg(test)]
 mod extension_disco_tests {

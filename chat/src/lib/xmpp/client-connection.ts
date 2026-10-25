@@ -321,8 +321,8 @@ export class ReconnectScheduler {
 
 /** Structural subset of the WASM client the resume store reads on disconnect. */
 type ResumeStateSource = {
-  get_resume_state?: () => XmppResumeState | null;
-  get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  resume_state?: () => XmppResumeState | null;
+  resume_state_handle?: () => XmppResumeStateHandle | undefined;
 };
 
 /**
@@ -430,7 +430,7 @@ export class ResumeStateStore {
   /** Consume a witness only when this exact conflicting handle exposes it. */
   consumeOwnResumeConflict(source: ResumeStateSource): boolean {
     if (this.disposed) return false;
-    const previd = source.get_resume_state?.()?.previd;
+    const previd = source.resume_state?.()?.previd;
     return !!previd && this.persistence.consumeOwnResume(previd, this.ownResumeClientId ?? "") === "foreign";
   }
 
@@ -455,8 +455,8 @@ export class ResumeStateStore {
    */
   captureFromDisconnect(source: ResumeStateSource, resource: string): XmppResumeState | null {
     if (this.disposed) return null;
-    this.setHandle(source.get_resume_state_handle?.() ?? null);
-    const resumeState = source.get_resume_state?.() ?? null;
+    this.setHandle(source.resume_state_handle?.() ?? null);
+    const resumeState = source.resume_state?.() ?? null;
     this.stateValue = resumeState ? { ...resumeState, resource } : null;
     return this.stateValue;
   }

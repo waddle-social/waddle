@@ -2,27 +2,23 @@
 //!
 //! A lost socket acknowledgement can make this duplicate a delivered copy. The
 //! transaction records real pending custody, never a successful socket send.
+use crate::ingress::decision::EffectReceiptKey;
 use jid::FullJid;
 use sha2::{Digest, Sha256};
-use waddle_xmpp::{
-    ingress::{IngressEffectIntent, MessageKey},
-    pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId},
-    protocol::{
-        dm_routing::{classify_dm_intake, OnlineResources, PendingDecision},
-        Blocklist,
-    },
-};
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
+use waddle_xmpp::protocol::dm_routing::{classify_dm_intake, OnlineResources, PendingDecision};
+use waddle_xmpp::protocol::Blocklist;
 
-use crate::{
-    ingress::{recorded::RouteProgress, recovery_rebuild},
-    ingress_uow::{
-        settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
-        DeliveryProgressRepository, EffectIntentRepository, EffectReceiptRepository,
-        IngressUnitOfWork, IngressUowError, PendingReceiptRepository, RecoveryReceiptRepository,
-        SendAttemptRepository, SendAttemptStatus, SendObligation,
-    },
-    server::routes::interpret::Deps,
+use crate::ingress::recorded::RouteProgress;
+use crate::ingress::recovery_rebuild;
+use crate::ingress_uow::{
+    settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
+    DeliveryProgressRepository, EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork,
+    IngressUowError, PendingReceiptRepository, RecoveryReceiptRepository, SendAttemptRepository,
+    SendAttemptStatus, SendObligation,
 };
+use crate::server::routes::interpret::Deps;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum HandoffError {
@@ -221,10 +217,7 @@ pub(super) async fn handoff(
     Ok(Some(settled))
 }
 
-pub(crate) fn pending_id(
-    key: MessageKey,
-    receipt: &crate::ingress::decision::EffectReceiptKey,
-) -> PendingRowId {
+pub(crate) fn pending_id(key: MessageKey, receipt: &EffectReceiptKey) -> PendingRowId {
     let mut hash = Sha256::new();
     hash.update(b"waddle-ingress-ambiguous-offline-v1");
     hash.update(key.to_storage().as_bytes());

@@ -1,4 +1,13 @@
-use super::*;
+//! Internal commands and result channels used by the browser client driver.
+
+use super::{
+    apply_pagehide_message_sent, js_error, oneshot, publish_resume_state_snapshot, wasm_bindgen,
+    AvatarRequestFailure, ClientError, ClientEvent, ConnectionEvent, DeferredWasmCommand,
+    DriverResult, Element, JsValue, PagehideAckRequest, PagehideCommandCompletion, Rc, RefCell,
+    SmState, StreamClose, TransportMessage, WaddleClientInner, WaddleSendMessageOutcome,
+    WasmCommand, WasmDriverCore,
+};
+use crate::state::InboxPage;
 
 pub(crate) async fn send_stanza_command(
     inner: Rc<RefCell<WaddleClientInner>>,
@@ -114,7 +123,7 @@ async fn send_iq_roundtrip(
 ) -> Result<Result<Element, ClientError>, JsValue> {
     let iq_id = stanza
         .attr("id")
-        .and_then(|value| waddle_xmpp_client::request::StanzaId::new(value).ok());
+        .and_then(|value| waddle_xmpp_client::request::StanzaId::try_new(value).ok());
     let (responder, rx) = oneshot::channel();
     let queue_inner = inner.clone();
     let round_trip = async move {
@@ -214,8 +223,8 @@ pub(crate) async fn cancel_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     id: String,
 ) -> Result<(), JsValue> {
-    let id =
-        waddle_xmpp_client::request::StanzaId::new(id).map_err(|err| js_error(err.to_string()))?;
+    let id = waddle_xmpp_client::request::StanzaId::try_new(id)
+        .map_err(|err| js_error(err.to_string()))?;
     let (responder, rx) = oneshot::channel();
     enqueue_command(&inner, WasmCommand::CancelIq { id, responder }).await?;
     rx.await
@@ -582,7 +591,7 @@ pub(crate) async fn send_inbox_query_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     stanza: Element,
     query_id: String,
-) -> Result<crate::state::InboxPage, JsValue> {
+) -> Result<InboxPage, JsValue> {
     let (responder, rx) = oneshot::channel();
     enqueue_command(
         &inner,

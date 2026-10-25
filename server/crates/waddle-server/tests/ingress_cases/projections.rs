@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    archive_plan, commit_submission, CanonicalMessageRepository, DurableDirectEffect,
+    DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture,
+    IngressSubmission, PlannedEffect,
+};
 
 fn inbox_push_plan(
     fixture: &IngressFixture,
@@ -6,14 +10,11 @@ fn inbox_push_plan(
     id: &str,
     timestamp: i64,
 ) -> IngressSubmission {
-    use waddle_server::ingress::{
-        effects::{direct::ExternalDirectEffect, ProjectionRef},
-        ExternalEffect,
-    };
-    use waddle_xmpp::{
-        inbox::{ConversationKind, InboxEntry},
-        ingress::InboxProjectionMutation,
-    };
+    use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+    use waddle_server::ingress::effects::ProjectionRef;
+    use waddle_server::ingress::ExternalEffect;
+    use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
+    use waddle_xmpp::ingress::InboxProjectionMutation;
     let mut submission = archive_plan(fixture, Some(origin), "inbox body", id);
     let owner = fixture.principal.bare_jid().clone();
     let entry = InboxEntry::new(
@@ -58,10 +59,9 @@ fn inbox_push_plan(
 }
 
 async fn committed_inbox_projection(fixture: IngressFixture) {
-    use waddle_server::ingress::{
-        effects::{direct::ExternalDirectEffect, ProjectionRef},
-        ExternalEffect,
-    };
+    use waddle_server::ingress::effects::direct::ExternalDirectEffect;
+    use waddle_server::ingress::effects::ProjectionRef;
+    use waddle_server::ingress::ExternalEffect;
     let first_plan = inbox_push_plan(&fixture, "inbox-first", "inbox-first-id", 10);
     let first = commit_submission(&fixture.uow, &first_plan, 5)
         .await
@@ -190,12 +190,11 @@ pub(super) async fn assert_pushed_entry(
     unread: u32,
 ) {
     use kameo::actor::Spawn;
-    use waddle_server::ingress::{execute::execute_effects, Deps, ExternalOutcome, ImmediateSink};
+    use waddle_server::ingress::execute::execute_effects;
+    use waddle_server::ingress::{Deps, ExternalOutcome, ImmediateSink};
+    use waddle_xmpp::registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor};
     use waddle_xmpp::xep::xep0430::{parse_inbox_entry_with_metadata, NS_INBOX, NS_WADDLE_INBOX};
-    use waddle_xmpp::{
-        registry::{ConnectionRegistry, RegisterUserResource, UserRegistryActor},
-        Stanza,
-    };
+    use waddle_xmpp::Stanza;
     let registry = ConnectionRegistry::new();
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     let resource = fixture
@@ -207,7 +206,7 @@ pub(super) async fn assert_pushed_entry(
     registry.register_with_carbons(resource.clone(), sender, false);
     users
         .ask(RegisterUserResource {
-            entry: registry.get_entry(&resource).expect("registered entry"),
+            entry: registry.entry(&resource).expect("registered entry"),
             jid: resource,
         })
         .await
@@ -248,13 +247,11 @@ async fn ingress_gc_reclaims_expired_inbox_delivery(fixture: IngressFixture) {
     use chrono::{Duration, Utc};
     use std::time::Duration as StdDuration;
     use tokio::time::Instant;
-    use waddle_server::{
-        db::DatabaseDriver,
-        ingress_substrate::{
-            gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome, ALIAS_RETENTION,
-        },
-        ingress_uow::EffectReceiptRepository,
+    use waddle_server::db::DatabaseDriver;
+    use waddle_server::ingress_substrate::{
+        gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome, ALIAS_RETENTION,
     };
+    use waddle_server::ingress_uow::EffectReceiptRepository;
 
     let now = Utc::now();
     let expired = commit_submission(

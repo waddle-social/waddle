@@ -7,8 +7,8 @@ use waddle_server::ingress_uow::{
 use waddle_xmpp::auth::{ExtensionGrantId, ExtensionGrantRef, ExtensionGrantScope};
 
 async fn exercise(fixture: IngressFixture) {
-    let plugin = PluginId::new("grant-test").expect("plugin");
-    let other = PluginId::new("other-plugin").expect("plugin");
+    let plugin = PluginId::try_new("grant-test").expect("plugin");
+    let other = PluginId::try_new("other-plugin").expect("plugin");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     let replacement: jid::BareJid = "new@conference.example.com".parse().expect("room");
     let mut configured = ConfiguredPluginGrants {

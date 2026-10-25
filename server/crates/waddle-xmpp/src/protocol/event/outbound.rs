@@ -1,3 +1,7 @@
+use crate::muc::RoomClaimFenceContext;
+use crate::muc::RoomSubjectTexts;
+use crate::pending_delivery::PendingPayload;
+use crate::telemetry::call::PendingCallSetupRoute;
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
 use tracing::Level;
@@ -84,7 +88,7 @@ pub enum OutboundEvent {
     RouteToConnection {
         jid: jid::Jid,
         stanza: Box<Stanza>,
-        call_setup: Option<crate::telemetry::call::PendingCallSetupRoute>,
+        call_setup: Option<PendingCallSetupRoute>,
     },
     /// Hand a `<message type='groupchat'>` to the room handler chain
     /// (Option C — issue #229 Q7) for occupancy validation,
@@ -211,7 +215,7 @@ pub enum OutboundEvent {
         /// after it obtains the actor snapshot. `None` is valid only for
         /// an actor without durable ownership; a durable actor rejects a
         /// missing or different fence before applying the subject change.
-        claim_fence: Option<crate::muc::RoomClaimFenceContext>,
+        claim_fence: Option<RoomClaimFenceContext>,
         /// New subject texts keyed by `xml:lang` (`""` is the default
         /// language). Mirrors the originating §8.1 message's
         /// `<subject xml:lang='...'>` set so localized variants
@@ -219,7 +223,7 @@ pub enum OutboundEvent {
         /// value represents an explicit clear (still stored as
         /// `Some(SubjectState)` so the next join emits `<delay/>`
         /// per §7.2.15's SHOULD-include-delay-on-cleared).
-        texts: crate::muc::RoomSubjectTexts,
+        texts: RoomSubjectTexts,
         /// Setter's bare JID — input to the XEP-0421 occupant-id HMAC
         /// at next-join emission.
         setter: BareJid,
@@ -453,7 +457,7 @@ pub enum OutboundEvent {
     /// timestamp").
     QueueOfflineDelivery {
         recipient: BareJid,
-        payload: crate::pending_delivery::PendingPayload,
+        payload: PendingPayload,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
         /// The original inbound `<message>`, preserved verbatim so the
         /// `<service-unavailable/>` bounce path on

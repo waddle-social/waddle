@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    handle_iq_with_conn_state, ConnectionPhase, IqConnState, Session, Stanza, WebSocketState,
+};
 use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
 
 /// Only called from test helpers.
@@ -8,7 +10,7 @@ pub async fn handle_iq(
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
 ) -> Vec<String> {
     let mut carbons_enabled = phase.bound_jid().is_some_and(|jid| {

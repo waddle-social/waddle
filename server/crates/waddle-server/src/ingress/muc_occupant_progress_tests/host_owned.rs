@@ -1,5 +1,13 @@
-use super::*;
+use super::{
+    build_interpret_deps, commit_submission, effects, execute_effects, plan_broadcast, receipt_key,
+    terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput,
+    Duration, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome,
+    ImmediateSink, IngressEffectIntent, IngressFixture, Join, NormalizedTarget,
+    STALL_DELIVERY_RESOURCE,
+};
+use crate::ingress_uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
+use crate::server::routes::websocket::tests as socket_tests;
 
 fn sorted(mut resources: Vec<jid::FullJid>) -> Vec<jid::FullJid> {
     resources.sort_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -117,7 +125,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
         "the frozen non-reflection audience is exactly bot, A and B"
     );
     let mut tx = fixture.uow.begin().await.expect("inspect frozen route");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("load envelope")
         .expect("canonical envelope");

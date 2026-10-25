@@ -866,13 +866,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
 
     /**
      * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
-     * group DM. `full_history` requests the full-archive grant via
-     * the Waddle history-access extension; `false` omits the child
-     * and the server applies its from-join default. Fire-and-forget
-     * at the stanza level: the server answers refusals with a typed
+     * group DM. [`WaddleGroupDmHistoryAccess::Full`] requests the
+     * full-archive grant via the Waddle history-access extension.
+     * [`WaddleGroupDmHistoryAccess::FromJoin`] omits the child and
+     * the server applies its from-join default. Fire-and-forget at
+     * the stanza level: the server answers refusals with a typed
      * message error, delivered through the regular event stream.
      */
-    func inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Bool) async throws
+    func inviteToGroupDm(roomJid: String, inviteeJid: String, history: WaddleGroupDmHistoryAccess) async throws
 
     /**
      * `urn:waddle:group-dm:leave:0`: leave a group DM. The server
@@ -892,12 +893,11 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
      * resolve once the server's closing `<fin/>` arrives.
      *
-     * `only_unread` maps to `unread-only='true'`; `no_messages`
-     * inverts the XEP's `messages` attribute (pass `true` to elide
-     * the embedded MAM `<result/>` bodies — the cheap hydration
-     * shape the clients use on session-ready).
+     * `read_filter` selects `unread-only`. `message_content` selects
+     * whether the page embeds MAM `<result/>` bodies; [`WaddleInboxMessageContent::Omit`]
+     * is the cheap hydration shape the clients use on session-ready.
      */
-    func fetchInbox(onlyUnread: Bool, noMessages: Bool) async throws  -> WaddleInboxResult
+    func fetchInbox(readFilter: WaddleInboxReadFilter, messageContent: WaddleInboxMessageContent) async throws  -> WaddleInboxResult
 
     /**
      * Mark one conversation (optionally one thread of it) read via
@@ -1017,7 +1017,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * XEP-0085: send a standalone chat state notification
      * (typing indicator) to a DM peer or room.
      */
-    func sendChatState(peerJid: String, state: WaddleChatState, isMuc: Bool) async  -> Bool
+    func sendChatState(peerJid: String, state: WaddleChatState, audience: WaddleMessageAudience) async  -> Bool
 
     /**
      * XEP-0308: replace the body of the message identified by
@@ -1025,13 +1025,13 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * send; on success `stanza_id` is the id of the *correction*
      * message (the wasm client's `send_correction` return value).
      */
-    func sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Bool, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
+    func sendCorrection(peerJid: String, targetId: String, newBody: String, audience: WaddleMessageAudience, options: WaddleSendOptions?) async  -> WaddleSendMessageOutcome
 
     /**
      * XEP-0333: send a `<displayed id='…'/>` marker acknowledging
      * the message identified by `stanza_id` as read.
      */
-    func sendDisplayed(peerJid: String, stanzaId: String, isMuc: Bool) async  -> Bool
+    func sendDisplayed(peerJid: String, stanzaId: String, audience: WaddleMessageAudience) async  -> Bool
 
     /**
      * XEP-0425: ask the room to moderate (retract) the message
@@ -1048,7 +1048,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * stanza carries the *complete* reaction state of this user for
      * that message — send an empty `emojis` to clear all reactions.
      */
-    func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], isMuc: Bool) async  -> Bool
+    func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], audience: WaddleMessageAudience) async  -> Bool
 
     /**
      * XEP-0424: retract the sender's own message identified by
@@ -1056,7 +1056,7 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
      * marked with a XEP-0428 `<fallback/>` so supporting receivers
      * never render it.
      */
-    func sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Bool) async  -> Bool
+    func sendRetraction(peerJid: String, targetStanzaId: String, audience: WaddleMessageAudience) async  -> Bool
 
     /**
      * XEP-0060 explicit subscribe to the user's own MDS node — the
@@ -2285,19 +2285,20 @@ open func createGroupDm(name: String, memberJids: [String])async throws  -> Stri
 
     /**
      * XEP-0045 §7.8.2 mediated invite adding `invitee_jid` to a
-     * group DM. `full_history` requests the full-archive grant via
-     * the Waddle history-access extension; `false` omits the child
-     * and the server applies its from-join default. Fire-and-forget
-     * at the stanza level: the server answers refusals with a typed
+     * group DM. [`WaddleGroupDmHistoryAccess::Full`] requests the
+     * full-archive grant via the Waddle history-access extension.
+     * [`WaddleGroupDmHistoryAccess::FromJoin`] omits the child and
+     * the server applies its from-join default. Fire-and-forget at
+     * the stanza level: the server answers refusals with a typed
      * message error, delivered through the regular event stream.
      */
-open func inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Bool)async throws   {
+open func inviteToGroupDm(roomJid: String, inviteeJid: String, history: WaddleGroupDmHistoryAccess)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_invite_to_group_dm(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(roomJid),FfiConverterString.lower(inviteeJid),FfiConverterBool.lower(fullHistory)
+                    FfiConverterString.lower(roomJid),FfiConverterString.lower(inviteeJid),FfiConverterTypeWaddleGroupDmHistoryAccess_lower(history)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_void,
@@ -2356,18 +2357,17 @@ open func renameGroupDm(roomJid: String, name: String?)async throws   {
      * Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
      * resolve once the server's closing `<fin/>` arrives.
      *
-     * `only_unread` maps to `unread-only='true'`; `no_messages`
-     * inverts the XEP's `messages` attribute (pass `true` to elide
-     * the embedded MAM `<result/>` bodies — the cheap hydration
-     * shape the clients use on session-ready).
+     * `read_filter` selects `unread-only`. `message_content` selects
+     * whether the page embeds MAM `<result/>` bodies; [`WaddleInboxMessageContent::Omit`]
+     * is the cheap hydration shape the clients use on session-ready.
      */
-open func fetchInbox(onlyUnread: Bool, noMessages: Bool)async throws  -> WaddleInboxResult  {
+open func fetchInbox(readFilter: WaddleInboxReadFilter, messageContent: WaddleInboxMessageContent)async throws  -> WaddleInboxResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_inbox(
                     self.uniffiCloneHandle(),
-                    FfiConverterBool.lower(onlyUnread),FfiConverterBool.lower(noMessages)
+                    FfiConverterTypeWaddleInboxReadFilter_lower(readFilter),FfiConverterTypeWaddleInboxMessageContent_lower(messageContent)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
@@ -2826,13 +2826,13 @@ open func publishMdsDisplayed(chatJid: String, stanzaId: String, stanzaIdBy: Str
      * XEP-0085: send a standalone chat state notification
      * (typing indicator) to a DM peer or room.
      */
-open func sendChatState(peerJid: String, state: WaddleChatState, isMuc: Bool)async  -> Bool  {
+open func sendChatState(peerJid: String, state: WaddleChatState, audience: WaddleMessageAudience)async  -> Bool  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_chat_state(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerJid),FfiConverterTypeWaddleChatState_lower(state),FfiConverterBool.lower(isMuc)
+                    FfiConverterString.lower(peerJid),FfiConverterTypeWaddleChatState_lower(state),FfiConverterTypeWaddleMessageAudience_lower(audience)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -2850,13 +2850,13 @@ open func sendChatState(peerJid: String, state: WaddleChatState, isMuc: Bool)asy
      * send; on success `stanza_id` is the id of the *correction*
      * message (the wasm client's `send_correction` return value).
      */
-open func sendCorrection(peerJid: String, targetId: String, newBody: String, isMuc: Bool, options: WaddleSendOptions?)async  -> WaddleSendMessageOutcome  {
+open func sendCorrection(peerJid: String, targetId: String, newBody: String, audience: WaddleMessageAudience, options: WaddleSendOptions?)async  -> WaddleSendMessageOutcome  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_correction(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetId),FfiConverterString.lower(newBody),FfiConverterBool.lower(isMuc),FfiConverterOptionTypeWaddleSendOptions.lower(options)
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetId),FfiConverterString.lower(newBody),FfiConverterTypeWaddleMessageAudience_lower(audience),FfiConverterOptionTypeWaddleSendOptions.lower(options)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
@@ -2872,13 +2872,13 @@ open func sendCorrection(peerJid: String, targetId: String, newBody: String, isM
      * XEP-0333: send a `<displayed id='…'/>` marker acknowledging
      * the message identified by `stanza_id` as read.
      */
-open func sendDisplayed(peerJid: String, stanzaId: String, isMuc: Bool)async  -> Bool  {
+open func sendDisplayed(peerJid: String, stanzaId: String, audience: WaddleMessageAudience)async  -> Bool  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_displayed(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerJid),FfiConverterString.lower(stanzaId),FfiConverterBool.lower(isMuc)
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(stanzaId),FfiConverterTypeWaddleMessageAudience_lower(audience)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -2921,13 +2921,13 @@ open func sendModeration(roomJid: String, targetStanzaId: String, reason: String
      * stanza carries the *complete* reaction state of this user for
      * that message — send an empty `emojis` to clear all reactions.
      */
-open func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], isMuc: Bool)async  -> Bool  {
+open func sendReaction(targetJid: String, targetStanzaId: String, emojis: [String], audience: WaddleMessageAudience)async  -> Bool  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_reaction(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(targetJid),FfiConverterString.lower(targetStanzaId),FfiConverterSequenceString.lower(emojis),FfiConverterBool.lower(isMuc)
+                    FfiConverterString.lower(targetJid),FfiConverterString.lower(targetStanzaId),FfiConverterSequenceString.lower(emojis),FfiConverterTypeWaddleMessageAudience_lower(audience)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -2945,13 +2945,13 @@ open func sendReaction(targetJid: String, targetStanzaId: String, emojis: [Strin
      * marked with a XEP-0428 `<fallback/>` so supporting receivers
      * never render it.
      */
-open func sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Bool)async  -> Bool  {
+open func sendRetraction(peerJid: String, targetStanzaId: String, audience: WaddleMessageAudience)async  -> Bool  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_send_retraction(
                     self.uniffiCloneHandle(),
-                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetStanzaId),FfiConverterBool.lower(isMuc)
+                    FfiConverterString.lower(peerJid),FfiConverterString.lower(targetStanzaId),FfiConverterTypeWaddleMessageAudience_lower(audience)
                 )
             },
             pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_i8,
@@ -13504,6 +13504,241 @@ public func FfiConverterTypeWaddleForumPostKind_lower(_ value: WaddleForumPostKi
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * History a newly invited group-DM member may read.
+ *
+ * `Full` sends the Waddle history-access extension. `FromJoin` omits
+ * that child and the server applies its from-join default.
+ */
+
+public enum WaddleGroupDmHistoryAccess: Equatable, Hashable {
+
+    /**
+     * New member may only see archive rows from their add boundary.
+     */
+    case fromJoin
+    /**
+     * New member may query the full group-DM archive.
+     */
+    case full
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleGroupDmHistoryAccess: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleGroupDmHistoryAccess: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleGroupDmHistoryAccess
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleGroupDmHistoryAccess {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .fromJoin
+
+        case 2: return .full
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleGroupDmHistoryAccess, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .fromJoin:
+            writeInt(&buf, Int32(1))
+
+
+        case .full:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleGroupDmHistoryAccess_lift(_ buf: RustBuffer) throws -> WaddleGroupDmHistoryAccess {
+    return try FfiConverterTypeWaddleGroupDmHistoryAccess.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleGroupDmHistoryAccess_lower(_ value: WaddleGroupDmHistoryAccess) -> RustBuffer {
+    return FfiConverterTypeWaddleGroupDmHistoryAccess.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Whether a XEP-0430 inbox query embeds each conversation's latest message.
+ *
+ * `Omit` is the XEP `messages='false'` form. `Include` asks for the bodies.
+ */
+
+public enum WaddleInboxMessageContent: Equatable, Hashable {
+
+    /**
+     * Include the latest archived message for each entry.
+     */
+    case include
+    /**
+     * Request entries and counts without archived message payloads.
+     */
+    case omit
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInboxMessageContent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInboxMessageContent: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleInboxMessageContent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInboxMessageContent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .include
+
+        case 2: return .omit
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleInboxMessageContent, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .include:
+            writeInt(&buf, Int32(1))
+
+
+        case .omit:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxMessageContent_lift(_ buf: RustBuffer) throws -> WaddleInboxMessageContent {
+    return try FfiConverterTypeWaddleInboxMessageContent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxMessageContent_lower(_ value: WaddleInboxMessageContent) -> RustBuffer {
+    return FfiConverterTypeWaddleInboxMessageContent.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Conversations included in a XEP-0430 inbox query.
+ *
+ * `UnreadOnly` is `unread-only='true'`. `All` asks for every conversation.
+ */
+
+public enum WaddleInboxReadFilter: Equatable, Hashable {
+
+    /**
+     * Include both read and unread conversations.
+     */
+    case all
+    /**
+     * Include only conversations with unread messages.
+     */
+    case unreadOnly
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleInboxReadFilter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleInboxReadFilter: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleInboxReadFilter
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleInboxReadFilter {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .all
+
+        case 2: return .unreadOnly
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleInboxReadFilter, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .all:
+            writeInt(&buf, Int32(1))
+
+
+        case .unreadOnly:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxReadFilter_lift(_ buf: RustBuffer) throws -> WaddleInboxReadFilter {
+    return try FfiConverterTypeWaddleInboxReadFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleInboxReadFilter_lower(_ value: WaddleInboxReadFilter) -> RustBuffer {
+    return FfiConverterTypeWaddleInboxReadFilter.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0166 §7.4 session-terminate reason conditions. Mirrors the
  * 17 variants in `xmpp_parsers::jingle::Reason` so the wire
  * parser's enum is the single source of truth — outbound calls
@@ -13970,6 +14205,85 @@ public func FfiConverterTypeWaddleMarkupSpanType_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeWaddleMarkupSpanType_lower(_ value: WaddleMarkupSpanType) -> RustBuffer {
     return FfiConverterTypeWaddleMarkupSpanType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Direct chat versus multi-user chat for a messaging verb.
+ *
+ * `Muc` selects `type='groupchat'` and requires a bare room JID.
+ * `Direct` selects `type='chat'` and accepts a bare or full JID.
+ */
+
+public enum WaddleMessageAudience: Equatable, Hashable {
+
+    /**
+     * One-to-one chat (`type='chat'`).
+     */
+    case direct
+    /**
+     * Multi-user chat (`type='groupchat'`).
+     */
+    case muc
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMessageAudience: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMessageAudience: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMessageAudience
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMessageAudience {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .direct
+
+        case 2: return .muc
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleMessageAudience, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .direct:
+            writeInt(&buf, Int32(1))
+
+
+        case .muc:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMessageAudience_lift(_ buf: RustBuffer) throws -> WaddleMessageAudience {
+    return try FfiConverterTypeWaddleMessageAudience.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMessageAudience_lower(_ value: WaddleMessageAudience) -> RustBuffer {
+    return FfiConverterTypeWaddleMessageAudience.lower(value)
 }
 
 
@@ -18094,7 +18408,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_group_dm() != 19027) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 30554) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_invite_to_group_dm() != 61498) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_leave_group_dm() != 31049) {
@@ -18103,7 +18417,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_rename_group_dm() != 3394) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 65490) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_inbox() != 54568) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_mark_inbox_read() != 3970) {
@@ -18169,22 +18483,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_publish_mds_displayed() != 38895) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state() != 32445) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_chat_state() != 38740) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction() != 59489) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_correction() != 47928) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed() != 54513) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_displayed() != 38488) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_moderation() != 18691) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction() != 34917) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_reaction() != 458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction() != 65449) {
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_send_retraction() != 30240) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_subscribe_mds_displayed() != 23876) {

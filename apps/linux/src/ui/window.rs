@@ -1,8 +1,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use adw::prelude::*;
-use adw::subclass::prelude::*;
+use adw::prelude::{ActionRowExt, EditableExt, IsA, ListBoxRowExt, WidgetExt};
+use adw::subclass::prelude::{
+    AdwApplicationWindowImpl, ApplicationWindowImpl, CompositeTemplateClass,
+    CompositeTemplateInitializingExt, CompositeTemplateInstanceCallbacksClass, ObjectImpl,
+    ObjectImplExt, ObjectSubclass, ObjectSubclassExt, ObjectSubclassIsExt, TemplateChild,
+    WidgetClassExt, WidgetImpl, WindowImpl,
+};
 use gtk::{gio, glib};
 
 use crate::auth::device::{DeviceAuthClient, DeviceAuthorization, Provider, ServerUrl};
@@ -17,6 +22,13 @@ use super::directory::DirectorySearch;
 use super::membership::{Membership, OutboundSends};
 
 mod imp {
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::wildcard_imports,
+            reason = "inline subclass parent imports are an explicit Rust style exception"
+        )
+    )]
     use super::*;
 
     #[derive(Default, gtk::CompositeTemplate)]

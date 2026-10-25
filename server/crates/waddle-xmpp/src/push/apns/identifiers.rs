@@ -132,7 +132,7 @@ impl ApnsKeyId {
 pub struct ApnsCollapseId(String);
 
 impl ApnsCollapseId {
-    pub fn new(value: &str) -> Option<Self> {
+    pub fn try_new(value: &str) -> Option<Self> {
         let valid = !value.is_empty()
             && value.len() <= MAX_COLLAPSE_ID_LEN
             && value.bytes().all(|byte| byte.is_ascii_graphic());
@@ -193,9 +193,9 @@ mod tests {
 
     #[test]
     fn collapse_id_is_dropped_past_64_bytes() {
-        assert!(ApnsCollapseId::new(&"a".repeat(64)).is_some());
-        assert!(ApnsCollapseId::new(&"a".repeat(65)).is_none());
-        assert!(ApnsCollapseId::new("").is_none());
-        assert!(ApnsCollapseId::new("has space").is_none());
+        assert!(ApnsCollapseId::try_new(&"a".repeat(64)).is_some());
+        assert!(ApnsCollapseId::try_new(&"a".repeat(65)).is_none());
+        assert!(ApnsCollapseId::try_new("").is_none());
+        assert!(ApnsCollapseId::try_new("has space").is_none());
     }
 }

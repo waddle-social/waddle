@@ -1664,10 +1664,16 @@ fn advertised_feature_vars() -> BTreeSet<String> {
         .chain(waddle_xmpp::disco::info::spaces_service_features())
         .chain(waddle_xmpp::disco::info::muc_service_features())
         .chain(waddle_xmpp::disco::info::muc_room_features(
-            true, true, false, false, true,
+            waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
+            waddle_xmpp_core::disco::info::RoomMembership::MembersOnly,
+            waddle_xmpp_core::disco::info::RoomVisibility::Hidden,
+            waddle_xmpp_core::types::Moderation::Unmoderated,
         ))
         .chain(waddle_xmpp::disco::info::muc_room_features(
-            true, false, true, false, false,
+            waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
+            waddle_xmpp_core::disco::info::RoomMembership::Open,
+            waddle_xmpp_core::disco::info::RoomVisibility::Public,
+            waddle_xmpp_core::types::Moderation::Unmoderated,
         ))
         .chain(waddle_xmpp::disco::info::call_features())
         .chain(waddle_xmpp::pubsub::pep_features())

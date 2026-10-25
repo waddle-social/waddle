@@ -3,7 +3,13 @@
 //! session is skipped when the live registration is bound to a
 //! different session, regardless of clocks.
 
-use super::*;
+use super::{
+    create_test_server_owner_session, drain_due, fixture_config, get_room_actor,
+    handle_muc_join_with_occupancy_session, occupant_generation, snapshot_room,
+    state_with_executor, Arc, BareJid, CallId, CallTeardownIntent, CallTeardownStatus, Creator,
+    FullJid, Identity, MediaKind, Muji, MujiContent, RecordingAdmin, SfuService, TeardownTarget,
+    UpsertMujiPresence,
+};
 
 #[tokio::test]
 async fn participant_intent_with_stale_session_binding_is_skipped() {
@@ -23,10 +29,10 @@ async fn participant_intent_with_stale_session_binding_is_skipped() {
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
-    let stale = waddle_sfu::SessionBinding::new("muji-stale").expect("binding");
+    let current = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
+    let stale = waddle_sfu::SessionBinding::try_new("muji-stale").expect("binding");
     let occupant = occupant_generation();
 
     let _ = handle_muc_join_with_occupancy_session(
@@ -36,7 +42,7 @@ async fn participant_intent_with_stale_session_binding_is_skipped() {
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session.clone())),
+        (occupant, Some(&owner_session.clone())),
     )
     .await;
     // The replacement registration happens FIRST; the stale intent is
@@ -105,9 +111,9 @@ async fn participant_intent_with_matching_session_binding_executes() {
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let current = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
     let occupant = occupant_generation();
 
     let _ = handle_muc_join_with_occupancy_session(
@@ -117,7 +123,7 @@ async fn participant_intent_with_matching_session_binding_executes() {
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session.clone())),
+        (occupant, Some(&owner_session.clone())),
     )
     .await;
     sfu.register_call_participant_with_session(&call_id, &identity, &current, occupant);
@@ -175,10 +181,10 @@ async fn actor_present_muji_clear_with_stale_session_is_refused() {
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
-    let stale = waddle_sfu::SessionBinding::new("muji-stale").expect("binding");
+    let current = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
+    let stale = waddle_sfu::SessionBinding::try_new("muji-stale").expect("binding");
     let occupant = occupant_generation();
 
     let _ = handle_muc_join_with_occupancy_session(
@@ -188,7 +194,7 @@ async fn actor_present_muji_clear_with_stale_session_is_refused() {
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session.clone())),
+        (occupant, Some(&owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -255,9 +261,9 @@ async fn unbound_registration_survives_a_redriven_muji_clear_but_not_the_live_co
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let current = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
     let occupant = occupant_generation();
 
     let _ = handle_muc_join_with_occupancy_session(
@@ -267,7 +273,7 @@ async fn unbound_registration_survives_a_redriven_muji_clear_but_not_the_live_co
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session.clone())),
+        (occupant, Some(&owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -336,9 +342,9 @@ async fn actor_present_muji_clear_with_matching_session_still_clears() {
         .parse()
         .expect("room jid");
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
-    let call_id = CallId::new(room_jid.to_string()).expect("call id");
+    let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let current = waddle_sfu::SessionBinding::new("muji-current").expect("binding");
+    let current = waddle_sfu::SessionBinding::try_new("muji-current").expect("binding");
     let occupant = occupant_generation();
 
     let _ = handle_muc_join_with_occupancy_session(
@@ -348,7 +354,7 @@ async fn actor_present_muji_clear_with_matching_session_still_clears() {
         &alice,
         "alice",
         None,
-        (occupant, &Some(owner_session.clone())),
+        (occupant, Some(&owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)

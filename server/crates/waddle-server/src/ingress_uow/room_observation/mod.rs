@@ -4,6 +4,11 @@
 //! revisions, leased work, receipts, and outbound publications share one
 //! commit boundary with the room archive and never depend on its GC lifetime.
 
+use crate::db::DatabaseError;
+use crate::db::Transaction;
+use crate::ingress_substrate::IngressSubstrateError;
+use crate::ingress_uow::DbRetryClass;
+use crate::ingress_uow::IngressUowError;
 mod observation_body;
 mod publications;
 mod retention;
@@ -31,7 +36,7 @@ pub enum ObservationError {
     #[error("room observation database operation failed")]
     Database,
     #[error("room observation transaction requires a retry")]
-    RetryableDatabase(crate::ingress_uow::DbRetryClass),
+    RetryableDatabase(DbRetryClass),
     #[error("room observation database operation timed out")]
     Timeout,
     #[error("room observation node authority is no longer current")]
@@ -50,10 +55,10 @@ pub enum ObservationError {
     PublicationConflict,
 }
 
-impl From<crate::db::DatabaseError> for ObservationError {
-    fn from(error: crate::db::DatabaseError) -> Self {
-        let class = crate::ingress_uow::DbRetryClass::from_database_error(&error);
-        if class == crate::ingress_uow::DbRetryClass::NotRetryable {
+impl From<DatabaseError> for ObservationError {
+    fn from(error: DatabaseError) -> Self {
+        let class = DbRetryClass::from_database_error(&error);
+        if class == DbRetryClass::NotRetryable {
             Self::Database
         } else {
             Self::RetryableDatabase(class)
@@ -61,10 +66,10 @@ impl From<crate::db::DatabaseError> for ObservationError {
     }
 }
 
-impl From<crate::ingress_uow::IngressUowError> for ObservationError {
-    fn from(error: crate::ingress_uow::IngressUowError) -> Self {
+impl From<IngressUowError> for ObservationError {
+    fn from(error: IngressUowError) -> Self {
         let class = error.retry_class();
-        if class != crate::ingress_uow::DbRetryClass::NotRetryable {
+        if class != DbRetryClass::NotRetryable {
             Self::RetryableDatabase(class)
         } else if matches!(error, crate::ingress_uow::IngressUowError::Timeout) {
             Self::Timeout
@@ -74,9 +79,9 @@ impl From<crate::ingress_uow::IngressUowError> for ObservationError {
     }
 }
 
-impl From<crate::ingress_substrate::IngressSubstrateError> for ObservationError {
-    fn from(error: crate::ingress_substrate::IngressSubstrateError) -> Self {
-        crate::ingress_uow::IngressUowError::from(error).into()
+impl From<IngressSubstrateError> for ObservationError {
+    fn from(error: IngressSubstrateError) -> Self {
+        IngressUowError::from(error).into()
     }
 }
 
@@ -235,7 +240,7 @@ impl RoomObservationRepository {
     /// deletions across every table. Active work, pending publications, and
     /// anything still evidence for a non-terminal canonical row survive.
     pub(crate) async fn collect_expired(
-        tx: &mut crate::db::Transaction<'_>,
+        tx: &mut Transaction<'_>,
         now_ms: i64,
         limit: u32,
     ) -> Result<ObserverRetentionBatch, ObservationError> {

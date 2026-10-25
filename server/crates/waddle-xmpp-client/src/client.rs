@@ -1,8 +1,9 @@
+//! Native client handles and the asynchronous command and transport driver.
+
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
 
 use minidom::Element;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 
 use crate::command::XmppCommand;
@@ -25,29 +26,35 @@ use crate::transport::{
 pub struct ClientHandle {
     commands: mpsc::Sender<XmppCommand>,
     events: broadcast::Sender<ClientEvent>,
-    state: Arc<RwLock<SessionSnapshot>>,
+    // The driver clones complete snapshots before publication and runs no
+    // application callbacks under the watch lock.
+    state: watch::Sender<SessionSnapshot>,
 }
 
 impl ClientHandle {
     /// Subscribe to the live event stream.
+    #[must_use]
     pub fn events(&self) -> broadcast::Receiver<ClientEvent> {
         self.events.subscribe()
     }
 
-    /// Current session snapshot (reads from shared state without blocking).
+    /// Current session snapshot.
+    #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
-        match self.state.read() {
-            Ok(snapshot) => snapshot.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        self.state.borrow().clone()
     }
 
     /// Current high-level client state.
+    #[must_use]
     pub fn state(&self) -> ClientState {
         self.snapshot().client_state()
     }
 
     /// Fire-and-forget: queue a raw stanza for sending.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     pub async fn send_stanza(&self, stanza: Element) -> ClientResult<()> {
         self.commands
             .send(XmppCommand::SendStanza(stanza))
@@ -56,6 +63,10 @@ impl ClientHandle {
     }
 
     /// Send an IQ stanza and await a correlated result or error response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the command channel or response channel closes; otherwise propagates the IQ timeout, stanza error, or transport failure reported by the driver.
     pub async fn send_iq(&self, stanza: Element) -> ClientResult<Element> {
         let (tx, rx) = oneshot::channel();
         self.commands
@@ -69,6 +80,10 @@ impl ClientHandle {
     }
 
     /// Request a clean disconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     pub async fn disconnect(&self) -> ClientResult<()> {
         self.commands
             .send(XmppCommand::Disconnect)
@@ -83,7 +98,7 @@ impl ClientHandle {
     pub(crate) fn from_parts(
         commands: mpsc::Sender<XmppCommand>,
         events: broadcast::Sender<ClientEvent>,
-        state: Arc<RwLock<SessionSnapshot>>,
+        state: watch::Sender<SessionSnapshot>,
     ) -> Self {
         Self {
             commands,
@@ -100,24 +115,45 @@ pub struct XmppClient {
 }
 
 impl XmppClient {
-    pub fn new(config: ClientConfig) -> ClientResult<Self> {
+    /// Validate configuration before creating a native client facade.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
+    pub fn try_new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
         Ok(Self { config })
     }
 
+    /// Borrow the validated configuration used by this client or runtime.
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
 
     /// Create a fresh runtime for standalone inspection or testing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn runtime(&self) -> ClientResult<XmppRuntime> {
-        XmppRuntime::new(self.config.clone())
+        XmppRuntime::try_new(self.config.clone())
     }
 
+    /// Create the native asynchronous client driver using the default WebSocket transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn driver(&self) -> ClientResult<ClientDriver<DefaultTransportFactory>> {
         self.driver_with_factory(DefaultTransportFactory)
     }
 
+    /// Create the asynchronous client driver using the supplied transport factory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn driver_with_factory<TFactory>(
         &self,
         transport_factory: TFactory,
@@ -125,7 +161,7 @@ impl XmppClient {
     where
         TFactory: WebSocketTransportFactory,
     {
-        ClientDriver::new(self.config.clone(), transport_factory)
+        ClientDriver::try_new(self.config.clone(), transport_factory)
     }
 }
 
@@ -142,13 +178,20 @@ impl<TFactory> ClientDriver<TFactory>
 where
     TFactory: WebSocketTransportFactory,
 {
-    pub fn new(config: ClientConfig, transport_factory: TFactory) -> ClientResult<Self> {
+    /// Create a client driver from validated configuration and the selected transport factory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
+    pub fn try_new(config: ClientConfig, transport_factory: TFactory) -> ClientResult<Self> {
         Ok(Self {
-            runtime: XmppRuntime::new(config)?,
+            runtime: XmppRuntime::try_new(config)?,
             transport_factory,
         })
     }
 
+    /// Borrow the immutable configuration used to create this client or runtime.
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         self.runtime.config()
     }
@@ -157,6 +200,13 @@ where
     ///
     /// Consumes the driver, spawns a background task that owns the transport,
     /// and returns a [`ClientHandle`] that can be cloned and used concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial connect request cannot be queued or the
+    /// transport connection fails. The handle is returned before authentication,
+    /// resource binding and stream-management negotiation finish; their outcomes
+    /// are reported asynchronously through client events.
     pub async fn connect(mut self) -> ClientResult<ClientHandle>
     where
         TFactory: Send + 'static,
@@ -171,7 +221,7 @@ where
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(256);
-        let state = Arc::new(RwLock::new(self.runtime.snapshot().clone()));
+        let state = watch::Sender::new(self.runtime.snapshot().clone());
 
         let handle = ClientHandle {
             commands: cmd_tx,
@@ -203,7 +253,7 @@ struct DriverTask {
     transport: Box<dyn WebSocketTransport>,
     commands: mpsc::Receiver<XmppCommand>,
     events: broadcast::Sender<ClientEvent>,
-    state: Arc<RwLock<SessionSnapshot>>,
+    state: watch::Sender<SessionSnapshot>,
     pending_iqs: HashMap<String, oneshot::Sender<ClientResult<Element>>>,
     deferred_commands: VecDeque<DeferredXmppCommand>,
     /// Set on [`XmppCommand::Disconnect`]. XEP-0198 forbids resuming
@@ -227,13 +277,7 @@ enum DeferredXmppCommand {
 impl DriverTask {
     fn publish_snapshot(&self) {
         let snapshot = self.runtime.snapshot().clone();
-        match self.state.write() {
-            Ok(mut current) => *current = snapshot,
-            Err(poisoned) => {
-                *poisoned.into_inner() = snapshot;
-                self.state.clear_poison();
-            }
-        }
+        self.state.send_replace(snapshot);
     }
 
     async fn run(mut self) {
@@ -650,7 +694,7 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
         return None;
     }
 
-    element.attr("id").and_then(|id| StanzaId::new(id).ok())
+    element.attr("id").and_then(|id| StanzaId::try_new(id).ok())
 }
 
 fn is_fatal_transport_error(error: &ClientError) -> bool {

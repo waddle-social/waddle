@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    run_commit_with_backstop_and_admission, run_with_backstop, run_with_backstop_and_admission,
+    InboundDisposition, StanzaBackstop, StanzaTimeout, STANZA_HANDLER_WEDGE_TIMEOUT,
+};
 use std::future::pending;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -167,7 +170,7 @@ async fn already_revoked_admission_never_starts_dispatch_and_preserves_sm_hole()
         &mut completion,
         &mut sm_state,
     );
-    assert_eq!(sm_state.get_inbound_count(), 0);
+    assert_eq!(sm_state.inbound_count(), 0);
     assert!(completion.has_unhandled_hole());
     assert!(!completion.has_pending());
 }
@@ -224,7 +227,7 @@ async fn revoked_after_committed_dispatch_suppresses_frames_but_settles_sm() {
         &mut completion,
         &mut sm_state,
     );
-    assert_eq!(sm_state.get_inbound_count(), 1);
+    assert_eq!(sm_state.inbound_count(), 1);
     assert!(!completion.has_unhandled_hole());
     assert!(!completion.has_pending());
 }
@@ -261,7 +264,7 @@ async fn iq_get_timeout_yields_conformant_resource_constraint() {
         &mut sm_state,
     );
     assert_eq!(
-        sm_state.get_inbound_count(),
+        sm_state.inbound_count(),
         1,
         "the retryable IQ error accepts responsibility for the request"
     );

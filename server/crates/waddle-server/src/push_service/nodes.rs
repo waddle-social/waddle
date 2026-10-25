@@ -1,6 +1,9 @@
 //! Push node lifecycle: one node per `(owner, app-id)`, quotas,
 //! disable/reactivate, and retained-disabled-node pruning.
 
+use crate::db::Row;
+use crate::db::Transaction;
+use crate::db::Value;
 use jid::BareJid;
 use waddle_xmpp::XmppError;
 
@@ -20,7 +23,7 @@ pub(super) const MAX_APP_ID_LEN: usize = 128;
 pub(super) const MAX_NODE_ID_LEN: usize = 256;
 
 pub(super) async fn get_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     node: &str,
 ) -> Result<Option<PushServiceNode>, XmppError> {
     let mut rows = tx
@@ -45,7 +48,7 @@ pub(super) async fn get_node_tx(
 }
 
 async fn get_node_for_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
 ) -> Result<Option<PushServiceNode>, XmppError> {
@@ -60,7 +63,7 @@ async fn get_node_for_owner_tx(
 }
 
 async fn find_node_by_owner_app_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     app_id: &str,
 ) -> Result<Option<PushServiceNode>, XmppError> {
@@ -86,7 +89,7 @@ async fn find_node_by_owner_app_tx(
 }
 
 async fn count_active_nodes_for_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
 ) -> Result<i64, XmppError> {
     let mut rows = tx
@@ -106,7 +109,7 @@ async fn count_active_nodes_for_owner_tx(
 }
 
 async fn node_names_for_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
 ) -> Result<Vec<String>, XmppError> {
     let mut rows = tx
@@ -136,7 +139,7 @@ async fn node_names_for_owner_tx(
 }
 
 async fn prune_disabled_nodes_for_owner_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     local_service: Option<&BareJid>,
     retain: i64,
@@ -189,9 +192,7 @@ async fn prune_disabled_nodes_for_owner_tx(
             crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000)
         ];
         if guard_local_registrations {
-            params.push(crate::db::Value::from(
-                local_service.map(ToString::to_string),
-            ));
+            params.push(Value::from(local_service.map(ToString::to_string)));
         }
         tx.execute(
             &format!("DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR (push_publish_jobs.uncertain_send = 1 AND push_publish_jobs.terminal_disposition IS NULL) OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?)) {registration_guard}"),
@@ -213,7 +214,7 @@ fn validate_app_id(app_id: &str) -> Result<(), XmppError> {
 }
 
 pub(super) async fn ensure_node_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &BareJid,
     app_id: &str,
     now_ms: i64,
@@ -287,7 +288,7 @@ pub(super) async fn ensure_node_tx(
         .ok_or_else(|| XmppError::internal("Push Service node was not persisted"))
 }
 
-fn decode_node(row: &crate::db::Row) -> Result<PushServiceNode, XmppError> {
+fn decode_node(row: &Row) -> Result<PushServiceNode, XmppError> {
     let owner_bare_jid: String = row
         .get(1)
         .map_err(|error| XmppError::internal(error.to_string()))?;

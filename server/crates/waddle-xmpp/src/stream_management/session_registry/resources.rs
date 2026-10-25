@@ -1,3 +1,12 @@
+use crate::ingress::IngressEffectKind;
+use crate::ownership::Entity;
+use crate::ownership::EntityType;
+use crate::stream_management::persistence::IngressCustodyDisposition;
+use crate::stream_management::SmDrainedAppendTicket;
+use crate::stream_management::SmIngressAppendKey;
+use crate::stream_management::SmKeyedAppendOutcome;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -7,7 +16,8 @@ use xmpp_parsers::presence::Show;
 use super::core::InMemorySmSessionRegistry;
 use super::session::DetachedSession;
 use super::SmRegistryError;
-use crate::{pending_delivery::SmSessionId, Stanza};
+use crate::pending_delivery::SmSessionId;
+use crate::Stanza;
 
 /// Outcome of probing whether a full JID still owns resumable XEP-0198 state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +154,7 @@ impl InMemorySmSessionRegistry {
             .claimed_sessions
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
-        let generations: std::collections::BTreeSet<_> = sessions
+        let generations: BTreeSet<_> = sessions
             .values()
             .chain(claimed.values())
             .filter(|session| session.jid == *jid)
@@ -169,10 +179,7 @@ impl InMemorySmSessionRegistry {
         if locally_owned()? {
             return Ok(true);
         }
-        let entity = crate::ownership::Entity::new(
-            crate::ownership::EntityType::SmSession,
-            stream_id.as_str().to_owned(),
-        );
+        let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_owned());
         if self
             .claim_store
             .current_claim(&entity)
@@ -414,8 +421,8 @@ impl InMemorySmSessionRegistry {
         jid: &FullJid,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
-        key: crate::stream_management::SmIngressAppendKey,
-    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        key: SmIngressAppendKey,
+    ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::SmKeyedAppendOutcome;
         match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {
@@ -462,8 +469,8 @@ impl InMemorySmSessionRegistry {
         sequence: u32,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
-        key: crate::stream_management::SmIngressAppendKey,
-    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
+        key: SmIngressAppendKey,
+    ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::SmKeyedAppendOutcome;
         match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { accepting_stream } => {
@@ -493,13 +500,11 @@ impl InMemorySmSessionRegistry {
     /// sequence and hand it to [`Self::store_session_with_drained_ingress_appends`].
     pub async fn reserve_drained_ingress_append(
         &self,
-        key: crate::stream_management::SmIngressAppendKey,
-    ) -> Result<Option<crate::stream_management::SmDrainedAppendTicket>, SmRegistryError> {
+        key: SmIngressAppendKey,
+    ) -> Result<Option<SmDrainedAppendTicket>, SmRegistryError> {
         Ok(match self.consult_ingress_append_ledger(&key).await? {
             LedgerDecision::Allocated { .. } => None,
-            LedgerDecision::Unallocated => {
-                Some(crate::stream_management::SmDrainedAppendTicket { key })
-            }
+            LedgerDecision::Unallocated => Some(SmDrainedAppendTicket { key }),
         })
     }
 
@@ -507,7 +512,7 @@ impl InMemorySmSessionRegistry {
     /// ledger is consulted before looking at any detached session.
     async fn consult_ingress_append_ledger(
         &self,
-        key: &crate::stream_management::SmIngressAppendKey,
+        key: &SmIngressAppendKey,
     ) -> Result<LedgerDecision, SmRegistryError> {
         let storage = self
             .persistence
@@ -534,16 +539,14 @@ impl InMemorySmSessionRegistry {
     async fn commit_keyed_detached_entry(
         self: &Arc<Self>,
         stream_id: String,
-        key: crate::stream_management::SmIngressAppendKey,
+        key: SmIngressAppendKey,
         new_delivery: bool,
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
         record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
-    ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
-        use crate::stream_management::{
-            persistence::{KeyedSnapshotOutcome, PersistedIngressAppend},
-            SmKeyedAppendOutcome,
-        };
+    ) -> Result<SmKeyedAppendOutcome, SmRegistryError> {
+        use crate::stream_management::persistence::{KeyedSnapshotOutcome, PersistedIngressAppend};
+        use crate::stream_management::SmKeyedAppendOutcome;
         let storage = self
             .persistence
             .as_ref()
@@ -567,12 +570,9 @@ impl InMemorySmSessionRegistry {
             .map(|entry| entry.sequence)
             .collect();
         let mut updated = previous;
-        if [
-            crate::ingress::IngressEffectKind::Carbons,
-            crate::ingress::IngressEffectKind::RelayCarbons,
-        ]
-        .iter()
-        .any(|kind| kind.storage_tag() == key.kind.to_storage())
+        if [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
+            .iter()
+            .any(|kind| kind.storage_tag() == key.kind.to_storage())
             && !updated.carbons_enabled
         {
             // Evaluate opt-in under the stream shard after reconciliation,
@@ -596,7 +596,7 @@ impl InMemorySmSessionRegistry {
             appended_at: Utc::now(),
             payload: stanza.clone(),
             original_receipt_at,
-            disposition: crate::stream_management::persistence::IngressCustodyDisposition::Pending,
+            disposition: IngressCustodyDisposition::Pending,
         });
         delta.new_delivery = new_delivery;
         let fence = self.detached_append_fence_locked(&updated).await;
@@ -713,15 +713,14 @@ impl InMemorySmSessionRegistry {
         generation: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     ) -> ResumableSessionProbe {
         let in_memory = {
-            let matches_memory =
-                |sessions: &std::collections::HashMap<String, super::super::DetachedSession>| {
-                    sessions.values().any(|session| {
-                        !session.is_expired()
-                            && session.jid == *jid
-                            && generation
-                                .is_none_or(|generation| session.occupancy_session == generation)
-                    })
-                };
+            let matches_memory = |sessions: &HashMap<String, super::super::DetachedSession>| {
+                sessions.values().any(|session| {
+                    !session.is_expired()
+                        && session.jid == *jid
+                        && generation
+                            .is_none_or(|generation| session.occupancy_session == generation)
+                })
+            };
             let sessions = self.sessions.read();
             let claimed = self.claimed_sessions.read();
             match (sessions, claimed) {

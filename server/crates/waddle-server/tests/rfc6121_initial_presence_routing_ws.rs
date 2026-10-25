@@ -13,12 +13,10 @@ use std::time::Duration;
 use jid::BareJid;
 use minidom::Element;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
-use xmpp_parsers::{
-    iq::Iq,
-    message::{Id, Lang, Message, MessageType},
-    ping::Ping,
-    presence::{Presence, Type as PresenceType},
-};
+use xmpp_parsers::iq::Iq;
+use xmpp_parsers::message::{Id, Lang, Message, MessageType};
+use xmpp_parsers::ping::Ping;
+use xmpp_parsers::presence::{Presence, Type as PresenceType};
 
 const DOMAIN: &str = "localhost";
 const RECIPIENT_USER: &str = "admin";

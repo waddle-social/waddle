@@ -1,4 +1,12 @@
-use super::*;
+//! Conversion and delivery of typed client events to JavaScript callbacks.
+
+use super::{
+    bare_jid, call_event_to_js, inbound_to_js, inbox_push_to_js, mpsc, presence_to_js,
+    pubsub_event_to_js, to_js_value, ClientEvent, ConnectionEvent, DriverEvent, JsMessageRejection,
+    JsStreamManagementTelemetry, JsValue, LifecycleEvent, MessageDeliveryEvent, Rc, RefCell,
+    Serialize, StreamErrorCondition, StreamErrorDetail, StreamExt, StreamManagementEvent,
+    WaddleAvatarChanged, WaddleClientInner, WaddleMdsDisplayedEntry,
+};
 
 pub(crate) async fn event_dispatch_loop(
     inner: Rc<RefCell<WaddleClientInner>>,
@@ -236,7 +244,7 @@ mod tests {
     fn avatar_changed_callback_payload_uses_bare_jid_and_optional_id() {
         let payload = avatar_changed_to_js(waddle_xmpp_client::AvatarChanged {
             jid: "bob@waddle.test".parse().expect("valid bare JID"),
-            avatar_id: waddle_xmpp_client::AvatarItemId::new(
+            avatar_id: waddle_xmpp_client::AvatarItemId::try_new(
                 "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
             ),
         });
@@ -292,8 +300,11 @@ fn emit_stream_error_callback(
 fn stream_management_error_to_js(
     detail: Option<StreamErrorDetail>,
 ) -> Option<JsStreamManagementError> {
-    detail.map(|StreamErrorDetail::HandledCountTooHigh { h, send_count }| {
-        JsStreamManagementError::HandledCountTooHigh { h, send_count }
+    detail.and_then(|detail| match detail {
+        StreamErrorDetail::HandledCountTooHigh { h, send_count } => {
+            Some(JsStreamManagementError::HandledCountTooHigh { h, send_count })
+        }
+        _ => None,
     })
 }
 

@@ -1,6 +1,11 @@
 //! Immutable, typed descriptions of effects selected during ingress.
 
-use std::{cmp::Ordering, collections::BTreeMap, ops::Deref};
+use crate::inbox::ConversationKind;
+use crate::muc::pin::PinPreview;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::ops::Deref;
 
 use jid::{BareJid, FullJid, Jid};
 use minidom::Element;
@@ -11,20 +16,18 @@ use uuid::Uuid;
 use waddle_extensions::{ObservationGeneration, PluginId, Sha256Digest};
 use waddle_xmpp_core::mam::{ArchiveOrdinal, RichMessageId, ThreadId};
 use waddle_xmpp_core::xep0359::{OriginId, StanzaId};
-use xmpp_parsers::{
-    message::Lang,
-    stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType, StanzaError},
-};
+use xmpp_parsers::message::Lang;
+use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType as XmppStanzaErrorType, StanzaError};
 
-use crate::{
-    error::StanzaErrorCondition,
-    inbox::InboxEntry,
-    ingress::{EntityGeneration, StoredMessagePayload},
-    muc::{pin::PinnedEntry, SubjectState},
-    pending_delivery::{PendingRowId, SmSessionId},
-    protocol::CarbonKind,
-    xep::{xep0085::ChatState, CallThreadDuration, CallThreadMedia},
-};
+use crate::error::StanzaErrorCondition;
+use crate::inbox::InboxEntry;
+use crate::ingress::{EntityGeneration, StoredMessagePayload};
+use crate::muc::pin::PinnedEntry;
+use crate::muc::SubjectState;
+use crate::pending_delivery::{PendingRowId, SmSessionId};
+use crate::protocol::CarbonKind;
+use crate::xep::xep0085::ChatState;
+use crate::xep::{CallThreadDuration, CallThreadMedia};
 
 /// Largest accepted version-one storage payload, matching the database check.
 pub const MAX_EFFECT_INTENT_PAYLOAD_BYTES: usize = 65_536;
@@ -1006,7 +1009,7 @@ pub struct PlannedDmCallState {
     pub key: DmCallThreadKey,
     pub pending: Option<PendingDmCallOffer>,
     pub active: Option<PlannedActiveDmCall>,
-    pub projected: std::collections::HashSet<BareJid>,
+    pub projected: HashSet<BareJid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1580,7 +1583,7 @@ impl IngressEffectIntent {
         let direct_entry = || {
             InboxEntry::new(
                 bare("juliet@example.test"),
-                crate::inbox::ConversationKind::Direct,
+                ConversationKind::Direct,
                 "stable-1",
                 1_752_768_000,
             )
@@ -1593,7 +1596,7 @@ impl IngressEffectIntent {
             pinned_at: chrono::DateTime::parse_from_rfc3339("2025-07-27T12:00:00Z")
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc),
-            preview: crate::muc::pin::PinPreview::new(
+            preview: PinPreview::new(
                 bare("juliet@example.test"),
                 Some("Juliet".to_string()),
                 "important",
@@ -1679,7 +1682,7 @@ impl IngressEffectIntent {
                 mutation: GroupchatNotificationRecoveryMutation {
                     recipient: bare("romeo@example.test"),
                     room: bare("room@conference.example.test"),
-                    thread_id: Some(ThreadId::new("thread-1").expect("fixture thread id")),
+                    thread_id: Some(ThreadId::try_new("thread-1").expect("fixture thread id")),
                     archive_stanza_id: stanza(),
                     sender: "juliet@example.test/balcony"
                         .parse::<Jid>()
@@ -1703,7 +1706,7 @@ impl IngressEffectIntent {
                     upload_slot_id: Uuid::parse_str("d5c7a44f-7c8c-4587-b0fb-f0e68444d36a")
                         .expect("fixture UUID"),
                     archive: bare("room@conference.example.test"),
-                    message_id: RichMessageId::new("client-msg-1").expect("fixture message id"),
+                    message_id: RichMessageId::try_new("client-msg-1").expect("fixture message id"),
                     current_archive_stanza_id: stanza(),
                     state: LinkPreviewMediaRefState::Current,
                 },
@@ -1814,9 +1817,9 @@ impl IngressEffectIntent {
                 room: bare("room@conference.example.test"),
                 requester: bare("romeo@example.test"),
                 sender: full("romeo@example.test/phone"),
-                plugin: PluginId::new("message-hook-fixture").expect("valid fixture plugin"),
-                generation: ObservationGeneration::new(1).expect("generation"),
-                identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+                plugin: PluginId::try_new("message-hook-fixture").expect("valid fixture plugin"),
+                generation: ObservationGeneration::try_new(1).expect("generation"),
+                identity: Sha256Digest::try_new("0".repeat(64)).expect("identity"),
                 correction_target: None,
             },
             Self::TombstoneReplayDeletion {
@@ -1942,7 +1945,7 @@ impl IngressEffectIntent {
                 let (partner, thread) = match mutation {
                     InboxProjectionMutation::Direct { entry, .. } => (
                         entry.partner.clone(),
-                        entry.thread_id.clone().and_then(ThreadId::new),
+                        entry.thread_id.clone().and_then(ThreadId::try_new),
                     ),
                     InboxProjectionMutation::GroupchatChannel { room, .. }
                     | InboxProjectionMutation::GroupchatChannelRead { room } => {
@@ -2582,7 +2585,7 @@ impl StoredInboxProjectionMutation {
             },
             Self::GroupchatThread { room, thread_id } => InboxProjectionMutation::GroupchatThread {
                 room,
-                thread_id: ThreadId::new(thread_id)
+                thread_id: ThreadId::try_new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
             },
             Self::GroupchatChannelRead { room } => {
@@ -2591,7 +2594,7 @@ impl StoredInboxProjectionMutation {
             Self::GroupchatThreadRead { room, thread_id } => {
                 InboxProjectionMutation::GroupchatThreadRead {
                     room,
-                    thread_id: ThreadId::new(thread_id)
+                    thread_id: ThreadId::try_new(thread_id)
                         .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 }
             }
@@ -2601,7 +2604,7 @@ impl StoredInboxProjectionMutation {
                 increment_unread,
             } => InboxProjectionMutation::GroupchatChannelAndThread {
                 room,
-                thread_id: ThreadId::new(thread_id)
+                thread_id: ThreadId::try_new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 increment_unread,
             },
@@ -2613,7 +2616,7 @@ impl StoredInboxProjectionMutation {
                 last_updated,
             } => InboxProjectionMutation::DirectCallThreadAnchor {
                 peer,
-                thread_id: ThreadId::new(thread_id)
+                thread_id: ThreadId::try_new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 archive_stanza_id,
                 media,
@@ -2626,7 +2629,7 @@ impl StoredInboxProjectionMutation {
                 duration,
             } => InboxProjectionMutation::DirectCallThreadEnded {
                 peer,
-                thread_id: ThreadId::new(thread_id)
+                thread_id: ThreadId::try_new(thread_id)
                     .ok_or(EffectIntentCodecError::MalformedPayload)?,
                 ended,
                 duration,
@@ -2814,7 +2817,7 @@ impl StoredGroupchatNotificationRecoveryMutation {
             thread_id: self
                 .thread_id
                 .map(|thread_id| {
-                    ThreadId::new(thread_id).ok_or(EffectIntentCodecError::MalformedPayload)
+                    ThreadId::try_new(thread_id).ok_or(EffectIntentCodecError::MalformedPayload)
                 })
                 .transpose()?,
             archive_stanza_id: self.archive_stanza_id,
@@ -4019,11 +4022,11 @@ mod tests {
     }
 
     fn thread_id(value: &str) -> ThreadId {
-        ThreadId::new(value).expect("valid thread id")
+        ThreadId::try_new(value).expect("valid thread id")
     }
 
     fn rich_message_id(value: &str) -> RichMessageId {
-        RichMessageId::new(value).expect("valid message id")
+        RichMessageId::try_new(value).expect("valid message id")
     }
 
     fn direct_entry() -> InboxEntry {
@@ -4281,9 +4284,9 @@ mod tests {
             room: bare("room@conference.example.test"),
             requester: bare("romeo@example.test"),
             sender: full("romeo@example.test/phone"),
-            plugin: PluginId::new("message-hook-fixture").expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            plugin: PluginId::try_new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: None,
         };
         let encoded = intent.encode_v1().expect("observer codec");
@@ -4314,9 +4317,9 @@ mod tests {
             intent.semantic_key(),
             IngressEffectKey::RoomObserver(
                 bare("room@conference.example.test"),
-                PluginId::new("message-hook-fixture").expect("plugin"),
-                ObservationGeneration::new(1).expect("generation"),
-                Sha256Digest::new("0".repeat(64)).expect("identity"),
+                PluginId::try_new("message-hook-fixture").expect("plugin"),
+                ObservationGeneration::try_new(1).expect("generation"),
+                Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             )
         );
         assert_eq!(
@@ -4334,9 +4337,9 @@ mod tests {
             room: bare("room@conference.example.test"),
             requester: bare("romeo@example.test"),
             sender: full("romeo@example.test/phone"),
-            plugin: PluginId::new("observer").expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            plugin: PluginId::try_new("observer").expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: Some(StanzaId::new(
                 "authoritative-archive-id",
                 bare("room@conference.example.test").into(),
@@ -4368,9 +4371,9 @@ mod tests {
             room: room.clone(),
             requester: room,
             sender,
-            plugin: PluginId::new("message-hook-fixture").expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            plugin: PluginId::try_new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: None,
         };
         let encoded = intent.encode_v1().expect("bounded observer metadata");
@@ -4387,9 +4390,9 @@ mod tests {
             room: bare("room@conference.example.test"),
             requester: bare("romeo@example.test"),
             sender: full("romeo@example.test/phone"),
-            plugin: PluginId::new("message-hook-fixture").expect("plugin"),
-            generation: ObservationGeneration::new(1).expect("generation"),
-            identity: Sha256Digest::new("0".repeat(64)).expect("identity"),
+            plugin: PluginId::try_new("message-hook-fixture").expect("plugin"),
+            generation: ObservationGeneration::try_new(1).expect("generation"),
+            identity: Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: None,
         };
         let mut payload = intent
@@ -5524,7 +5527,7 @@ mod tests {
             "<message xmlns='jabber:client' from='romeo@example.test/phone' to='juliet@example.test/phone' type='chat'><body>frozen</body><stanza-id xmlns='urn:xmpp:sid:0' by='juliet@example.test' id='recipient-stamp'/></message>"
         ).expect("message");
         if let IngressEffectIntent::RouteDirect { prepared, .. } = &mut prepared {
-            *prepared = Some(StoredMessagePayload::new(message).expect("freeze"));
+            *prepared = Some(StoredMessagePayload::try_new(message).expect("freeze"));
         }
         assert_eq!(original.semantic_key(), prepared.semantic_key());
         assert_eq!(

@@ -1,7 +1,12 @@
 //! Typed identifiers, classes, reasons, statuses, outcomes, and errors
 //! for the notification outbox.
 
-use super::*;
+use super::{
+    build_xep0357_notification_payload, BareJid, BlockingStorageError, DatabaseError, Element,
+    Error, Jid, NotificationActivityError, PubSubItem, RichSummary,
+};
+use crate::ingress_uow::IngressUowError;
+use crate::notification_settings_projection::NotificationSettingsProjectionError;
 
 pub(super) const STATUS_QUEUED: &str = "queued";
 pub(super) const STATUS_IN_PROGRESS: &str = "in-progress";
@@ -29,7 +34,7 @@ impl NotificationThreadId {
 pub struct PushServiceNodeName(String);
 
 impl PushServiceNodeName {
-    pub fn new(value: impl Into<String>) -> Result<Self, NotificationOutboxError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NotificationOutboxError> {
         let value = value.into();
         if value.is_empty() {
             return Err(NotificationOutboxError::InvalidNode);
@@ -496,7 +501,7 @@ pub enum NotificationOutboxError {
     #[error("invalid frozen notification payload")]
     InvalidApprovedPayload,
     #[error("notification ancestry error: {0}")]
-    Ancestry(#[from] crate::ingress_uow::IngressUowError),
+    Ancestry(#[from] IngressUowError),
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
     #[error("push error: {0}")]
@@ -516,9 +521,7 @@ pub enum NotificationOutboxError {
     #[error("invalid suppressed reason: {0}")]
     InvalidSuppressedReason(String),
     #[error("notification settings projection error: {0}")]
-    NotificationSettings(
-        #[from] crate::notification_settings_projection::NotificationSettingsProjectionError,
-    ),
+    NotificationSettings(#[from] NotificationSettingsProjectionError),
     #[error("notification activity projection error: {0}")]
     NotificationActivity(#[from] NotificationActivityError),
     #[error("invalid outbox status: {0}")]

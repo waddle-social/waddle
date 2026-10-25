@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    fixed_time, fixture_principal, fixture_session, fixture_unacked, DatabaseSmPersistence,
+    DateTime, Duration, IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend,
+    PersistedSession, SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
+};
+#[cfg(feature = "clustering")]
+use super::{Database, DatabaseConfig, DatabaseDriver};
 use crate::db::Value;
 use std::sync::Arc;
 use waddle_xmpp::ingress::MessageKey;
@@ -104,7 +110,7 @@ async fn snapshot(storage: &DatabaseSmPersistence, stream: &SmSessionId) -> Vec<
     ] {
         let mut rows = storage.query(sql, crate::db_params![stream.to_string()]).await.expect("schema query");
         while let Some(row) = rows.next().await.expect("row fetch") {
-            values.push((0..count).map(|index| row.get_value(index).expect("column decode")).collect());
+            values.push((0..count).map(|index| row.value(index).expect("column decode")).collect());
         }
     }
     values
@@ -1018,7 +1024,8 @@ async fn live_attempt_interlock(
     fixture: crate::ingress::test_support::IngressFixture,
     storage: Box<dyn SmPersistenceStorage>,
 ) {
-    use crate::ingress::{commit::commit_submission, receipt_key};
+    use crate::ingress::commit::commit_submission;
+    use crate::ingress::receipt_key;
     use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
     use waddle_xmpp::ownership::NodeIdentity;
@@ -1251,18 +1258,16 @@ async fn completed_handoff_blocks_stale_detached_append(
     fixture: crate::ingress::test_support::IngressFixture,
     storage: Box<dyn SmPersistenceStorage>,
 ) {
-    use crate::ingress::{commit::commit_submission, receipt_key};
+    use crate::ingress::commit::commit_submission;
+    use crate::ingress::receipt_key;
     use crate::ingress_uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
         PendingReceiptRepository, SendAttemptRepository, SendClaim, SendObligation,
     };
-    use waddle_xmpp::{
-        ingress::{EffectMessageIdentity, IngressEffectIntent},
-        ownership::NodeIdentity,
-        pending_delivery::{
-            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, QuotaPolicy,
-        },
-    };
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
+    use waddle_xmpp::ownership::NodeIdentity;
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
     let snapshot_storage = DatabaseSmPersistence::from_database(fixture.db.clone())
         .await
         .expect("snapshot storage");

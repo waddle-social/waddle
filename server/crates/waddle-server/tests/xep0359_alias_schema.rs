@@ -7,10 +7,8 @@
 #[cfg(feature = "clustering")]
 mod ingress_authority_support;
 
-use waddle_server::{
-    db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::PostgresIngressSubstrate,
-};
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress_substrate::PostgresIngressSubstrate;
 use waddle_xmpp::ingress::{
     AliasOutcome, AliasResolution, MessageKey, NormalizedTarget, SemanticDigest,
     MAX_ORIGIN_ID_BYTES,

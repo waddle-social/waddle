@@ -234,6 +234,7 @@ pub(crate) async fn extension_command_result(
                 ))
             }
             ExtensionEffect::Noop => {}
+            _ => {}
         }
     }
     if notes.is_empty() {
@@ -344,7 +345,7 @@ mod tests {
     async fn host_warning_command_result_uses_error_note() {
         let result = extension_command_result(
             vec![ExtensionEffect::HostWarning(
-                DisplayText::new("invalid submitted form").expect("warning text"),
+                DisplayText::try_new("invalid submitted form").expect("warning text"),
             )],
             None,
             Some("session-123".to_string()),
@@ -361,17 +362,17 @@ mod tests {
 
     fn envelope() -> ExtensionEnvelope {
         ExtensionEnvelope::new(vec![MessageEnrichment {
-            id: EnrichmentId::new("ai-command-posted").expect("enrichment id"),
-            plugin: PluginId::new("ai-chatbot").expect("plugin id"),
+            id: EnrichmentId::try_new("ai-command-posted").expect("enrichment id"),
+            plugin: PluginId::try_new("ai-chatbot").expect("plugin id"),
             capability: ExtensionCapability::MessageEnrich,
             payload_namespace: PayloadNamespace::framework(),
-            created_at: Timestamp::new("2026-05-09T00:00:00Z").expect("timestamp"),
+            created_at: Timestamp::try_new("2026-05-09T00:00:00Z").expect("timestamp"),
             source: None,
             ui: vec![UiView {
-                id: UiViewId::new("ai-command-posted").expect("view id"),
-                title: Some(DisplayText::new("AI answer posted").expect("title")),
+                id: UiViewId::try_new("ai-command-posted").expect("view id"),
+                title: Some(DisplayText::try_new("AI answer posted").expect("title")),
                 blocks: vec![UiBlock::Text(TextBlock {
-                    text: DisplayText::new("AI answer posted to channel.").expect("body"),
+                    text: DisplayText::try_new("AI answer posted to channel.").expect("body"),
                     style: TextStyle::Body,
                 })],
             }],

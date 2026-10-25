@@ -61,6 +61,7 @@
 //! owner-binds-to-node invariant via SQL — a caller cannot register a
 //! device against another user's node nor disable foreign devices.
 
+use crate::push_service::PushDevicePlatform;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -644,7 +645,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Web,
+            PushDevicePlatform::Web,
             environment.as_wire_str(),
         )
         .with_provider_endpoint(Some(endpoint.clone()))
@@ -657,7 +658,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Apns,
+            PushDevicePlatform::Apns,
             environment.as_wire_str(),
         )
         .with_provider_token(Some(device_token.as_str().to_owned())),
@@ -669,7 +670,7 @@ fn build_registration(
         } => PushDeviceRegistration::new(
             device_id,
             node,
-            crate::push_service::PushDevicePlatform::Fcm,
+            PushDevicePlatform::Fcm,
             environment.as_wire_str(),
         )
         .with_provider_token(Some(registration_token.as_str().to_owned()))
@@ -679,7 +680,7 @@ fn build_registration(
 }
 
 fn require_value<'a>(form: &'a DataForm, var: &str) -> Result<&'a str, String> {
-    form.get_value(var)
+    form.value(var)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("missing required form field '{var}'"))
 }
@@ -689,7 +690,7 @@ fn require_value<'a>(form: &'a DataForm, var: &str) -> Result<&'a str, String> {
 /// schema identifier; a wrong value indicates either client drift or
 /// an attempt to coerce the parser with a foreign form shape.
 fn require_form_type(form: &DataForm, expected: &str) -> Result<(), String> {
-    match form.get_form_type_value() {
+    match form.form_type_value() {
         Some(value) if value == expected => Ok(()),
         Some(other) => Err(format!(
             "form FORM_TYPE='{other}' does not match expected '{expected}'"
@@ -970,10 +971,10 @@ mod tests {
             "urn:waddle:push-device:1",
         );
         assert!(matches!(form.form_type, FormType::Result));
-        assert_eq!(form.get_form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
-        assert_eq!(form.get_value(FIELD_NODE), Some("urn:waddle:push-node:abc"));
+        assert_eq!(form.form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
+        assert_eq!(form.value(FIELD_NODE), Some("urn:waddle:push-node:abc"));
         assert_eq!(
-            form.get_value(FIELD_DEVICE_ID),
+            form.value(FIELD_DEVICE_ID),
             Some("urn:waddle:push-device:1")
         );
     }
@@ -990,7 +991,7 @@ mod tests {
     fn register_device_form_prompt_carries_form_type_and_required_fields() {
         let form = build_register_device_form_prompt();
         assert!(matches!(form.form_type, FormType::Form));
-        assert_eq!(form.get_form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
+        assert_eq!(form.form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
         for var in [
             FIELD_PLATFORM,
             FIELD_ENVIRONMENT,
@@ -1014,7 +1015,7 @@ mod tests {
     fn disable_device_form_prompt_carries_node_and_device_id_fields() {
         let form = build_disable_device_form_prompt();
         assert!(matches!(form.form_type, FormType::Form));
-        assert_eq!(form.get_form_type_value(), Some(DISABLE_DEVICE_FORM_TYPE));
+        assert_eq!(form.form_type_value(), Some(DISABLE_DEVICE_FORM_TYPE));
         assert!(form.field(FIELD_NODE).is_some());
         assert!(form.field(FIELD_DEVICE_ID).is_some());
     }

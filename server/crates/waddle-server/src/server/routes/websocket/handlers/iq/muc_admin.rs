@@ -1,9 +1,21 @@
-use super::*;
+use super::{
+    bad_request_iq_error, build_admin_result, build_admin_set_result, build_iq_error_xml_typed,
+    build_iq_error_xml_with_payload, build_role_result, build_xmpp_error_response,
+    conflict_iq_error, forbidden_iq_error, get_room_actor_result, internal_server_error_iq_error,
+    iq_to_xml, is_role_change_query, item_not_found_iq_error, not_allowed_iq_error,
+    not_authorized_iq_error, parse_admin_query, response_batch_from_inline_room_effect_frames,
+    stanza_to_xml, warn, AdminItem, Affiliation, ApplyAdminItems, BareJid, FullJid,
+    GetAdminContext, GetSnapshot, Jid, Object, ObjectType, Relation, ResponseBatch, Stanza,
+    Subject, WebSocketState,
+};
 use crate::admin::channels::{
     acquire_room_config_lock, explicit_channel_affiliations_for_jids, reacquire_config_actor,
 };
 use crate::permissions::{ExclusiveRelationSwap, ReplaceExclusiveRelation, SwapExclusiveRelation};
+use crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary;
+use crate::room_effect_outbox::RoomEffectOutboxError;
 use crate::server::routes::websocket::handlers::iq::errors::resource_constraint_iq_error;
+use std::collections::BTreeMap;
 
 /// Upper bound on the mutating room-actor asks below. The room actor
 /// awaits the durable-membership source inside its affiliation
@@ -220,10 +232,7 @@ async fn extend_batch_with_inline_room_effect_frames(
     state: &WebSocketState,
     reservation: &waddle_xmpp::muc::RoomEffectReservation,
     initiator: Option<&FullJid>,
-) -> Result<
-    crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary,
-    crate::room_effect_outbox::RoomEffectOutboxError,
-> {
+) -> Result<InlineRoomEffectDrainSummary, RoomEffectOutboxError> {
     let drained =
         crate::room_effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
             .await?;
@@ -243,15 +252,15 @@ fn affiliation_updates_match_room(
 ) -> bool {
     affiliation_updates
         .iter()
-        .all(|(jid, affiliation)| room.get_affiliation(jid) == *affiliation)
+        .all(|(jid, affiliation)| room.affiliation(jid) == *affiliation)
 }
 
 fn final_affiliation_updates(
     before: &waddle_xmpp::muc::MucRoom,
     items: &[AdminItem],
 ) -> Vec<(BareJid, Affiliation)> {
-    let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> = before
-        .get_all_affiliations()
+    let mut final_affiliations: BTreeMap<BareJid, Affiliation> = before
+        .all_affiliations()
         .into_iter()
         .map(|entry| (entry.jid, entry.affiliation))
         .collect();
@@ -272,7 +281,7 @@ fn final_affiliation_updates(
     touched_jids
         .into_iter()
         .filter_map(|jid| {
-            let current = before.get_affiliation(&jid);
+            let current = before.affiliation(&jid);
             let final_affiliation = final_affiliations
                 .get(&jid)
                 .copied()
@@ -291,18 +300,16 @@ fn role_updates_match_room(
         let (Some(target_nick), Some(new_role)) = (item.nick.as_ref(), item.role) else {
             return false;
         };
-        let Some(before_occupant) = before.get_occupant(target_nick) else {
+        let Some(before_occupant) = before.occupant(target_nick) else {
             return false;
         };
         match new_role {
-            waddle_xmpp::Role::None => after.get_occupant(target_nick).is_none(),
-            _ => after
-                .get_occupant(target_nick)
-                .is_some_and(|after_occupant| {
-                    after_occupant.real_jid == before_occupant.real_jid
-                        && after_occupant.affiliation == before_occupant.affiliation
-                        && after_occupant.role == new_role
-                }),
+            waddle_xmpp::Role::None => after.occupant(target_nick).is_none(),
+            _ => after.occupant(target_nick).is_some_and(|after_occupant| {
+                after_occupant.real_jid == before_occupant.real_jid
+                    && after_occupant.affiliation == before_occupant.affiliation
+                    && after_occupant.role == new_role
+            }),
         }
     })
 }
@@ -394,10 +401,7 @@ async fn recover_committed_admin_effects_after_ambiguity(
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
-) -> Result<
-    (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
-    crate::room_effect_outbox::RoomEffectOutboxError,
-> {
+) -> Result<(waddle_xmpp::muc::room_actor::AdminItemsApplied, bool), RoomEffectOutboxError> {
     let mut applied = recover_committed_admin_effects(
         room,
         items,
@@ -634,7 +638,7 @@ async fn recover_admin_result_after_actor_failure(
 fn all_room_sessions(room: &waddle_xmpp::muc::MucRoom) -> Vec<FullJid> {
     room.occupants
         .values()
-        .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+        .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
         .collect()
 }
 
@@ -658,7 +662,7 @@ fn session_voices(
         .into_iter()
         .flat_map(|occupant| {
             let voice = occupant.role.voice(moderation);
-            room.get_occupant_sessions(&occupant.nick)
+            room.occupant_sessions(&occupant.nick)
                 .into_iter()
                 .map(move |session| (session, voice))
         })
@@ -669,10 +673,8 @@ fn changed_session_voices(
     before: &[(FullJid, waddle_xmpp::Voice)],
     after: &[(FullJid, waddle_xmpp::Voice)],
 ) -> Vec<(FullJid, waddle_xmpp::Voice)> {
-    let before_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
-        before.iter().cloned().collect();
-    let after_map: std::collections::BTreeMap<FullJid, waddle_xmpp::Voice> =
-        after.iter().cloned().collect();
+    let before_map: BTreeMap<FullJid, waddle_xmpp::Voice> = before.iter().cloned().collect();
+    let after_map: BTreeMap<FullJid, waddle_xmpp::Voice> = after.iter().cloned().collect();
     after_map
         .into_iter()
         .filter(|(session, voice)| before_map.get(session) != Some(voice))
@@ -719,7 +721,7 @@ fn replay_affiliation_change_from_snapshot(
         let mut presence_updates = Vec::new();
         let mut removed_by_moderation = Vec::new();
         for occupant in &affected_occupants {
-            let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+            let removed_sessions = room.occupant_sessions(&occupant.nick);
             let occupant_bare = occupant.real_jid.to_bare();
             if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
                 presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
@@ -758,10 +760,10 @@ fn replay_affiliation_change_from_snapshot(
         let mut presence_updates = Vec::new();
         let removed_by_moderation: Vec<FullJid> = affected_occupants
             .iter()
-            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
             .collect();
         for occupant in &affected_occupants {
-            let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+            let removed_sessions = room.occupant_sessions(&occupant.nick);
             let occupant_bare = occupant.real_jid.to_bare();
             if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
                 presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
@@ -797,7 +799,7 @@ fn replay_affiliation_change_from_snapshot(
 
     let mut presence_updates = Vec::new();
     for occupant in &affected_occupants {
-        let affected_sessions = room.get_occupant_sessions(&occupant.nick);
+        let affected_sessions = room.occupant_sessions(&occupant.nick);
         let occupant_bare = occupant.real_jid.to_bare();
         if let Some(from_room_jid) = occupant_room_jid(room, &occupant.nick) {
             presence_updates.extend(all_room_sessions(room).into_iter().map(|recipient| {
@@ -838,11 +840,11 @@ fn replay_role_change_from_snapshot(
     actor: &BareJid,
     reason: Option<&str>,
 ) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
-    let Some(target_occupant) = room.get_occupant(target_nick).cloned() else {
+    let Some(target_occupant) = room.occupant(target_nick).cloned() else {
         return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
     };
     let target_bare = target_occupant.real_jid.to_bare();
-    let target_sessions = room.get_occupant_sessions(target_nick);
+    let target_sessions = room.occupant_sessions(target_nick);
     if new_role == waddle_xmpp::Role::None {
         let mut presence_updates = Vec::new();
         if let Some(from_room_jid) = occupant_room_jid(room, target_nick) {
@@ -1105,13 +1107,13 @@ pub(super) async fn answer_admin_list_get(
     let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
     AdminListAnswer::Affiliations(if let Some(affiliation) = affiliation_filter {
         snapshot
-            .get_jids_by_affiliation(affiliation)
+            .jids_by_affiliation(affiliation)
             .into_iter()
             .map(|jid| (jid, affiliation))
             .collect()
     } else {
         snapshot
-            .get_all_affiliations()
+            .all_affiliations()
             .into_iter()
             .map(|entry| (entry.jid, entry.affiliation))
             .collect()
@@ -1259,17 +1261,14 @@ pub(super) async fn handle_muc_admin_iq(
             .await
         {
             Ok(snapshot) => {
-                let mut final_affiliations: std::collections::BTreeMap<BareJid, Affiliation> =
-                    snapshot
-                        .room
-                        .get_all_affiliations()
-                        .into_iter()
-                        .map(|entry| (entry.jid, entry.affiliation))
-                        .collect();
-                let current_owner_count = snapshot
+                let mut final_affiliations: BTreeMap<BareJid, Affiliation> = snapshot
                     .room
-                    .get_jids_by_affiliation(Affiliation::Owner)
-                    .len();
+                    .all_affiliations()
+                    .into_iter()
+                    .map(|entry| (entry.jid, entry.affiliation))
+                    .collect();
+                let current_owner_count =
+                    snapshot.room.jids_by_affiliation(Affiliation::Owner).len();
                 for (jid, affiliation) in &affiliation_updates {
                     if *affiliation == Affiliation::Owner
                         && context.affiliation != Affiliation::Owner
@@ -1291,7 +1290,7 @@ pub(super) async fn handle_muc_admin_iq(
                         )]
                         .into();
                     }
-                    let previous_affiliation = snapshot.room.get_affiliation(jid);
+                    let previous_affiliation = snapshot.room.affiliation(jid);
                     if *affiliation != Affiliation::Owner
                         && previous_affiliation == Affiliation::Owner
                         && context.affiliation == Affiliation::Admin
@@ -1897,12 +1896,12 @@ mod tests {
     };
 
     fn test_secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
+        OccupantIdSecret::try_new(b"occupant-id-secret-at-least-32-bytes".to_vec())
             .expect("test secret meets minimum length")
     }
 
     fn test_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
-        crate::room_effect_outbox::RoomEffectOriginInstanceId::new("origin-instance".to_owned())
+        crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new("origin-instance".to_owned())
             .expect("origin instance")
     }
 
@@ -1979,7 +1978,8 @@ mod tests {
             .first()
             .expect("self-kick reservation needs at least one session")
             .to_bare();
-        let nick = waddle_xmpp::muc::MucOccupantNick::new("owner".to_owned()).expect("owner nick");
+        let nick =
+            waddle_xmpp::muc::MucOccupantNick::try_new("owner".to_owned()).expect("owner nick");
         let effects = waddle_xmpp::muc::RoomMutationEffects::admin(
             room_jid.clone(),
             sessions

@@ -3,7 +3,9 @@
 //! fastening ahead of its target. Each case reproduces a defect found in
 //! review of the first version of this store.
 
-use waddle_client_session::*;
+use waddle_client_session::{
+    Delivery, HistoryPage, IncomingMessage, LocalEcho, ReactionUpdate, Timeline, TimelineDiff,
+};
 
 /// A DM archive row as session.rs::archived_from builds it.
 fn dm(mam: &str, origin: &str, own: bool, body: &str, at: i64) -> IncomingMessage {
@@ -57,12 +59,12 @@ fn dm_decoy_swallows_my_held_retraction() {
             },
         ],
         Some("m5".into()),
-        false,
+        HistoryPage::Partial,
     );
     t.apply_history_page(
         vec![dm("m1", "X", true, "my secret", 1)],
         Some("m1".into()),
-        true,
+        HistoryPage::Complete,
     );
     let mine = t.items().iter().find(|i| i.own).expect("my row");
     assert!(mine.retracted, "my retraction was lost: {mine:?}");
@@ -80,12 +82,12 @@ fn dm_decoy_swallows_my_held_correction() {
             },
         ],
         Some("m5".into()),
-        false,
+        HistoryPage::Partial,
     );
     t.apply_history_page(
         vec![dm("m1", "X", true, "fxied", 1)],
         Some("m1".into()),
-        true,
+        HistoryPage::Complete,
     );
     let mine = t.items().iter().find(|i| i.own).expect("my row");
     assert_eq!(mine.body, "fixed");
@@ -112,7 +114,7 @@ fn dm_decoy_also_shows_reactions_to_my_message() {
             },
         ],
         Some("m1".into()),
-        true,
+        HistoryPage::Complete,
     );
     let decoy = t.items().iter().find(|i| !i.own).expect("decoy");
     assert!(
@@ -143,7 +145,7 @@ fn nick_retaker_overwrites_held_retraction() {
             },
         ],
         Some("S2".into()),
-        false,
+        HistoryPage::Partial,
     );
     t.apply_history_page(
         vec![room(
@@ -155,7 +157,7 @@ fn nick_retaker_overwrites_held_retraction() {
             1,
         )],
         Some("S1".into()),
-        true,
+        HistoryPage::Complete,
     );
     assert!(
         t.items()[0].retracted,
@@ -179,12 +181,12 @@ fn nick_retaker_overwrites_held_correction() {
             },
         ],
         Some("S2".into()),
-        false,
+        HistoryPage::Partial,
     );
     t.apply_history_page(
         vec![room("S1", "ob1", "bob", "bob@w.s", "meet at 1pm", 1)],
         Some("S1".into()),
-        true,
+        HistoryPage::Complete,
     );
     assert_eq!(t.items()[0].body, "meet at 3pm");
 }
@@ -205,7 +207,7 @@ fn same_sender_reused_message_id_with_distinct_stanza_ids_drops_one() {
         message_id: Some("1".into()),
         ..room("S2", "x", "bot", "bot@w.s", "two", 2)
     };
-    t.apply_history_page(vec![a], Some("S1".into()), false);
+    t.apply_history_page(vec![a], Some("S1".into()), HistoryPage::Partial);
     t.apply_live(b);
     assert_eq!(t.items().len(), 2);
 }
@@ -236,7 +238,7 @@ fn echo_reflection_survives_reindex() {
     t.apply_history_page(
         vec![room("S0", "o0", "ann", "ann@w.s", "earlier", 1)],
         Some("S0".into()),
-        false,
+        HistoryPage::Partial,
     );
     let d = t.apply_history_page(
         vec![IncomingMessage {
@@ -244,7 +246,7 @@ fn echo_reflection_survives_reindex() {
             ..room("S9", "o1", "david", "david@w.s", "hi", 11)
         }],
         None,
-        true,
+        HistoryPage::Complete,
     );
     assert!(d.is_empty(), "{d:?}");
     assert_eq!(t.items().len(), 2);
@@ -295,12 +297,12 @@ fn dm_decoy_keeps_reaction_after_real_target_pages_in() {
             },
         ],
         Some("m5".into()),
-        false,
+        HistoryPage::Partial,
     );
     t.apply_history_page(
         vec![dm("m1", "X", true, "mine", 1)],
         Some("m1".into()),
-        true,
+        HistoryPage::Complete,
     );
     let counts: Vec<(bool, usize)> = t
         .items()

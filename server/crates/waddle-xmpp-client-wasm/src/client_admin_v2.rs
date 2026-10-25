@@ -47,7 +47,10 @@ use waddle_xmpp_client::admin_commands::{
     AdminSpacesSetRoleArgs, AdminSpacesUpdateArgs,
 };
 
-use super::*;
+use super::{
+    future_to_promise, jid_domain, js_error, send_iq_command, to_js_value, wasm_bindgen, JsValue,
+    Promise, Rc, RefCell, WaddleClient, WaddleClientInner,
+};
 
 fn caller_domain(inner: &Rc<RefCell<WaddleClientInner>>) -> String {
     let stored = inner.borrow().config.clone();
@@ -90,6 +93,10 @@ macro_rules! admin_v2_delete {
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// List spaces with optional prefix filtering and pagination.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesListArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_list(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -100,6 +107,10 @@ impl WaddleClient {
         )
     }
 
+    /// Create a space with a name and optional description or icon.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesCreateArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_create(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -110,6 +121,10 @@ impl WaddleClient {
         )
     }
 
+    /// Update an existing space's name, description, or icon.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesUpdateArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_update(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -120,6 +135,10 @@ impl WaddleClient {
         )
     }
 
+    /// Delete a space and its channels; resolves to `true` after acknowledgement.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesDeleteArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_delete(&self, args: JsValue) -> Promise {
         admin_v2_delete!(
             self,
@@ -129,6 +148,10 @@ impl WaddleClient {
         )
     }
 
+    /// List a space's roster members with pagination.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesMembersArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_members(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -139,6 +162,10 @@ impl WaddleClient {
         )
     }
 
+    /// Set a space member's role to owner, admin, member, or none.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminSpacesSetRoleArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_spaces_set_role(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -149,6 +176,10 @@ impl WaddleClient {
         )
     }
 
+    /// List channels with optional space filtering and pagination.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsListArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_list(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -159,6 +190,10 @@ impl WaddleClient {
         )
     }
 
+    /// Create a channel with optional topic, parent space, and visibility policy.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsCreateArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_create(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -169,6 +204,10 @@ impl WaddleClient {
         )
     }
 
+    /// Update a channel's name, topic, or visibility policy.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsUpdateArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_update(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -179,6 +218,10 @@ impl WaddleClient {
         )
     }
 
+    /// Destroy a channel's MUC room; resolves to `true` after acknowledgement.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsDeleteArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_delete(&self, args: JsValue) -> Promise {
         admin_v2_delete!(
             self,
@@ -188,6 +231,10 @@ impl WaddleClient {
         )
     }
 
+    /// Fetch the live occupant snapshot of a channel.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsOccupantsArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_occupants(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -198,6 +245,10 @@ impl WaddleClient {
         )
     }
 
+    /// Fetch a channel's persistent affiliations, optionally filtered by tier.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsAffiliationsArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_affiliations(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -208,6 +259,11 @@ impl WaddleClient {
         )
     }
 
+    /// Set a channel member's persistent MUC affiliation.
+    ///
+    /// `args` has the shape of
+    /// `waddle_xmpp_client::admin_commands::AdminChannelsSetAffiliationArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_set_affiliation(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,
@@ -218,6 +274,10 @@ impl WaddleClient {
         )
     }
 
+    /// Remove an occupant from a channel by setting their room role to none.
+    ///
+    /// `args` has the shape of `waddle_xmpp_client::admin_commands::AdminChannelsKickArgs`.
+    /// The Promise rejects malformed arguments, refused commands, or invalid replies.
     pub fn admin_channels_kick(&self, args: JsValue) -> Promise {
         admin_v2_command!(
             self,

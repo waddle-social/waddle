@@ -459,10 +459,8 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     /// Get detailed information about the canonical space.
-    async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
-        Ok(Some(super::xmpp_space_state::get_space_details(
-            &self.domain,
-        )))
+    async fn space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
+        Ok(Some(super::xmpp_space_state::space_details(&self.domain)))
     }
 }
 

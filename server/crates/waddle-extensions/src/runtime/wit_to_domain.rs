@@ -1,3 +1,8 @@
+//! Validation of component responses, effects, and payloads at the host boundary.
+
+use crate::types::InvocationUsage;
+use crate::types::ModelId;
+use crate::types::ProviderId;
 use anyhow::Result;
 
 use super::exports::waddle::extension as wit_exports;
@@ -148,7 +153,7 @@ impl TryFrom<wit_types::PayloadRoot> for PayloadRoot {
     type Error = anyhow::Error;
 
     fn try_from(value: wit_types::PayloadRoot) -> Result<Self> {
-        PayloadRoot::new(
+        PayloadRoot::try_new(
             wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
             value.local_name,
         )
@@ -279,12 +284,12 @@ impl From<wit_types::ExtensionCapability> for ExtensionCapability {
     }
 }
 
-impl TryFrom<wit_types::InvocationUsage> for crate::types::InvocationUsage {
+impl TryFrom<wit_types::InvocationUsage> for InvocationUsage {
     type Error = anyhow::Error;
     fn try_from(value: wit_types::InvocationUsage) -> Result<Self> {
         Ok(Self {
-            provider: crate::types::ProviderId::new(value.provider.value)?,
-            model: crate::types::ModelId::new(value.model.value)?,
+            provider: ProviderId::try_new(value.provider.value)?,
+            model: ModelId::try_new(value.model.value)?,
             cost_micro_usd: value.cost_micro_usd,
         })
     }

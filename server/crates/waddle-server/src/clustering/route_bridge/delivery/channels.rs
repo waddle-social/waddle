@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    Arc, Mutex, NackChannelAction, OrderedRelayChannel, OrderedRelayDeliveryBridge,
+    OrderedRelayDiversion, OrderedRelayDiversionReason, OrderedRelayOriginProof,
+    RemoteStanzaEnvelope, MAX_ORDERED_RELAY_CHANNEL_LOCKS,
+};
 
 impl OrderedRelayDeliveryBridge {
     pub(in super::super) async fn lock_for_channel(

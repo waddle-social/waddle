@@ -9,6 +9,7 @@ use super::publish_jobs::{
 };
 use super::store::{lock_node_tx, lock_owner_tx};
 use super::DatabasePushServiceStore;
+use crate::db::DatabaseDriver;
 use waddle_xmpp::XmppError;
 
 impl DatabasePushServiceStore {
@@ -22,7 +23,7 @@ impl DatabasePushServiceStore {
         let now_ms = crate::time::now_ms();
         let mut tx = self.db.begin_immediate().await.map_err(internal)?;
         let pending = pending_notification_custody_sql(&mut tx).await?;
-        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE SKIP LOCKED"
         } else {
             ""

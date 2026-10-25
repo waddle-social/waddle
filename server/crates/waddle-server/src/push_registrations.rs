@@ -5,6 +5,10 @@
 //! behind the XMPP Push Service boundary, not in the user-server registration
 //! table.
 
+use crate::db::DatabaseDriver;
+use crate::db::Row;
+use crate::db::Rows;
+use crate::db::Transaction;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -41,7 +45,7 @@ pub struct DatabasePushRegistrationStore {
 }
 
 impl DatabasePushRegistrationStore {
-    pub async fn new(db: Database) -> Result<Self, PushError> {
+    pub async fn try_new(db: Database) -> Result<Self, PushError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
@@ -90,11 +94,7 @@ impl DatabasePushRegistrationStore {
             .map_err(|error| PushError::StorageError(error.to_string()))
     }
 
-    async fn query(
-        &self,
-        sql: &str,
-        params: impl IntoParams,
-    ) -> Result<crate::db::Rows, PushError> {
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, PushError> {
         let conn = self
             .db
             .guard()
@@ -177,7 +177,7 @@ impl PushSubscriptionStore for DatabasePushRegistrationStore {
 }
 
 pub(crate) async fn register_subscription_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     sub: &PushSubscription,
 ) -> Result<(), PushError> {
     if sub
@@ -241,7 +241,7 @@ pub(crate) async fn register_subscription_tx(
 /// returning the row and no further candidates enqueue. Returns the
 /// number of rows transitioned (0 = already disabled or unknown).
 pub(crate) async fn disable_registration_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &jid::BareJid,
     service_jid: &jid::BareJid,
     node: &str,
@@ -274,7 +274,7 @@ pub(crate) async fn disable_registration_tx(
 /// this in the caller's transaction with credential erasure and custody release.
 /// Standalone push-service stores need not have a user-server registration table.
 pub(crate) async fn disable_node_registrations_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner: &jid::BareJid,
     service: &jid::BareJid,
     node: Option<&str>,
@@ -289,9 +289,9 @@ pub(crate) async fn disable_node_registrations_tx(
 }
 
 pub(crate) async fn registration_table_exists_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
 ) -> Result<bool, PushError> {
-    let probe = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+    let probe = if tx.driver() == DatabaseDriver::Postgres {
         "SELECT 1 WHERE to_regclass('push_registrations') IS NOT NULL"
     } else {
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_registrations'"
@@ -309,7 +309,7 @@ pub(crate) async fn registration_table_exists_tx(
 }
 
 pub(crate) async fn registered_nodes_for_disable_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &jid::BareJid,
     service_jid: &str,
     node: Option<&str>,
@@ -354,7 +354,7 @@ pub(crate) async fn registered_nodes_for_disable_tx(
 }
 
 pub(crate) async fn remove_subscription_tx(
-    tx: &mut crate::db::Transaction<'_>,
+    tx: &mut Transaction<'_>,
     owner_bare_jid: &jid::BareJid,
     service_jid: &str,
     node: Option<&str>,
@@ -405,7 +405,7 @@ pub(crate) fn publish_options_contains_provider_credentials(form: &Element) -> b
         })
 }
 
-fn decode_registration(row: &crate::db::Row) -> Result<PushSubscription, PushError> {
+fn decode_registration(row: &Row) -> Result<PushSubscription, PushError> {
     let user_jid: String = row
         .get(0)
         .map_err(|error| PushError::StorageError(error.to_string()))?;
@@ -511,7 +511,7 @@ mod tests {
     }
 
     async fn memory_store() -> DatabasePushRegistrationStore {
-        DatabasePushRegistrationStore::new(
+        DatabasePushRegistrationStore::try_new(
             Database::in_memory("push-registrations")
                 .await
                 .expect("database"),
@@ -640,7 +640,9 @@ mod tests {
             let db = Database::open_local("push-restart", &path)
                 .await
                 .expect("database");
-            let store = DatabasePushRegistrationStore::new(db).await.expect("store");
+            let store = DatabasePushRegistrationStore::try_new(db)
+                .await
+                .expect("store");
             store
                 .register(registration(
                     "alice@example.com",
@@ -655,7 +657,7 @@ mod tests {
         let reopened_db = Database::open_local("push-restart-reopened", &path)
             .await
             .expect("reopened database");
-        let reopened = DatabasePushRegistrationStore::new(reopened_db)
+        let reopened = DatabasePushRegistrationStore::try_new(reopened_db)
             .await
             .expect("reopened store");
         let registrations = reopened

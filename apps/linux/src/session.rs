@@ -25,8 +25,9 @@ use waddle_client_session::{
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
     WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleFallbackRange, WaddleInboxEntry, WaddleMentionDirectory, WaddleMentionTarget,
-    WaddleMessage, WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
+    WaddleFallbackRange, WaddleInboxEntry, WaddleInboxMessageContent, WaddleInboxReadFilter,
+    WaddleMentionDirectory, WaddleMentionTarget, WaddleMessage, WaddleMessageAudience,
+    WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
     WaddleSharedFile, WaddleStanzaId, WaddleStickerHash, WaddleTopology, WaddleUserSearchEntry,
 };
 
@@ -46,8 +47,11 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn is_muc(self) -> bool {
-        self == Self::Room
+    fn audience(self) -> WaddleMessageAudience {
+        match self {
+            Self::Room => WaddleMessageAudience::Muc,
+            Self::Direct => WaddleMessageAudience::Direct,
+        }
     }
 }
 
@@ -259,7 +263,13 @@ impl Session {
     /// XEP-0430 inbox: every conversation with its unread count.
     pub async fn inbox(&self) -> Vec<WaddleInboxEntry> {
         let client = Arc::clone(&self.client);
-        match runtime::spawn(async move { client.fetch_inbox(false, true).await }).await {
+        match runtime::spawn(async move {
+            client
+                .fetch_inbox(WaddleInboxReadFilter::All, WaddleInboxMessageContent::Omit)
+                .await
+        })
+        .await
+        {
             Ok(Ok(inbox)) => inbox.conversations,
             Ok(Err(error)) => {
                 tracing::warn!(?error, "could not fetch the inbox");
@@ -442,7 +452,7 @@ impl Session {
         let peer = jid.to_string();
         runtime::spawn(async move {
             client
-                .send_reaction(peer, target, emojis, kind.is_muc())
+                .send_reaction(peer, target, emojis, kind.audience())
                 .await
         })
         .await
@@ -467,7 +477,7 @@ impl Session {
         let peer = jid.to_string();
         let outcome = runtime::spawn(async move {
             client
-                .send_correction(peer, correction_id, body, kind.is_muc(), Some(options))
+                .send_correction(peer, correction_id, body, kind.audience(), Some(options))
                 .await
         })
         .await;
@@ -495,7 +505,7 @@ impl Session {
         let peer = jid.to_string();
         runtime::spawn(async move {
             client
-                .send_retraction(peer, reference_id, kind.is_muc())
+                .send_retraction(peer, reference_id, kind.audience())
                 .await
         })
         .await

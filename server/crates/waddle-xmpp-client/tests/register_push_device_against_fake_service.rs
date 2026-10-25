@@ -65,8 +65,8 @@ async fn register_test_device(
     environment: PushEnvironment,
     credentials: &PushDeviceCredentials,
 ) -> ClientResult<RegisterDeviceResult> {
-    let push_service_jid = PushServiceJid::new("push.example.com")?;
-    let app_id = PushAppId::new(app_id)?;
+    let push_service_jid = PushServiceJid::try_new("push.example.com")?;
+    let app_id = PushAppId::try_new(app_id)?;
     register_push_device(driver, &push_service_jid, &app_id, environment, credentials).await
 }
 

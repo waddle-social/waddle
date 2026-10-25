@@ -199,7 +199,7 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    pub fn new(providers: Vec<AuthProviderConfig>) -> Result<Self, AuthError> {
+    pub fn try_new(providers: Vec<AuthProviderConfig>) -> Result<Self, AuthError> {
         let mut seen = HashSet::new();
         let mut map = HashMap::new();
 
@@ -365,14 +365,16 @@ mod tests {
     #[test]
     fn registry_rejects_duplicate_provider_ids() {
         let providers = vec![oidc_provider(), oidc_provider()];
-        let err = ProviderRegistry::new(providers).unwrap_err().to_string();
+        let err = ProviderRegistry::try_new(providers)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("duplicate provider id"));
     }
 
     #[test]
     fn registry_accepts_valid_mixed_providers() {
         let providers = vec![oidc_provider(), oauth2_provider()];
-        let registry = ProviderRegistry::new(providers).expect("registry should build");
+        let registry = ProviderRegistry::try_new(providers).expect("registry should build");
         assert!(!registry.is_empty());
         assert_eq!(registry.list().len(), 2);
         assert!(registry.get("google").is_some());

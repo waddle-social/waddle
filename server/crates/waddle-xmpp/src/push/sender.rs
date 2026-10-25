@@ -332,7 +332,7 @@ mod tests {
 
     fn dummy_jwt() -> VapidJwt {
         // Three-segment ASCII string; jsonwebtoken doesn't validate here.
-        VapidJwt::new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2V4Lm9yZyJ9.sig").expect("jwt")
+        VapidJwt::try_new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2V4Lm9yZyJ9.sig").expect("jwt")
     }
 
     fn _ensure_arc_authsecret_compiles() {
@@ -460,7 +460,7 @@ mod tests {
         let sender = HttpWebPushSender::new();
         let jwt = dummy_jwt();
         let p = payload();
-        let topic = PushTopic::new("d-test").ok();
+        let topic = PushTopic::try_new("d-test").ok();
         let outcome = sender
             .send(WebPushRequest {
                 endpoint: &url,
@@ -868,7 +868,7 @@ mod tests {
         let sender = HttpWebPushSender::new();
         let jwt = dummy_jwt();
         let p = payload();
-        let topic = PushTopic::new("d-fingerprint").expect("topic");
+        let topic = PushTopic::try_new("d-fingerprint").expect("topic");
         let outcome = sender
             .send(WebPushRequest {
                 endpoint: &url,

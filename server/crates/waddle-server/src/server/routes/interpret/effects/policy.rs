@@ -1,3 +1,5 @@
+use crate::server::routes::websocket::muc_invites::OutstandingInvite;
+use crate::server::routes::websocket::DmPairKey;
 use jid::BareJid;
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -6,7 +8,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 pub enum PlanEffectDependency {
     /// Execute only after this pin mutation reports `Completed`.
     AfterDmPinMutation {
-        pair: crate::server::routes::websocket::DmPairKey,
+        pair: DmPairKey,
         target: StanzaId,
     },
     /// The room actor must confirm this exact pin state change.
@@ -26,7 +28,7 @@ pub enum PlanEffectDependency {
     /// Execute only for a newly recorded invite or a successful claim.
     /// `AlreadyOutstanding` and `Claimed(false)` suppress dependent delivery.
     AfterInviteLedger {
-        invite: crate::server::routes::websocket::muc_invites::OutstandingInvite,
+        invite: OutstandingInvite,
     },
     AfterArchive {
         archive: BareJid,

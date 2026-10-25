@@ -1,4 +1,12 @@
-use super::*;
+use super::{
+    execute_effects, Arc, ConnectionRegistry, DatabasePendingDeliveryStorage, Deps, Duration,
+    Effect, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, ImmediateSink,
+    IngressDecision, IngressEffectIntent, IngressFixture, IngressSubmission,
+    NotificationActivityMutation, NotificationCandidate, NotificationCandidateOutcome,
+    NotificationOutboxStore, PendingDeliveryMutation, PendingDeliveryStorage, PendingPayload,
+    PendingRow, PendingRowId, PlanSuppressionPolicy, PlannedEffect, PreparedOfflineNotification,
+    QuotaPolicy, StanzaId,
+};
 
 pub(super) fn pending_plan(
     fixture: &IngressFixture,
@@ -89,7 +97,7 @@ pub(super) async fn storage(
     fixture: &IngressFixture,
     quota: QuotaPolicy,
 ) -> Arc<dyn PendingDeliveryStorage> {
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     Arc::new(

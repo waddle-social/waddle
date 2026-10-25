@@ -17,7 +17,8 @@
 //! [`build_publish_avatar_metadata_iq`] — the §3.2 data-before-metadata order
 //! is enforced by the calling boundary (FFI/wasm), which owns the IQ acks.
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use jid::BareJid;
 use minidom::Element;
 use sha1::{Digest, Sha1};
@@ -34,9 +35,13 @@ use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult};
 use tracing::warn;
 
+/// Protocol token `urn:xmpp:avatar:data`.
 pub const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+/// Protocol token `urn:xmpp:avatar:metadata`.
 pub const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+/// Protocol token `http://jabber.org/protocol/pubsub`.
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+/// Protocol token `vcard-temp`.
 pub const NS_VCARD_TEMP: &str = "vcard-temp";
 
 const NS_CLIENT: &str = "jabber:client";
@@ -54,12 +59,16 @@ pub const AVATAR_REMOVE_ITEM_ID: &str = "current";
 pub struct AvatarItemId(String);
 
 impl AvatarItemId {
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    /// Validate a 40-character hexadecimal avatar digest while preserving its original case; invalid digests return None.
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -84,8 +93,11 @@ impl std::fmt::Display for VcardPhotoId {
 /// The resolved avatar identifier, including the content-addressed vCard
 /// fallback which has no pubsub item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AvatarId {
+    /// A content-addressed avatar published through XEP-0084 PEP items.
     Item(AvatarItemId),
+    /// An in-band vCard PHOTO identified by its content hash.
     VcardPhoto(VcardPhotoId),
 }
 
@@ -105,8 +117,11 @@ pub struct AvatarInfo {
     pub id: AvatarItemId,
     /// MIME type of the image (e.g. `image/png`).
     pub mime_type: String,
+    /// Media width in pixels.
     pub width: Option<u32>,
+    /// Media height in pixels.
     pub height: Option<u32>,
+    /// Binary content of the resource.
     pub bytes: Option<u64>,
 }
 
@@ -126,15 +141,20 @@ pub struct Avatar {
 /// vCard `PHOTO` payload from XEP-0054.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VcardPhoto {
+    /// MIME media type of the referenced content.
     pub mime_type: Option<String>,
+    /// Content carried by the request or response.
     pub data: Option<Vec<u8>>,
 }
 
 /// Error classification for request flows that distinguish stanza-level
 /// "not available" failures from transport/runtime failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AvatarRequestFailure<E> {
+    /// The peer returned an XMPP stanza-level error.
     StanzaError,
+    /// A non-definitive fetch failure that should be reported to the caller.
     Other(E),
 }
 
@@ -144,6 +164,7 @@ impl<E> AvatarRequestFailure<E> {
     /// avatar. Transient ones (`type='wait'`, unreachable or failing
     /// remote server) are failures, so callers keep the avatar they
     /// already show instead of clearing it.
+    #[must_use]
     pub fn from_stanza_error(error: StanzaError, transient: impl FnOnce(StanzaError) -> E) -> Self {
         let is_transient = matches!(error.error_type, StanzaErrorType::Wait)
             || matches!(
@@ -170,10 +191,10 @@ pub struct AvatarChanged {
     /// its avatar. Retract-only notifications do not produce this event.
     pub avatar_id: Option<AvatarItemId>,
 }
-
 // ── IQ builders ──────────────────────────────────────────────────────────────
 
 /// Build a pubsub `items` IQ requesting the latest avatar metadata item.
+#[must_use]
 pub fn build_metadata_request_iq(to: &BareJid) -> Element {
     let id = format!("avatar-meta-{}", Uuid::new_v4());
     let items = Element::builder("items", NS_PUBSUB)
@@ -195,6 +216,7 @@ pub fn build_metadata_request_iq(to: &BareJid) -> Element {
 }
 
 /// Build a pubsub `items` IQ requesting a specific avatar-data item by id.
+#[must_use]
 pub fn build_data_request_iq(to: &BareJid, item_id: &AvatarItemId) -> Element {
     let id = format!("avatar-data-{}", Uuid::new_v4());
     let item = Element::builder("item", NS_PUBSUB)
@@ -222,6 +244,7 @@ pub fn build_data_request_iq(to: &BareJid, item_id: &AvatarItemId) -> Element {
 }
 
 /// Build a vCard request IQ for XEP-0054 `PHOTO` fallback.
+#[must_use]
 pub fn build_vcard_request_iq(to: &BareJid) -> Element {
     let id = format!("avatar-vcard-{}", Uuid::new_v4());
     let vcard = Element::builder("vCard", NS_VCARD_TEMP).build();
@@ -248,12 +271,15 @@ pub struct AvatarPublishInfo {
     pub id: AvatarItemId,
     /// MIME type, e.g. `image/png` (REQUIRED).
     pub mime_type: String,
+    /// Media width in pixels.
     pub width: Option<u32>,
+    /// Media height in pixels.
     pub height: Option<u32>,
 }
 
 /// Compute the XEP-0084 §3.1 pubsub item id: the SHA-1 hash of the raw
 /// image bytes, lowercase hex-encoded.
+#[must_use]
 pub fn compute_avatar_item_id(data: &[u8]) -> AvatarItemId {
     AvatarItemId(sha1_hex(data))
 }
@@ -274,6 +300,7 @@ fn sha1_hex(data: &[u8]) -> String {
 /// Build the §3.2 avatar-data publish IQ: `<data/>` carries the RFC 4648
 /// §4 base64 of the raw image bytes, published at `item_id` (the SHA-1
 /// hex of those bytes, from [`compute_avatar_item_id`]).
+#[must_use]
 pub fn build_publish_avatar_data_iq(item_id: &AvatarItemId, data: &[u8]) -> Element {
     let id = format!("avatar-publish-data-{}", Uuid::new_v4());
     let payload = Element::builder("data", NS_AVATAR_DATA)
@@ -285,6 +312,7 @@ pub fn build_publish_avatar_data_iq(item_id: &AvatarItemId, data: &[u8]) -> Elem
 /// Build the §3.3 avatar-metadata publish IQ: `<metadata><info/></metadata>`
 /// with the REQUIRED `bytes`/`id`/`type` attributes plus `width`/`height`
 /// when known, published at the same SHA-1 item id as the data item.
+#[must_use]
 pub fn build_publish_avatar_metadata_iq(info: &AvatarPublishInfo) -> Element {
     let id = format!("avatar-publish-meta-{}", Uuid::new_v4());
     let mut info_builder = Element::builder("info", NS_AVATAR_METADATA)
@@ -320,6 +348,7 @@ pub fn build_publish_avatar_metadata_iq(info: &AvatarPublishInfo) -> Element {
 
 /// Build the §4.3 "no avatar" IQ: publish an EMPTY `<metadata/>` at the
 /// fixed [`AVATAR_REMOVE_ITEM_ID`] so subscribers drop their cached avatar.
+#[must_use]
 pub fn build_disable_avatar_iq() -> Element {
     let id = format!("avatar-disable-{}", Uuid::new_v4());
     let payload = Element::builder("metadata", NS_AVATAR_METADATA).build();
@@ -330,6 +359,7 @@ pub fn build_disable_avatar_iq() -> Element {
 
 /// Parse a pubsub-items IQ result carrying an avatar-metadata payload.
 /// Returns `None` if the node is empty (no avatar published).
+#[must_use]
 pub fn parse_metadata_response(iq: &Element) -> Option<AvatarInfo> {
     let pubsub = iq.get_child("pubsub", NS_PUBSUB)?;
     let items = pubsub.get_child("items", NS_PUBSUB)?;
@@ -362,6 +392,7 @@ fn is_empty_metadata(metadata: &Element) -> bool {
 /// XEP-0084 metadata is a singleton node in normal operation. Only an
 /// empty `<metadata/>` means the peer disabled its avatar; a retract-only
 /// notification produces no event.
+#[must_use]
 pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
     if event.node != NS_AVATAR_METADATA {
         return None;
@@ -399,7 +430,7 @@ pub fn parse_metadata_event(event: &PubsubEvent) -> Option<AvatarChanged> {
 fn metadata_avatar_id(metadata: &Element) -> Option<AvatarItemId> {
     let mut external_id = None;
     for info in metadata_info_elements(metadata) {
-        let Some(id) = info.attr("id").and_then(AvatarItemId::new) else {
+        let Some(id) = info.attr("id").and_then(AvatarItemId::try_new) else {
             continue;
         };
         if info.attr("url").is_none() {
@@ -419,7 +450,7 @@ fn parse_metadata_info(metadata: &Element) -> Option<AvatarInfo> {
             return None;
         }
         Some(AvatarInfo {
-            id: AvatarItemId::new(info.attr("id")?)?,
+            id: AvatarItemId::try_new(info.attr("id")?)?,
             mime_type: info.attr("type").unwrap_or("image/png").to_string(),
             width: info.attr("width").and_then(|value| value.parse().ok()),
             height: info.attr("height").and_then(|value| value.parse().ok()),
@@ -436,6 +467,7 @@ fn metadata_info_elements(metadata: &Element) -> impl Iterator<Item = &Element> 
 
 /// Parse a pubsub-items IQ result carrying an avatar-data payload.
 /// Returns the base64 text content of the `<data>` child.
+#[must_use]
 pub fn parse_data_response(iq: &Element) -> Option<String> {
     let pubsub = iq.get_child("pubsub", NS_PUBSUB)?;
     let items = pubsub.get_child("items", NS_PUBSUB)?;
@@ -453,6 +485,7 @@ pub fn parse_data_response(iq: &Element) -> Option<String> {
 }
 
 /// Parse a XEP-0054 vCard `PHOTO` fallback payload.
+#[must_use]
 pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
     let vcard = iq.get_child("vCard", NS_VCARD_TEMP)?;
     let photo = vcard.get_child("PHOTO", NS_VCARD_TEMP)?;
@@ -479,11 +512,17 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
 /// serves the bytes from its own cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvatarFetch {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: AvatarId,
+    /// Avatar metadata or immutable avatar artifact for this profile.
     pub avatar: Option<Avatar>,
 }
 
 /// Request an avatar using XEP-0084 first, then XEP-0054 vCard PHOTO fallback.
+///
+/// # Errors
+///
+/// Propagates non-stanza failures from `send_iq`. Stanza errors and invalid or unsupported avatar items are treated as absent avatars and allow fallback candidates.
 pub async fn request_avatar_with_iq<F, Fut, E>(
     jid: &BareJid,
     send_iq: F,
@@ -503,6 +542,10 @@ where
 /// fetch data as usual; when the metadata path yields nothing the
 /// XEP-0054 vCard PHOTO fallback runs (never skipped — its synthetic id
 /// does not address a pubsub data item).
+///
+/// # Errors
+///
+/// Propagates non-stanza failures from `send_iq`. Stanza errors and invalid or unsupported avatar items are treated as absent avatars and allow fallback candidates.
 pub async fn request_avatar_with_iq_skipping<F, Fut, E>(
     jid: &BareJid,
     known_ids: &[AvatarItemId],
@@ -615,6 +658,10 @@ pub trait AvatarExt {
     /// PHOTO when avatar metadata or data is unavailable. Item ids in
     /// `known_ids` honor the §4.2 no-refetch rule: an advertised id the
     /// caller already holds answers id-only, without the data IQ.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport/IQ failures and transient stanza errors. Definitive missing-avatar responses allow fallback or return None.
     fn request_avatar<'a>(
         &'a self,
         jid: &'a BareJid,

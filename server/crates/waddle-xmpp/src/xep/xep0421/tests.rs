@@ -1,9 +1,15 @@
-use super::*;
+use super::OccupantIdCarrier;
+use super::{
+    build_occupant_id_element, extract_occupant_id_from_message, extract_occupant_id_from_presence,
+    generate_occupant_id, is_occupant_id_element, set_occupant_id_on_message,
+    strip_occupant_id_from_message, Element, Message, OccupantId, OccupantIdSecret,
+    OccupantIdSecretError, Presence, NS_OCCUPANT_ID, OCCUPANT_ID_SECRET_MIN_BYTES,
+};
 
 use xmpp_parsers::message::MessageType;
 
 fn test_secret() -> OccupantIdSecret {
-    OccupantIdSecret::new(b"waddle-test-secret-key-for-occupant-ids".to_vec())
+    OccupantIdSecret::try_new(b"waddle-test-secret-key-for-occupant-ids".to_vec())
         .expect("test secret meets length floor")
 }
 
@@ -52,10 +58,10 @@ fn test_generate_different_secrets_produce_different_ids() {
     // XEP-0421 §3: the deployment-keyed derivation MUST make occupant-ids
     // unlinkable across deployments using different secrets. Same (user,
     // room) inputs with different keys must yield different ids.
-    let secret_a =
-        OccupantIdSecret::new(b"deployment-a-secret-32-bytes-long".to_vec()).expect("≥32 bytes");
-    let secret_b =
-        OccupantIdSecret::new(b"deployment-b-secret-32-bytes-long".to_vec()).expect("≥32 bytes");
+    let secret_a = OccupantIdSecret::try_new(b"deployment-a-secret-32-bytes-long".to_vec())
+        .expect("≥32 bytes");
+    let secret_b = OccupantIdSecret::try_new(b"deployment-b-secret-32-bytes-long".to_vec())
+        .expect("≥32 bytes");
     let id_a = generate_occupant_id(&alice(), &room(), &secret_a);
     let id_b = generate_occupant_id(&alice(), &room(), &secret_b);
     assert_ne!(id_a, id_b);
@@ -71,7 +77,7 @@ fn test_generate_id_length() {
 
 #[test]
 fn test_secret_rejects_short_input() {
-    let result = OccupantIdSecret::new(b"too-short".to_vec());
+    let result = OccupantIdSecret::try_new(b"too-short".to_vec());
     assert_eq!(
         result.unwrap_err(),
         OccupantIdSecretError::TooShort {
@@ -84,7 +90,7 @@ fn test_secret_rejects_short_input() {
 #[test]
 fn test_secret_accepts_minimum_length() {
     let bytes = vec![0x42u8; OCCUPANT_ID_SECRET_MIN_BYTES];
-    OccupantIdSecret::new(bytes).expect("32 bytes meets floor");
+    OccupantIdSecret::try_new(bytes).expect("32 bytes meets floor");
 }
 
 #[test]
@@ -99,7 +105,7 @@ fn test_secret_debug_redacts_bytes() {
     // redaction failed, the panic message would itself leak the
     // bytes during test failure).
     const MARKER: &str = "do-not-leak-this-byte-string-32b!!!!!";
-    let secret = OccupantIdSecret::new(MARKER.as_bytes().to_vec()).expect("≥32 bytes");
+    let secret = OccupantIdSecret::try_new(MARKER.as_bytes().to_vec()).expect("≥32 bytes");
     let rendered = format!("{secret:?}");
     let redacted = rendered.contains("redacted");
     let leaked = rendered.contains(MARKER);

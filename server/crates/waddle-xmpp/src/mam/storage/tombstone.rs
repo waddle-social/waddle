@@ -196,7 +196,7 @@ mod tests {
             .insert(String::new(), "Topic".to_string());
         assert!(!origin_id_tombstone_match(&tombstone, &subject_retry));
         subject_retry.thread = Some(waddle_xmpp_core::xep0201::ThreadInfo::root(
-            waddle_xmpp_core::mam::ThreadId::new("timeline").expect("thread"),
+            waddle_xmpp_core::mam::ThreadId::try_new("timeline").expect("thread"),
         ));
         assert!(origin_id_tombstone_match(&tombstone, &subject_retry));
     }

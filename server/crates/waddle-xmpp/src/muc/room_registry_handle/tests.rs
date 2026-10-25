@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    BareJid, RoomConfig, RoomRegistry, RoomRegistryError, ROOM_REGISTRY_MAILBOX_CAPACITY,
+    ROOM_REGISTRY_REPLY_TIMEOUT,
+};
 use crate::muc::RoomClaimFenceContext;
 use crate::xep::xep0421::OccupantIdSecret;
 use std::time::Duration;
