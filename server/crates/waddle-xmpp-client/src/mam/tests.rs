@@ -739,11 +739,10 @@ mod stanza_id_filter_tests {
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 mod query {
-    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     use minidom::Element;
-    use tokio::sync::{broadcast, mpsc, oneshot};
+    use tokio::sync::{broadcast, mpsc, oneshot, watch};
     use tokio::time::timeout;
 
     use super::super::{ArchivedMessage, ArchivedPayload, MamExt, CLIENT_NS};
@@ -760,7 +759,7 @@ mod query {
     ) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(4);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(64);
-        let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+        let state = watch::Sender::new(SessionSnapshot::new());
         let handle = ClientHandle::from_parts(cmd_tx, evt_tx.clone(), state);
         (handle, cmd_rx, evt_tx)
     }
@@ -782,7 +781,7 @@ mod query {
             stream_id: None,
             resumable: false,
         });
-        let state = Arc::new(RwLock::new(snapshot));
+        let state = watch::Sender::new(snapshot);
         let handle = ClientHandle::from_parts(cmd_tx, evt_tx.clone(), state);
         (handle, cmd_rx, evt_tx)
     }

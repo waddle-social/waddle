@@ -1,17 +1,18 @@
 use super::{
     ClientConfig, ClientHandle, ClientRequest, ClientResult, ClientState, ConnectionEvent,
-    DriverTask, Duration, HashMap, RwLock, StanzaId, StreamManagementEvent, WebSocketTransport,
+    DriverTask, Duration, HashMap, StanzaId, StreamManagementEvent, WebSocketTransport,
     WebSocketTransportFactory, XmppClient, XmppRuntime,
 };
 
 use std::collections::VecDeque;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 use jid::{BareJid, FullJid};
 use minidom::Element;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use url::Url;
 
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
@@ -68,7 +69,7 @@ fn make_driver_task_with_config(
 ) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
     let (evt_tx, evt_rx) = broadcast::channel::<ClientEvent>(256);
-    let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+    let state = watch::Sender::new(SessionSnapshot::new());
     let task = DriverTask {
         runtime: XmppRuntime::try_new(config).unwrap(),
         transport: Box::new(transport),
@@ -98,6 +99,36 @@ async fn confirm_latest_enable_sent(task: &mut DriverTask, shared: &MockTranspor
         .expect("transport sent stream-management enable");
     task.apply_transport_event(TransportEvent::MessageSent(enable))
         .await;
+}
+
+#[test]
+fn snapshot_publication_survives_panicking_writer() {
+    let (mut task, commands, _events) = make_driver_task(MockTransport::new(
+        vec![],
+        vec![],
+        MockTransportShared::default(),
+    ));
+    let handle = ClientHandle::from_parts(commands, task.events.clone(), task.state.clone());
+    let observer = handle.clone();
+    let initial = handle.snapshot();
+
+    // Inject an unwind while watch holds its write guard. Production only
+    // replaces complete snapshots; this callback is solely a fault injector.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        task.state.send_if_modified(|_| {
+            panic!("snapshot writer panicked");
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(handle.snapshot(), initial);
+
+    task.runtime.queue_request(ClientRequest::Connect).unwrap();
+    task.publish_snapshot();
+
+    assert_eq!(handle.snapshot(), *task.runtime.snapshot());
+    assert_eq!(observer.snapshot(), handle.snapshot());
+    assert_eq!(observer.state(), ClientState::Connecting);
+    assert_eq!(initial.phase, SessionPhase::Disconnected);
 }
 
 // ── IQ correlation unit tests ─────────────────────────────────────────────
@@ -212,7 +243,7 @@ async fn driver_cancels_unreplayable_iq_after_fresh_stream_fallback() {
 async fn send_iq_resolves_via_mock_driver() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<XmppCommand>(1);
     let (evt_tx, _) = broadcast::channel::<ClientEvent>(1);
-    let state = Arc::new(RwLock::new(SessionSnapshot::new()));
+    let state = watch::Sender::new(SessionSnapshot::new());
 
     let handle = ClientHandle {
         commands: cmd_tx,

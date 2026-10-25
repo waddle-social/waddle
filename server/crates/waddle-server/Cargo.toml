@@ -48,7 +48,7 @@ waddle-extensions = { path = "../waddle-extensions" }
 # Graceful restart (Ecdysis pattern)
 waddle-ecdysis = { path = "../waddle-ecdysis" }
 jid = { workspace = true }
-dashmap = { workspace = true }
+dashmap = { workspace = true, features = ["raw-api"] }
 minidom = { workspace = true }
 
 xmpp-parsers = { workspace = true }

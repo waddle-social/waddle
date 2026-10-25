@@ -7,8 +7,9 @@
 
 /// Terminate the process without inspecting or recovering a poisoned guard.
 ///
-/// Use as the error callback to [`Result::unwrap_or_else`] only where the API
-/// cannot propagate a typed failure. Aborting also stops sibling tasks: ordinary
+/// Use as the error callback to [`Result::unwrap_or_else`] only for authority or checkpoint state where the API
+/// cannot propagate a typed failure. Disposable caches and diagnostic throttles
+/// should use a non-poisoning lock after documenting their unwind invariants. Aborting also stops sibling tasks: ordinary
 /// unwinding would allow detached workers or their supervisors to disappear
 /// while the process continued advertising healthy authority.
 ///

@@ -155,11 +155,10 @@ impl InboxExt for ClientHandle {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::sync::{Arc, RwLock};
 
     use jid::FullJid;
     use minidom::Element;
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, watch};
 
     use super::*;
     use crate::command::XmppCommand;
@@ -210,7 +209,7 @@ mod tests {
     fn mock_driver(snapshot: SessionSnapshot) -> MockDriver {
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(8);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(256);
-        let state = Arc::new(RwLock::new(snapshot));
+        let state = watch::Sender::new(snapshot);
         let handle = ClientHandle::from_parts(cmd_tx, evt_tx.clone(), state);
         MockDriver {
             handle,

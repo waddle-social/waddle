@@ -11,6 +11,7 @@ use crate::ingress::gc::{run_retention_gc_coordinator, RetentionGcCoordinator};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress::{Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect};
 use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -872,6 +873,48 @@ fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttemp
         pending: vec![waddle_xmpp::ingress::IngressEffectKind::RouteDirect],
         generation,
     }
+}
+
+#[tokio::test]
+async fn recovered_obligation_credit_survives_a_writer_panic_without_double_counting() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    let key = interrupted_delivery(&fixture, "accounting-after-writer-panic").await;
+    let evidence = super::evidence_now(&fixture.db, key)
+        .await
+        .expect("receipted delivery evidence");
+    assert!(evidence.receipts > 0);
+    let cursor = MaintenanceCursor::default();
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _credit = cursor.recovery_credited.write();
+        panic!("telemetry credit writer failed");
+    }));
+    assert!(panic.is_err());
+    let before = metrics
+        .counter_sum("ingress.maintenance.recovered_obligations", &[])
+        .unwrap_or(0);
+
+    for generation in 1..=2 {
+        cursor
+            .recovery_accounting
+            .lock()
+            .expect("accounting queue")
+            .push(accounting_attempt(key, generation));
+        super::spawn_recovery_accounting(
+            &fixture.db,
+            &fixture.uow,
+            &cursor,
+            immediate_budget(),
+            None,
+        );
+        cursor.wait_for_recovery_accounting().await;
+        assert_eq!(
+            metrics.counter_sum("ingress.maintenance.recovered_obligations", &[]),
+            Some(before + u64::from(evidence.receipts)),
+            "the receipt is credited once across repeated accounting"
+        );
+    }
+    fixture.close().await;
 }
 
 struct EmptyRecoveryEnvironment(ConnectionRegistry);

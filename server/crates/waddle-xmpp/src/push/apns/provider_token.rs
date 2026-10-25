@@ -8,9 +8,10 @@
 //! one token and reuses it for [`APNS_PROVIDER_TOKEN_REUSE`] (50
 //! minutes), which sits inside that window.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dashmap::{RwLock, RwLockWriteGuard};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use p256::pkcs8::DecodePrivateKey;
 use serde::Serialize;
@@ -112,7 +113,7 @@ pub struct CachingApnsTokenSigner {
     key_id: ApnsKeyId,
     encoding_key: EncodingKey,
     clock: Arc<dyn ApnsClock>,
-    cache: Mutex<Option<CachedToken>>,
+    cache: RwLock<Option<CachedToken>>,
 }
 
 impl CachingApnsTokenSigner {
@@ -132,15 +133,14 @@ impl CachingApnsTokenSigner {
             key_id,
             encoding_key,
             clock,
-            cache: Mutex::new(None),
+            cache: RwLock::new(None),
         })
     }
 
-    /// Terminate the process if a prior writer left the cache uncertain.
-    fn lock_cache(&self) -> MutexGuard<'_, Option<CachedToken>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    /// Serialize cache access without poisoning: mutations replace complete records,
+    /// with no user callbacks or custom panicking destructors under this guard.
+    fn lock_cache(&self) -> RwLockWriteGuard<'_, Option<CachedToken>> {
+        self.cache.write()
     }
 
     fn sign(&self, issued_at: u64) -> Result<ApnsProviderJwt, ApnsSignError> {
@@ -204,7 +204,10 @@ impl ApnsProviderTokenSource for CachingApnsTokenSigner {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Barrier;
+    use std::thread;
 
     use jsonwebtoken::{DecodingKey, Validation};
     use p256::elliptic_curve::rand_core::OsRng;
@@ -333,6 +336,56 @@ mod tests {
         // away the fresh one (Apple throttles token refreshes).
         assert!(signer.invalidate(&first));
         assert_eq!(signer.current().expect("still second"), second);
+    }
+
+    #[test]
+    fn concurrent_callers_share_one_refresh() {
+        let (signer, clock, _key) = signer();
+        let first = signer.current().expect("first");
+        clock.advance(APNS_PROVIDER_TOKEN_REUSE);
+        let barrier = Barrier::new(8);
+        let refreshed = thread::scope(|scope| {
+            let callers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        signer.current().expect("refreshed")
+                    })
+                })
+                .collect();
+            callers
+                .into_iter()
+                .map(|caller| caller.join().expect("join"))
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(refreshed[0], first);
+        assert!(refreshed.iter().all(|token| token == &refreshed[0]));
+    }
+
+    #[test]
+    fn cache_unwind_preserves_reuse_and_minimum_refresh() {
+        let (signer, clock, key) = signer();
+        let first = signer.current().expect("first");
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _cache = signer.lock_cache();
+            panic!("fault while holding the populated cache guard");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(signer.current().expect("cached after unwind"), first);
+
+        clock.advance(APNS_PROVIDER_TOKEN_MIN_REFRESH - Duration::from_secs(1));
+        assert!(!signer.invalidate(&first));
+        assert_eq!(signer.current().expect("young token retained"), first);
+        clock.advance(Duration::from_secs(1));
+        assert!(signer.invalidate(&first));
+        let second = signer.current().expect("refreshed after unwind");
+        assert_ne!(second, first);
+        assert_eq!(
+            decode(&second, &key).iat,
+            START + APNS_PROVIDER_TOKEN_MIN_REFRESH.as_secs()
+        );
+        assert!(signer.invalidate(&first));
+        assert_eq!(signer.current().expect("newer token retained"), second);
     }
 
     #[test]

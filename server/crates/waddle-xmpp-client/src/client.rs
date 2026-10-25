@@ -1,10 +1,9 @@
 //! Native client handles and the asynchronous command and transport driver.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
 
 use minidom::Element;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 
 use crate::command::XmppCommand;
@@ -27,7 +26,9 @@ use crate::transport::{
 pub struct ClientHandle {
     commands: mpsc::Sender<XmppCommand>,
     events: broadcast::Sender<ClientEvent>,
-    state: Arc<RwLock<SessionSnapshot>>,
+    // The driver clones complete snapshots before publication and runs no
+    // application callbacks under the watch lock.
+    state: watch::Sender<SessionSnapshot>,
 }
 
 impl ClientHandle {
@@ -38,15 +39,9 @@ impl ClientHandle {
     }
 
     /// Current session snapshot.
-    ///
-    /// Terminates the process if a panicking writer poisoned the shared state;
-    /// an uncertain snapshot must not authorize continued session operations.
     #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
-        self.state
-            .read()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .clone()
+        self.state.borrow().clone()
     }
 
     /// Current high-level client state.
@@ -103,7 +98,7 @@ impl ClientHandle {
     pub(crate) fn from_parts(
         commands: mpsc::Sender<XmppCommand>,
         events: broadcast::Sender<ClientEvent>,
-        state: Arc<RwLock<SessionSnapshot>>,
+        state: watch::Sender<SessionSnapshot>,
     ) -> Self {
         Self {
             commands,
@@ -226,7 +221,7 @@ where
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(256);
-        let state = Arc::new(RwLock::new(self.runtime.snapshot().clone()));
+        let state = watch::Sender::new(self.runtime.snapshot().clone());
 
         let handle = ClientHandle {
             commands: cmd_tx,
@@ -258,7 +253,7 @@ struct DriverTask {
     transport: Box<dyn WebSocketTransport>,
     commands: mpsc::Receiver<XmppCommand>,
     events: broadcast::Sender<ClientEvent>,
-    state: Arc<RwLock<SessionSnapshot>>,
+    state: watch::Sender<SessionSnapshot>,
     pending_iqs: HashMap<String, oneshot::Sender<ClientResult<Element>>>,
     deferred_commands: VecDeque<DeferredXmppCommand>,
     /// Set on [`XmppCommand::Disconnect`]. XEP-0198 forbids resuming
@@ -282,10 +277,7 @@ enum DeferredXmppCommand {
 impl DriverTask {
     fn publish_snapshot(&self) {
         let snapshot = self.runtime.snapshot().clone();
-        *self
-            .state
-            .write()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = snapshot;
+        self.state.send_replace(snapshot);
     }
 
     async fn run(mut self) {

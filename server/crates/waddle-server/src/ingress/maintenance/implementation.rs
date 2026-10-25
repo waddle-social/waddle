@@ -1,5 +1,7 @@
 //! Implementation behind the parent module facade.
 
+use dashmap::RwLock;
+
 use super::stalls;
 use super::waits;
 use super::AttemptClassification;
@@ -94,11 +96,15 @@ pub(in crate::ingress) struct MaintenanceCursor {
     pub(in crate::ingress::maintenance) recovery_accounting_worker: Arc<tokio::sync::Mutex<()>>,
     /// Highest receipt total already credited per row, so a delayed worker
     /// and a later pass's worker never credit the same receipt twice.
-    pub(in crate::ingress::maintenance) recovery_credited: Arc<Mutex<CreditedRows>>,
+    /// Non-poisoning: closed key/count types have no panicking callbacks or
+    /// destructors, and this bounded cache affects only telemetry credit.
+    pub(in crate::ingress::maintenance) recovery_credited: Arc<RwLock<CreditedRows>>,
     /// Earliest instant the observer-retention phase runs again; `None` means
     /// due now, so a fresh cursor collects at startup.
+    /// Non-poisoning: complete optional deadlines are replaced atomically;
+    /// this schedules observer-history cleanup, not canonical authority.
     pub(in crate::ingress::maintenance) observer_retention_due_at:
-        Arc<Mutex<Option<tokio::time::Instant>>>,
+        Arc<RwLock<Option<tokio::time::Instant>>>,
     #[cfg(test)]
     pub(in crate::ingress::maintenance) accounting_tasks:
         Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -134,8 +140,7 @@ impl MaintenanceCursor {
 
     pub(in crate::ingress) fn observer_retention_due(&self) -> bool {
         self.observer_retention_due_at
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .read()
             .is_none_or(|at| tokio::time::Instant::now() >= at)
     }
 
@@ -145,20 +150,13 @@ impl MaintenanceCursor {
         &self,
         outcome: MaintenanceOutcome,
     ) {
-        *self
-            .observer_retention_due_at
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = (outcome
-            == MaintenanceOutcome::Complete)
+        *self.observer_retention_due_at.write() = (outcome == MaintenanceOutcome::Complete)
             .then(|| tokio::time::Instant::now() + OBSERVER_RETENTION_INTERVAL);
     }
 
     #[cfg(test)]
     pub(in crate::ingress) fn expire_observer_retention_interval(&self) {
-        *self
-            .observer_retention_due_at
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = None;
+        *self.observer_retention_due_at.write() = None;
     }
 }
 
@@ -723,14 +721,11 @@ pub(in crate::ingress::maintenance) fn spawn_recovery_accounting(
                     .unwrap_or(Err(IngressUowError::Timeout));
             let fresh = match result {
                 Ok(now) => {
-                    recovered += credited
-                        .lock()
-                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-                        .credit(
-                            key,
-                            u64::from(attempt.observed.receipts),
-                            u64::from(now.receipts),
-                        );
+                    recovered += credited.write().credit(
+                        key,
+                        u64::from(attempt.observed.receipts),
+                        u64::from(now.receipts),
+                    );
                     now
                 }
                 Err(error) => {

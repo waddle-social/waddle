@@ -12,11 +12,11 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use dashmap::{RwLock, RwLockWriteGuard};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use lru::LruCache;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -89,14 +89,14 @@ pub fn vapid_k_header(public_key: &p256::PublicKey) -> String {
 /// serialization rather than as `url::Origin` to keep the key cheap to
 /// hash without `Tuple`/`Opaque` discriminator overhead.
 ///
-/// Wraps an `Arc<Mutex<LruCache>>` so concurrent senders share the cache.
+/// Wraps an `Arc<RwLock<LruCache>>` so concurrent senders share the cache.
 /// `max_capacity = VAPID_JWT_CACHE_CAPACITY` (32) — comfortably exceeds
 /// the legitimate browser-push origin set (~3), no origin allowlist.
 pub struct InProcessVapidSigner {
     kid: Kid,
     public_key: p256::PublicKey,
     encoding_key: EncodingKey,
-    cache: Arc<Mutex<LruCache<CacheKey, CachedJwt>>>,
+    cache: Arc<RwLock<LruCache<CacheKey, CachedJwt>>>,
 }
 
 /// JWT cache key — typed end-to-end. `url::Origin` and `VapidSub` already
@@ -144,7 +144,7 @@ impl InProcessVapidSigner {
             kid,
             public_key,
             encoding_key,
-            cache: Arc::new(Mutex::new(LruCache::new(
+            cache: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(VAPID_JWT_CACHE_CAPACITY).expect("non-zero capacity"),
             ))),
         })
@@ -157,12 +157,10 @@ impl InProcessVapidSigner {
         cache.clear();
     }
 
-    /// Lock the cache, terminating the process if a prior writer panicked.
-    /// A detached signer task must not leave the service using uncertain state.
-    fn lock_cache(&self) -> std::sync::MutexGuard<'_, LruCache<CacheKey, CachedJwt>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+    /// Serialize LRU mutations without poisoning. Entries are complete records;
+    /// keys and values have no user callbacks or custom panicking destructors.
+    fn lock_cache(&self) -> RwLockWriteGuard<'_, LruCache<CacheKey, CachedJwt>> {
+        self.cache.write()
     }
 
     fn cache_key(&self, aud: &url::Origin, sub: &VapidSub) -> CacheKey {
@@ -262,6 +260,8 @@ fn fresh_jti() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use super::*;
     use p256::elliptic_curve::rand_core::OsRng;
 
@@ -434,6 +434,48 @@ mod tests {
         // — so the JWTs differ even though the cache key, claims (modulo jti),
         // and key are identical.
         assert_ne!(jwt_a, jwt_b);
+    }
+
+    #[test]
+    fn cache_unwind_preserves_reuse_and_invalidation() {
+        let signer = fresh_signer();
+        let aud = parse_origin("https://fcm.googleapis.com/fcm/send/abc");
+        let sub = VapidSub::default_for_domain("example.com").unwrap();
+        let first = signer.sign(&aud, &sub).expect("first");
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _cache = signer.lock_cache();
+            panic!("fault while holding the populated cache guard");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(signer.sign(&aud, &sub).expect("cached after unwind"), first);
+        signer.invalidate_cache();
+        let second = signer.sign(&aud, &sub).expect("fresh after unwind");
+        assert_ne!(second, first);
+        assert_eq!(signer.sign(&aud, &sub).expect("fresh token cached"), second);
+    }
+
+    #[test]
+    fn signer_cache_evicts_the_least_recently_used_entry_at_capacity() {
+        let signer = fresh_signer();
+        let sub = VapidSub::default_for_domain("example.com").unwrap();
+        let oldest = parse_origin("https://oldest.example.com");
+        let retained = parse_origin("https://retained.example.com");
+        signer.sign(&oldest, &sub).expect("oldest");
+        let retained_jwt = signer.sign(&retained, &sub).expect("retained");
+        for index in 0..VAPID_JWT_CACHE_CAPACITY - 2 {
+            let aud = parse_origin(&format!("https://push-{index}.example.com"));
+            signer.sign(&aud, &sub).expect("fill cache");
+        }
+        assert_eq!(signer.lock_cache().len(), VAPID_JWT_CACHE_CAPACITY);
+        // Reusing this entry must keep it while the least recently used one goes.
+        assert_eq!(signer.sign(&retained, &sub).expect("reuse"), retained_jwt);
+        let newest = parse_origin("https://newest.example.com");
+        signer.sign(&newest, &sub).expect("insert beyond capacity");
+        let cache = signer.lock_cache();
+        assert_eq!(cache.len(), VAPID_JWT_CACHE_CAPACITY);
+        assert!(!cache.contains(&signer.cache_key(&oldest, &sub)));
+        assert!(cache.contains(&signer.cache_key(&retained, &sub)));
+        assert!(cache.contains(&signer.cache_key(&newest, &sub)));
     }
 
     #[test]
