@@ -86,6 +86,7 @@ pub(crate) async fn empty_extension_manager() -> Arc<ExtensionManager> {
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn create_test_websocket_state_with_extension_manager(
     extension_manager: Arc<ExtensionManager>,
     overrides: TestStateOverrides,

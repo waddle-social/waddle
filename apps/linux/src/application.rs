@@ -10,6 +10,13 @@ use gtk::{gio, glib};
 use crate::ui::WaddleWindow;
 
 mod imp {
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::wildcard_imports,
+            reason = "inline subclass parent imports are an explicit Rust style exception"
+        )
+    )]
     use super::*;
 
     #[derive(Default)]
