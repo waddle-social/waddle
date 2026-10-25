@@ -3,6 +3,7 @@ use super::super::effects::direct::DurableDirectEffect;
 use super::super::effects::{
     DurableEffect, Effect, ExternalEffect, PlanEffectDependency, PlanSink, PlanSuppressionPolicy,
 };
+use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
 use super::{
@@ -11,7 +12,6 @@ use super::{
     BlockingStorage, Deps, InMemorySmSessionRegistry, InboxStorage, MamStorage, Message,
     OutboundEvent, Stanza, StanzaDispatcher, XmppMessageType, XmppStateMachine,
 };
-use super::{tests, OrderedRelayRouteOrigin};
 use kameo::actor::Spawn;
 use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
 use waddle_xmpp::mam::storage::InMemoryMamStorage;

@@ -6,26 +6,23 @@ use super::dispatch_to_room;
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
-#[cfg(feature = "clustering")]
-use super::DemoteRoomIfExactActor;
 use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
 use super::{
     apply_archive_id_rewrites, apply_groupchat_retraction_tombstone, archive_lookup,
-    direct_archive, extract_stanza_id_by, groupchat_archive, interpret_with_depth,
-    parse_reply_from_message, plan_message_dispatch, waddle_id_for_room_jid, ArchiveIdRewrite,
-    ArchivedTombstone, CarbonKind, DefinedCondition, ErrorType, ExtensionRoomMessage, FromStr,
-    FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot, InMemorySmSessionRegistry, InboundEvent,
-    IngressEffectIntent, InterpretOutcome, MamArchivedMessage, MessageRef, OccupantSnapshot,
-    RoomRegistryActor, SmIngressAppendContext, StanzaError, XmppStateMachine,
-    MAX_RECIPIENT_PASS_DEPTH,
+    direct_archive, groupchat_archive, interpret_with_depth, parse_reply_from_message,
+    plan_message_dispatch, waddle_id_for_room_jid, ArchiveIdRewrite, CarbonKind, DefinedCondition,
+    ErrorType, ExtensionRoomMessage, FromStr, FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot,
+    InMemorySmSessionRegistry, InboundEvent, IngressEffectIntent, InterpretOutcome,
+    MamArchivedMessage, MessageRef, OccupantSnapshot, RoomRegistryActor, SmIngressAppendContext,
+    StanzaError, XmppStateMachine, MAX_RECIPIENT_PASS_DEPTH,
 };
 
 use super::{
-    effects, extract_forum_action, interpret, ActorRef, Arc, BareJid, BlockingStorage,
-    ConnectionRegistry, DeliveryExecutionContext, Deps, ForumAction, FullJid, InboxStorage, Jid,
-    MamStorage, Message, OutboundEvent, StanzaDispatcher, Xep0359StanzaId, XmppMessageType,
+    effects, extract_forum_action, interpret, Arc, BareJid, BlockingStorage, ConnectionRegistry,
+    Deps, ForumAction, FullJid, InboxStorage, Jid, MamStorage, Message, OutboundEvent,
+    StanzaDispatcher, XmppMessageType,
 };
 use crate::server::routes::interpret::tests;
 use std::io;

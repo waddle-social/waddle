@@ -10,8 +10,6 @@ use super::Stanza;
 #[cfg(feature = "clustering")]
 use super::register_into_both_tiers;
 #[cfg(feature = "clustering")]
-use super::FullJid;
-#[cfg(feature = "clustering")]
 use super::InMemorySmSessionRegistry;
 use super::{
     interpret, Arc, ConnectionRegistry, Deps, GetRoom, GetRoomSnapshot, Message, OutboundEvent,

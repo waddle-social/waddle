@@ -3,30 +3,16 @@ use super::commit::commit_submission;
 use super::effects::delivery::ExternalDeliveryEffect;
 use super::effects::PlanSink;
 use super::execute::{execute_effects, terminalize_if_complete};
-#[cfg(feature = "clustering")]
-use super::execute_uow;
 use super::execute_uow::STALL_DELIVERY_RESOURCE;
-#[cfg(feature = "clustering")]
-use super::receipts;
-#[cfg(feature = "clustering")]
-use super::recovery_executor;
-#[cfg(feature = "clustering")]
-use super::room_canonical;
 use super::test_support::IngressFixture;
-#[cfg(feature = "clustering")]
-use super::CancellationToken;
-#[cfg(feature = "clustering")]
-use super::DurableEffect;
 #[cfg(feature = "clustering")]
 use super::EffectReceiptKey;
 #[cfg(feature = "clustering")]
 use super::IngressPlan;
-#[cfg(feature = "clustering")]
-use super::RoomExecutionPath;
-use super::{effects, execute, recorded, IngressCanonicalRef, IngressStreamIdentity};
+use super::{effects, IngressCanonicalRef, IngressStreamIdentity};
 use super::{
-    receipt_key, Arc, Duration, ExternalEffect, ExternalOutcome, ImmediateSink,
-    IngressDecisionClass, IngressEffectCapture, IngressSubmission,
+    receipt_key, Duration, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecisionClass,
+    IngressEffectCapture, IngressSubmission,
 };
 use crate::ingress_uow::{DeliveryProgressRepository, EffectReceiptRepository};
 use crate::server::routes::interpret::interpret;

@@ -1,21 +1,21 @@
 use super::{
     classify, classify_effect, finish_ordered_reservation, is_no_effect_stale_ref_relookup_error,
-    is_ordered_unsupported_envelope_error, is_stale_ref_error, mpsc, ordered_send_error,
+    is_ordered_unsupported_envelope_error, is_stale_ref_error, ordered_send_error,
     relay_dispatch_span, relay_name, Demote, DemoteReply, Deserialize, Mutex,
     OrderedRelayNackReason, OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation,
     PendingReplyReceipts, RelayDispatchKind, RelayReassertMediaGrants,
     RelayReassertMediaGrantsReply, RelayResumeSteal, RelayResumeStealReply, Serialize,
 };
 use super::{
-    refresh_relay_registration, remote_resource_compat, send_error, ActorRef, Arc,
-    CancellationToken, ClusteringMessagingConfig, Duration, NodeId, OrderedRelayDeliveryBridge,
-    RelayActor, RelayAskError, RelayDeliverOrdered, RelayEchoStanza, RelayExtensionRoomSend,
-    RelayExtensionRoomSendReply, RelayMucAdminQuery, RelayMucAdminQueryItem,
-    RelayMucAdminQueryReply, RelayPing, RelayRegisterAttempt, RelayRemoteUserSideEffect,
-    RelayRemoteUserSideEffectStatus, RelayResourcePresence, RelayResourcePresenceReply,
-    RelaySendEffect, RelaySendFailure, RelayTraceContext, RemoteResourceOutboundFrame,
-    RemoteSendError, RemoteStanza, RemoteStanzaEnvelope, RemoteUserSideEffect, ResumeStealBridge,
-    RoomLocalClaims, SharedNodeIdentity, Spawn, REREGISTER_INTERVAL, RESPAWN_BACKOFF,
+    refresh_relay_registration, remote_resource_compat, send_error, Arc, CancellationToken,
+    Duration, NodeId, OrderedRelayDeliveryBridge, RelayActor, RelayAskError, RelayDeliverOrdered,
+    RelayEchoStanza, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelayMucAdminQuery,
+    RelayMucAdminQueryItem, RelayMucAdminQueryReply, RelayPing, RelayRegisterAttempt,
+    RelayRemoteUserSideEffect, RelayRemoteUserSideEffectStatus, RelayResourcePresence,
+    RelayResourcePresenceReply, RelaySendEffect, RelaySendFailure, RelayTraceContext,
+    RemoteResourceOutboundFrame, RemoteSendError, RemoteStanza, RemoteStanzaEnvelope,
+    RemoteUserSideEffect, ResumeStealBridge, RoomLocalClaims, SharedNodeIdentity, Spawn,
+    REREGISTER_INTERVAL, RESPAWN_BACKOFF,
 };
 use crate::clustering::claims::{NodeLeaseStore, OrphanedSmSessionClaim};
 use crate::clustering::ordered_relay::{

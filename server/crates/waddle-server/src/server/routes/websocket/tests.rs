@@ -1,7 +1,5 @@
 use super::frame::handle_xmpp_frame;
 use super::interpret_loop::build_interpret_deps;
-#[cfg(feature = "clustering")]
-use super::relayed_muc_admin_query;
 use super::replay::drive_interpret_loop;
 use super::session_init::build_internal_server_error_stream_error;
 use super::state::WsConnState;
@@ -12,16 +10,11 @@ pub(crate) use super::test_state::{
 use super::transport_xml::{
     build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
 };
-#[cfg(feature = "clustering")]
-use super::AdminListAnswer;
-#[cfg(feature = "clustering")]
-use super::AdminListDenial;
 use super::{
     build_iq_error_xml_typed, cleanup, element_to_xml, get_or_create_room_actor, handlers,
-    localpart_to_jid, not_authorized_iq_error, transport_xml, ActiveCallThread, ConnectionRegistry,
-    DeliveryKind, FromStr, InboundEvent, InboxStorage, MamStorage, Message, OutboundStanza,
-    PubSubStorage, ResolvedPrincipal, RoomConfig, StreamManagementState, XmppServiceDomains,
-    BASE64_STANDARD, SM_NS,
+    localpart_to_jid, not_authorized_iq_error, transport_xml, ConnectionRegistry, DeliveryKind,
+    FromStr, InboundEvent, InboxStorage, MamStorage, Message, OutboundStanza, ResolvedPrincipal,
+    RoomConfig, StreamManagementState, XmppServiceDomains, BASE64_STANDARD, SM_NS,
 };
 
 use super::{
@@ -29,7 +22,6 @@ use super::{
     Engine, ExtensionManager, FullJid, InMemorySmSessionRegistry, InboundFrame, NativeUserStore,
     Session, Stanza, WebSocketState, XmppStateMachine,
 };
-use super::{outbound, timers};
 use crate::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;

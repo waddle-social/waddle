@@ -12,7 +12,7 @@ use super::{
     AckDepartureOutcome, AckDepartureReceipt, AdminApplyError, Affiliation,
     AffiliationMutationError, ApplyAdminItems, ApplyAffiliationChange, ApplyPin, BareJid,
     BuildGroupchatBroadcast, ChangeAffiliation, ClearMujiPresence, ConfigEffectPlan, Context,
-    DepartureReceipt, Destroy, DestroyAttemptId, DurableRestoreReadiness, EnforceMembersOnly,
+    DepartureReceipt, Destroy, DurableRestoreReadiness, EnforceMembersOnly,
     EnforceMembersOnlyAffiliations, FullJid, GetActiveMujiSessions, GetAffiliation, GetConfig,
     GetDurableRestoreReadiness, GetInfo, GetOccupantByJid, GetOccupantByNick, GetPinList,
     GetReplayOccupantSessionGeneration, GetRoomJid, GetRoomSealState, GetRoomSnapshot, GetSnapshot,

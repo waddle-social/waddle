@@ -4,7 +4,7 @@ use super::{
     PersistedSession, SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };
 #[cfg(feature = "clustering")]
-use super::{Database, DatabaseConfig, DatabaseDriver, PostgresFencedSmPersistence};
+use super::{Database, DatabaseConfig, DatabaseDriver};
 use crate::db::Value;
 use std::sync::Arc;
 use waddle_xmpp::ingress::MessageKey;

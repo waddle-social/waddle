@@ -1,6 +1,6 @@
 use super::{
-    envelope_is_consistent, IngressCanonicalRef, OrderedRelayAck, OrderedRelayDiversion,
-    OrderedRelayDiversionReason, OrderedRelayNack, OrderedRelayNackReason, OrderedRelaySenderState,
+    envelope_is_consistent, OrderedRelayAck, OrderedRelayDiversion, OrderedRelayDiversionReason,
+    OrderedRelayNack, OrderedRelayNackReason, OrderedRelaySenderState,
     MAX_TRACKED_ORDERED_RELAY_CHANNELS, ORDERED_RELAY_DIVERSION_COOLDOWN,
     RECENT_ACK_CACHE_PER_CHANNEL,
 };

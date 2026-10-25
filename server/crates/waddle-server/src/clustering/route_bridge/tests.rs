@@ -4,21 +4,21 @@ use super::delivery::receiver::{deliver_reserved_bare_presence_direct, room_enti
 use super::delivery::remote_route_helpers::payload_for_recipient;
 use super::delivery::{deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome};
 use super::delivery::{
-    no_client_reply_outcome_with_commit_state, remote_resource_muc_ask_error_outcome, remote_socket,
+    no_client_reply_outcome_with_commit_state, remote_resource_muc_ask_error_outcome,
 };
 use super::reassert::REASSERT_CLAIM_READ_TIMEOUT;
 use super::{
     ask_error_allows_target_refresh, ask_error_is_unseen, caller_delivery_outcome,
-    channel_diversion_for_ask_error, mpsc, outcome_for_ask_error, outcome_for_nack, registration,
+    channel_diversion_for_ask_error, mpsc, outcome_for_ask_error, outcome_for_nack,
     remote_registration_request, remote_registration_request_from_entry,
     replies_for_origin_handoff, validate_claims, AtomicBool, BroadcastOutcome, CancellationToken,
-    ClaimSnapshot, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind,
-    FullJidDeliveryOutcome, Future, LocalMediaGrantReassertion, LocalResourcePresence,
-    MucProxyOrigin, Mutex, NackChannelAction, OrderedRelayClaimRole, OrderedRelayDeliveryBridge,
-    OrderedRelayDiversion, OrderedRelayDiversionReason, OrderedRelayMucProxyKind,
-    OrderedRelayMucProxyOutcome, OrderedRelayNack, OrderedRelayNackReason, OrderedRelayReply,
-    OutboundStanza, PreparedRemoteDelivery, PublicKey, RegisteredRemoteWriteAcceptedDelivery,
-    RelayAskError, RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame,
+    ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, FullJidDeliveryOutcome,
+    LocalMediaGrantReassertion, LocalResourcePresence, MucProxyOrigin, Mutex, NackChannelAction,
+    OrderedRelayClaimRole, OrderedRelayDeliveryBridge, OrderedRelayDiversion,
+    OrderedRelayDiversionReason, OrderedRelayMucProxyKind, OrderedRelayMucProxyOutcome,
+    OrderedRelayNack, OrderedRelayNackReason, OrderedRelayReply, OutboundStanza,
+    PreparedRemoteDelivery, RegisteredRemoteWriteAcceptedDelivery, RelayAskError,
+    RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame,
     RelayRegisterRemoteUserResource, RelayRemoteResourceFrameStatus,
     RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUnregisterStatus,
     RelayRemoteResourceWriteAcceptedStatus, RelayRemoteUserSideEffect,
@@ -30,7 +30,6 @@ use super::{
     RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
     RemoteResourceStateSnapshot, RemoteResourceWriteAcceptedOutboundFrame, RemoteUserSideEffect,
     WebSocketState, ORDERED_RECEIVER_DELIVERY_TIMEOUT, TEST_CANCELLED_ENVELOPES,
-    TEST_CANCELLED_REMOTE_FRAMES,
 };
 use super::{
     AllowlistStore, Arc, BlockingStorage, ClaimStore, ConnectionRegistry, Duration, Entity,
