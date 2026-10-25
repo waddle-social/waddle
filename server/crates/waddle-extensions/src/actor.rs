@@ -1,30 +1,25 @@
 //! Actor-facing extension invocation and observation request contracts.
 
-use crate::host_tools::DeliveryInvocation;
-#[cfg(any(test, feature = "test-support"))]
-use crate::observer_test_support::ObserverTestPlugin;
-#[cfg(any(test, feature = "test-support"))]
-use crate::types::ArtifactReference;
-use crate::types::ConfiguredRoomObserver;
-#[cfg(any(test, feature = "test-support"))]
-use crate::types::ExtensionProfile;
-use crate::types::ExtensionResponse;
-use crate::types::ObservationFailure;
-use crate::types::RoomMessageObserve;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::warn;
+use xmpp_parsers::jid::FullJid;
 
 use crate::host_tools::{
-    DenyingExtensionHostTools, ExtensionHostTools, InvocationContext, InvocationKind,
+    DeliveryInvocation, DenyingExtensionHostTools, ExtensionHostTools, InvocationContext,
+    InvocationKind,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::observer_test_support::ObserverTestPlugin;
 use crate::runtime::LoadedExtension;
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::{ArtifactReference, ExtensionProfile};
 use crate::types::{
-    DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent, ExtensionManifest, WaddleId,
+    ConfiguredRoomObserver, DisplayText, ExtensionCapability, ExtensionEffect, ExtensionEvent,
+    ExtensionManifest, ExtensionResponse, ObservationFailure, RoomMessageObserve, WaddleId,
 };
-use xmpp_parsers::jid::FullJid;
 
 /// Host admission is distinct from any error after entering the runtime.
 pub(crate) enum ObservationInvocationError {
