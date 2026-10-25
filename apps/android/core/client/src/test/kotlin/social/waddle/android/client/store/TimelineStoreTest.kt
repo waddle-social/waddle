@@ -8,6 +8,7 @@ import org.junit.Test
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
 import social.waddle.client.ffi.WaddleStanzaId
+import java.time.Instant
 
 class TimelineStoreTest {
     private val store = TimelineStore()
@@ -456,11 +457,61 @@ class TimelineStoreTest {
         store.onArchivedMessage(
             testArchivedMessage(mamId = "m3", stanzaId = "s3", timestamp = "2026-07-15T10:00:00Z", body = "third"),
         )
-        // No timestamp: live messages are newest and go last.
+        // No timestamp: sorts at its arrival, never before history seen.
         store.onLiveMessage(testMessage(stanzaId = "s4", body = "fourth"))
 
         val bodies = store.timeline("alice@waddle.test").value.map { it.body }
         assertEquals(listOf("first", "second", "third", "fourth"), bodies)
+    }
+
+    @Test
+    fun `archived catch-up newer than earlier live rows sorts after them`() {
+        var now = Instant.parse("2026-10-24T23:37:00Z")
+        val store = TimelineStore(nowMillis = { now.toEpochMilli() })
+        store.setOwnBareJid("me@waddle.test")
+        store.onLiveMessage(testMessage(stanzaId = "live-1", body = "yesterday, live"))
+        now = Instant.parse("2026-10-24T23:55:00Z")
+        store.onLiveMessage(testMessage(stanzaId = "live-2", body = "yesterday, later"))
+        // The stream drops overnight; the catch-up page is stamped today.
+        now = Instant.parse("2026-10-25T12:55:00Z")
+        store.onArchivedPage(
+            listOf(
+                testArchivedMessage(mamId = "m1", stanzaId = "s1", timestamp = "2026-10-25T12:11:00Z", body = "today"),
+                testArchivedMessage(
+                    mamId = "m2", stanzaId = "s2", timestamp = "2026-10-25T12:52:00Z", body = "today, later",
+                ),
+            ),
+        )
+
+        val bodies = store.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(listOf("yesterday, live", "yesterday, later", "today", "today, later"), bodies)
+    }
+
+    @Test
+    fun `a live row never sorts before history already seen when the device clock lags`() {
+        // Device clock five minutes behind the server.
+        val store = TimelineStore(nowMillis = { Instant.parse("2026-10-25T12:00:00Z").toEpochMilli() })
+        store.setOwnBareJid("me@waddle.test")
+        store.onArchivedMessage(
+            testArchivedMessage(mamId = "m1", stanzaId = "s1", timestamp = "2026-10-25T12:05:00Z", body = "history"),
+        )
+        store.onLiveMessage(testMessage(stanzaId = "live-1", body = "live"))
+
+        val bodies = store.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(listOf("history", "live"), bodies)
+    }
+
+    @Test
+    fun `live rows keep arrival order when the device clock steps backward`() {
+        var now = Instant.parse("2026-10-25T12:05:00Z")
+        val store = TimelineStore(nowMillis = { now.toEpochMilli() })
+        store.setOwnBareJid("me@waddle.test")
+        store.onLiveMessage(testMessage(stanzaId = "live-1", body = "first"))
+        now = Instant.parse("2026-10-25T12:00:00Z")
+        store.onLiveMessage(testMessage(stanzaId = "live-2", body = "second"))
+
+        val bodies = store.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(listOf("first", "second"), bodies)
     }
 
     @Test
