@@ -27,6 +27,11 @@ license = "AGPL-3.0-or-later"
 authors = ["Waddle Contributors"]
 repository = "https://github.com/waddle-social/waddle"
 
+[workspace.lints.clippy]
+ref_option = "warn"
+undocumented_unsafe_blocks = "warn"
+wildcard_imports = "warn"
+
 [workspace.dependencies]
 # Core Runtime & Async
 tokio = { version = "1.52", features = ["full"] }

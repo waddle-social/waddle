@@ -11,3 +11,6 @@ repository.workspace = true
 jid.workspace = true
 
 [dev-dependencies]
+
+[lints]
+workspace = true

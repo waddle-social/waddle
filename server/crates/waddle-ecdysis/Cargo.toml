@@ -24,3 +24,6 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 name = "listener_inheritance"
 path = "tests/listener_inheritance.rs"
 harness = false
+
+[lints]
+workspace = true

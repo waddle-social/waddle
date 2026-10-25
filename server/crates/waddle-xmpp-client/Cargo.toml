@@ -70,3 +70,6 @@ webpki-roots = { version = "0.26", optional = true }
 # `aws-lc-rs` provider into the workspace graph.
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+
+[lints]
+workspace = true

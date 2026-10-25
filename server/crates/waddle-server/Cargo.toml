@@ -176,3 +176,6 @@ path = "src/main.rs"
 name = "waddle-cluster-keypool"
 path = "src/bin/cluster_keypool.rs"
 required-features = ["clustering"]
+
+[lints]
+workspace = true

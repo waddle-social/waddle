@@ -2,6 +2,8 @@
 
 ## Rust quality and protocol boundaries
 
+- For Rust API, import and module-layout changes, follow
+  [the Rust style conventions](../docs/rust-style.md).
 - Rust toolchain changes follow [`docs/rust-toolchain-bump.md`](../docs/rust-toolchain-bump.md).
 - Local and CI Clippy checks MUST use `-D warnings`. Do not add `#[allow(...)]`, `#![allow(...)]`, or Clippy-specific suppressions unless necessary and justified in the PR description. Prefer removing dead code, exercising it, or narrowing visibility.
 - Never construct XMPP/XML with `format!`, string concatenation, or `println!`. Build payloads with Rust structs/builders (`xmpp_parsers`, `minidom::Element`, etc.) and serialize them.

@@ -118,3 +118,6 @@ test-utils = [
   "dep:tracing-opentelemetry",
   "dep:tracing-subscriber",
 ]
+
+[lints]
+workspace = true
