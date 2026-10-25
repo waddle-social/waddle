@@ -17,7 +17,7 @@ use crate::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use hmac::{Hmac, KeyInit, Mac};
-use pbkdf2::pbkdf2_hmac;
+use pbkdf2::pbkdf2_hmac_array;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -1027,8 +1027,7 @@ fn scram_client_final_from_challenge(
         .expect("salt base64");
     let iterations = iterations.expect("iterations");
 
-    let mut salted_password = vec![0u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut salted_password);
+    let salted_password = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), &salt, iterations);
     let client_key = hmac_sha256(&salted_password, b"Client Key");
     let stored_key = sha256(&client_key);
     let channel_binding = BASE64_STANDARD.encode("n,,");

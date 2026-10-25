@@ -286,7 +286,10 @@ fn body_without_reply_fallback<'a>(
 mod tests {
     use super::*;
     use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
-    const SECRET: &[u8] = b"test-link-preview-secret";
+    fn secret() -> &'static [u8] {
+        static SECRET: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &*SECRET
+    }
 
     fn sender() -> jid::FullJid {
         "alice@example.com/desktop".parse().expect("jid")
@@ -365,7 +368,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -379,7 +382,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -439,7 +442,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -453,7 +456,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -490,7 +493,7 @@ mod tests {
             player: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -504,7 +507,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -550,7 +553,7 @@ mod tests {
             player: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -564,7 +567,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig {
@@ -604,7 +607,7 @@ mod tests {
     fn message_with_direct_video_request(
         preview: &waddle_xmpp::xep::LinkPreviewTokenData,
     ) -> Message {
-        let token = waddle_xmpp::xep::encode_link_preview_token(preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -625,7 +628,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -672,7 +675,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -698,7 +701,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &config,
@@ -732,7 +735,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -746,7 +749,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig {
@@ -777,7 +780,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -791,7 +794,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig {
@@ -828,7 +831,7 @@ mod tests {
                 native_video: None,
                 expires_at_unix: 1_900_000_000,
             };
-            let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+            let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
             let mut message = Message::new(None::<jid::Jid>);
             message.to = Some("room@muc.example.com".parse().expect("jid"));
             message.bodies.insert(
@@ -842,7 +845,7 @@ mod tests {
             consume_link_preview_request(
                 &mut message,
                 &sender(),
-                SECRET,
+                secret(),
                 1_800_000_000,
                 "https://waddle.example",
                 &LinkPreviewConfig::default(),
@@ -870,7 +873,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -884,7 +887,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig {
@@ -914,7 +917,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -928,7 +931,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig {
@@ -967,7 +970,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -986,7 +989,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1036,7 +1039,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1050,7 +1053,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1080,7 +1083,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 10,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1094,7 +1097,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             11,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1126,7 +1129,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1162,7 +1165,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1186,7 +1189,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1200,7 +1203,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1224,7 +1227,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1238,7 +1241,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1262,7 +1265,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1276,7 +1279,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1300,7 +1303,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1314,7 +1317,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1341,7 +1344,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1355,7 +1358,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1382,7 +1385,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(
@@ -1396,7 +1399,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1423,7 +1426,7 @@ mod tests {
             native_video: None,
             expires_at_unix: 1_900_000_000,
         };
-        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, SECRET);
+        let token = waddle_xmpp::xep::encode_link_preview_token(&preview, secret());
         let fallback_prefix = "> earlier https://quoted.example.com/\n";
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
@@ -1447,7 +1450,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),
@@ -1477,7 +1480,7 @@ mod tests {
         consume_link_preview_request(
             &mut message,
             &sender(),
-            SECRET,
+            secret(),
             1_800_000_000,
             "https://waddle.example",
             &LinkPreviewConfig::default(),

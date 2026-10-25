@@ -703,7 +703,8 @@ mod tests {
     }
 
     fn secret() -> &'static [u8] {
-        b"test-link-preview-secret"
+        static SECRET: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &*SECRET
     }
 
     /// Register a live connection for [`sender`] through the

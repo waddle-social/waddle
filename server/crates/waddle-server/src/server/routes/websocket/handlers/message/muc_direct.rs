@@ -874,7 +874,11 @@ mod tests {
     use waddle_xmpp::{Affiliation, Role};
 
     fn secret() -> OccupantIdSecret {
-        OccupantIdSecret::try_new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
+        static SECRET: std::sync::LazyLock<OccupantIdSecret> = std::sync::LazyLock::new(|| {
+            OccupantIdSecret::try_new(rand::random::<[u8; OCCUPANT_ID_SECRET_MIN_BYTES]>().to_vec())
+                .expect("valid secret")
+        });
+        SECRET.clone()
     }
 
     fn pm() -> Message {

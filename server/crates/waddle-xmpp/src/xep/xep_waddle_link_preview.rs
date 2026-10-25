@@ -382,7 +382,10 @@ pub fn decode_link_preview_token(
 mod tests {
     use super::*;
 
-    const SECRET: &[u8] = b"test-link-preview-secret";
+    fn secret() -> &'static [u8] {
+        static SECRET: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &*SECRET
+    }
 
     #[test]
     fn request_element_round_trips_token() {
@@ -418,10 +421,10 @@ mod tests {
             expires_at_unix: 1_900_000_000,
         };
 
-        let token = encode_link_preview_token(&data, SECRET);
+        let token = encode_link_preview_token(&data, secret());
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            decode_link_preview_token(&token, secret(), 1_800_000_000),
             Ok(data)
         );
     }
@@ -446,10 +449,10 @@ mod tests {
             expires_at_unix: 1_900_000_000,
         };
 
-        let token = encode_link_preview_token(&data, SECRET);
+        let token = encode_link_preview_token(&data, secret());
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            decode_link_preview_token(&token, secret(), 1_800_000_000),
             Ok(data)
         );
     }
@@ -473,10 +476,10 @@ mod tests {
             expires_at_unix: 1_900_000_000,
         };
 
-        let token = encode_link_preview_token(&data, SECRET);
+        let token = encode_link_preview_token(&data, secret());
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            decode_link_preview_token(&token, secret(), 1_800_000_000),
             Ok(data)
         );
     }
@@ -497,11 +500,11 @@ mod tests {
             expires_at_unix: 1_900_000_000,
         };
 
-        let mut token = encode_link_preview_token(&data, SECRET);
+        let mut token = encode_link_preview_token(&data, secret());
         token.0.push('x');
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            decode_link_preview_token(&token, secret(), 1_800_000_000),
             Err(WaddleLinkPreviewError::InvalidTokenSignature)
         );
     }
@@ -522,10 +525,10 @@ mod tests {
             expires_at_unix: 10,
         };
 
-        let token = encode_link_preview_token(&data, SECRET);
+        let token = encode_link_preview_token(&data, secret());
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 11),
+            decode_link_preview_token(&token, secret(), 11),
             Err(WaddleLinkPreviewError::Expired)
         );
     }
@@ -546,7 +549,7 @@ mod tests {
             expires_at_unix: 1_900_000_000,
         };
 
-        assert!(encode_link_preview_token_checked(&data, SECRET).is_none());
+        assert!(encode_link_preview_token_checked(&data, secret()).is_none());
     }
 
     #[test]
@@ -556,14 +559,13 @@ mod tests {
         let token = LinkPreviewToken("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1));
 
         assert_eq!(
-            decode_link_preview_token(&token, SECRET, 1_800_000_000),
+            decode_link_preview_token(&token, secret(), 1_800_000_000),
             Err(WaddleLinkPreviewError::InvalidTokenEncoding)
         );
     }
 
     #[test]
     fn round_trips_player_embed_in_token() {
-        let secret = b"test-secret";
         let data = LinkPreviewTokenData {
             sender_jid: "alice@example.com".parse().expect("jid"),
             scope_jid: "room@muc.example.com".parse().expect("jid"),
@@ -581,8 +583,8 @@ mod tests {
             native_video: None,
             expires_at_unix: 4_102_444_800,
         };
-        let token = encode_link_preview_token(&data, secret);
-        let decoded = decode_link_preview_token(&token, secret, 0).expect("decode");
+        let token = encode_link_preview_token(&data, secret());
+        let decoded = decode_link_preview_token(&token, secret(), 0).expect("decode");
         assert_eq!(decoded.player, data.player);
     }
 }
