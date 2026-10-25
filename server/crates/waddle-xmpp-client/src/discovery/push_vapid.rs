@@ -173,8 +173,8 @@ pub enum PushVapidReplyError {
 }
 
 /// Parse the Push Service's VAPID advertisement out of its disco#info
-/// reply [`reply`], refusing any reply whose `from` is not exactly
-/// [`service`] (a bare component JID, never a resource).
+/// reply `reply`, refusing any reply whose `from` is not exactly
+/// `service` (a bare component JID, never a resource).
 ///
 /// # Errors
 ///

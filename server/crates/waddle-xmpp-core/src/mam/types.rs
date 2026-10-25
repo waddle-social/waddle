@@ -220,7 +220,7 @@ impl ArchivedOccupantId {
 /// XEP-0313 §MUC Archives real-JID disclosure for an archived
 /// groupchat row: "In the case of non-anonymous rooms … the archive
 /// message will use extended message information in an `<x/>` element
-/// qualified by the 'http://jabber.org/protocol/muc#user' namespace
+/// qualified by the `http://jabber.org/protocol/muc#user` namespace
 /// and containing an `<item/>` child with a 'jid' attribute
 /// specifying the occupant's full JID."
 ///

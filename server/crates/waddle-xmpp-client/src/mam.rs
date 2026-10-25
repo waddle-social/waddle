@@ -597,7 +597,7 @@ fn parse_archived_author_real_jid(inner: &Element) -> Option<String> {
 /// Accumulates MAM results for one query: filters out results belonging to
 /// other queries and drops duplicates by `mam_id` (XEP-0198 §5 leaves weeding
 /// out resume-replayed duplicates to the recipient). Every collection path —
-/// both arms of the native [`run_mam_query`] and the WASM driver's pending
+/// both arms of the native `run_mam_query` and the WASM driver's pending
 /// query — delegates to one instance per query, so the dedup state cannot
 /// diverge between them.
 pub struct MamResultCollector {

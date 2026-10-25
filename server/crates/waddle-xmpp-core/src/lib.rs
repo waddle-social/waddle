@@ -1,6 +1,7 @@
 //! Shared typed primitives for Waddle's native XMPP client crates.
 
 #![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![warn(clippy::fn_params_excessive_bools, clippy::must_use_candidate)]
 
 pub mod carbons;
 pub mod connection;

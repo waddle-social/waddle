@@ -165,7 +165,7 @@ pub fn parse_show(token: &str) -> Option<Show> {
 }
 
 /// Build the user's own outbound presence (RFC 6121 §4.7) as a typed
-/// [`xmpp_parsers::Presence`]. `show` is the typed availability state (or
+/// [`xmpp_parsers::presence::Presence`]. `show` is the typed availability state (or
 /// `None` for plain Available); `status` is an optional free-text `<status>`
 /// line; `idle_since` is the typed XEP-0319 last-interaction instant, present
 /// only on an auto-away presence and `None` on a return-from-idle (RFC 6121 /

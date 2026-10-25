@@ -67,7 +67,7 @@ pub fn parse_status_preference_fetch_result(iq: &Element) -> Option<StatusPrefer
         })
 }
 
-/// A live pick from another resource of [`account`], from a PEP
+/// A live pick from another resource of `account`, from a PEP
 /// notification on the status-preference node. A retraction of the
 /// `current` item means Automatic. Notifications from anyone else, and
 /// malformed payloads, yield `None`.
