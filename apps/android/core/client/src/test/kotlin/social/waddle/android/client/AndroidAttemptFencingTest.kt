@@ -60,24 +60,13 @@ class AndroidAttemptFencingTest {
             assertEquals(
                 ActiveSession.LeaseInvocation.Stale,
                 active.invokeIfCurrent(retiredLease) {
-                it.sendReaction(
-                    "room@muc.waddle.test",
-                    "reaction-1",
-                    listOf("👍"),
-                    WaddleMessageAudience.MUC,
-                )
+                it.sendReaction("room@muc.waddle.test", "reaction-1", listOf("👍"), WaddleMessageAudience.MUC)
             }
             )
             assertEquals(
                 ActiveSession.LeaseInvocation.Stale,
                 active.invokeIfCurrent(retiredLease) {
-                it.sendCorrection(
-                    "peer@waddle.test",
-                    "correction-1",
-                    "fixed",
-                    WaddleMessageAudience.DIRECT,
-                    null,
-                )
+                it.sendCorrection("peer@waddle.test", "correction-1", "fixed", WaddleMessageAudience.DIRECT, null)
             }
             )
 

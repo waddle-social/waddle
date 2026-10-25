@@ -150,7 +150,10 @@ class XmppSessionManagerReadStateTest {
         // XEP-0333 id-class rule: the DM marker carries the AUTHOR's id
         // ("id-2"), never the local archive stanza id — the peer never
         // saw "s2". The MDS publish still uses the stanza-id pair.
-        assertEquals(listOf(Triple("alice@waddle.test", "id-2", WaddleMessageAudience.DIRECT)), harness.client.displayedCalls)
+        assertEquals(
+            listOf(Triple("alice@waddle.test", "id-2", WaddleMessageAudience.DIRECT)),
+            harness.client.displayedCalls,
+        )
         assertEquals("s2", harness.client.mdsPublishCalls.last().second)
         harness.manager.logout()
     }
@@ -204,7 +207,10 @@ class XmppSessionManagerReadStateTest {
         runCurrent()
 
         assertTrue("released once the drain sent it", waiter.isCompleted)
-        assertEquals(listOf(Triple("room@muc.waddle.test", "s1", WaddleMessageAudience.MUC)), harness.client.displayedCalls)
+        assertEquals(
+            listOf(Triple("room@muc.waddle.test", "s1", WaddleMessageAudience.MUC)),
+            harness.client.displayedCalls,
+        )
         harness.manager.logout()
     }
 
