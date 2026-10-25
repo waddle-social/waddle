@@ -1,6 +1,6 @@
 use super::{
-    relay_name, Arc, CancellationToken, ClusteringMessagingConfig, Duration, Entity, EntityType,
-    NodeId, OrderedRelayDeliveryBridge, OrderedRelayReply, OrderedRelaySequence, RelayActor,
+    relay_name, Arc, CancellationToken, Duration, Entity, EntityType, NodeId,
+    OrderedRelayDeliveryBridge, OrderedRelayReply, OrderedRelaySequence, RelayActor,
     RelayDeliverOrdered,
 };
 use crate::clustering::ordered_relay::{

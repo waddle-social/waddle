@@ -17,13 +17,11 @@ use super::AdminListAnswer;
 #[cfg(feature = "clustering")]
 use super::AdminListDenial;
 use super::{
-    broadcast_unavailable_if_no_replacement, build_iq_error_xml_typed, cleanup, element_to_xml,
-    frame, get_or_create_room_actor, get_room_actor_result, handlers, localpart_to_jid,
-    muc_invites, not_authorized_iq_error, replay, state, transport_xml, ActiveCallThread, ActorRef,
-    ConnectionRegistry, DeliveryKind, DmCallThreadKey, FromStr, InboundEvent, InboxStorage,
-    MamStorage, Message, OutboundEvent, OutboundStanza, PubSubStorage, ResolvedPrincipal,
-    RoomActor, RoomConfig, StreamManagementState, XmppServiceDomains, BASE64_STANDARD,
-    MAX_FRAME_SIZE, SM_NS,
+    build_iq_error_xml_typed, cleanup, element_to_xml, get_or_create_room_actor, handlers,
+    localpart_to_jid, not_authorized_iq_error, transport_xml, ActiveCallThread, ConnectionRegistry,
+    DeliveryKind, FromStr, InboundEvent, InboxStorage, MamStorage, Message, OutboundStanza,
+    PubSubStorage, ResolvedPrincipal, RoomConfig, StreamManagementState, XmppServiceDomains,
+    BASE64_STANDARD, SM_NS,
 };
 
 use super::{

@@ -1,4 +1,5 @@
 use crate::channel_space_links::ChannelSpaceLinkStore;
+#[cfg(any(test, feature = "test-support"))]
 use crate::channel_space_links::InMemoryChannelSpaceLinkStore;
 use crate::clustering::ClusteringHandles;
 use crate::clustering::NodeLifecycle;
@@ -12,6 +13,7 @@ use crate::db::Database;
 use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
+#[cfg(any(test, feature = "test-support"))]
 use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
 use jid::{BareJid, DomainPart};

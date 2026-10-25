@@ -1,10 +1,11 @@
 #[cfg(feature = "clustering")]
+use super::open_for_cluster_mode_with_lineage;
+#[cfg(feature = "clustering")]
 use super::PostgresFencedSmPersistence;
 use super::{
-    open_for_cluster_mode_with_lineage, schema, Arc, Database, DatabaseSmPersistence, DateTime,
-    FullJid, IngressCustodyDisposition, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, Show, SmAckWindow, SmPersistenceError,
-    SmPersistenceStorage, SmSessionId, Stanza, Utc,
+    schema, Arc, Database, DatabaseSmPersistence, DateTime, FullJid, IngressCustodyDisposition,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PromotionAppendOutcome, Show,
+    SmAckWindow, SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };
 use super::{DatabaseConfig, DatabaseDriver, KeyedSnapshotOutcome};
 

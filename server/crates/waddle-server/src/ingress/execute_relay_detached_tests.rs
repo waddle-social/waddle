@@ -1,7 +1,9 @@
 //! A frozen remote route retains its receipt identity when execution falls back locally.
+#[cfg(feature = "clustering")]
+use super::FullJidDeliveryOutcome;
 use super::{
     execute_effects, terminalize_if_complete, Deps, Duration, Effect, ExternalDeliveryEffect,
-    ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome, ImmediateSink, PlannedEffect, Stanza,
+    ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect, Stanza,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;

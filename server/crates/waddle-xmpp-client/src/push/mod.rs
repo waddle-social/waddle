@@ -18,6 +18,7 @@
 //! `waddle-server`) is unchanged by the XEP-0050 cutover — only the
 //! wire shape changes.
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use crate::client::ClientHandle;
 use std::str::FromStr;
 

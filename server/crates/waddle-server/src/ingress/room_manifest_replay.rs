@@ -1,4 +1,5 @@
 //! A sealed room child may reach only its frozen endpoint and occupancy.
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::CanonicalMessageRepository;
 use crate::ingress_uow::IngressFencing;
 use crate::server::routes::interpret::Deps;

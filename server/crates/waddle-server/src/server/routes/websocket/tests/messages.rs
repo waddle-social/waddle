@@ -6,16 +6,14 @@ use super::{
     parse_message_for_test, ready_phase, register_test_connection, register_test_native_user,
     seed_local_account, stanza_to_xml, Affiliation, Arc, BareJid, Blocklist, ChangeAffiliation,
     ConnectionPhase, DeliveryKind, Element, FromStr, FullJid, GetSnapshot, InboundEvent,
-    InboxStorage, IqConnState, JoinAffiliationGrant, JoinWithAffiliation, MamStorage,
-    PubSubStorage, RoomConfig, Session, Stanza, WebSocketState, WsConnState, XmppMessageType,
-    XmppStateMachine,
+    IqConnState, JoinAffiliationGrant, JoinWithAffiliation, RoomConfig, Session, Stanza,
+    WebSocketState, WsConnState, XmppMessageType, XmppStateMachine,
 };
 use super::{
     create_test_websocket_state_with_db_pool_and_ingress,
     create_test_websocket_state_with_extension_manager,
     create_test_websocket_state_with_fixture_bot, empty_extension_manager, get_room_actor,
-    handle_muc_join_with_occupancy_session, record_test_occupancy_session, tests, DatabaseConfig,
-    DatabasePool, OutboundStanza, PoolConfig, TestStateOverrides, FIXTURE_BOT_PLUGIN,
+    TestStateOverrides, FIXTURE_BOT_PLUGIN,
 };
 
 #[path = "messages_offline.rs"]

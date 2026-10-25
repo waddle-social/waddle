@@ -1,8 +1,8 @@
 //! RFC 0018 §3 recorded-wins and XEP-0198: resource drift cannot revoke acceptance.
 use super::{
-    archive_plan, commit_submission, replay, ArchiveExpectation, ArchivedMessage,
-    DurableDirectEffect, DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent,
-    IngressFixture, PlannedEffect, StanzaId,
+    archive_plan, commit_submission, ArchiveExpectation, ArchivedMessage, DurableDirectEffect,
+    DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture,
+    PlannedEffect, StanzaId,
 };
 use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
 use waddle_server::ingress::{ExternalEffect, IngressStreamIdentity, PlanSuppressionPolicy};

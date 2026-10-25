@@ -1,8 +1,10 @@
 use super::contract::{test_lineage_config, RETIREMENT_BATCH_SIZE};
 #[cfg(feature = "clustering")]
+use super::DatabaseDriver;
+#[cfg(feature = "clustering")]
 use super::SharedNodeIdentity;
 use super::{
-    Arc, Database, DatabaseConfig, DatabaseDriver, Duration, IngressAuthority, IngressConfig,
+    Arc, Database, DatabaseConfig, Duration, IngressAuthority, IngressConfig,
     IngressRetirementOutcome, IngressUnitOfWork, IngressUowError, SmIngressId, SmIngressRepository,
     SmSessionId, WireHandledCount,
 };

@@ -1,13 +1,20 @@
 #[cfg(feature = "clustering")]
+use super::dispatch_to_room;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
-use super::{dispatch_to_room, OrderedRelayRouteOrigin, Stanza};
+#[cfg(feature = "clustering")]
+use super::Stanza;
 
 #[cfg(feature = "clustering")]
-use super::DemoteRoomIfExactActor;
+use super::register_into_both_tiers;
+#[cfg(feature = "clustering")]
+use super::FullJid;
+#[cfg(feature = "clustering")]
+use super::InMemorySmSessionRegistry;
 use super::{
-    interpret, register_into_both_tiers, ActorRef, Arc, ConnectionRegistry,
-    DeliveryExecutionContext, Deps, Element, FullJid, GetRoom, GetRoomSnapshot,
-    InMemorySmSessionRegistry, IngressEffectIntent, Jid, MamStorage, Message, OutboundEvent,
+    interpret, Arc, ConnectionRegistry, Deps, GetRoom, GetRoomSnapshot, Message, OutboundEvent,
     RoomRegistryActor,
 };
 

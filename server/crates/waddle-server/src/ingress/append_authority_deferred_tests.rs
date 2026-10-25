@@ -1,6 +1,6 @@
 //! A relayed claim's canonical read is deferred to its first trusting consumer
 //! and runs once per context clone-tree, caching a rejection (#1790).
-use super::{canonical_reads, AppendAuthority, MessageKey, Stanza};
+use super::{canonical_reads, AppendAuthority, Stanza};
 use crate::ingress::commit::commit_submission;
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::test_support::IngressFixture;

@@ -2,9 +2,8 @@ use super::{
     connection, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager, empty_extension_manager,
     get_or_create_room_actor, handle_xmpp_frame, mpsc, offered_message, register_test_connection,
-    stanza_to_xml, store_resumable_detached_session, transport_xml, Arc, ConnectionPhase,
-    DatabaseConfig, DatabasePool, Element, PoolConfig, RoomConfig, SmSessionId, Stanza,
-    TestStateOverrides, WebSocketState, WsConnState, XmppMessageType,
+    store_resumable_detached_session, Arc, ConnectionPhase, DatabaseConfig, DatabasePool,
+    PoolConfig, RoomConfig, SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
 };
 use crate::ingress::commit::commit_hooks;
 use crate::ingress_uow::IngressUowError;

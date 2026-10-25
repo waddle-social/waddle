@@ -15,10 +15,7 @@ use super::handle_push_iq;
 use super::handle_roster_iq;
 use super::handle_sans_io_iq;
 use super::is_muc_admin_iq;
-#[cfg(feature = "clustering")]
-use super::jingle_muji_relay;
-#[cfg(feature = "clustering")]
-use super::muc_admin_relay;
+
 use super::route_full_jid_iq;
 use super::ConnectionPhase;
 use super::IqConnState;

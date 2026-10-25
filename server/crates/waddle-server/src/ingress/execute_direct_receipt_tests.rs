@@ -1,9 +1,18 @@
 //! RFC 0018 §3: a capture identity receipts only its complete frozen fanout.
+#[cfg(feature = "clustering")]
+use super::classify_outcome;
+#[cfg(feature = "clustering")]
+use super::completed_receipts;
+#[cfg(feature = "clustering")]
+use super::proven_receipts;
+#[cfg(feature = "clustering")]
+use super::EffectOutcome;
+#[cfg(feature = "clustering")]
+use super::ExternalDeliveryEffect;
 use super::{
-    classify_outcome, completed_receipts, execute_effects, proven_receipts,
-    terminalize_if_complete, CanonicalMessageRepository, Deps, Duration, Effect, EffectOutcome,
-    EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, FullJidDeliveryOutcome,
-    ImmediateSink, PlannedEffect, Stanza,
+    execute_effects, terminalize_if_complete, CanonicalMessageRepository, Deps, Duration, Effect,
+    EffectReceiptRepository, ExternalEffect, FullJidDeliveryOutcome, ImmediateSink, PlannedEffect,
+    Stanza,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;

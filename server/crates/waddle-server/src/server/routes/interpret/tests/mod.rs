@@ -12,18 +12,13 @@ use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
 use super::{
-    apply_archive_id_rewrites, apply_groupchat_retraction_tombstone, apply_retraction_tombstone,
-    archive_lookup, deliver_direct_to_full, deliver_direct_to_full_with_registered_remote,
-    direct_archive, direct_retraction, extract_stanza_id_by, groupchat_archive,
-    interpret_with_depth, lookup_archived_message, parse_reply_from_message, plan_message_dispatch,
-    route_to_connection, routing, set_thread_id, waddle_id_for_room_jid, ArchiveIdRewrite,
-    ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, CarbonKind, DefinedCondition,
-    DisplayText, ErrorType, ExtensionManager, ExtensionRoomMessage, FromStr,
-    FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot, GroupchatInboxAudience,
-    InMemorySmSessionRegistry, InboundEvent, IngressEffectIntent, InterpretOutcome,
-    MamArchivedMessage, MessageMarkupKind, MessageMarkupSpan, MessageRef, OccupantSnapshot,
-    ReplyTarget, RichMessageId, RichText, RoomActor, RoomJid, RoomRegistryActor, SetSubject,
-    SmIngressAppendContext, StanzaError, StanzaId, SubjectState, ThreadId, XmppStateMachine,
+    apply_archive_id_rewrites, apply_groupchat_retraction_tombstone, archive_lookup,
+    direct_archive, extract_stanza_id_by, groupchat_archive, interpret_with_depth,
+    parse_reply_from_message, plan_message_dispatch, waddle_id_for_room_jid, ArchiveIdRewrite,
+    ArchivedTombstone, CarbonKind, DefinedCondition, ErrorType, ExtensionRoomMessage, FromStr,
+    FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot, InMemorySmSessionRegistry, InboundEvent,
+    IngressEffectIntent, InterpretOutcome, MamArchivedMessage, MessageRef, OccupantSnapshot,
+    RoomRegistryActor, SmIngressAppendContext, StanzaError, XmppStateMachine,
     MAX_RECIPIENT_PASS_DEPTH,
 };
 

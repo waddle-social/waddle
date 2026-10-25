@@ -5,7 +5,7 @@ use super::{
     outcome_for_ask_error, outcome_for_nack, owner_remote_entry_if_current,
     replies_for_origin_handoff, route_outcome_log, route_target_stanza_is_iq, stanza_message_id,
     validate_claims, Arc, AtomicBool, BroadcastOutcome, CancellationToken, ClaimSnapshot,
-    ClaimStore, DeliveryKind, Entity, EntityType, FullJidDeliveryOutcome, MucProxyOrigin, Mutex,
+    DeliveryKind, Entity, EntityType, FullJidDeliveryOutcome, MucProxyOrigin, Mutex,
     NackChannelAction, NodeId, NodeIdentity, OrderedRelayChannel, OrderedRelayClaim,
     OrderedRelayClaimRole, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     OrderedRelayDiversion, OrderedRelayDiversionReason, OrderedRelayEnvelopeClaims,

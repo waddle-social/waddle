@@ -1,10 +1,8 @@
-#[cfg(feature = "clustering")]
-use super::NodeId;
 use super::{
     classify_outcome, completed_receipts, execute_effects, proven_receipts,
     terminalize_if_complete, Deps, Duration, Effect, EffectOutcome, EffectReceiptRepository,
     ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome, ImmediateSink,
-    PlanEffectDependency, PlannedEffect,
+    PlannedEffect,
 };
 
 use crate::ingress::commit::commit_submission;

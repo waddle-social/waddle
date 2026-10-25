@@ -1,12 +1,11 @@
 //! Foreign ownership never turns maintenance's detached recovery into a relay.
 use super::{
-    append_count, commit_submission, departed, pass, pass_with_row_deadline, persistent_sm,
-    planned_room, receipt_key, state_for, store_detached, Arc, CanonicalMessageRepository, Case,
-    CreateRoom, DeliveryExecutionContext, DeliveryProgressRepository, Duration,
-    EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, InMemorySmSessionRegistry,
-    IngressEffectIntent, IngressFixture, Join, MaintenanceBudget, MaintenanceCursor,
-    MaintenanceOutcome, MessageKey, Ordering, RecoveryEnvironment, Stanza, StateEnvironment,
-    WebSocketState,
+    append_count, commit_submission, pass, pass_with_row_deadline, persistent_sm, planned_room,
+    receipt_key, state_for, store_detached, Arc, CanonicalMessageRepository, Case,
+    DeliveryProgressRepository, Duration, EffectReceiptRepository, ExternalDeliveryEffect,
+    ExternalEffect, InMemorySmSessionRegistry, IngressEffectIntent, IngressFixture, Join,
+    MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome, MessageKey, RecoveryEnvironment,
+    StateEnvironment, WebSocketState,
 };
 use crate::clustering::relay::RelayRemoteResourceRegistrationStatus;
 use crate::clustering::route_bridge::{

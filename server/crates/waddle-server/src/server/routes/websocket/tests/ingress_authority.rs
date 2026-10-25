@@ -1,17 +1,21 @@
 use super::super::frame::{handle_xmpp_frame, settle_inbound_dispatch};
 use super::super::frame_backstop::InboundDisposition;
 use super::super::state::WsConnState;
+#[cfg(feature = "clustering")]
+use super::BareJid;
+#[cfg(feature = "clustering")]
+use super::SM_NS;
 use super::{
     create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager,
     create_test_websocket_state_with_sm_registry_and_ingress, empty_extension_manager,
-    stanza_to_xml, transport_xml, Arc, BareJid, ConnectionPhase, DatabaseConfig, DatabasePool,
-    Element, FullJid, InMemorySmSessionRegistry, InboxStorage, MamStorage, Message, PoolConfig,
-    Stanza, TestStateOverrides, WebSocketState, XmppMessageType, SM_NS,
+    stanza_to_xml, transport_xml, Arc, ConnectionPhase, DatabaseConfig, DatabasePool, Element,
+    InMemorySmSessionRegistry, InboxStorage, MamStorage, Message, PoolConfig, Stanza,
+    TestStateOverrides, WebSocketState, XmppMessageType,
 };
 use super::{
     element_to_xml, get_or_create_room_actor, mpsc, register_test_connection, seed_local_account,
-    store_resumable_detached_session, tests, DeliveryKind, OutboundStanza, RoomConfig, Session,
+    store_resumable_detached_session, tests, RoomConfig,
 };
 // Its only use sits in a clustering-gated branch, so a default-feature build
 // sees it unused. Predates this work (#1786); invisible because every other

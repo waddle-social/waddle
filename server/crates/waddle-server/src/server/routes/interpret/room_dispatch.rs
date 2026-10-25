@@ -2,22 +2,27 @@
 use super::resource_constraint_error;
 #[cfg(feature = "clustering")]
 use super::DemoteRoomIfExactActor;
+#[cfg(feature = "clustering")]
+use super::FullJid;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
 use super::{
     bad_request_error, build_message_error_reply, debug, default_room_pipeline_dispatcher,
     extract_correction_from_message, extract_forum_action, extract_retraction_from_message,
     info_span, interpret_with_depth, item_not_found_error, message_has_framework_envelope,
     parse_managed_room_jid, remove_framework_envelopes, remove_stanza_ids_by, set_thread_id,
     validate_groupchat_rich_targets, waddle_id_for_room_jid, warn, BareJid, CheckPermission, Deps,
-    ForumAction, FullJid, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid,
-    MamArchivedMessage, Message, Object, ObjectType, OccupantSnapshot, OrderedRelayRouteOrigin,
-    OutboundEvent, Permission, RetractionKind, RoomContext, Stanza, Subject, ToElementString,
-    UuidV4Generator, WebSocketState, Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
+    ForumAction, GetRoom, GetRoomSnapshot, Instrument, InterpretOutcome, Jid, MamArchivedMessage,
+    Message, Object, ObjectType, OccupantSnapshot, OutboundEvent, Permission, RetractionKind,
+    RoomContext, Stanza, Subject, ToElementString, UuidV4Generator, WebSocketState,
+    Xep0359StanzaId, XmppMessageType, DEPLOYMENT_SERVER_ID,
 };
 
 #[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::MucProxyOrigin;
 #[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+#[cfg(feature = "clustering")]
 use crate::ingress::IngressEffectCapture;
 use crate::ingress::RoomManifestSnapshot;
 use crate::server::routes::websocket::ResolvedPrincipal;

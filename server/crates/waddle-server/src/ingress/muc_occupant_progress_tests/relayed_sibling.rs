@@ -1,10 +1,9 @@
 use super::{
-    build_interpret_deps, commit_submission, execute_effects, execute_uow, local, receipt_key,
-    receipts, recorded, room_canonical, stall, terminalize_if_complete, CancellationToken,
-    CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput, DurableEffect, Duration,
+    build_interpret_deps, commit_submission, execute_effects, receipt_key, terminalize_if_complete,
+    CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput, Duration,
     EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ImmediateSink,
-    IngressCanonicalRef, IngressEffectIntent, IngressFixture, IngressPlan, IngressStreamIdentity,
-    Join, NormalizedTarget, RoomExecutionPath,
+    IngressCanonicalRef, IngressEffectIntent, IngressFixture, IngressStreamIdentity, Join,
+    NormalizedTarget,
 };
 use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;
 use crate::clustering::ClusteringHandles;

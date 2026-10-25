@@ -17,11 +17,14 @@ use waddle_xmpp::registry::{
 use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
+#[cfg(feature = "clustering")]
+use super::promote_session_unacked_with_policy;
+#[cfg(feature = "clustering")]
+use super::StreamPromotionDeps;
 use super::{
     is_senderless_inbox_projection, parse_stanza, promote_displaced_sessions,
-    promote_session_unacked, promote_session_unacked_with_policy, promote_session_with_custody,
-    DisplacedPromotionDeps, PromotionFailureReason, StreamPromotionDeps,
-    TerminalOverflowPromotionDeps,
+    promote_session_unacked, promote_session_with_custody, DisplacedPromotionDeps,
+    PromotionFailureReason, TerminalOverflowPromotionDeps,
 };
 
 fn full(s: &str) -> FullJid {

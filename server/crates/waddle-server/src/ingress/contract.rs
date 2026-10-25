@@ -231,7 +231,7 @@ impl IngressAuthority {
     /// Fixtures share a fixed deployment UUID so reusing a test pool re-attests its row.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn for_test(database: Database) -> Self {
-        let lineage = test_lineage_config();
+        let lineage = super::test_lineage_config();
         crate::db::lineage::enroll(&database, &lineage)
             .await
             .expect("enroll test ingress lineage");

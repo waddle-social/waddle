@@ -5,10 +5,10 @@ use super::{
     create_test_websocket_state_with_fixture_bot_avatar, disco_info_iq_frame, disco_items_iq_frame,
     get_or_create_room_actor, handle_iq, handle_iq_with_conn_state, handle_xmpp_frame,
     iq_set_frame, parse_iq_for_test, ready_phase, register_test_connection, stanza_to_xml,
-    Affiliation, Arc, BareJid, CommandContext, CommandResult, ConnectionPhase, Element, Engine,
-    FromStr, FullJid, Iq, IqConnState, IqPayload, JoinAffiliationGrant, JoinWithAffiliation,
-    Object, ObjectType, OutboundStanza, Permission, PubSubStorage, Relation, Session, Stanza,
-    Subject, Tuple, WebSocketState, WriteTuple, WsConnState, FIXTURE_BOT_PLUGIN,
+    Affiliation, Arc, BareJid, CommandContext, CommandResult, ConnectionPhase, Element, FromStr,
+    FullJid, Iq, IqConnState, IqPayload, JoinAffiliationGrant, JoinWithAffiliation, Object,
+    ObjectType, OutboundStanza, Permission, Relation, Session, Stanza, Subject, Tuple,
+    WebSocketState, WriteTuple, WsConnState, FIXTURE_BOT_PLUGIN,
 };
 use crate::permissions::{CheckPermission, SubjectType};
 

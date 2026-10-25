@@ -1,5 +1,5 @@
 use super::{
-    archive_plan, commit_submission, replay, CanonicalMessageRepository, DurableDirectEffect,
+    archive_plan, commit_submission, CanonicalMessageRepository, DurableDirectEffect,
     DurableEffect, Effect, IngressDecisionClass, IngressEffectIntent, IngressFixture,
     IngressSubmission, PlannedEffect,
 };

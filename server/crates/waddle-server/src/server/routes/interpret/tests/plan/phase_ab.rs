@@ -1,12 +1,14 @@
 //! RFC 0018 §2: pool stores are tripwires; only the authority transaction writes.
+
 #[cfg(feature = "clustering")]
-use super::poison_muc;
+use super::InMemorySmSessionRegistry;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
 use super::{
-    plan_message_dispatch, poison, sqlite_writes, tests, Arc, Deps, Effect, ExternalEffect,
-    InMemoryInboxStorage, InMemoryMamStorage, InMemoryPendingDeliveryStorage,
-    InMemorySmSessionRegistry, InboxStorage, MamStorage, OrderedRelayRouteOrigin,
+    plan_message_dispatch, poison, Arc, Deps, Effect, ExternalEffect, InMemoryInboxStorage,
+    InMemoryMamStorage, InMemoryPendingDeliveryStorage, InboxStorage, MamStorage,
     PendingDeliveryStorage, Stanza, StanzaDispatcher, XmppStateMachine,
 };
 

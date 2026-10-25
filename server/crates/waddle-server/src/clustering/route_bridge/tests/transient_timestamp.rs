@@ -1,6 +1,6 @@
 //! Timestamp-only relay metadata preserves native SM custody without ingress authority.
 use super::{
-    envelope_for_services, mpsc, origin_identity, receiver_identity, registration, sender_full,
+    envelope_for_services, mpsc, origin_identity, receiver_identity, sender_full,
     services_with_claims, sign_envelope, target_full, test_peer_id, Arc, AtomicBool,
     CancellationToken, ClusteringMessagingConfig, ConnectionEntry, Keypair, Lang, Message, NodeId,
     NodeIdentity, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNack,

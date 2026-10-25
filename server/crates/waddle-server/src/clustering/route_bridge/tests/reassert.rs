@@ -1,7 +1,7 @@
 use super::{
     origin_identity, receiver_identity, room_entity, services_with_claims, test_peer_id, Arc,
-    CancellationToken, ClaimSnapshot, ClaimStore, ClusteringMessagingConfig, Duration, Entity,
-    LocalMediaGrantReassertion, OrderedRelayDeliveryBridge, REASSERT_CLAIM_READ_TIMEOUT,
+    CancellationToken, ClusteringMessagingConfig, Duration, Entity, LocalMediaGrantReassertion,
+    OrderedRelayDeliveryBridge, REASSERT_CLAIM_READ_TIMEOUT,
 };
 use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, NodeIdentity};
 

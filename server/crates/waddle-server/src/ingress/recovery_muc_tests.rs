@@ -1,4 +1,12 @@
 //! Real room planning followed by maintenance, without client retransmission.
+#[cfg(feature = "clustering")]
+use super::DeliveryExecutionContext;
+#[cfg(feature = "clustering")]
+use super::InMemorySmSessionRegistry;
+#[cfg(feature = "clustering")]
+use super::Ordering;
+#[cfg(feature = "clustering")]
+use super::Stanza;
 use super::{
     append_count, build_interpret_deps, commit_submission, execute_effects,
     immediate_recovery_budget, pass, persistent_sm, retarget, run_maintenance_pass_with_cursor,
@@ -8,10 +16,7 @@ use super::{
     MaintenanceCursor, MaintenanceOutcome, NormalizedTarget, PlanSink, RecoveryEnvironment,
     SmSessionRegistry, StateEnvironment, WebSocketState,
 };
-use super::{
-    AtomicBool, DeliveryExecutionContext, Deps, InMemorySmSessionRegistry, MessageKey, Ordering,
-    Stanza,
-};
+use super::{Deps, MessageKey};
 use crate::ingress::execute::ExternalOutcome;
 use crate::ingress::{receipt_key, IngressEffectCapture};
 use crate::ingress_uow::DeliveryProgressRepository;

@@ -4,7 +4,7 @@ use super::{
     terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput,
     Duration, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome,
     ImmediateSink, IngressEffectCapture, IngressEffectIntent, IngressFixture, IngressSubmission,
-    Join, NormalizedTarget, OutboundEvent, PlanSink, RoomExecutionPath,
+    Join, NormalizedTarget, OutboundEvent, PlanSink,
 };
 use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
 use crate::server::routes::interpret::DeliveryExecutionContext;

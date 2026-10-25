@@ -1,13 +1,14 @@
 use super::effects::{EffectSink, IngressPlan, PlanFailure, PlanSink, RoomExecutionPath};
 use super::groupchat_archive::room_scoped_reply_to_attr;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
 use super::{
     build_plan_deps, default_room_pipeline_dispatcher, interpret_with_depth, set_reply_payload,
     set_thread_id, validate_groupchat_rich_targets, warn, ActorRef, BareJid, Deps, DisplayText,
     Element, ExtensionEnvelope, FullJid, GetAffiliation, GetRoom, GetRoomSnapshot,
     HostOwnedResources, Jid, JoinAffiliationGrant, JoinWithAffiliation, Message, MessageMarkupKind,
-    MessageMarkupSpan, OccupantSnapshot, OrderedRelayRouteOrigin, OutboundEvent, ReplyReference,
-    ReplyTarget, RoomActor, RoomContext, RoomJid, Stanza, StanzaId, ThreadId, UuidV4Generator,
-    XmppMessageType,
+    MessageMarkupSpan, OccupantSnapshot, OutboundEvent, ReplyReference, ReplyTarget, RoomActor,
+    RoomContext, RoomJid, Stanza, StanzaId, ThreadId, UuidV4Generator, XmppMessageType,
 };
 use crate::ingress::IngressEffectCapture;
 use crate::ingress::RoomManifestSnapshot;

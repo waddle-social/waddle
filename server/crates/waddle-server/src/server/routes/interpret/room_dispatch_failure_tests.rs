@@ -1,8 +1,8 @@
 //! Phase-A room infrastructure failures must leave the origin-id retryable.
 use super::super::effects::{PlanFailure, PlanSink};
-use super::{
-    dispatch_to_room, BareJid, Deps, FullJid, IngressEffectIntent, OrderedRelayRouteOrigin,
-};
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+use super::{dispatch_to_room, BareJid, Deps, FullJid, IngressEffectIntent};
 use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress::{IngressDecisionClass, IngressStreamIdentity, IngressSubmission};

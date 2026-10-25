@@ -1,9 +1,8 @@
 //! #1803 receiver side: every node answers for its OWN sockets and sessions.
 use super::{
-    mpsc, origin_identity, reassert, receiver_identity, remote_registration_request,
-    services_with_claims, target_full, test_peer_id, Arc, CancellationToken,
-    ClusteringMessagingConfig, Duration, InMemorySmSessionRegistry, LocalResourcePresence, NodeId,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OutboundStanza,
+    mpsc, origin_identity, receiver_identity, remote_registration_request, services_with_claims,
+    target_full, test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig, Duration,
+    LocalResourcePresence, NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     RelayRemoteResourceRegistrationStatus,
 };
 use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry as _};

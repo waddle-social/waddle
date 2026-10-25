@@ -1,37 +1,11 @@
 //! Implementation behind the parent module facade.
 
 #[cfg(feature = "clustering")]
-use super::allowlist;
-#[cfg(all(test, feature = "clustering"))]
-use super::allowlist_table_lock;
-#[cfg(feature = "clustering")]
-use super::behaviour;
-#[cfg(feature = "clustering")]
 use super::claims;
-#[cfg(feature = "clustering")]
-use super::codec;
-#[cfg(feature = "clustering")]
-use super::dns;
-#[cfg(feature = "clustering")]
-use super::drain;
-#[cfg(feature = "clustering")]
-use super::identity;
-#[cfg(all(test, feature = "clustering"))]
-use super::keypair_slot_table_lock;
-#[cfg(feature = "clustering")]
-use super::lease;
 #[cfg(feature = "clustering")]
 use super::local_claims;
 #[cfg(feature = "clustering")]
-use super::metrics;
-#[cfg(feature = "clustering")]
-use super::ordered_relay;
-#[cfg(feature = "clustering")]
-use super::relay;
-#[cfg(feature = "clustering")]
 use super::resource_presence;
-#[cfg(feature = "clustering")]
-use super::resume_asker;
 #[cfg(feature = "clustering")]
 use super::resume_bridge;
 #[cfg(feature = "clustering")]
@@ -40,8 +14,6 @@ use super::route_bridge;
 use super::self_fence;
 #[cfg(feature = "clustering")]
 use super::swarm;
-#[cfg(feature = "clustering")]
-use super::trace_context;
 use super::Arc;
 use super::CancellationToken;
 use super::ClusteringConfig;
@@ -750,7 +722,7 @@ pub async fn start_if_enabled(
         // supervisor, allowlist/DNS timers, and — from Phase 3 Slice 2 — the
         // node-lease/self-fence loop) is driven off this child, never the
         // raw process-wide `stop_token` — see `clustering_scope_token`.
-        let clustering_stop = clustering_scope_token(stop_token);
+        let clustering_stop = super::clustering_scope_token(stop_token);
         let fatal_fence = readiness.fatal_fence_token();
         // ADR-0017 Phase 3 Slice 6: constructed empty (the `ConnectionRegistry`
         // doesn't exist yet at this point in startup) and wired to it later by
@@ -810,7 +782,7 @@ pub async fn start_if_enabled(
         // sibling var) rather than a raw `std::env::var` at this call site.
         let pod_template_hash = config.pod_template_hash.clone();
         let local_peer_id = handle.local_peer_id.to_string();
-        prepare_node_lease(
+        super::prepare_node_lease(
             &node_lease,
             &node_identity,
             pod_template_hash.clone(),
@@ -966,5 +938,5 @@ pub(in crate::clustering) async fn prepare_node_lease(
         .ensure_schema()
         .await
         .map_err(ClusteringError::ClaimStoreSchema)?;
-    register_node_lease(node_lease, identity, pod_template_hash, peer_id).await
+    super::register_node_lease(node_lease, identity, pod_template_hash, peer_id).await
 }

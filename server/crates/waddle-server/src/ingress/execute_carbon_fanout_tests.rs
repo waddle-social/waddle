@@ -2,8 +2,7 @@
 use super::{
     carbon_progress, classify_outcome, completed_receipts, proven_receipts,
     terminalize_if_complete, Deps, Duration, Effect, EffectOutcome, EffectReceiptRepository,
-    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome,
-    IngressUowError, PlannedEffect, Stanza,
+    ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, PlannedEffect,
 };
 use crate::clustering::relay::RelayRemoteUserSideEffectStatus;
 use crate::clustering::route_bridge::tests::delivery::remote_carbon_owner_reply;

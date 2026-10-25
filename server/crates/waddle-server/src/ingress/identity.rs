@@ -1,4 +1,5 @@
 //! Typed admission and canonical identities for the authority transaction.
+#[cfg(feature = "clustering")]
 use crate::db::Database;
 use crate::ingress_substrate::EffectReceiptKind;
 use crate::server::routes::interpret::SmIngressAppendContext;

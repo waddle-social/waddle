@@ -2,9 +2,13 @@ use super::super::effects::room::DurableRoomEffect;
 #[cfg(feature = "clustering")]
 use super::super::effects::room::ExternalRoomEffect;
 use super::super::effects::{DurableEffect, Effect, ExternalEffect, PlanSink, RoomExecutionPath};
+#[cfg(feature = "clustering")]
+use super::Deps;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
 use super::{
-    dispatch_to_room, BareJid, Deps, FullJid, GetRoomSnapshot, IngressEffectIntent, Jid, Message,
-    OrderedRelayRouteOrigin, OutboundEvent, Stanza,
+    dispatch_to_room, BareJid, FullJid, GetRoomSnapshot, IngressEffectIntent, Jid, Message,
+    OutboundEvent, Stanza,
 };
 use crate::server::routes::interpret::interpret;
 #[cfg(feature = "clustering")]

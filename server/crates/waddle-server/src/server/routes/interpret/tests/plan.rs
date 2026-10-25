@@ -6,13 +6,12 @@ use super::super::effects::{
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
 use super::{
-    chat_msg, detached_dm_session, extract_stanza_id_by, interpret, jid, offline_pass_deps,
-    pipelined_dispatcher, plan_message_dispatch, register_into_both_tiers, result_iq,
-    test_registry, Arc, BareJid, BlockingStorage, Deps, FullJid, InMemorySmSessionRegistry,
-    InboxStorage, IngressEffectIntent, MamArchivedMessage, MamStorage, Message, OutboundEvent,
-    Stanza, StanzaDispatcher, Xep0359StanzaId, XmppMessageType, XmppStateMachine,
+    chat_msg, detached_dm_session, interpret, jid, offline_pass_deps, pipelined_dispatcher,
+    plan_message_dispatch, register_into_both_tiers, result_iq, test_registry, Arc,
+    BlockingStorage, Deps, InMemorySmSessionRegistry, InboxStorage, MamStorage, Message,
+    OutboundEvent, Stanza, StanzaDispatcher, XmppMessageType, XmppStateMachine,
 };
-use super::{effects, tests, ArchivedTombstone, Element, OrderedRelayRouteOrigin};
+use super::{tests, OrderedRelayRouteOrigin};
 use kameo::actor::Spawn;
 use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
 use waddle_xmpp::mam::storage::InMemoryMamStorage;

@@ -1,9 +1,8 @@
 //! XEP-0198 §4: the failed ordered-relay ask follows committed responsibility.
 use super::{
     connection, create_test_websocket_state, create_test_websocket_state_with_extension_manager,
-    empty_extension_manager, handle_xmpp_frame, recovery, stanza_to_xml, tests, transport_xml, Arc,
-    BareJid, Element, Stanza, TestStateOverrides, WebSocketState, WsConnState, XmppMessageType,
-    SM_NS,
+    empty_extension_manager, handle_xmpp_frame, Arc, Stanza, TestStateOverrides, WebSocketState,
+    WsConnState,
 };
 use crate::clustering::ordered_relay::OrderedRelayPayload;
 use crate::clustering::route_bridge::tests::services_with_claims;

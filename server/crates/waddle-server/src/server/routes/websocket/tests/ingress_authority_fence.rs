@@ -1,8 +1,17 @@
+#[cfg(feature = "clustering")]
+use super::create_test_session;
+#[cfg(feature = "clustering")]
+use super::create_test_websocket_state_with_extension_manager;
+#[cfg(feature = "clustering")]
+use super::empty_extension_manager;
+#[cfg(feature = "clustering")]
+use super::Arc;
+#[cfg(feature = "clustering")]
+use super::SmSessionId;
+#[cfg(feature = "clustering")]
+use super::TestStateOverrides;
 use super::{
-    connection, create_test_session, create_test_websocket_state,
-    create_test_websocket_state_with_extension_manager, element_to_xml, empty_extension_manager,
-    handle_xmpp_frame, recovery, stanza_to_xml, tests, transport_xml, Arc, Element, Message,
-    SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
+    connection, create_test_websocket_state, handle_xmpp_frame, Stanza, WebSocketState, WsConnState,
 };
 
 async fn enabled_connection(state: &WebSocketState) -> WsConnState {

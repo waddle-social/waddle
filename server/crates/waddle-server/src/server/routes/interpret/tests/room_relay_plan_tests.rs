@@ -1,6 +1,6 @@
 use super::{
-    dispatch_to_room, spawn_subject_mutation_test_room, Arc, FullJid, InMemorySmSessionRegistry,
-    Message, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind, Stanza,
+    dispatch_to_room, spawn_subject_mutation_test_room, Arc, InMemorySmSessionRegistry, Message,
+    OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind, Stanza,
 };
 use crate::server::routes::interpret::effects::delivery::ExternalDeliveryEffect;
 use crate::server::routes::interpret::effects::{Effect, ExternalEffect, PlanSink};

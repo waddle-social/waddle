@@ -3,6 +3,7 @@ use super::{
     build_available_presence, build_subscription_presence, roster_storage, warn, BareJid, Element,
     FullJid, Jid, Stanza, SubscriptionType, WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::FullJidDeliveryOutcome;
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 

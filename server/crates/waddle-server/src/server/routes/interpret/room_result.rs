@@ -1,9 +1,8 @@
 //! Saved extension output is admitted as a room-authored XMPP message.
 use super::effects::{EffectSink, PlanSink};
-use super::{
-    Deps, Element, HostOwnedResources, IngressEffectIntent, Message, OrderedRelayRouteOrigin,
-    XmppMessageType,
-};
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOrigin;
+use super::{Deps, Element, HostOwnedResources, IngressEffectIntent, Message, XmppMessageType};
 use crate::ingress::IngressEffectCapture;
 use crate::ingress::{IngressPrincipal, IngressStreamIdentity, IngressSubmission};
 use crate::ingress_uow::RoomPublication;

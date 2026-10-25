@@ -1,7 +1,6 @@
 use super::{
     connection, create_test_websocket_state, frame_receipt_state, handle_xmpp_frame, recovery,
-    register_test_connection, seed_local_account, Arc, InboxStorage, MamStorage, Stanza,
-    WebSocketState,
+    register_test_connection, seed_local_account, Arc, Stanza, WebSocketState,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 use waddle_xmpp_core::xep0359::StanzaIdCarrier;

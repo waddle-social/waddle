@@ -3,6 +3,7 @@ use super::{
     service_unavailable_iq_error, warn, DatabaseBlockingStorage, FullJid, Jid, Stanza,
     WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::FullJidDeliveryOutcome;
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
