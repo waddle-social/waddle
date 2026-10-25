@@ -26,6 +26,7 @@ churn test for session changes, and an on-device check before release.
 | Outbox replays first after reconnect, one pass per row | ✅ | `XmppSessionManagerCatchupTest` | — | — |
 | Bounded parallel rejoin and MAM catch-up | ✅ | `XmppSessionManagerCatchupTest` | — | — |
 | History ingested once (MAM pages only) | ✅ | `TimelinePublishTest` | — | — |
+| Live rows and a later MAM catch-up interleave by time (an unstamped live row sorts at arrival, never before history already seen) | n/a | `TimelineStoreTest` | — | — |
 | Push over UnifiedPush (XEP-0357, Web Push provider) | ✅ | `PushRegistrarTest`, `PushMessageHandlerTest` | `settings` | — |
 | Push over FCM in the Play build (XEP-0357, FCM provider; RFC 8291 ciphertext only), one transport and one device at a time | n/a | `PushCoordinatorTest`, `FcmEnvelopeKeysTest`, `PushRegistrarTest`, `PushStateStoreTest` | — | — |
 | Stay-connected foreground service (FOSS build; no distributor, or by choice) | n/a | — | `settings` | — |

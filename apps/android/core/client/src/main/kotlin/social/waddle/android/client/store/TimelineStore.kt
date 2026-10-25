@@ -21,8 +21,12 @@ import java.time.OffsetDateTime
  * arrive, MAM pages merge in, and duplicates (XEP-0198 replays, MAM
  * refetch of a live message) collapse on the XEP-0359 stanza id when
  * present, else origin id, else message id. Ordering is by timestamp,
- * with insertion order breaking ties; items without a timestamp sort
- * after timestamped history (live messages are the newest).
+ * with insertion order breaking ties. An item without a wire timestamp
+ * (an undelayed live message) sorts at the local time it arrived, never
+ * before the newest wire timestamp already seen in its conversation: a
+ * device clock behind the server cannot drop a fresh live row beneath
+ * history already on screen, and archive pages fetched later (catch-up
+ * after a stream drop) still sort after the live rows they follow.
  *
  * Mutation messages (XEP-0444 reactions, XEP-0308 corrections, XEP-0424
  * retractions, XEP-0425 moderation, XEP-0422 safety-score fastenings —
@@ -60,6 +64,8 @@ class TimelineStore(
     private val maxPendingMutationsPerConversation: Int = MAX_PENDING_MUTATIONS,
     /** Our actual occupant nick per room (self-presence); see [liveOwnNickOf]. */
     private val actualOwnNickIn: (roomJid: String) -> String? = { null },
+    /** Local wall clock, epoch millis: stamps [TimelineItem.receivedAtMillis]. */
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     private val lock = Any()
     private val flows = HashMap<String, MutableStateFlow<List<TimelineItem>>>()
@@ -148,6 +154,7 @@ class TimelineStore(
                 isMine = key.isMine,
                 source = TimelineSource.Live(message),
                 authorJid = stamp,
+                receivedAtMillis = nowMillis(),
             ),
             isGroupchat = isGroupchat,
             initialTombstone = null,
@@ -226,6 +233,7 @@ class TimelineStore(
                 isMine = isMine,
                 source = TimelineSource.Archived(message),
                 authorJid = authorJid,
+                receivedAtMillis = nowMillis(),
             ),
             isGroupchat = isGroupchat,
             // The archive returns retracted originals as tombstones.
@@ -253,6 +261,17 @@ class TimelineStore(
             insertionCounter = 0L
             flows.values.forEach { it.value = emptyList() }
         }
+    }
+
+    /**
+     * Where a new row sorts: its wire timestamp, else when it arrived but
+     * not before the newest wire instant seen. Must hold [lock].
+     */
+    private fun sortInstantOf(conversation: String, item: TimelineItem): Instant {
+        item.timestamp?.let(::parseInstant)?.let { return it }
+        val received = Instant.ofEpochMilli(item.receivedAtMillis)
+        val newestWire = newestWireInstant[conversation] ?: return received
+        return maxOf(received, newestWire)
     }
 
     /** Must hold [lock]. */
@@ -305,7 +324,7 @@ class TimelineStore(
             }
             var entry = Entry(
                 item = item,
-                sortInstant = item.timestamp?.let { parseInstant(it) },
+                sortInstant = sortInstantOf(conversation, item),
                 order = insertionCounter++,
                 mutations = MutationState(tombstone = initialTombstone),
                 dedupeArchiveId = archiveIdOf(item),
@@ -704,7 +723,7 @@ class TimelineStore(
 
     private data class Entry(
         val item: TimelineItem,
-        val sortInstant: Instant?,
+        val sortInstant: Instant,
         val order: Long,
         val mutations: MutationState = MutationState(),
         /** First valid MAM UID; survives live-source replacement and never enters wire identities. */
@@ -763,7 +782,7 @@ class TimelineStore(
         const val MAX_PENDING_MUTATIONS = 200
 
         val ENTRY_ORDER: Comparator<Entry> =
-            compareBy<Entry> { it.sortInstant ?: Instant.MAX }.thenBy { it.order }
+            compareBy<Entry> { it.sortInstant }.thenBy { it.order }
 
         fun enrichedOf(item: TimelineItem, state: MutationState): TimelineItem {
             if (state == MutationState()) return item
