@@ -1,5 +1,5 @@
 use super::{
-    execute_sealed_inbox_push, fail_after_projection_update, store_projection, Deps, EffectOutcome,
+    execute_sealed_inbox_push, fail_after_projection_update, store_projection, EffectOutcome,
     ExternalDirectEffect, ExternalEffect, IngressEffectIntent, SettledCompletion, SettledOutcome,
 };
 use crate::ingress::commit::commit_submission;

@@ -1,6 +1,6 @@
 use super::{
-    handoff, pending_id, DeliveryProgressRepository, Deps, FullJid, IngressEffectIntent,
-    PendingPayload, RouteProgress, SendAttemptRepository, SendObligation,
+    handoff, pending_id, Deps, FullJid, IngressEffectIntent, PendingPayload, RouteProgress,
+    SendAttemptRepository, SendObligation,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::receipt_key;

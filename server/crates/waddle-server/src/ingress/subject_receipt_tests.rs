@@ -1,6 +1,6 @@
 use super::{
-    commit, durable, execute, receipt_key, test_support, Arc, Deps, Duration, ExternalEffect,
-    ExternalOutcome, ImmediateSink, IngressEffectCapture,
+    commit, durable, execute, test_support, Deps, Duration, ExternalEffect, ExternalOutcome,
+    ImmediateSink, IngressEffectCapture,
 };
 use crate::server::routes::interpret::effects::PlanSink;
 use crate::server::routes::interpret::interpret;

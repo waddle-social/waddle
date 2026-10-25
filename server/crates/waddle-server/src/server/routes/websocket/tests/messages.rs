@@ -1,14 +1,13 @@
 use super::{
     assert_sample_payload, build_interpret_deps, create_test_server_owner_session,
-    create_test_session, create_test_websocket_state, drive_interpret_loop, frame,
+    create_test_session, create_test_websocket_state, drive_interpret_loop,
     get_or_create_room_actor, handle_iq, handle_iq_with_conn_state, handle_message_for_test,
-    handle_muc_join, handle_xmpp_frame, handlers, iq_set_frame, mpsc, muc_invites,
-    parse_iq_for_test, parse_message_for_test, ready_phase, register_test_connection,
-    register_test_native_user, seed_local_account, stanza_to_xml, state, ActorRef, Affiliation,
-    Arc, BareJid, Blocklist, ChangeAffiliation, ConnectionPhase, DeliveryKind, DmCallThreadKey,
-    Element, FromStr, FullJid, GetConfig, GetSnapshot, InboundEvent, InboxStorage, IqConnState,
-    JoinAffiliationGrant, JoinWithAffiliation, MamStorage, OutboundEvent, PubSubStorage, RoomActor,
-    RoomConfig, Session, Stanza, UpdateConfig, WebSocketState, WsConnState, XmppMessageType,
+    handle_muc_join, handle_xmpp_frame, handlers, iq_set_frame, mpsc, parse_iq_for_test,
+    parse_message_for_test, ready_phase, register_test_connection, register_test_native_user,
+    seed_local_account, stanza_to_xml, Affiliation, Arc, BareJid, Blocklist, ChangeAffiliation,
+    ConnectionPhase, DeliveryKind, Element, FromStr, FullJid, GetSnapshot, InboundEvent,
+    InboxStorage, IqConnState, JoinAffiliationGrant, JoinWithAffiliation, MamStorage,
+    PubSubStorage, RoomConfig, Session, Stanza, WebSocketState, WsConnState, XmppMessageType,
     XmppStateMachine,
 };
 use super::{

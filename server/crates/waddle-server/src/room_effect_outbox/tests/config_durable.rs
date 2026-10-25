@@ -21,8 +21,8 @@ use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 use waddle_xmpp::{Affiliation, Role, Voice};
 
 use super::{
-    full_jid, initial_revision, lifecycle, origin, producing_node, room_jid, store, BareJid,
-    OccupantVoiceChange, RoomEffectKey, RoomEffectOutboxStore, RoomLifecycleId,
+    full_jid, initial_revision, lifecycle, origin, producing_node, room_jid, RoomEffectKey,
+    RoomEffectOutboxStore,
 };
 use crate::room_effect_outbox::drain::drain_due_effects;
 use crate::room_effect_outbox::{RoomEffectArmSupervisor, RoomEffectEnqueue};

@@ -1,7 +1,6 @@
 use super::{
-    discharges, settle_recorded, EffectReceiptRepository, GroupchatNotificationRecoveryAction,
-    IngressEffectIntent, NotificationActivityMutation, NotificationCandidateOutcome,
-    POOLED_RECEIPT_WRITES,
+    discharges, settle_recorded, EffectReceiptRepository, IngressEffectIntent,
+    NotificationActivityMutation, NotificationCandidateOutcome, POOLED_RECEIPT_WRITES,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::execute::execute_effects;

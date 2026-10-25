@@ -5,6 +5,7 @@ use super::stream_management::{
     SmRegistrationFinalization,
 };
 use super::{error, info, mpsc, Blocklist, FullJid, OutboundStanza, WebSocketState};
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceRegisterOutcome;
 use crate::clustering::NodeAdmissionPermit;
 use crate::db::DatabaseError;

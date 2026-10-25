@@ -1,11 +1,7 @@
 //! XEP-0045 frozen room acceptance and crash/retry authority.
 use super::commit::commit_submission;
 use super::test_support::IngressFixture;
-use super::{
-    execute, Arc, Deps, Duration, ExternalEffect, ExternalOutcome, ImmediateSink,
-    IngressStreamIdentity, IngressSubmission, PlanSuppressionPolicy, PlannedEffect,
-    RoomManifestSnapshot, SmIngressStreamRepository, SmSessionId, StdMutex, WireHandledCount,
-};
+use super::{IngressStreamIdentity, IngressSubmission, RoomManifestSnapshot};
 use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
 use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
 use crate::server::routes::interpret::effects::RoomExecutionPath;

@@ -1,5 +1,5 @@
 //! Boot rejects split pending stores before schema initialization.
-use super::{create_ingress_pending_storage, Database, DatabaseDriver, IngressColocationError};
+use super::{create_ingress_pending_storage, IngressColocationError};
 
 #[tokio::test]
 async fn postgres_pending_requires_the_same_schema_without_clustering() {

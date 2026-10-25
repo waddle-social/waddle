@@ -3,9 +3,13 @@ use super::subscription::{
     roster_storage,
 };
 use super::{debug, info, warn, FullJid, Jid, WebSocketState};
+#[cfg(feature = "clustering")]
 use crate::clustering::codec::RemoteElement;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemotePresenceShow;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemotePresenceStateSnapshot;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceStateUpdate;
 use crate::pending_delivery::FlushContext;
 use crate::pending_delivery::MamArchiveResolver;

@@ -1,5 +1,6 @@
 //! Append one resource before atomically committing its progress and receipt.
 use crate::ingress::FrozenRoomManifest;
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::ClaimRepository;
 #[cfg(test)]
 use crate::ingress_uow::DbRetryClass;

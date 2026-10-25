@@ -1,7 +1,4 @@
-use super::{
-    DatabaseDriver, NotificationOutboxError, NotificationOutboxPruneOutcome,
-    NotificationOutboxStore, Transaction,
-};
+use super::{NotificationOutboxError, NotificationOutboxPruneOutcome, NotificationOutboxStore};
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{

@@ -2,12 +2,12 @@ use super::substrate::{expired_candidates, gc_candidate_batch, message_exists};
 use super::{
     advance_frontier, authority, dialect_sql, flush_checkpoint, gc_expired_aliases, insert_sm_ref,
     load_envelope, load_stream_checkpoint, lookup_wire_binding, receipts_complete, record_message,
-    record_receipt, record_receipt_pooled, record_room_canonical_envelope,
-    resolve_and_record_alias, terminalize_message, AliasGcBudget, AliasGcProgress, AliasResolution,
-    Database, DatabaseDriver, Duration, EffectReceiptKind, FrontierOutcome, IngressOrdinal,
-    IngressSubstrateError, Instant, MessageEnvelope, MessageKey, MessageWriteOutcome,
-    MucArchiveContext, NormalizedTarget, OriginId, SemanticDigest, SmIngressId, TerminalizeOutcome,
-    Transaction, Utc, Uuid, WireHandledCount, ALIAS_RETENTION,
+    record_receipt, record_receipt_pooled, resolve_and_record_alias, terminalize_message,
+    AliasGcBudget, AliasGcProgress, AliasResolution, Database, DatabaseDriver, Duration,
+    EffectReceiptKind, FrontierOutcome, IngressOrdinal, IngressSubstrateError, Instant,
+    MessageEnvelope, MessageKey, MessageWriteOutcome, MucArchiveContext, NormalizedTarget,
+    OriginId, SemanticDigest, SmIngressId, TerminalizeOutcome, Transaction, Utc, Uuid,
+    WireHandledCount, ALIAS_RETENTION,
 };
 use crate::db::{DatabaseConfig, MigrationRunner};
 use std::time::Duration as StdDuration;

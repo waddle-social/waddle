@@ -1,6 +1,6 @@
 use super::{
     Arc, AuthorityUnavailable, Duration, IngressAuthority, IngressDecisionClass, IngressSubmission,
-    NestedContinuation, NestedOutcome, Stanza, TestGate, WebSocketState,
+    NestedContinuation, NestedOutcome, TestGate,
 };
 use crate::ingress::effects::Effect;
 use crate::ingress::test_support::IngressFixture;

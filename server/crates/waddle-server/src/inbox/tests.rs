@@ -1,8 +1,7 @@
 use super::{
     insert_groupchat_notification_recovery_in_transaction, upsert_in_transaction, BareJid,
-    CallThreadDuration, ConversationKind, DatabaseInboxStorage, DateTime,
-    GroupchatNotificationRecovery, GroupchatNotificationRecoveryKey, InboxEntry, InboxStorage,
-    MessageKey, StanzaId, Utc,
+    ConversationKind, DatabaseInboxStorage, GroupchatNotificationRecovery,
+    GroupchatNotificationRecoveryKey, InboxEntry, InboxStorage, MessageKey, StanzaId,
 };
 use std::path::PathBuf;
 

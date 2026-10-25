@@ -1,5 +1,5 @@
 use super::{
-    router, ActorRef, Arc, AuthProviderTokenEndpointAuthMethod, AuthState, BrowserSessionTransport,
+    router, Arc, AuthProviderTokenEndpointAuthMethod, AuthState, BrowserSessionTransport,
     PendingAuthorization, PendingFlow, Session, Utc,
 };
 use crate::config::ServerConfig;

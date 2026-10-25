@@ -1,7 +1,6 @@
 use super::{
-    reconcile_xep0357_notification_candidates_for_sweep, BareJid, MamArchivedMessage,
-    PendingNotificationRecoveryCursor, RecoveryPolicyDecision, RecoverySweepOutcome,
-    WebSocketState,
+    reconcile_xep0357_notification_candidates_for_sweep, BareJid,
+    PendingNotificationRecoveryCursor, WebSocketState,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::receipt_key;

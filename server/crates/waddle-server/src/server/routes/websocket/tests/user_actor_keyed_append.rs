@@ -1,8 +1,7 @@
 //! #1805: ordinary local delivery must retain the proof needed by the detach drain.
 use super::{
-    commit_submission, detach, detaching_socket, outbound, timers, Arc, Blocklist, DetachingSocket,
-    EffectMessageIdentity, IngressEffectIntent, IngressFixture, Message, Stanza,
-    StreamManagementState, STREAM,
+    commit_submission, detach, detaching_socket, Arc, Blocklist, DetachingSocket,
+    EffectMessageIdentity, IngressEffectIntent, IngressFixture, Message, Stanza, STREAM,
 };
 use crate::ingress::execute::execute_effects;
 use crate::ingress::maintenance::{run_maintenance_pass, MaintenanceBudget};

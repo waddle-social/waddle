@@ -1,5 +1,5 @@
 use super::{
-    reconcile_ambiguous_admin_result, recover_admin_result_after_actor_failure, tests, AdminItem,
+    reconcile_ambiguous_admin_result, recover_admin_result_after_actor_failure, AdminItem,
     AdminReconciliationOutcome, Affiliation, ApplyAdminItems, BareJid, FullJid, GetSnapshot,
 };
 use crate::server::routes::websocket::tests::create_test_websocket_state;

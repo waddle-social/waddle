@@ -158,10 +158,7 @@ fn subscribed_config() -> ExtensionConfig {
 
 fn room_source() -> waddle_extensions::RoomMessageSource {
     use waddle_extensions::{
-        DisplayText, ExtensionCapability, ExtensionConfig, ExtensionManager, ExtensionModuleConfig,
-        MessageRevision, ObservationFailure, ObservationGeneration, ObservationSkip, OriginId,
-        PluginId, RoomMessageSource, RoomObservationConfig, RoomObservationOutcome,
-        RoomObservationScope, Sha256Digest, StanzaId, Timestamp, WaddleId,
+        MessageRevision, OriginId, RoomMessageSource, Sha256Digest, StanzaId, Timestamp,
     };
     RoomMessageSource {
         room: "room@muc.example.com".parse().expect("room"),
@@ -206,10 +203,8 @@ async fn durable_observations_are_explicit_and_excluded_from_legacy_hooks() {
 #[tokio::test]
 async fn frozen_observations_reject_changed_config_and_missing_origin() {
     use waddle_extensions::{
-        DisplayText, ExtensionCapability, ExtensionConfig, ExtensionManager, ExtensionModuleConfig,
-        MessageRevision, ObservationFailure, ObservationGeneration, ObservationSkip, OriginId,
-        PluginId, RoomMessageSource, RoomObservationConfig, RoomObservationOutcome,
-        RoomObservationScope, Sha256Digest, StanzaId, Timestamp, WaddleId,
+        DisplayText, ExtensionManager, ObservationFailure, ObservationGeneration, ObservationSkip,
+        RoomObservationOutcome,
     };
     let manager = ExtensionManager::from_config(subscribed_config())
         .await

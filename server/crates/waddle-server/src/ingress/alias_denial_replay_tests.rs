@@ -1,7 +1,4 @@
-use super::{
-    commit_submission, AliasOutcomeClass, EffectReceiptRepository, IngressDecisionClass,
-    IngressEffectIntent, IngressStreamIdentity,
-};
+use super::{commit_submission, AliasOutcomeClass, IngressDecisionClass, IngressEffectIntent};
 use crate::ingress::execute::{execute_effects, terminalize_if_complete};
 use crate::ingress::test_support::IngressFixture;
 use crate::server::routes::interpret::effects::{

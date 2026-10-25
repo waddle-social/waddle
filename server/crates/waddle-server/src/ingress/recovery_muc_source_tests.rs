@@ -1,7 +1,6 @@
 use super::{
     authorized_source, CanonicalSourceError, EffectMessageIdentity, ExternalDeliveryEffect,
-    ExternalEffect, IngressEffectIntent, Message, MessageEnvelope, MucRecoveryError, RecoveryInput,
-    Stanza,
+    ExternalEffect, IngressEffectIntent, Message, MessageEnvelope, MucRecoveryError, Stanza,
 };
 use waddle_xmpp::ingress::EntityGeneration;
 use waddle_xmpp::muc::{RoomSubjectTexts, SubjectState};

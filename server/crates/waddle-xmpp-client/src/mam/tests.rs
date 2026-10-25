@@ -1,11 +1,10 @@
 use super::XEP0359_NS;
 use super::{
-    broadcast, build_dm_search_history_iq, build_mam_iq, build_room_search_history_iq,
-    build_room_thread_history_iq, parse_mam_fin, parse_mam_result, timeout, ArchivedMessage,
-    ArchivedMessageId, ArchivedPayload, BareJid, ClientEvent, ClientHandle, Duration, Element,
-    MamExt, MamIqBuilder, MamResultCollector, RsmPageInfo, StableStanzaId, ThreadId, CLIENT_NS,
-    DATA_FORMS_NS, DELAY_NS, FORWARD_NS, FULLTEXT_MAM_FIELD, MAM_END_FIELD, MAM_NS,
-    MAM_START_FIELD, NS_MUC_USER, RSM_NS, STANZA_ID_FILTER_FIELD, WADDLE_MAM_THREAD_FIELD,
+    build_dm_search_history_iq, build_mam_iq, build_room_search_history_iq,
+    build_room_thread_history_iq, parse_mam_fin, parse_mam_result, ArchivedMessageId, BareJid,
+    Element, MamIqBuilder, RsmPageInfo, ThreadId, CLIENT_NS, DATA_FORMS_NS, DELAY_NS, FORWARD_NS,
+    FULLTEXT_MAM_FIELD, MAM_END_FIELD, MAM_NS, MAM_START_FIELD, NS_MUC_USER, RSM_NS,
+    WADDLE_MAM_THREAD_FIELD,
 };
 
 use chrono::Datelike;

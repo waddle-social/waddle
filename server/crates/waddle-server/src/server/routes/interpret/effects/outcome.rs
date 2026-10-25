@@ -1,4 +1,5 @@
 //! Typed results shared by assumed planning and immediate execution.
+#[cfg(feature = "clustering")]
 use crate::ingress::execute::RelayFrameReceiptCompletion;
 use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerError;
 use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerOutcome;

@@ -18,9 +18,8 @@ use xmpp_parsers::minidom::Element;
 
 use super::{
     admin_effects, config_effects, full_jid, initial_revision, lifecycle, nick, origin,
-    producing_node, retry_delay_ms, room_jid, store, store_with_db, AdminPresenceKind,
-    OccupantPresenceUpdate, Role, RoomEffectKey, RoomEffectLastError, RoomEffectOutboxStore,
-    CLAIM_TIMEOUT_MS,
+    producing_node, room_jid, store_with_db, AdminPresenceKind, OccupantPresenceUpdate,
+    RoomEffectKey, RoomEffectLastError, RoomEffectOutboxStore, CLAIM_TIMEOUT_MS,
 };
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::OrderedRelayDeliveryBridge;

@@ -3,8 +3,11 @@ use crate::call_teardown_outbox::CallTeardownIntent;
 use crate::call_teardown_outbox::CallTeardownOutboxStore;
 use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
 use crate::call_teardown_outbox::TeardownTarget;
+#[cfg(feature = "clustering")]
 use crate::clustering::allowlist::PostgresAllowlistStore;
+#[cfg(feature = "clustering")]
 use crate::clustering::resume_asker::SwarmRemoteResumeAsker;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::OrderedRelayDeliveryServices;
 use crate::clustering::ClusteringHandles;
 use crate::config::DatabaseRuntimeConfig;
@@ -20,6 +23,7 @@ use crate::dnd_projection::DndProjectionStore;
 use crate::dnd_reader::PepDndReader;
 use crate::inbox::DatabaseInboxStorage;
 use crate::ingress::IngressAuthority;
+#[cfg(feature = "clustering")]
 use crate::ingress::IngressStartupError;
 use crate::ingress_uow::IngressUnitOfWork;
 use crate::notification_activity::NotificationActivityStore;

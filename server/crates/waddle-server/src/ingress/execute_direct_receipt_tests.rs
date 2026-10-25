@@ -1,10 +1,9 @@
 //! RFC 0018 §3: a capture identity receipts only its complete frozen fanout.
 use super::{
     classify_outcome, completed_receipts, execute_effects, proven_receipts,
-    terminalize_if_complete, AppendAuthority, CanonicalMessageRepository, Deps, Duration, Effect,
-    EffectOutcome, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect,
-    FullJidDeliveryOutcome, ImmediateSink, MessageKey, PlannedEffect, SmIngressAppendContext,
-    Stanza,
+    terminalize_if_complete, CanonicalMessageRepository, Deps, Duration, Effect, EffectOutcome,
+    EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, FullJidDeliveryOutcome,
+    ImmediateSink, PlannedEffect, Stanza,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;

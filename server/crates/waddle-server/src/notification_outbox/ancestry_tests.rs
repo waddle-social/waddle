@@ -1,8 +1,8 @@
 use super::{
     build_waddle_context, enqueue_outbox_job_tx, lock_candidate_ancestry_tx,
     lock_outbox_ancestry_tx, mark_candidate_outboxed_tx, settle_candidate_ancestry_tx, BareJid,
-    EffectDescendantRepository, Element, NotificationCandidate, NotificationOutboxError,
-    NotificationOutboxStore, NotificationOutboxTarget, PushSubscriptionStore, RichSummary,
+    Element, NotificationCandidate, NotificationOutboxError, NotificationOutboxStore,
+    NotificationOutboxTarget, PushSubscriptionStore, RichSummary,
 };
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;

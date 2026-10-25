@@ -1,9 +1,8 @@
 //! Real host dispatch with a persistent local room and durable recipients.
 use super::super::groupchat::BOT_LINGER;
 use super::super::{
-    interpret, ActorRef, Arc, BareJid, ExtensionHostAdapter, ExtensionHostAdapterError,
-    ExtensionInvocation, FullJid, GetRoom, GetSnapshot, HostMessageTarget, HostSendMessage,
-    InvocationKind, RoomActor, StanzaId,
+    ActorRef, Arc, BareJid, ExtensionHostAdapter, ExtensionHostAdapterError, ExtensionInvocation,
+    FullJid, GetSnapshot, HostMessageTarget, HostSendMessage, InvocationKind, RoomActor, StanzaId,
 };
 use super::direct_ingress;
 use crate::ingress::test_support::IngressFixture;

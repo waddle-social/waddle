@@ -1,8 +1,7 @@
 use super::{
-    chat_msg, interpret, jid, offline_pass_deps, pipelined_dispatcher, Arc, BareJid,
-    BlockingStorage, ConnectionRegistry, DefinedCondition, Deps, Element, ErrorType, InboxStorage,
-    IngressEffectIntent, Jid, MamStorage, Message, OutboundEvent, Stanza, StanzaError,
-    XmppMessageType,
+    chat_msg, interpret, jid, offline_pass_deps, pipelined_dispatcher, Arc, BlockingStorage,
+    ConnectionRegistry, DefinedCondition, Deps, Element, ErrorType, InboxStorage,
+    IngressEffectIntent, MamStorage, OutboundEvent, Stanza, StanzaError,
 };
 use crate::ingress::IngressEffectCapture;
 

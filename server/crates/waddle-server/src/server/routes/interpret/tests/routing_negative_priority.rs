@@ -1,7 +1,7 @@
 use super::{
     chat_msg, drain_inbound, interpret, jid, offline_pass_deps_with_user_registry,
-    pipelined_dispatcher, register_into_both_tiers, Arc, BareJid, BlockingStorage,
-    ConnectionRegistry, Deps, FullJid, InboxStorage, Jid, MamStorage, OutboundEvent, Stanza,
+    pipelined_dispatcher, register_into_both_tiers, Arc, BlockingStorage, ConnectionRegistry, Deps,
+    InboxStorage, MamStorage, OutboundEvent, Stanza,
 };
 use kameo::actor::Spawn;
 

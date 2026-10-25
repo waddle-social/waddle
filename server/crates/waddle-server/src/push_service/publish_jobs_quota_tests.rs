@@ -1,6 +1,6 @@
 use super::{
-    DatabasePushServiceStore, PushQueueAcceptanceError, XmppError, ALIAS_RETENTION,
-    MAX_PUBLISH_JOBS_PER_NODE, PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
+    DatabasePushServiceStore, PushQueueAcceptanceError, XmppError, MAX_PUBLISH_JOBS_PER_NODE,
+    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
 };
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::{

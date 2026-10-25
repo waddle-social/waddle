@@ -3,6 +3,7 @@ use super::{
     InMemorySmSessionRegistry, InboundEvent, InboxStorage, MamStorage, RoomRegistryActor,
     StanzaDispatcher, WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceOriginSnapshot;
 use crate::ingress::append_authority::AppendAuthority;
 use crate::ingress::append_authority::AppendAuthorityRejection;

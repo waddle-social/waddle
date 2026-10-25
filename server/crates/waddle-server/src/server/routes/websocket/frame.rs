@@ -28,9 +28,11 @@ use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
 use crate::server::routes::interpret::effects::IngressPlan;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::OrderedRelayHandoffHandle;
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;

@@ -1,6 +1,6 @@
 use super::{
-    broadcast_unavailable_if_no_replacement, cleanup, create_test_websocket_state, mpsc,
-    stanza_to_xml, BroadcastOutcome, ConnectionRegistry, FullJid, OutboundStanza, Stanza,
+    create_test_websocket_state, mpsc, stanza_to_xml, BroadcastOutcome, ConnectionRegistry,
+    FullJid, OutboundStanza, Stanza,
 };
 
 #[tokio::test]

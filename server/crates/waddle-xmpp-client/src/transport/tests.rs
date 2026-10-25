@@ -1,7 +1,7 @@
 use super::{
-    decode_message, encode_message, native, BareJid, ClientConfig, DefaultTransportFactory,
-    Element, StreamClose, StreamId, StreamOpen, TransportEvent, TransportMessage, TransportState,
-    WebSocketTransport, WebSocketTransportFactory,
+    decode_message, encode_message, BareJid, ClientConfig, DefaultTransportFactory, Element,
+    StreamClose, StreamId, StreamOpen, TransportEvent, TransportMessage, TransportState,
+    WebSocketTransportFactory,
 };
 use crate::bootstrap::NS_CLIENT;
 use crate::ClientError;

@@ -1,8 +1,11 @@
 //! Typed room mutations and delivery work retained by an ingress plan.
 #[cfg(feature = "clustering")]
 pub use super::super::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::MucProxyOrigin;
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+#[cfg(feature = "clustering")]
 use crate::ingress::identity::IngressRelayAdmission;
 use crate::notification_outbox::NotificationCandidate;
 use jid::BareJid;

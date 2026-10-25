@@ -1,8 +1,7 @@
 //! A frozen remote route retains its receipt identity when execution falls back locally.
 use super::{
-    execute_effects, terminalize_if_complete, CanonicalMessageRepository, Deps, DispatchReadiness,
-    Duration, Effect, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome,
-    FullJidDeliveryOutcome, ImmediateSink, PlannedEffect, Stanza,
+    execute_effects, terminalize_if_complete, Deps, Duration, Effect, ExternalDeliveryEffect,
+    ExternalEffect, ExternalOutcome, FullJidDeliveryOutcome, ImmediateSink, PlannedEffect, Stanza,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::test_support::IngressFixture;

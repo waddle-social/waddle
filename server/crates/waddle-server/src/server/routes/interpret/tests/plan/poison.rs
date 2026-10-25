@@ -1,6 +1,6 @@
 use super::{
-    ArchivedTombstone, InMemoryInboxStorage, InMemoryMamStorage, InMemoryPendingDeliveryStorage,
-    InboxStorage, MamStorage, PendingDeliveryStorage,
+    InMemoryInboxStorage, InMemoryMamStorage, InMemoryPendingDeliveryStorage, InboxStorage,
+    MamStorage, PendingDeliveryStorage,
 };
 use chrono::{DateTime, Utc};
 use jid::{BareJid, Jid};

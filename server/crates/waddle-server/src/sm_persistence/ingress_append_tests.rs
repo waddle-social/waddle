@@ -1,6 +1,6 @@
 use super::{
     fixed_time, fixture_principal, fixture_session, fixture_unacked, Database, DatabaseConfig,
-    DatabaseDriver, DatabaseSmPersistence, DateTime, Duration, FullJid, IngressCustodyDisposition,
+    DatabaseDriver, DatabaseSmPersistence, DateTime, Duration, IngressCustodyDisposition,
     KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PostgresFencedSmPersistence,
     SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };

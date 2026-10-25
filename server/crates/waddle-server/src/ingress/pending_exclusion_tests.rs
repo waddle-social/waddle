@@ -3,7 +3,7 @@ use super::{
     commit_submission, execute_effects, ConnectionRegistry, Deps, Duration, Effect,
     EffectMessageIdentity, ExternalDeliveryEffect, ExternalEffect, ExternalOutcome, ImmediateSink,
     IngressEffectIntent, IngressFixture, MucUserRoute, PendingDeliveryMutation,
-    PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, PlannedEffect, QuotaPolicy,
+    PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, PlannedEffect,
 };
 
 async fn specialized_replay(fixture: IngressFixture, live: bool, decline: bool) {

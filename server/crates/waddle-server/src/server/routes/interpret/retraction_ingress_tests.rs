@@ -1,7 +1,6 @@
 //! XEP-0424 obligations cross the real plan, commit and execution boundaries.
 use super::{
-    apply_retraction_tombstone, build_plan_deps, direct_retraction, interpret, replace_stanza_id,
-    Arc, BareJid, ConnectionRegistry, Deps, IngressEffectIntent, MamArchivedMessage, MamStorage,
+    build_plan_deps, Arc, BareJid, ConnectionRegistry, Deps, IngressEffectIntent, MamStorage,
     OutboundEvent,
 };
 use crate::ingress::commit::commit_submission;

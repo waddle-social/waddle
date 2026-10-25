@@ -2,7 +2,7 @@ use super::{
     evaluate_recovery_policy, insert_groupchat_notification_candidate,
     reconcile_groupchat_notification_candidates_for_sweep, Deps,
     GroupchatNotificationCandidateQueueOutcome, GroupchatNotificationCandidateSeed,
-    IngressEffectIntent, NotificationThreadId, T1PushDispatchOutcome, WebSocketState,
+    IngressEffectIntent, WebSocketState,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::effects::{Effect, PlanSink};

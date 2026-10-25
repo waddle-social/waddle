@@ -1,6 +1,6 @@
 use super::{
-    chat_msg, deliver_direct_to_full, jid, register_into_both_tiers, routing, test_registry,
-    FullJid, FullJidDeliveryOutcome, SmIngressAppendContext, Stanza,
+    chat_msg, jid, register_into_both_tiers, test_registry, FullJidDeliveryOutcome,
+    SmIngressAppendContext, Stanza,
 };
 use kameo::actor::Spawn;
 

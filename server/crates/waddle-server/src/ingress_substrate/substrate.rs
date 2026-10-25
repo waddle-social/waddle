@@ -1,31 +1,18 @@
 //! Implementation behind the parent module facade.
 
 use super::authority;
-use super::canonical_sender;
-use super::canonical_sender_pooled;
-use super::maintenance;
-use super::retention;
 use super::Arc;
 use super::BareJid;
 use super::DbRetryClass;
 use super::Error;
 use super::Instant;
-use super::MucArchiveContext;
 use super::OriginId;
 use super::StdDuration;
 use super::Uuid;
 #[cfg(test)]
 use super::FAIL_ORPHAN_SWEEP;
-use super::{
-    advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
-    receipts_complete, record_receipt, record_receipt_pooled, record_room_canonical_envelope,
-    EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
-};
-use super::{invalidate_retention, refresh_retention, refresh_retention_with_db_clock};
-use super::{
-    receipt_complete_nonterminal_keys, recovery_evidence_pooled,
-    unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
-};
+use super::{invalidate_retention, refresh_retention};
+use super::{lookup_wire_binding, MessageEnvelope};
 use super::{
     resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
     NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,

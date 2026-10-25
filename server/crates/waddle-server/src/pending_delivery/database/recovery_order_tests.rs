@@ -1,4 +1,4 @@
-use super::{begin, DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId, Transaction};
+use super::{begin, DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId};
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::PendingReceiptRepository;

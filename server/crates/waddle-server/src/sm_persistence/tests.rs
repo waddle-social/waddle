@@ -1,8 +1,8 @@
 use super::{
     open_for_cluster_mode_with_lineage, schema, Arc, Database, DatabaseSmPersistence, DateTime,
     FullJid, IngressCustodyDisposition, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, Show, SmAckWindow, SmClaimFence,
-    SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
+    PersistedUnackedStanza, PromotionAppendOutcome, Show, SmAckWindow, SmPersistenceError,
+    SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };
 use super::{DatabaseConfig, DatabaseDriver, KeyedSnapshotOutcome, PostgresFencedSmPersistence};
 use chrono::TimeZone;

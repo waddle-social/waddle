@@ -1,8 +1,8 @@
 use super::{
     append_count, build_interpret_deps, commit_submission, execute_effects, pass, persistent_sm,
     planned_room, receipt_key, state_for, store_detached, Arc, CanonicalMessageRepository, Case,
-    Duration, EffectMessageIdentity, EffectReceiptRepository, ExternalEffect, ExternalOutcome,
-    ImmediateSink, IngressEffectCapture, IngressEffectIntent, IngressFixture, MaintenanceCursor,
+    Duration, EffectMessageIdentity, EffectReceiptRepository, ExternalEffect, ImmediateSink,
+    IngressEffectCapture, IngressEffectIntent, IngressFixture, MaintenanceCursor,
     MaintenanceOutcome, OutboundEvent, PlanSink, RecoveryEnvironment, SmSessionRegistry,
     StateEnvironment,
 };

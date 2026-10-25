@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use super::{
-    build_pubsub_storage, Affiliation, BareJid, DatabasePubSubStorage, Jid, NodeConfig, PubSubItem,
-    PubSubStorage, XmppError,
+    build_pubsub_storage, Affiliation, BareJid, DatabasePubSubStorage, NodeConfig, PubSubItem,
+    PubSubStorage,
 };
 
 fn jid(value: &str) -> BareJid {

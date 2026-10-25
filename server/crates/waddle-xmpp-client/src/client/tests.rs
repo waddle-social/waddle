@@ -1,5 +1,5 @@
 use super::{
-    time, ClientConfig, ClientHandle, ClientRequest, ClientResult, ClientState, ConnectionEvent,
+    ClientConfig, ClientHandle, ClientRequest, ClientResult, ClientState, ConnectionEvent,
     DriverTask, Duration, HashMap, RwLock, StanzaId, StreamManagementEvent, WebSocketTransport,
     WebSocketTransportFactory, XmppClient, XmppRuntime,
 };

@@ -1,8 +1,7 @@
 use super::{
     chat_msg, interpret, interpret_with_depth, jid, offline_pass_deps, pipelined_dispatcher, Arc,
-    BareJid, BlockingStorage, ConnectionRegistry, FullJid, InboundEvent, InboxStorage, Jid,
-    MamStorage, Message, OutboundEvent, Stanza, StanzaDispatcher, XmppMessageType,
-    XmppStateMachine, MAX_RECIPIENT_PASS_DEPTH,
+    BlockingStorage, ConnectionRegistry, InboxStorage, MamStorage, OutboundEvent, Stanza,
+    StanzaDispatcher, XmppStateMachine, MAX_RECIPIENT_PASS_DEPTH,
 };
 
 #[tokio::test]

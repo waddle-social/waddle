@@ -1,10 +1,10 @@
 //! Pin system broadcasts freeze the archived payload for each pending occupant.
 use super::{
     build_interpret_deps, commit_submission, effects, execute_effects, interpret, receipt_key,
-    room_canonical, terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext,
-    DigestInput, Duration, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect,
-    ImmediateSink, IngressEffectCapture, IngressEffectIntent, IngressFixture, Join,
-    NormalizedTarget, OutboundEvent, PlanSink,
+    terminalize_if_complete, CreateRoom, DeliveryProgressRepository, DigestContext, DigestInput,
+    Duration, EffectReceiptRepository, ExternalDeliveryEffect, ExternalEffect, ImmediateSink,
+    IngressEffectCapture, IngressEffectIntent, IngressFixture, Join, NormalizedTarget,
+    OutboundEvent, PlanSink,
 };
 use crate::ingress::execute_uow::STALL_DELIVERY_RESOURCE;
 use crate::ingress_substrate::MessageEnvelope;

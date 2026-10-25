@@ -5,6 +5,7 @@ use super::{
     send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid, warn,
     BareJid, DatabaseBlockingStorage, FullJid, HashSet, IqConnState, Jid, Stanza, WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceStateUpdate;
 
 pub(super) async fn handle_blocking_iq(

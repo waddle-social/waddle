@@ -1,7 +1,7 @@
 use super::conversions::{host_presence_show, host_roster_item};
 use super::{
-    envelope_has_cross_room_launch, envelope_has_roomless_launch, BareJid, DisplayText,
-    HostPresenceShow, HostRosterAsk, HostRosterSubscription, PluginId, RoomJid,
+    envelope_has_cross_room_launch, envelope_has_roomless_launch, BareJid, HostPresenceShow,
+    HostRosterAsk, HostRosterSubscription,
 };
 use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
 use xmpp_parsers::presence::Show;

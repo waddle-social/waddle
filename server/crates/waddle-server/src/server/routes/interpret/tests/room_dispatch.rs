@@ -5,13 +5,10 @@ use super::{
     available_bot_nick, available_bot_nick_with_base, chat_msg, drain_inbound, effects,
     extract_forum_action, interpret, message_thread_id, normalize_thread_create_source,
     parse_reply_from_message, plan_bot_groupchat_message, prepare_extension_room_message,
-    register_into_both_tiers, room_scoped_reply_to_attr, set_thread_create, set_thread_id,
-    waddle_id_for_room_jid, Arc, BareJid, BotGroupchatDispatch, CaptureWriter, ConnectionRegistry,
-    DefinedCondition, DeliveryExecutionContext, Deps, DisplayText, Element, ErrorType,
-    ExtensionManager, ExtensionRoomMessage, ForumAction, FullJid, IngressEffectIntent,
-    InterpretOutcome, Jid, Message, MessageMarkupKind, MessageMarkupSpan, OccupantSnapshot,
-    OutboundEvent, ReplyTarget, RoomJid, Stanza, StanzaError, StanzaId, ThreadCreate, ThreadId,
-    XmppMessageType,
+    register_into_both_tiers, room_scoped_reply_to_attr, set_thread_create, waddle_id_for_room_jid,
+    Arc, BareJid, BotGroupchatDispatch, CaptureWriter, ConnectionRegistry, Deps, Element,
+    ExtensionRoomMessage, ForumAction, IngressEffectIntent, InterpretOutcome, Jid, Message,
+    OccupantSnapshot, OutboundEvent, Stanza, ThreadCreate, XmppMessageType,
 };
 use crate::ingress::IngressEffectCapture;
 use kameo::actor::Spawn;

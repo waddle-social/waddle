@@ -6,6 +6,8 @@ use super::dispatch_to_room;
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
+#[cfg(feature = "clustering")]
+use super::DemoteRoomIfExactActor;
 use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
@@ -16,21 +18,21 @@ use super::{
     interpret_with_depth, lookup_archived_message, parse_reply_from_message, plan_message_dispatch,
     route_to_connection, routing, set_thread_id, waddle_id_for_room_jid, ArchiveIdRewrite,
     ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, CarbonKind, DefinedCondition,
-    DemoteRoomIfExactActor, DisplayText, ErrorType, ExtensionManager, ExtensionRoomMessage,
-    FromStr, FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot, GroupchatInboxAudience,
+    DisplayText, ErrorType, ExtensionManager, ExtensionRoomMessage, FromStr,
+    FullJidDeliveryOutcome, GetRoom, GetRoomSnapshot, GroupchatInboxAudience,
     InMemorySmSessionRegistry, InboundEvent, IngressEffectIntent, InterpretOutcome,
     MamArchivedMessage, MessageMarkupKind, MessageMarkupSpan, MessageRef, OccupantSnapshot,
     ReplyTarget, RichMessageId, RichText, RoomActor, RoomJid, RoomRegistryActor, SetSubject,
     SmIngressAppendContext, StanzaError, StanzaId, SubjectState, ThreadId, XmppStateMachine,
     MAX_RECIPIENT_PASS_DEPTH,
 };
+
 use super::{
     effects, extract_forum_action, interpret, ActorRef, Arc, BareJid, BlockingStorage,
     ConnectionRegistry, DeliveryExecutionContext, Deps, ForumAction, FullJid, InboxStorage, Jid,
     MamStorage, Message, OutboundEvent, StanzaDispatcher, Xep0359StanzaId, XmppMessageType,
 };
 use crate::server::routes::interpret::tests;
-use kameo::actor::Spawn;
 use std::io;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;

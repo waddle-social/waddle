@@ -1,80 +1,30 @@
 //! Implementation behind the parent module facade.
 
-use super::ambiguous_offline_pending_id;
-use super::append_authority;
-use super::archive_authority;
-use super::archive_dispatch;
-use super::capture;
 use super::commit;
-use super::commit_room;
-use super::commit_stream;
-use super::decision;
-use super::durable;
 use super::execute;
-use super::execute_uow;
 use super::frame_receipt_retry;
 use super::gc;
-use super::identity;
-use super::invitation_authority;
-use super::live_delivery;
-use super::maintenance;
-use super::nested;
-use super::pending_dispatch;
-use super::principal;
-use super::receipt_key;
-use super::receipts;
-use super::recorded;
-use super::recovery;
-use super::recovery_departed;
-use super::recovery_environment;
-use super::recovery_executor;
-use super::recovery_ghosts;
-use super::recovery_reachability;
-use super::recovery_rebuild;
-use super::reflection_dispatch;
-use super::rejection;
-use super::restamp;
-use super::restore_offline;
-use super::room_canonical;
-use super::room_manifest;
-use super::room_manifest_replay;
-use super::storage_hint;
-use super::submission;
-use super::suppression;
 use super::CancellationToken;
 use super::DatabaseDriver;
 use super::DeliveryExecutionContext;
+use super::Deps;
 use super::Duration;
+use super::ExecutionReport;
 use super::HashMap;
+use super::ImmediateSink;
+use super::IngressStreamIdentity;
 use super::IngressSubmission;
 use super::RecoveryBinding;
 use super::RecoveryEnvironment;
 #[cfg(feature = "clustering")]
 use super::SharedNodeIdentity;
 use super::SmSessionId;
-#[cfg(test)]
-use super::TEST_CAPTURE_LIMIT;
-use super::{effects, plan_message_dispatch, Deps, HostOwnedResources};
-use super::{socket_delivery_readiness, DispatchProbeBudget};
-use super::{AliasOutcomeClass, EffectReceiptKey, IngressDecision, IngressDecisionClass};
+use super::{AliasOutcomeClass, IngressDecision, IngressDecisionClass};
 use super::{Arc, StdMutex, Weak};
 use super::{Database, DatabaseConfig, DatabaseError};
-use super::{
-    DurableEffect, ExternalEffect, ImmediateSink, IngressPlan, PlanSuppressionPolicy,
-    PlannedEffect, RoomExecutionPath,
-};
-use super::{ExecutionReport, ExternalOutcome, FrameObligation};
-use super::{ExtensionPrincipal, IngressPrincipal};
-use super::{
-    FrozenRoomManifest, RoomManifestChild, RoomManifestChildDisposition, RoomManifestSnapshot,
-};
-use super::{IngressCanonicalRef, IngressStreamIdentity};
 use super::{IngressConfig, IngressConfigError, LineageConfig};
-use super::{IngressEffectCapture, IngressEffectCaptureSnapshot};
 use super::{IngressUnitOfWork, IngressUowError, SmIngressRepository, SmIngressStreamRepository};
 use super::{Mutex, RwLock};
-use super::{ProgressObligation, RouteProgress};
-use super::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
 use super::{SmIngressId, WireHandledCount};
 
 #[derive(Debug, thiserror::Error)]
@@ -470,7 +420,7 @@ impl IngressAuthority {
             let refs = SmIngressRepository::refs_for_stream_batch(
                 &mut transaction,
                 id,
-                RETIREMENT_BATCH_SIZE,
+                super::RETIREMENT_BATCH_SIZE,
             )
             .await?;
             // The stream is locked, so a short page contains all remaining refs.
@@ -520,7 +470,7 @@ impl IngressAuthority {
     pub async fn commit(&self, submission: &IngressSubmission) -> IngressDecision {
         let admission = self.admission.read().await;
         if self.cancellation.is_cancelled() || !*admission {
-            return non_advancing(IngressDecisionClass::Storage);
+            return super::non_advancing(IngressDecisionClass::Storage);
         }
         self.commit_admitted(submission).await
     }

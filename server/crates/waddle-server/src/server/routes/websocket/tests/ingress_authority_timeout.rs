@@ -1,8 +1,7 @@
 use super::{
     connection, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager, empty_extension_manager, handle_xmpp_frame,
-    offered_message, stanza_to_xml, tests, transport_xml, Arc, BareJid, Element, SmSessionId,
-    Stanza, TestStateOverrides, WebSocketState, WsConnState, XmppMessageType, SM_NS,
+    offered_message, Arc, SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
 };
 
 async fn count(state: &WebSocketState, sql: &str) -> i64 {

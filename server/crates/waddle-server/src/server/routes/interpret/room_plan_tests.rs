@@ -3,9 +3,8 @@ use super::super::effects::room::DurableRoomEffect;
 use super::super::effects::room::ExternalRoomEffect;
 use super::super::effects::{DurableEffect, Effect, ExternalEffect, PlanSink, RoomExecutionPath};
 use super::{
-    dispatch_to_room, BareJid, Deps, FullJid, GetRoomSnapshot, IngressEffectCapture,
-    IngressEffectIntent, Jid, MamArchivedMessage, Message, OrderedRelayRouteOrigin, OutboundEvent,
-    Stanza, Xep0359StanzaId,
+    dispatch_to_room, BareJid, Deps, FullJid, GetRoomSnapshot, IngressEffectIntent, Jid, Message,
+    OrderedRelayRouteOrigin, OutboundEvent, Stanza,
 };
 use crate::server::routes::interpret::interpret;
 #[cfg(feature = "clustering")]

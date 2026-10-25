@@ -1,9 +1,8 @@
 use super::{
-    chat_msg, detached_dm_session, drain_inbound, extract_stanza_id_by, interpret, jid,
-    offline_pass_deps, offline_pass_deps_with_user_registry, pipelined_dispatcher,
-    register_into_both_tiers, Arc, BareJid, BlockingStorage, ConnectionRegistry, Deps, Element,
-    FullJid, InMemorySmSessionRegistry, InboxStorage, Jid, MamStorage, Message, OutboundEvent,
-    Stanza,
+    chat_msg, detached_dm_session, drain_inbound, interpret, jid, offline_pass_deps,
+    offline_pass_deps_with_user_registry, pipelined_dispatcher, register_into_both_tiers, Arc,
+    BlockingStorage, ConnectionRegistry, Deps, Element, InMemorySmSessionRegistry, InboxStorage,
+    MamStorage, OutboundEvent, Stanza,
 };
 use kameo::actor::Spawn;
 

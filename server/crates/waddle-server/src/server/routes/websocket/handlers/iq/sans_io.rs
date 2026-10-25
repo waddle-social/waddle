@@ -10,7 +10,9 @@ use super::{
 use crate::call_teardown_outbox::CallTeardownIntent;
 use crate::call_teardown_outbox::CallTeardownOutboxError;
 use crate::call_teardown_outbox::TeardownTarget;
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::MucProxyOrigin;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceStateUpdate;
 use crate::server::routes::interpret::effects::ImmediateSink;
 use crate::server::routes::interpret::DeliveryExecutionContext;

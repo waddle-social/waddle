@@ -1,5 +1,7 @@
 use super::frame::handle_xmpp_frame;
 use super::interpret_loop::build_interpret_deps;
+#[cfg(feature = "clustering")]
+use super::relayed_muc_admin_query;
 use super::replay::drive_interpret_loop;
 use super::session_init::build_internal_server_error_stream_error;
 use super::state::WsConnState;
@@ -10,15 +12,20 @@ pub(crate) use super::test_state::{
 use super::transport_xml::{
     build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
 };
+#[cfg(feature = "clustering")]
+use super::AdminListAnswer;
+#[cfg(feature = "clustering")]
+use super::AdminListDenial;
 use super::{
     broadcast_unavailable_if_no_replacement, build_iq_error_xml_typed, cleanup, element_to_xml,
     frame, get_or_create_room_actor, get_room_actor_result, handlers, localpart_to_jid,
-    muc_invites, not_authorized_iq_error, relayed_muc_admin_query, replay, state, transport_xml,
-    ActiveCallThread, ActorRef, AdminListAnswer, AdminListDenial, ConnectionRegistry, DeliveryKind,
-    DmCallThreadKey, FromStr, InboundEvent, InboxStorage, MamStorage, Message, OutboundEvent,
-    OutboundStanza, PubSubStorage, ResolvedPrincipal, RoomActor, RoomConfig, StreamManagementState,
-    XmppServiceDomains, BASE64_STANDARD, MAX_FRAME_SIZE, SM_NS,
+    muc_invites, not_authorized_iq_error, replay, state, transport_xml, ActiveCallThread, ActorRef,
+    ConnectionRegistry, DeliveryKind, DmCallThreadKey, FromStr, InboundEvent, InboxStorage,
+    MamStorage, Message, OutboundEvent, OutboundStanza, PubSubStorage, ResolvedPrincipal,
+    RoomActor, RoomConfig, StreamManagementState, XmppServiceDomains, BASE64_STANDARD,
+    MAX_FRAME_SIZE, SM_NS,
 };
+
 use super::{
     get_room_actor, parse_frame, stanza_to_xml, BareJid, Blocklist, ConnectionPhase, Element,
     Engine, ExtensionManager, FullJid, InMemorySmSessionRegistry, InboundFrame, NativeUserStore,

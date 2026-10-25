@@ -10,9 +10,8 @@ use waddle_xmpp::muc::{RoomLifecycleId, RoomLifecycleState, RoomRevision};
 use waddle_xmpp::registry::OutboundStanza;
 
 use super::{
-    config_effects_for, full_jid, initial_revision, lifecycle, origin, producing_node,
-    room_effect_origin_instance_id, room_jid, store_with_db, NodeIdentity,
-    RoomEffectOriginInstanceId, RoomEffectOutboxStore, RoomEffectProducingNode,
+    config_effects_for, full_jid, initial_revision, lifecycle, origin, producing_node, room_jid,
+    store_with_db, RoomEffectOriginInstanceId, RoomEffectOutboxStore, RoomEffectProducingNode,
 };
 use crate::room_effect_outbox::drain::{
     complete_after_write, drain_due_effects, drain_reservation_inline,

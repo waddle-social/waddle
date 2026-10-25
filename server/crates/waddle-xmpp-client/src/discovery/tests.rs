@@ -5,7 +5,7 @@ use crate::messaging::{MucAffiliation, MucRole};
 
 use super::parsing::resolve_component_services;
 use super::{
-    bookmarks, build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
+    build_muc_admin_affiliation_list_iq, build_muc_admin_affiliation_set_iq,
     build_muc_admin_role_set_iq, build_roster_get_iq, build_user_search_form_iq,
     build_user_search_iq, build_waddle_inbox_mark_read_iq, parse_disco_info_result,
     parse_disco_items_result, parse_muc_admin_affiliation_query, parse_roster_result,

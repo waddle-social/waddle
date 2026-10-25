@@ -1,8 +1,8 @@
 use super::{
     execute_dm_pin, handle_dm_pin_message, handle_dm_pin_retraction_cascade,
-    is_tombstoned_archive_row, DmPairKey, DmPinAction, Effect, EffectMessageIdentity,
-    EffectOutcome, ExternalEffect, IngressEffectCapture, IngressEffectIntent, PlanFailure,
-    PlannedEffect, Stanza, StanzaId, WebSocketState,
+    is_tombstoned_archive_row, DmPinAction, Effect, EffectMessageIdentity, EffectOutcome,
+    ExternalEffect, IngressEffectCapture, IngressEffectIntent, PlanFailure, PlannedEffect, Stanza,
+    StanzaId, WebSocketState,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::execute::{execute_effects, terminalize_if_complete};

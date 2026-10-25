@@ -1,11 +1,9 @@
 //! XEP-0045 ghost users: a stalled `route_muc` row evicts the occupants pinning it.
 use super::{
-    build_interpret_deps, commit_submission, departed, pass, persistent_sm, planned_room,
-    planned_room_with_origin, receipt_key, state_for, store_detached, Arc, AtomicBool,
-    CanonicalMessageRepository, Case, DeliveryProgressRepository, Duration, EffectMessageIdentity,
+    build_interpret_deps, commit_submission, pass, persistent_sm, planned_room, receipt_key,
+    state_for, store_detached, Arc, CanonicalMessageRepository, Case, DeliveryProgressRepository,
     EffectReceiptRepository, IngressEffectIntent, IngressFixture, MaintenanceCursor,
-    MaintenanceOutcome, MessageKey, Ordering, RecoveryEnvironment, Stanza, StateEnvironment,
-    WebSocketState,
+    MaintenanceOutcome, MessageKey, RecoveryEnvironment, StateEnvironment, WebSocketState,
 };
 use crate::server::routes::websocket::tests as socket_tests;
 use waddle_xmpp::muc::room_registry_actor::GetRoom;

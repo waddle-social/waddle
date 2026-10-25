@@ -2,11 +2,9 @@
 
 use super::async_trait;
 use super::schema;
-use super::storage;
 use super::Arc;
 use super::BareJid;
 use super::Error;
-use super::InMemoryChannelSpaceLinkStore;
 use super::Path;
 use super::SpaceNode;
 use super::{info, instrument};
@@ -93,7 +91,7 @@ impl DatabaseChannelSpaceLinkStore {
     /// spaces-metadata storage so tests can spin up without a DSN.
     pub async fn open(database_url: Option<&str>) -> Result<Self, ChannelSpaceLinkError> {
         let db = match database_url {
-            Some(url) => open_database(url).await?,
+            Some(url) => super::open_database(url).await?,
             None => Database::in_memory("channel_space_links")
                 .await
                 .map_err(|error| ChannelSpaceLinkError::Storage(error.to_string()))?,
@@ -148,8 +146,8 @@ pub async fn build_channel_space_link_store(
 pub(in crate::channel_space_links) async fn open_database(
     database_url: &str,
 ) -> Result<Database, ChannelSpaceLinkError> {
-    ensure_sqlite_parent_dir(database_url)?;
-    let driver = infer_database_driver(database_url)?;
+    super::ensure_sqlite_parent_dir(database_url)?;
+    let driver = super::infer_database_driver(database_url)?;
     Database::from_config(
         "channel_space_links",
         &DatabaseConfig::new(driver, database_url.to_string()),
@@ -176,7 +174,7 @@ pub(in crate::channel_space_links) fn infer_database_driver(
 pub(in crate::channel_space_links) fn ensure_sqlite_parent_dir(
     database_url: &str,
 ) -> Result<(), ChannelSpaceLinkError> {
-    let Some(path) = sqlite_database_path(database_url) else {
+    let Some(path) = super::sqlite_database_path(database_url) else {
         return Ok(());
     };
 
@@ -283,7 +281,10 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         &self,
         channel_jid: &BareJid,
     ) -> Result<Option<ChannelSpaceLink>, ChannelSpaceLinkError> {
-        let sql = format!("SELECT {SELECT_COLS} FROM channel_space_links WHERE channel_jid = ?");
+        let sql = format!(
+            "SELECT {} FROM channel_space_links WHERE channel_jid = ?",
+            super::SELECT_COLS
+        );
         let mut rows = self
             .query(&sql, crate::db_params![channel_jid.to_string()])
             .await?;
@@ -294,7 +295,7 @@ impl ChannelSpaceLinkStore for DatabaseChannelSpaceLinkStore {
         else {
             return Ok(None);
         };
-        Ok(Some(decode_row(&row)?))
+        Ok(Some(super::decode_row(&row)?))
     }
 
     #[instrument(skip(self, space_jid), fields(space = %space_jid))]

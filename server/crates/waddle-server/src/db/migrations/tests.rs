@@ -1,4 +1,4 @@
-use super::{global, runner, sql, waddle, Migration, MigrationRunner};
+use super::{global, sql, waddle, Migration, MigrationRunner};
 use crate::db::{
     migration_checksum, Database, DatabaseConfig, DatabaseDriver, DatabaseError,
     MigrationLedgerError, MigrationNamespace, WADDLE_NAMESPACE_START,

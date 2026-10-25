@@ -1,5 +1,5 @@
 use super::{
-    obligation, test_hooks, BroadcastOutcome, DmPairKey, Duration, FullJid, FullJidDeliveryOutcome,
+    obligation, test_hooks, BroadcastOutcome, Duration, FullJid, FullJidDeliveryOutcome,
     IngressEffectIntent, IngressUnitOfWork, NodeIdentity, SendAttemptRepository, SendClaim,
     SmIngressAppendContext, Stanza, LEASE_DURATION,
 };

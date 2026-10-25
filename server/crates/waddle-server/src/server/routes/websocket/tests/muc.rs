@@ -1,17 +1,15 @@
 use super::{
-    cleanup, create_test_server_owner_session, create_test_session, create_test_websocket_state,
+    create_test_server_owner_session, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager, create_test_websocket_state_with_sfu,
     current_test_occupancy_session, disco_info_iq_frame, disco_items_iq_frame, element_to_xml,
-    empty_extension_manager, get_or_create_room_actor, get_room_actor, get_room_actor_result,
-    handle_iq, handle_message_for_test, handle_muc_join_with_occupancy_session,
-    handle_muc_leave_real, handle_muc_leave_with_occupancy_session, handlers, mpsc, muc_invites,
-    parse_message_for_test, parse_room_jid_context, ready_phase, record_test_occupancy_session,
-    register_test_connection, relayed_muc_admin_query, snapshot_room, stanza_to_xml,
+    empty_extension_manager, get_or_create_room_actor, get_room_actor, handle_iq,
+    handle_message_for_test, handlers, mpsc, parse_message_for_test, parse_room_jid_context,
+    ready_phase, register_test_connection, relayed_muc_admin_query, snapshot_room, stanza_to_xml,
     ActiveCallThread, AdminListAnswer, AdminListDenial, Affiliation, ApplyAdminItems, BareJid,
     ChangeAffiliation, ConnectionPhase, Element, FromStr, FullJid, GetConfig, GetSnapshot,
-    InboxStorage, Iq, JoinAffiliationGrant, JoinWithAffiliation, Object, ObjectType,
-    OutboundStanza, Permission, PubSubStorage, Relation, RoomConfig, Session, SetSubject, Subject,
-    TestStateOverrides, Tuple, UpdateConfig, WebSocketState, WriteTuple, DEPLOYMENT_SERVER_ID,
+    InboxStorage, Object, ObjectType, OutboundStanza, Permission, PubSubStorage, Relation,
+    RoomConfig, Session, SetSubject, Subject, TestStateOverrides, Tuple, UpdateConfig,
+    WebSocketState, WriteTuple, DEPLOYMENT_SERVER_ID,
 };
 use crate::permissions::CheckPermission;
 use std::io;

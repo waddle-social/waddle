@@ -1,3 +1,4 @@
+#[cfg(feature = "clustering")]
 use crate::clustering::relay::RelayExtensionRoomSend;
 use async_trait::async_trait;
 use jid::{BareJid, DomainRef, Jid, NodeRef};

@@ -32,6 +32,7 @@ use super::relay;
 use super::resource_presence;
 #[cfg(feature = "clustering")]
 use super::resume_asker;
+#[cfg(feature = "clustering")]
 use super::resume_bridge;
 #[cfg(feature = "clustering")]
 use super::route_bridge;
@@ -107,7 +108,7 @@ pub enum NodeAdmission {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::clustering) struct NodeAdmissionGeneration(pub(in crate::clustering) u64);
 
-impl NodeAdmissionGeneration {
+impl super::NodeAdmissionGeneration {
     pub(in crate::clustering) fn next(self) -> Self {
         Self(self.0.wrapping_add(1))
     }
@@ -132,7 +133,7 @@ pub(in crate::clustering) struct NodeLifecycleState {
 /// the permit, including a fence followed by recovery back to `Serving`.
 #[derive(Debug)]
 pub struct NodeAdmissionPermit {
-    pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
+    pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<super::NodeLifecycleState>>,
     pub(in crate::clustering) generation: NodeAdmissionGeneration,
     pub(in crate::clustering) generation_revoked: CancellationToken,
 }

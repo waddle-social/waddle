@@ -1,8 +1,10 @@
 use super::submission::IngressSubmission;
 use crate::ingress_uow::CanonicalMessageRepository;
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::ClaimRepository;
 use crate::ingress_uow::IngressFencing;
 use crate::ingress_uow::IngressUnitOfWork;
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::RoomClaimFence;
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 

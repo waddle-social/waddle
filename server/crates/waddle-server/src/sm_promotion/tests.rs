@@ -18,10 +18,10 @@ use waddle_xmpp::stream_management::DetachedSession;
 use waddle_xmpp::Stanza;
 
 use super::{
-    detached_session_for_terminal_entry, is_senderless_inbox_projection, parse_stanza,
-    promote_displaced_sessions, promote_session_unacked, promote_session_unacked_with_policy,
-    promote_session_with_custody, DateTime, DetachedUnackedStanza, DisplacedPromotionDeps, HashSet,
-    PendingPayload, PromotionFailureReason, StreamPromotionDeps, TerminalOverflowPromotionDeps,
+    is_senderless_inbox_projection, parse_stanza, promote_displaced_sessions,
+    promote_session_unacked, promote_session_unacked_with_policy, promote_session_with_custody,
+    DisplacedPromotionDeps, PromotionFailureReason, StreamPromotionDeps,
+    TerminalOverflowPromotionDeps,
 };
 
 fn full(s: &str) -> FullJid {

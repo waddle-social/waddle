@@ -1,5 +1,5 @@
 //! Frozen room copies retain payload order and exact-resource authority.
-use super::{check_canonical_obligation, check_stanza_binding, ArchiveDispatchRepository, Stanza};
+use super::{check_canonical_obligation, check_stanza_binding, Stanza};
 use crate::ingress::commit::commit_submission;
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::test_support::IngressFixture;

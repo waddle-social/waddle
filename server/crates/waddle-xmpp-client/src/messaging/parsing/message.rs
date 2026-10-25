@@ -1,10 +1,7 @@
 //! Implementation behind the parent module facade.
 
-use super::files;
-use super::markup;
 use super::parse_markup_spans;
 use super::parse_presence;
-use super::payloads;
 use super::Cow;
 use super::Element;
 use super::StableStanzaId;
@@ -37,7 +34,7 @@ use super::{
 pub fn parse(element: &Element) -> Option<MessagingEvent> {
     match element.name() {
         "message" => {
-            parse_message(element).map(|message| MessagingEvent::Message(Box::new(message)))
+            super::parse_message(element).map(|message| MessagingEvent::Message(Box::new(message)))
         }
         "presence" => Some(MessagingEvent::Presence(Box::new(parse_presence(element)))),
         _ => None,
@@ -89,7 +86,7 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
         .map(|payload| payload.replaces_id.clone());
 
     let moderation = parse_moderation_payload(el);
-    if has_moderation_retract(el) && moderation.is_none() {
+    if super::has_moderation_retract(el) && moderation.is_none() {
         return None;
     }
     let moderation_target_id = moderation.as_ref().map(|payload| payload.target_id.clone());
@@ -240,8 +237,8 @@ pub(in crate::messaging::parsing) fn parse_message(el: &Element) -> Option<Inbou
     }
     let link_preview_body = body
         .as_deref()
-        .map(|body| body_without_reply_fallback(el, body));
-    let link_previews = parse_link_previews(el, link_preview_body.as_deref());
+        .map(|body| super::body_without_reply_fallback(el, body));
+    let link_previews = super::parse_link_previews(el, link_preview_body.as_deref());
 
     // XEP-0447 / XEP-0363: also check <sims> children for file sharing
     for sims_el in el.children().filter(|c| c.ns() == NS_SIMS) {
@@ -350,13 +347,13 @@ pub(in crate::messaging::parsing) fn parse_link_previews(
     el: &Element,
     body: Option<&str>,
 ) -> Vec<LinkPreviewData> {
-    let first_url = body.and_then(first_eligible_https_url);
+    let first_url = body.and_then(super::first_eligible_https_url);
     if body.is_some() && first_url.is_none() {
         return Vec::new();
     }
     el.children()
         .filter(|child| child.name() == "Description" && child.ns() == NS_RDF_SYNTAX)
-        .filter_map(|child| parse_link_preview(child, first_url.as_ref()))
+        .filter_map(|child| super::parse_link_preview(child, first_url.as_ref()))
         .collect()
 }
 
@@ -365,18 +362,18 @@ pub(in crate::messaging::parsing) fn parse_link_preview(
     first_url: Option<&Url>,
 ) -> Option<LinkPreviewData> {
     let original_url =
-        parse_web_url(el.attr_ns(&minidom::rxml::Namespace::from(NS_RDF_SYNTAX), "about")?)?;
+        super::parse_web_url(el.attr_ns(&minidom::rxml::Namespace::from(NS_RDF_SYNTAX), "about")?)?;
     if first_url.is_some() && first_url != Some(&original_url) {
         return None;
     }
-    let preview_image_url = link_preview_image_url(el);
+    let preview_image_url = super::link_preview_image_url(el);
     let has_preview_image = preview_image_url.is_some();
-    let image = parse_link_preview_image(el, preview_image_url.as_deref());
-    let player_embed = parse_link_preview_player(el);
-    let video = parse_link_preview_native_video(el);
+    let image = super::parse_link_preview_image(el, preview_image_url.as_deref());
+    let player_embed = super::parse_link_preview_player(el);
+    let video = super::parse_link_preview_native_video(el);
     Some(LinkPreviewData {
         original_url,
-        normalized_url: og_text(el, "url").and_then(|value| parse_web_url(&value)),
+        normalized_url: super::og_text(el, "url").and_then(|value| parse_web_url(&value)),
         title: og_text(el, "title"),
         description: og_text(el, "description"),
         remote_media_unavailable: has_preview_image && image.is_none(),
@@ -412,7 +409,9 @@ pub(in crate::messaging::parsing) fn parse_link_preview_player(
         let value = child.text().trim().to_string();
         match child.name() {
             "secure_url" => secure_url = parse_web_url(&value),
-            "type" => is_html = og_video_type_essence(&value).eq_ignore_ascii_case("text/html"),
+            "type" => {
+                is_html = super::og_video_type_essence(&value).eq_ignore_ascii_case("text/html")
+            }
             "width" => width = value.parse().ok(),
             "height" => height = value.parse().ok(),
             _ => {}
@@ -460,8 +459,8 @@ pub(in crate::messaging::parsing) fn parse_link_preview_image(
     image_url: Option<&str>,
 ) -> Option<LinkPreviewImageData> {
     let url = image_url.and_then(parse_cached_preview_image_url)?;
-    let media_type =
-        og_image_text(el, "type").and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
+    let media_type = super::og_image_text(el, "type")
+        .and_then(|value| value.parse::<PreviewImageMediaType>().ok())?;
     Some(LinkPreviewImageData {
         url,
         media_type,
@@ -480,11 +479,11 @@ pub(in crate::messaging::parsing) fn link_preview_image_url(el: &Element) -> Opt
 
 pub(in crate::messaging) fn parse_cached_preview_image_url(value: &str) -> Option<Url> {
     let url = Url::parse(value).ok()?;
-    if !cached_preview_media_origin_allowed(&url) {
+    if !super::cached_preview_media_origin_allowed(&url) {
         return None;
     }
     let path = url.path();
-    is_link_preview_xep0363_file_path(path).then_some(url)
+    super::is_link_preview_xep0363_file_path(path).then_some(url)
 }
 
 pub(in crate::messaging::parsing) fn cached_preview_media_origin_allowed(url: &Url) -> bool {

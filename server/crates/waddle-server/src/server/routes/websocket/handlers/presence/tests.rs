@@ -1,8 +1,5 @@
 use super::muc::{build_muc_join_presence_xml, MucJoinPresence};
-use super::{
-    build_available_presence, handle_regular_presence_update, regular,
-    route_room_presence_to_occupant, Affiliation, BareJid, Element, FullJid, Jid, Role, Stanza,
-};
+use super::{build_available_presence, Affiliation, BareJid, Element, FullJid, Role};
 use crate::server::routes::websocket::tests::create_test_websocket_state;
 use tokio::sync::mpsc;
 use waddle_xmpp::registry::OutboundStanza;

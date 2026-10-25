@@ -2,7 +2,9 @@ use super::{
     build_carbon_envelope, debug, warn, Arc, BareJid, CarbonKind, ConnectionRegistry, Deps,
     FullJid, FullJidDeliveryOutcome, InMemorySmSessionRegistry, Message, Stanza, WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteCarbonFanout;
+#[cfg(feature = "clustering")]
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::IngressEffectCapture;
 use crate::ingress_uow::CarbonReceiptRepository;

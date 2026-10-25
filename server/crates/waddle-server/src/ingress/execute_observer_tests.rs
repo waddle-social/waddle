@@ -1,7 +1,6 @@
 use super::{
-    classify_outcome, execute_effects, terminalize_if_complete, CanonicalMessageRepository, Deps,
-    Duration, Effect, EffectOutcome, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
-    Stanza,
+    classify_outcome, execute_effects, terminalize_if_complete, Deps, Duration, Effect,
+    EffectOutcome, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect, Stanza,
 };
 use super::{ExecutionReport, IngressDecision};
 use crate::ingress::commit::commit_submission;

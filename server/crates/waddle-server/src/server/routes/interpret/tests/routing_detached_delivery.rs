@@ -1,8 +1,7 @@
 use super::{
-    chat_msg, detached_dm_session, extract_stanza_id_by, interpret, jid, offline_pass_deps,
-    pipelined_dispatcher, Arc, BareJid, BlockingStorage, ConnectionRegistry, Deps, Element,
-    FullJid, InMemorySmSessionRegistry, InboxStorage, IngressEffectIntent, Jid, MamStorage,
-    Message, OutboundEvent, Stanza,
+    chat_msg, detached_dm_session, interpret, jid, offline_pass_deps, pipelined_dispatcher, Arc,
+    BlockingStorage, ConnectionRegistry, Deps, Element, InMemorySmSessionRegistry, InboxStorage,
+    IngressEffectIntent, MamStorage, OutboundEvent, Stanza,
 };
 use crate::ingress::IngressEffectCapture;
 

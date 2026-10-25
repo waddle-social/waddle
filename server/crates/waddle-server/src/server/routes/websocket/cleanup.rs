@@ -12,15 +12,22 @@ use super::{
     InFlightLease, LeaveByRealJid, OutboundStanza, PendingLocalMucDepartures, RoomActor,
     RoomConfig, Stanza, WebSocketState,
 };
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::MucProxyOrigin;
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::MucProxyRouteDecision;
+#[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceUnregisterOutcome;
+#[cfg(feature = "clustering")]
 use crate::clustering::ClusteringHandles;
 use crate::pending_delivery::FlushOutcome;
 use crate::pending_delivery::MamArchiveResolver;
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+#[cfg(feature = "clustering")]
 use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
+#[cfg(feature = "clustering")]
 use crate::server::routes::websocket::state::RemoteMucMembershipSnapshot;
 use crate::sm_promotion::DisplacedPromotionDeps;
 use crate::sm_promotion::PromotionSessionGuard;

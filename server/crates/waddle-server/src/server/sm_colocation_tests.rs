@@ -1,5 +1,5 @@
 //! Boot rejects split SM stores before schema initialization or session hydration.
-use super::{create_ingress_sm_storage, Database, DatabaseDriver, IngressColocationError};
+use super::{create_ingress_sm_storage, IngressColocationError};
 
 #[tokio::test]
 async fn postgres_sm_requires_the_same_schema_without_clustering() {

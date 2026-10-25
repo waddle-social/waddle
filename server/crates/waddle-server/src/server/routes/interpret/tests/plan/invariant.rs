@@ -1,10 +1,9 @@
 use super::super::super::effects::delivery::PreparedOfflineNotification;
 use super::super::super::effects::direct::ExternalDirectEffect;
 use super::{
-    assert_personal_writes, jid, outgoing, plan_message_dispatch, poison, sender_machine,
-    sqlite_writes, Arc, Deps, Effect, ExternalDeliveryEffect, ExternalEffect, InMemoryInboxStorage,
-    InMemoryMamStorage, InMemoryPendingDeliveryStorage, InboxStorage, MamStorage,
-    PendingDeliveryStorage,
+    assert_personal_writes, jid, outgoing, plan_message_dispatch, poison, sender_machine, Arc,
+    Deps, Effect, ExternalDeliveryEffect, ExternalEffect, InMemoryInboxStorage, InMemoryMamStorage,
+    InMemoryPendingDeliveryStorage, InboxStorage, MamStorage, PendingDeliveryStorage,
 };
 
 #[tokio::test]

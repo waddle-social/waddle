@@ -1,37 +1,12 @@
 //! Implementation behind the parent module facade.
 
-use super::acme;
 use super::bootstrap_membership;
-use super::caps_resolution;
-use super::config;
-use super::dual_registration;
 use super::durable_membership;
-use super::effects;
-use super::extension_bot;
-use super::extension_bot_avatar;
-use super::extension_bot_rooms;
-use super::extension_commands;
-use super::extension_host_adapter;
-use super::extension_host_tools;
-use super::fixed_account;
-use super::health;
 use super::http;
 use super::info;
-use super::managed_channel_policy;
-use super::process_metrics;
-use super::profile_publish_route;
 use super::room_registry_gauge;
-use super::routes;
 use super::session_janitors;
 use super::start_acme_runtime;
-use super::state;
-use super::state_inventory;
-use super::state_inventory_metrics;
-use super::state_inventory_route;
-use super::topology;
-use super::trace;
-use super::xmpp_channels;
-use super::xmpp_state;
 use super::Arc;
 use super::DatabasePool;
 use super::DatabaseSpacesMetadataStore;
@@ -40,11 +15,10 @@ use super::Result;
 use super::ServerConfig;
 use super::SocketAddr;
 use super::Spawn;
-use super::{build_plan_deps, plan_message_dispatch};
+use super::XmppConfig;
 use super::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
 use super::{ensure_fixed_test_account, fixed_test_account_enabled};
 use super::{resolve_server_owner_jids, AppState, AppStateDeps};
-use super::{XmppAcmeConfig, XmppConfig};
 
 /// Start HTTP and XMPP services with inherited listeners and graceful shutdown.
 ///
@@ -315,7 +289,7 @@ pub async fn start_with_config(
     // The global store follows the same ephemeral classification as every
     // other boundary: an in-memory SQLite global (bare dev runs, the WS
     // integration harness) is non-durable and exempt from attestation.
-    bootstrap_and_register_store_lineage(
+    super::bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::Global,
         db_pool.global().clone(),
@@ -363,7 +337,7 @@ pub async fn start_with_config(
         db_pool.global(),
     )
     .await?;
-    bootstrap_mam_lineage(&state, &websocket_mam_storage).await?;
+    super::bootstrap_mam_lineage(&state, &websocket_mam_storage).await?;
     let acme_runtime = start_acme_runtime(&xmpp_config, stop_token.clone());
 
     // Start HTTP server

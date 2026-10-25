@@ -1,6 +1,5 @@
 use super::{
-    bootstrap_membership, config, create_websocket_mam_storage, extension_commands, fixed_account,
-    health, http, AppState, XmppConfig,
+    bootstrap_membership, extension_commands, fixed_account, health, http, AppState, XmppConfig,
 };
 use crate::auth::{NativeUserStore, RegisterRequest};
 use crate::config::ServerConfig;

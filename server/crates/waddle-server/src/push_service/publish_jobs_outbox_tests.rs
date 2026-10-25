@@ -1,7 +1,7 @@
 use super::{
     acknowledge_completed_outbox_tx, has_notification_outbox_frozen_schema_tx,
-    prune_publish_jobs_tx, BareJid, CanonicalNotificationTerminalProof, DatabaseDriver,
-    DatabasePushServiceStore, Element, PushServiceNodeName, PUBLISH_JOB_STATUS_PUBLISHED,
+    prune_publish_jobs_tx, BareJid, CanonicalNotificationTerminalProof, DatabasePushServiceStore,
+    Element, PUBLISH_JOB_STATUS_PUBLISHED,
 };
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{AliasGcBudget, AliasGcProgress};

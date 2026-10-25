@@ -1,9 +1,12 @@
-use super::{dispatch_to_room, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind, Stanza};
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOriginKind;
+use super::{dispatch_to_room, OrderedRelayRouteOrigin, Stanza};
+
 use super::{
-    effects, interpret, register_into_both_tiers, ActorRef, Arc, BareJid, ConnectionRegistry,
+    interpret, register_into_both_tiers, ActorRef, Arc, ConnectionRegistry,
     DeliveryExecutionContext, DemoteRoomIfExactActor, Deps, Element, FullJid, GetRoom,
     GetRoomSnapshot, InMemorySmSessionRegistry, IngressEffectIntent, Jid, MamStorage, Message,
-    OutboundEvent, RoomActor, RoomRegistryActor, SetSubject, StanzaError, SubjectState,
+    OutboundEvent, RoomRegistryActor,
 };
 use chrono::TimeZone;
 use kameo::actor::Spawn;

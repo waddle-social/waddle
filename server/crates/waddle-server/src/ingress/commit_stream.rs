@@ -1,5 +1,6 @@
 use super::identity::IngressStreamIdentity;
 use crate::ingress_substrate::{FrontierOutcome, MessageWriteOutcome};
+#[cfg(feature = "clustering")]
 use crate::ingress_uow::ClaimRepository;
 use crate::ingress_uow::{
     IngressFencing, IngressUowError, IngressUowTransaction, SmIngressRepository,

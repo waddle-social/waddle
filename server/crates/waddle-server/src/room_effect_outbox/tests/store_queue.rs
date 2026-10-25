@@ -1,9 +1,9 @@
 use super::{
     admin_effects, config_effects, full_jid, initial_revision, lifecycle, nick, origin,
-    producing_node, room_jid, store, store_with_db, Database, MucConfigStatusCode,
-    OccupantVoiceChange, RoomEffectEnqueue, RoomEffectKey, RoomEffectLastError,
-    RoomEffectLeaseToken, RoomEffectOutboxStore, RoomEffectProducingNode, RoomEffectReleaseOutcome,
-    RoomLifecycleId, RoomMutationEffects, RoomRevision, Voice, CLAIM_TIMEOUT_MS,
+    producing_node, room_jid, store_with_db, Database, MucConfigStatusCode, OccupantVoiceChange,
+    RoomEffectEnqueue, RoomEffectKey, RoomEffectLastError, RoomEffectLeaseToken,
+    RoomEffectOutboxStore, RoomEffectProducingNode, RoomEffectReleaseOutcome, RoomLifecycleId,
+    RoomMutationEffects, RoomRevision, CLAIM_TIMEOUT_MS,
 };
 use waddle_xmpp::muc::DestroyRecipient;
 use waddle_xmpp::ownership::NodeIdentity;

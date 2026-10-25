@@ -3,7 +3,7 @@ use super::{
     DurableDirectEffect, DurableEffect, DurableRoomEffect, Effect, ExternalDirectEffect,
     ExternalEffect, ExternalRoomEffect, GroupchatNotificationRecoveryAction,
     GroupchatNotificationRecoveryMutation, InboxProjectionMutation, IngressEffectIntent,
-    IngressPlan, MessageEnvelope, PlanEffectDependency, RoomActorMutation,
+    IngressPlan, RoomActorMutation,
 };
 use crate::server::routes::interpret::effects::room::PlannedGroupchatNotificationRecovery;
 use crate::server::routes::interpret::effects::{PlannedEffect, RoomExecutionPath};

@@ -3,13 +3,12 @@ mod promotion_handoff;
 mod recovery_storage;
 
 use super::{
-    async_trait, database, flush, flush_for_resource, flush_for_resource_with_retry,
-    open_for_cluster_mode, resume_flush_for_resource_with_retry, Arc, ArchiveResolveError,
-    ArchiveResolver, BareJid, ConnectionRegistry, Database, DatabaseConfig, DatabaseDriver,
-    DatabasePendingDeliveryStorage, FlushContext, FlushOutcome, FullJid, InsertOutcome,
-    MamArchiveResolver, NullArchiveResolver, PendingDeliveryStorage, PendingDispatchGate,
-    PendingDispatchReadiness, PendingRowId, PendingStorageError, QuotaPolicy, SmSessionId, Stanza,
-    StanzaId, FLUSH_BATCH_SIZE,
+    async_trait, flush_for_resource, flush_for_resource_with_retry,
+    resume_flush_for_resource_with_retry, Arc, ArchiveResolveError, ArchiveResolver, BareJid,
+    ConnectionRegistry, Database, DatabaseConfig, DatabaseDriver, DatabasePendingDeliveryStorage,
+    FlushContext, FlushOutcome, FullJid, InsertOutcome, MamArchiveResolver, NullArchiveResolver,
+    PendingDeliveryStorage, PendingDispatchGate, PendingDispatchReadiness, PendingRowId,
+    PendingStorageError, QuotaPolicy, SmSessionId, Stanza, StanzaId, FLUSH_BATCH_SIZE,
 };
 use chrono::Utc;
 use kameo::actor::{ActorRef, Spawn};

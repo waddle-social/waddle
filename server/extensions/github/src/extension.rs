@@ -44,9 +44,9 @@ pub(crate) const GITHUB_ACTIONS_ALERT_ROOM: &str = "github-actions@muc.waddle.so
 
 impl exports::waddle::extension::lifecycle::Guest for GitHub {
     fn init(config: String) -> Result<types::ExtensionManifest, String> {
-        parse_config(&config)
+        super::parse_config(&config)
             .map_err(|error| format!("github configuration is invalid: {error}"))?;
-        Ok(manifest())
+        Ok(super::manifest())
     }
 }
 
@@ -57,8 +57,12 @@ impl exports::waddle::extension::framework::Guest for GitHub {
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
             types::ExtensionEvent::RoomMessageObserve(_) => vec![],
-            types::ExtensionEvent::ProviderWebhook(webhook) => handle_provider_webhook(webhook)?,
-            types::ExtensionEvent::Command(command) => handle_command(command, current_config()?)?,
+            types::ExtensionEvent::ProviderWebhook(webhook) => {
+                super::handle_provider_webhook(webhook)?
+            }
+            types::ExtensionEvent::Command(command) => {
+                super::handle_command(command, super::current_config()?)?
+            }
             types::ExtensionEvent::MessageHook(_) | types::ExtensionEvent::Launch(_) => vec![],
         };
         Ok(types::ExtensionResponse {
@@ -70,13 +74,13 @@ impl exports::waddle::extension::framework::Guest for GitHub {
 
 pub(crate) fn manifest() -> types::ExtensionManifest {
     types::ExtensionManifest {
-        id: plugin_id(),
-        name: display(PLUGIN_NAME),
+        id: super::plugin_id(),
+        name: super::display(super::PLUGIN_NAME),
         version: types::PluginVersion {
-            value: VERSION.to_string(),
+            value: super::VERSION.to_string(),
         },
         payloads: vec![
-            payload_rule(types::PayloadSurface::MessageEnrichment, "github-event"),
+            super::payload_rule(types::PayloadSurface::MessageEnrichment, "github-event"),
             payload_rule(types::PayloadSurface::PubsubItem, "github-event"),
             payload_rule(types::PayloadSurface::PubsubItem, ROUTE_ELEMENT),
         ],
@@ -86,7 +90,7 @@ pub(crate) fn manifest() -> types::ExtensionManifest {
             types::ExtensionCapability::Commands,
             types::ExtensionCapability::PubsubPublish,
         ],
-        commands: vec![command_descriptor(
+        commands: vec![super::command_descriptor(
             COMMAND_NODE,
             "Configure GitHub repository alert route",
         )],
@@ -128,13 +132,13 @@ pub(crate) fn handle_provider_webhook(
     if webhook.provider.value != "github" {
         return Ok(vec![]);
     }
-    let Some(payload) = GitHubPayload::from_webhook(&webhook) else {
+    let Some(payload) = super::GitHubPayload::from_webhook(&webhook) else {
         return Ok(vec![]);
     };
-    let Some(alert) = alert_for_payload(&payload) else {
+    let Some(alert) = super::alert_for_payload(&payload) else {
         return Ok(vec![]);
     };
-    let routes = load_routes()?;
+    let routes = super::load_routes()?;
     let matching: Vec<_> = routes
         .iter()
         .filter(|route| route.matches(&payload))
@@ -144,26 +148,26 @@ pub(crate) fn handle_provider_webhook(
     }
     let mut effects = vec![];
     for route in matching {
-        let route = migrate_route(route);
+        let route = super::migrate_route(route);
         if route.migrated {
             effects.push(types::ExtensionEffect::PublishPubsub(
                 route.current.to_publish_effect(),
             ));
         }
-        send_room_message(
+        super::send_room_message(
             &types::RoomJid {
                 value: route.current.channel.clone(),
             },
             display(alert.body.as_str()),
-            Some(github_envelope(&webhook, &payload, &alert)),
+            Some(super::github_envelope(&webhook, &payload, &alert)),
         )?;
     }
     effects.push(types::ExtensionEffect::Noop);
     Ok(effects)
 }
 
-pub(crate) fn alert_for_payload(payload: &GitHubPayload) -> Option<GitHubAlert> {
-    if !should_alert_for_payload(payload) {
+pub(crate) fn alert_for_payload(payload: &GitHubPayload) -> Option<super::GitHubAlert> {
+    if !super::should_alert_for_payload(payload) {
         return None;
     }
     let name = payload.name.as_str();
@@ -199,9 +203,9 @@ pub(crate) fn should_alert_for_payload(payload: &GitHubPayload) -> bool {
     match payload.event_type.as_str() {
         "workflow_run" | "check_run" => {
             payload.action == "completed"
-                && is_workflow_check_alert_conclusion(payload.conclusion.as_str())
+                && super::is_workflow_check_alert_conclusion(payload.conclusion.as_str())
         }
-        "deployment_status" => is_deployment_alert_state(payload.conclusion.as_str()),
+        "deployment_status" => super::is_deployment_alert_state(payload.conclusion.as_str()),
         _ => false,
     }
 }
@@ -228,7 +232,7 @@ pub(crate) fn github_envelope(
             plugin: plugin_id(),
             capability: types::ExtensionCapability::MessageEnrich,
             payload_namespace: payload_namespace(),
-            created_at: timestamp(),
+            created_at: super::timestamp(),
             source: None,
             ui: vec![types::UiView {
                 id: types::UiViewId {
@@ -271,23 +275,23 @@ impl GitHubPayload {
             return None;
         }
         let event_type = webhook.event_type.value.as_str();
-        let prefix = status_payload_prefix(event_type);
-        let fields = ProviderFields::new(&webhook.payload);
+        let prefix = super::status_payload_prefix(event_type);
+        let fields = super::ProviderFields::new(&webhook.payload);
         Some(Self {
             event_type: event_type.to_string(),
             action: fields.text(&["action"])?.to_string(),
             installation_id: fields.text(&["installation", "id"])?.to_string(),
             repository_id: fields.text(&["repository", "id"])?.to_string(),
             repository_full_name: fields.text(&["repository", "full_name"])?.to_string(),
-            conclusion: status_conclusion(&fields, event_type, prefix)
+            conclusion: super::status_conclusion(&fields, event_type, prefix)
                 .unwrap_or("unknown")
                 .to_string(),
-            name: status_name(&fields, event_type, prefix)
+            name: super::status_name(&fields, event_type, prefix)
                 .unwrap_or(event_type)
                 .to_string(),
-            branch: status_branch(&fields, event_type, prefix).map(str::to_string),
-            revision: status_revision(&fields, event_type, prefix).map(str::to_string),
-            url: status_url(&fields, event_type, prefix).map(str::to_string),
+            branch: super::status_branch(&fields, event_type, prefix).map(str::to_string),
+            revision: super::status_revision(&fields, event_type, prefix).map(str::to_string),
+            url: super::status_url(&fields, event_type, prefix).map(str::to_string),
         })
     }
 
@@ -314,7 +318,7 @@ impl GitHubPayload {
             xml_attr("name", &self.name),
         ];
         if let Some(branch) = self.branch.as_ref() {
-            attributes.push(xml_attr("branch", branch));
+            attributes.push(super::xml_attr("branch", branch));
         }
         if let Some(revision) = self.revision.as_ref() {
             attributes.push(xml_attr("revision", revision));
@@ -323,7 +327,7 @@ impl GitHubPayload {
             attributes.push(xml_attr("url", url));
         }
         types::ExtensionPayload {
-            namespace: payload_namespace(),
+            namespace: super::payload_namespace(),
             root: types::PayloadRoot {
                 namespace: payload_namespace(),
                 local_name: "github-event".to_string(),
@@ -461,7 +465,7 @@ pub(crate) struct Route {
     pub(crate) installation_id: Option<String>,
 }
 
-impl Route {
+impl super::Route {
     pub(crate) fn matches(&self, payload: &GitHubPayload) -> bool {
         if self.repository_id != payload.repository_id {
             return false;
@@ -495,7 +499,7 @@ impl Route {
         if let Some(installation_id) = self.installation_id.as_ref() {
             attributes.push(types::XmlAttribute {
                 namespace: None,
-                local_name: ATTR_INSTALLATION_ID.to_string(),
+                local_name: super::ATTR_INSTALLATION_ID.to_string(),
                 value: installation_id.clone(),
             });
         }
@@ -503,7 +507,7 @@ impl Route {
             namespace: payload_namespace(),
             root: types::PayloadRoot {
                 namespace: payload_namespace(),
-                local_name: ROUTE_ELEMENT.to_string(),
+                local_name: super::ROUTE_ELEMENT.to_string(),
             },
             tokens: vec![
                 types::XmlToken::StartElement(types::XmlElement {
@@ -519,7 +523,7 @@ impl Route {
     pub(crate) fn to_publish_effect(&self) -> types::PubsubPublish {
         types::PubsubPublish {
             node: types::PubsubNode {
-                value: ROUTES_NODE.to_string(),
+                value: super::ROUTES_NODE.to_string(),
             },
             item_id: Some(types::PubsubItemId {
                 value: self.repository_id.clone(),
@@ -529,7 +533,9 @@ impl Route {
     }
 
     pub(crate) fn from_payload(payload: &types::ExtensionPayload) -> Option<Self> {
-        if payload.root.namespace.value != PLUGIN_NS || payload.root.local_name != ROUTE_ELEMENT {
+        if payload.root.namespace.value != super::PLUGIN_NS
+            || payload.root.local_name != ROUTE_ELEMENT
+        {
             return None;
         }
         let start = payload.tokens.iter().find_map(|token| match token {
@@ -538,9 +544,10 @@ impl Route {
             }
             _ => None,
         })?;
-        let repository_id = find_attr(&start.attributes, ATTR_REPOSITORY_ID)?.to_string();
-        let channel = find_attr(&start.attributes, ATTR_CHANNEL)?.to_string();
-        let events = find_attr(&start.attributes, ATTR_EVENTS)
+        let repository_id =
+            super::find_attr(&start.attributes, super::ATTR_REPOSITORY_ID)?.to_string();
+        let channel = find_attr(&start.attributes, super::ATTR_CHANNEL)?.to_string();
+        let events = find_attr(&start.attributes, super::ATTR_EVENTS)
             .map(|raw| {
                 raw.split(',')
                     .map(str::trim)
@@ -566,10 +573,10 @@ pub(crate) struct MigratedRoute {
     pub(crate) migrated: bool,
 }
 
-pub(crate) fn migrate_route(route: &Route) -> MigratedRoute {
-    if route.channel == LEGACY_ALERT_ROOM {
+pub(crate) fn migrate_route(route: &Route) -> super::MigratedRoute {
+    if route.channel == super::LEGACY_ALERT_ROOM {
         let mut current = route.clone();
-        current.channel = GITHUB_ACTIONS_ALERT_ROOM.to_string();
+        current.channel = super::GITHUB_ACTIONS_ALERT_ROOM.to_string();
         return MigratedRoute {
             current,
             migrated: true,
@@ -598,7 +605,7 @@ pub(crate) fn load_routes() -> Result<Vec<Route>, types::ExtensionError> {
         item_ids: vec![],
     };
     let response =
-        host_tools::pubsub_get_items(&request).map_err(extension_error_from_host_tool)?;
+        host_tools::pubsub_get_items(&request).map_err(super::extension_error_from_host_tool)?;
     Ok(response
         .items
         .into_iter()
@@ -612,14 +619,14 @@ pub(crate) fn load_routes() -> Result<Vec<Route>, types::ExtensionError> {
 
 pub(crate) fn handle_command(
     command: types::CommandInvocation,
-    config: GitHubConfig,
+    config: super::GitHubConfig,
 ) -> Result<Vec<types::ExtensionEffect>, types::ExtensionError> {
-    if command.command_node.value != COMMAND_NODE {
+    if command.command_node.value != super::COMMAND_NODE {
         return Ok(vec![]);
     }
-    let requester_bare = bare_jid_value(&command.requester.value);
+    let requester_bare = super::bare_jid_value(&command.requester.value);
     if !config.admins.iter().any(|admin| admin == &requester_bare) {
-        return Err(extension_error(
+        return Err(super::extension_error(
             types::ExtensionErrorCode::Denied,
             &format!("{requester_bare} is not authorized to configure github routes"),
         ));
@@ -627,15 +634,15 @@ pub(crate) fn handle_command(
     if matches!(command.action, Some(types::CommandAction::Cancel)) {
         return Ok(vec![]);
     }
-    let repository_id = field_value(&command.fields, FIELD_REPOSITORY_ID);
-    let channel = field_value(&command.fields, FIELD_CHANNEL);
+    let repository_id = super::field_value(&command.fields, super::FIELD_REPOSITORY_ID);
+    let channel = field_value(&command.fields, super::FIELD_CHANNEL);
     if repository_id.is_none() || channel.is_none() {
         return Ok(vec![types::ExtensionEffect::CommandForm(
-            configure_route_form(),
+            super::configure_route_form(),
         )]);
     }
-    require_form_type(&command.fields, CONFIGURE_ROUTE_FORM_TYPE)?;
-    let route = migrate_route(&build_route_from_fields(&command.fields)?).current;
+    super::require_form_type(&command.fields, super::CONFIGURE_ROUTE_FORM_TYPE)?;
+    let route = migrate_route(&super::build_route_from_fields(&command.fields)?).current;
     Ok(vec![types::ExtensionEffect::PublishPubsub(
         route.to_publish_effect(),
     )])
@@ -696,7 +703,7 @@ pub(crate) fn configure_route_form() -> types::DataForm {
                     form_value("deployment_status"),
                 ],
                 options: vec![
-                    form_option("Workflow runs", "workflow_run"),
+                    super::form_option("Workflow runs", "workflow_run"),
                     form_option("Check runs", "check_run"),
                     form_option("Deployment statuses", "deployment_status"),
                 ],
@@ -720,9 +727,9 @@ pub(crate) fn configure_route_form() -> types::DataForm {
 pub(crate) fn build_route_from_fields(
     fields: &[types::FormFieldValue],
 ) -> Result<Route, types::ExtensionError> {
-    let repository_id = require_numeric_field(fields, FIELD_REPOSITORY_ID)?;
-    let channel = require_field(fields, FIELD_CHANNEL)?;
-    let events: Vec<String> = field_values(fields, FIELD_EVENTS)
+    let repository_id = super::require_numeric_field(fields, FIELD_REPOSITORY_ID)?;
+    let channel = super::require_field(fields, FIELD_CHANNEL)?;
+    let events: Vec<String> = super::field_values(fields, super::FIELD_EVENTS)
         .into_iter()
         .filter(|event| !event.trim().is_empty())
         .collect();
@@ -733,7 +740,7 @@ pub(crate) fn build_route_from_fields(
         ));
     }
     let installation_id =
-        field_value(fields, FIELD_INSTALLATION_ID).filter(|value| !value.trim().is_empty());
+        field_value(fields, super::FIELD_INSTALLATION_ID).filter(|value| !value.trim().is_empty());
     Ok(Route {
         repository_id,
         channel,
@@ -760,7 +767,7 @@ pub(crate) fn require_form_type(
     fields: &[types::FormFieldValue],
     expected: &str,
 ) -> Result<(), types::ExtensionError> {
-    match field_value(fields, FIELD_FORM_TYPE).as_deref() {
+    match field_value(fields, super::FIELD_FORM_TYPE).as_deref() {
         Some(actual) if actual == expected => Ok(()),
         Some(_) => Err(extension_error(
             types::ExtensionErrorCode::InvalidRequest,
@@ -818,7 +825,7 @@ pub(crate) fn form_value(value: &str) -> types::DataFormValue {
 pub(crate) fn form_option(label: &str, value: &str) -> types::FormFieldOption {
     types::FormFieldOption {
         label: Some(display(label)),
-        value: form_value(value),
+        value: super::form_value(value),
     }
 }
 
@@ -846,7 +853,8 @@ pub(crate) struct RawConfig {
 
 pub(crate) fn parse_config(raw: &str) -> Result<GitHubConfig, String> {
     let raw = if raw.trim().is_empty() { "{}" } else { raw };
-    let parsed = serde_json::from_str::<RawConfig>(raw).map_err(|error| error.to_string())?;
+    let parsed =
+        serde_json::from_str::<super::RawConfig>(raw).map_err(|error| error.to_string())?;
     let admins = parsed
         .admins
         .into_iter()
@@ -883,7 +891,7 @@ pub(crate) fn send_room_message(
         markup: vec![],
         extensions,
     };
-    send_message_request(&request)
+    super::send_message_request(&request)
 }
 
 #[cfg(not(test))]
@@ -937,7 +945,7 @@ pub(crate) fn xml_attr(local_name: &str, value: &str) -> types::XmlAttribute {
 
 pub(crate) fn plugin_id() -> types::PluginId {
     types::PluginId {
-        value: PLUGIN_ID.to_string(),
+        value: super::PLUGIN_ID.to_string(),
     }
 }
 
@@ -955,7 +963,7 @@ pub(crate) fn display(value: &str) -> types::DisplayText {
 
 pub(crate) fn timestamp() -> types::Timestamp {
     types::Timestamp {
-        value: current_timestamp_value(),
+        value: super::current_timestamp_value(),
     }
 }
 

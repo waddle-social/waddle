@@ -1,8 +1,6 @@
 use super::{
-    archive_lookup, chat_msg, direct_archive, interpret, jid, lookup_archived_message, Arc,
-    ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone, BareJid, ConnectionRegistry, Deps,
-    InboundEvent, InboxStorage, Jid, MamArchivedMessage, MamStorage, MessageRef, OutboundEvent,
-    RichMessageId, Stanza, Xep0359StanzaId, XmppMessageType,
+    chat_msg, interpret, jid, Arc, ConnectionRegistry, Deps, InboundEvent, InboxStorage,
+    MamStorage, MessageRef, OutboundEvent, Stanza, XmppMessageType,
 };
 
 // XEP-0313 — ArchiveDirect persistence

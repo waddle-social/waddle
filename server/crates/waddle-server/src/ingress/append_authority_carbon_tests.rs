@@ -1,6 +1,6 @@
 //! Carbon receipt authority includes the direction, original payload and resource.
 use super::{
-    check_canonical_obligation, check_resource_binding, check_stanza_binding, AppendAuthority,
+    check_canonical_obligation, check_resource_binding, check_stanza_binding,
     AppendAuthorityRejection, Duration, Stanza,
 };
 use crate::ingress::commit::commit_submission;

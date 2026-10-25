@@ -4,9 +4,8 @@
 //! no-bounce rule for result/error IQs.
 
 use super::{
-    interpret, register_into_both_tiers, Arc, ConnectionRegistry, DefinedCondition, Deps, Element,
-    ErrorType, FromStr, FullJid, InMemorySmSessionRegistry, Iq, Jid, OutboundEvent, Stanza,
-    StanzaError,
+    interpret, register_into_both_tiers, Arc, ConnectionRegistry, Deps, Element, FromStr,
+    InMemorySmSessionRegistry, Iq, OutboundEvent, Stanza,
 };
 use kameo::actor::Spawn;
 

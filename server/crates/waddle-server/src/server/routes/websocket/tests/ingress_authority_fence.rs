@@ -2,7 +2,7 @@ use super::{
     connection, create_test_session, create_test_websocket_state,
     create_test_websocket_state_with_extension_manager, element_to_xml, empty_extension_manager,
     handle_xmpp_frame, recovery, stanza_to_xml, tests, transport_xml, Arc, Element, Message,
-    SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState, XmppMessageType, SM_NS,
+    SmSessionId, Stanza, TestStateOverrides, WebSocketState, WsConnState,
 };
 
 async fn enabled_connection(state: &WebSocketState) -> WsConnState {

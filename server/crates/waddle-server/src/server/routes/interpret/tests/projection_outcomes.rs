@@ -5,10 +5,7 @@ use super::super::effects::{
     ImmediateSink, PlanSink, ProjectionRef,
 };
 use super::super::groupchat_archive::{project_groupchat_inbox, GroupchatInboxProjectionInputs};
-use super::{
-    register_into_both_tiers, test_registry, Arc, BareJid, Deps, InboxStorage, Message, Stanza,
-    XmppMessageType,
-};
+use super::{register_into_both_tiers, test_registry, Arc, Deps, InboxStorage, Message, Stanza};
 use kameo::actor::Spawn;
 use waddle_xmpp::inbox::{ConversationKind, InboxEntry};
 use waddle_xmpp::protocol::event::GroupchatThreadProjection;

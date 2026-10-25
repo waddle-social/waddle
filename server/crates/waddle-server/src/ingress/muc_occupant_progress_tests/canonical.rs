@@ -1,10 +1,9 @@
 use super::{
-    build_interpret_deps, commit_submission, execute, execute_effects, interpret, plan_broadcast,
-    room_canonical, terminalize_if_complete, CreateRoom, DigestContext, DigestInput, DurableEffect,
-    Duration, ExternalDeliveryEffect, ExternalEffect, ImmediateSink, IngressCanonicalRef,
+    build_interpret_deps, commit_submission, execute_effects, interpret, plan_broadcast,
+    terminalize_if_complete, CreateRoom, DigestContext, DigestInput, Duration,
+    ExternalDeliveryEffect, ExternalEffect, ImmediateSink, IngressCanonicalRef,
     IngressEffectCapture, IngressEffectIntent, IngressFixture, IngressStreamIdentity, Join,
-    NormalizedTarget, OutboundEvent, PlanSink, PlanSuppressionPolicy, PlannedEffect,
-    RoomExecutionPath,
+    NormalizedTarget, OutboundEvent, PlanSink,
 };
 use crate::ingress::effects;
 use crate::ingress::recovery_rebuild::RecoveryInput;

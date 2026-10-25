@@ -1,14 +1,7 @@
 //! Implementation behind the parent module facade.
 
-use super::actor;
-use super::backend;
-use super::blocking;
 use super::lineage;
 use super::migrations;
-use super::pool;
-use super::roster;
-use super::schema;
-use super::value;
 use super::Error;
 use super::FromStr;
 #[cfg(test)]
@@ -18,14 +11,7 @@ use super::SqliteConnectOptions;
 use super::SqlitePool;
 use super::{connect_backend, DatabaseBackend};
 use super::{debug, info, instrument};
-use super::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
-use super::{
-    migration_checksum, MigrationLedgerError, MigrationNamespace, MigrationRunner,
-    WADDLE_NAMESPACE_START,
-};
-use super::{row_value, DbDecode, IntoParams, Row, Rows, Value, ValueExt};
 use super::{ConnectionGuard, DatabaseDriver, Transaction};
-use super::{DatabasePool, PoolConfig, PoolHealth};
 
 /// Database-specific errors.
 #[derive(Error, Debug)]
@@ -447,7 +433,7 @@ pub(crate) fn sqlite_url_is_in_memory(database_url: &str) -> bool {
     ) || base == "file::memory:"
         || base.ends_with("://file::memory:")
         || base.ends_with(":file::memory:")
-        || sqlite_url_query_requests_memory(&trimmed)
+        || super::sqlite_url_query_requests_memory(&trimmed)
     {
         return true;
     }

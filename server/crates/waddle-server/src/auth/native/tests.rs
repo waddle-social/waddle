@@ -1,5 +1,5 @@
 use super::{
-    validate_username, AuthError, DbActor, DbExecute, NativeUserStore, RegisterRequest,
+    validate_username, AuthError, DbExecute, NativeUserStore, RegisterRequest,
     DEFAULT_SCRAM_ITERATIONS,
 };
 use crate::db::{Database, MigrationRunner};

@@ -1,12 +1,15 @@
 //! RFC 0018 §2: pool stores are tripwires; only the authority transaction writes.
+#[cfg(feature = "clustering")]
+use super::poison_muc;
+#[cfg(feature = "clustering")]
+use super::OrderedRelayRouteOriginKind;
 use super::{
-    effects, extract_stanza_id_by, plan_message_dispatch, poison, poison_muc, sqlite_writes, tests,
-    Arc, BareJid, Deps, Effect, Element, ExternalEffect, FullJid, InMemoryInboxStorage,
-    InMemoryMamStorage, InMemoryPendingDeliveryStorage, InMemorySmSessionRegistry, InboxStorage,
-    IngressEffectIntent, MamArchivedMessage, MamStorage, OrderedRelayRouteOrigin,
-    OrderedRelayRouteOriginKind, PendingDeliveryStorage, Stanza, StanzaDispatcher, Xep0359StanzaId,
-    XmppStateMachine,
+    plan_message_dispatch, poison, sqlite_writes, tests, Arc, Deps, Effect, ExternalEffect,
+    InMemoryInboxStorage, InMemoryMamStorage, InMemoryPendingDeliveryStorage,
+    InMemorySmSessionRegistry, InboxStorage, MamStorage, OrderedRelayRouteOrigin,
+    PendingDeliveryStorage, Stanza, StanzaDispatcher, XmppStateMachine,
 };
+
 use crate::ingress::commit::commit_submission;
 use crate::ingress::execute::execute_effects;
 use crate::ingress::test_support::IngressFixture;
