@@ -1,6 +1,6 @@
 use base64::prelude::{Engine, BASE64_STANDARD};
 use hmac::{Hmac, KeyInit, Mac};
-use pbkdf2::pbkdf2_hmac;
+use pbkdf2::pbkdf2_hmac_array;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 
@@ -49,9 +49,7 @@ pub(super) fn generate_nonce() -> String {
 
 /// Hi() function from RFC 5802 - PBKDF2-HMAC-SHA256.
 pub(super) fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    let mut output = vec![0u8; 32]; // SHA-256 output is 32 bytes
-    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut output);
-    output
+    pbkdf2_hmac_array::<Sha256, 32>(password, salt, iterations).to_vec()
 }
 
 /// HMAC-SHA-256 helper.

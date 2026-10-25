@@ -850,6 +850,7 @@ mod tests {
 
     use crate::db::Database;
     use crate::push_service::secrets::SEALED_PROVIDER_VALUE_PREFIX;
+    use crate::push_service::store::test_secret_key;
     use crate::push_service::test_support::{
         assert_item_not_found, notification_item, owner, store,
     };
@@ -1270,7 +1271,7 @@ mod tests {
             Database::in_memory("push-service-failing-pubsub")
                 .await
                 .expect("push service db"),
-            b"waddle-push-service-test-secret-key",
+            test_secret_key(),
             "push.example.com".parse().expect("push service jid"),
             Arc::new(FailingNodeConfigPubSubStorage::new()),
         )

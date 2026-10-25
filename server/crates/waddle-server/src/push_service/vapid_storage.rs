@@ -464,6 +464,11 @@ fn parse_env_scalar(raw: &str) -> Result<p256::SecretKey, VapidLoadError> {
 mod tests {
     use super::*;
 
+    fn root_key() -> &'static [u8; 32] {
+        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        &KEY
+    }
+
     #[test]
     fn build_aad_is_length_prefixed() {
         let aad = build_aad(b"label", b"kid_bytes");
@@ -485,7 +490,7 @@ mod tests {
 
     #[test]
     fn cipher_round_trip() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"some-kid").unwrap();
         let opened = cipher.open(&sealed, AAD_LABEL, b"some-kid").unwrap();
@@ -494,7 +499,7 @@ mod tests {
 
     #[test]
     fn cipher_rejects_mismatched_kid() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, AAD_LABEL, b"kid-a").unwrap();
         let err = cipher.open(&sealed, AAD_LABEL, b"kid-b").unwrap_err();
@@ -503,7 +508,7 @@ mod tests {
 
     #[test]
     fn cipher_rejects_mismatched_label() {
-        let cipher = VapidKeyCipher::new(b"root-key-for-tests");
+        let cipher = VapidKeyCipher::new(root_key());
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher.seal(plaintext, b"label-a", b"kid").unwrap();
         let err = cipher.open(&sealed, b"label-b", b"kid").unwrap_err();
@@ -512,8 +517,10 @@ mod tests {
 
     #[test]
     fn cipher_rejects_wrong_root_key() {
-        let cipher_a = VapidKeyCipher::new(b"root-key-A");
-        let cipher_b = VapidKeyCipher::new(b"root-key-B");
+        let cipher_a = VapidKeyCipher::new(root_key());
+        let mut other_root_key = *root_key();
+        other_root_key[0] ^= 1;
+        let cipher_b = VapidKeyCipher::new(&other_root_key);
         let plaintext = b"my-32-byte-p256-scalar-padding!!";
         let sealed = cipher_a.seal(plaintext, AAD_LABEL, b"kid").unwrap();
         let err = cipher_b.open(&sealed, AAD_LABEL, b"kid").unwrap_err();

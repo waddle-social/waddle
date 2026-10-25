@@ -94,10 +94,16 @@ pub(super) async fn lock_node_tx(
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) fn test_secret_key() -> &'static [u8] {
+    static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+    &*KEY
+}
+
 impl DatabasePushServiceStore {
     #[cfg(test)]
     pub async fn try_new(db: Database) -> Result<Self, XmppError> {
-        Self::new_with_secret_key(db, b"waddle-push-service-test-secret-key").await
+        Self::new_with_secret_key(db, test_secret_key()).await
     }
 
     pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {

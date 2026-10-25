@@ -796,10 +796,9 @@ pub async fn last_activity_query(
 // ---------------------------------------------------------------------------
 
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    let mut output = vec![0u8; 32];
-    pbkdf2::pbkdf2::<HmacSha256>(password, salt, iterations, &mut output)
-        .expect("PBKDF2 output length is valid");
-    output
+    pbkdf2::pbkdf2_array::<HmacSha256, 32>(password, salt, iterations)
+        .expect("PBKDF2 output length is valid")
+        .to_vec()
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {

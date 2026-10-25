@@ -1573,6 +1573,13 @@ fn parse_host_patterns_var(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+fn test_session_key() -> String {
+    static KEY: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| hex::encode(rand::random::<[u8; 32]>()));
+    KEY.clone()
+}
+
+#[cfg(any(test, feature = "test-support"))]
 const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1690,7 +1697,7 @@ impl ServerConfig {
         Self {
             mode: ServerMode::HomeServer,
             base_url: "http://localhost:3000".to_string(),
-            session_key: "test-key-32-bytes-long-for-aes!".to_string(),
+            session_key: test_session_key(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
@@ -1710,7 +1717,7 @@ impl ServerConfig {
         Self {
             mode: ServerMode::Standalone,
             base_url: "http://localhost:3000".to_string(),
-            session_key: "test-key-32-bytes-long-for-aes!".to_string(),
+            session_key: test_session_key(),
             auth: AuthConfig::default(),
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),

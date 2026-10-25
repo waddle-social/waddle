@@ -106,6 +106,12 @@ mod tests {
     use super::*;
     use jid::FullJid;
 
+    fn fixture_key() -> &'static [u8; 16] {
+        static KEY: std::sync::LazyLock<[u8; 16]> =
+            std::sync::LazyLock::new(|| uuid::Uuid::new_v4().into_bytes());
+        &KEY
+    }
+
     fn fixture_identity() -> Identity {
         let jid: FullJid = "alice@waddle.social/desktop".parse().expect("valid JID");
         Identity::from_jid(jid)
@@ -148,11 +154,13 @@ mod tests {
         let identity = fixture_identity();
         let username = "0:alice@waddle.social/desktop";
 
-        let mut mac_a = HmacSha1::new_from_slice(b"shared-secret-a").expect("hmac key");
+        let mut mac_a = HmacSha1::new_from_slice(fixture_key()).expect("hmac key");
         mac_a.update(username.as_bytes());
         let pw_a = BASE64.encode(mac_a.finalize().into_bytes());
 
-        let mut mac_b = HmacSha1::new_from_slice(b"shared-secret-b").expect("hmac key");
+        let mut other_key = *fixture_key();
+        other_key[0] ^= 1;
+        let mut mac_b = HmacSha1::new_from_slice(&other_key).expect("hmac key");
         mac_b.update(username.as_bytes());
         let pw_b = BASE64.encode(mac_b.finalize().into_bytes());
 

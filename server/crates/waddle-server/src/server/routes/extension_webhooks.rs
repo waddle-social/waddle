@@ -664,8 +664,8 @@ mod tests {
     #[test]
     fn verifies_configured_hmac_sha256_signature() {
         let payload = b"{\"zen\":\"typed events\"}";
-        let secret = b"secret";
-        let mut mac = HmacSha256::new_from_slice(secret).expect("hmac");
+        let secret = rand::random::<[u8; 32]>();
+        let mut mac = HmacSha256::new_from_slice(&secret).expect("hmac");
         mac.update(payload);
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
         let mut headers = HeaderMap::new();
@@ -677,14 +677,14 @@ mod tests {
         assert!(verify_hmac_sha256_signature(
             &headers,
             payload,
-            secret,
+            &secret,
             "x-provider-signature-256",
             "sha256=",
         ));
         assert!(!verify_hmac_sha256_signature(
             &headers,
             b"{}",
-            secret,
+            &secret,
             "x-provider-signature-256",
             "sha256=",
         ));
