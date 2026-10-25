@@ -215,9 +215,9 @@ pub struct StanzaError {
 /// identified by its element name and namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationCondition {
-    /// XML namespace URI of the element or attribute.
+    /// Namespace URI of the application-specific condition element.
     pub namespace: String,
-    /// Human-readable name advertised to clients.
+    /// Local XML name of the condition element, such as `session-expired`.
     pub name: String,
 }
 

@@ -75,7 +75,7 @@ impl AdHocStatus {
 /// Parsed `<command/>` payload extracted from an IQ result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandResponse {
-    /// PubSub or discovery node selected by the request.
+    /// XEP-0050 command node returned in the response.
     pub node: String,
     /// Identifier of the session associated with this value.
     pub session_id: Option<String>,

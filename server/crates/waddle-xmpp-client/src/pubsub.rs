@@ -328,13 +328,13 @@ impl PubsubSubscriptionState {
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubSubscription {
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node named by the returned subscription.
     pub node: String,
-    /// XMPP address identifying the referenced entity.
+    /// Subscriber JID, when the response supplies a parseable address.
     pub jid: Option<Jid>,
     /// Service-assigned identifier distinguishing this subscription.
     pub subid: Option<String>,
-    /// Current lifecycle or protocol state.
+    /// Subscription state reported by the service.
     pub state: PubsubSubscriptionState,
 }
 

@@ -28,11 +28,11 @@ use crate::xep::xep0492::{
 pub struct SetRoomNotificationMode {
     /// Bare JID of the room in scope.
     pub room_jid: BareJid,
-    /// Human-readable name advertised to clients.
+    /// Fallback bookmark name used when the room has no existing bookmark name.
     pub name: Option<String>,
     /// Selected notification or availability policy.
     pub mode: NotifyMode,
-    /// Whether the archive query requests rich message metadata.
+    /// Whether the room bookmark opts into Waddle rich push summaries.
     pub rich_payload_opt_in: bool,
 }
 
@@ -57,7 +57,7 @@ pub struct SetDmNotificationMode {
     pub dm_jid: BareJid,
     /// Selected notification or availability policy.
     pub mode: NotifyMode,
-    /// Whether the archive query requests rich message metadata.
+    /// Whether the direct-message bookmark opts into Waddle rich push summaries.
     pub rich_payload_opt_in: bool,
 }
 
@@ -70,7 +70,7 @@ pub enum SetDmNotificationModeOutcome {
         jid: BareJid,
         /// Selected notification or availability policy.
         mode: NotifyMode,
-        /// Whether the archive query requests rich message metadata.
+        /// Rich push-summary opt-in stored in the resulting direct-message bookmark.
         rich_payload_opt_in: bool,
     },
     /// The target item or membership has been removed.

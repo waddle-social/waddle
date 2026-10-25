@@ -30,13 +30,13 @@ pub struct DiscoIdentity {
 pub struct DiscoInfoResult {
     /// XMPP address identifying the referenced entity.
     pub jid: String,
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node named by the returned `<query/>`, when present.
     pub node: Option<String>,
     /// Service identities advertised in the discovery response.
     pub identities: Vec<DiscoIdentity>,
     /// Protocol feature namespaces advertised by the entity.
     pub features: Vec<String>,
-    /// Data forms included in the command response.
+    /// Extended service-discovery data forms included in the response.
     pub forms: Vec<DiscoDataForm>,
 }
 
@@ -98,7 +98,7 @@ pub struct DiscoItem {
     pub jid: String,
     /// Human-readable name advertised to clients.
     pub name: Option<String>,
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node identifying this item at its JID, when present.
     pub node: Option<String>,
 }
 

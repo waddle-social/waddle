@@ -108,7 +108,8 @@ impl PushServiceJid {
     ///
     /// # Errors
     ///
-    /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
+    /// Returns `MalformedResultForm` if the trimmed address is empty, is not a
+    /// bare JID, or contains a localpart.
     pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
@@ -146,11 +147,11 @@ impl PushServiceJid {
 pub struct PushAppId(String);
 
 impl PushAppId {
-    /// Validate an application identifier permitted by the push-registration contract.
+    /// Trim an application identifier and reject an empty result.
     ///
     /// # Errors
     ///
-    /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
+    /// Returns `MalformedResultForm` if the identifier is empty after trimming.
     pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
@@ -222,15 +223,18 @@ impl PushEnvironment {
 /// Platform-discriminated provider credentials. Each variant carries
 /// the EXACT subset of fields its provider needs — typed-payloads
 /// hard rule (no shared `Option<&str>` bag at the boundary).
+///
+/// Credential strings are copied into the registration form without local
+/// validation; the Push Service validates the submitted provider material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushDeviceCredentials {
     /// Browser push delivery using an endpoint and encryption keys.
     WebPush {
-        /// WebSocket URL used to establish the XMPP transport.
+        /// Provider HTTPS delivery URL from the browser's push subscription.
         endpoint: String,
-        /// Base64url-encoded P-256 client key for Web Push encryption.
+        /// Base64url-encoded, uncompressed P-256 public key for RFC 8291 encryption.
         p256dh: String,
-        /// Authentication credentials and mechanism selection.
+        /// Base64url-encoded 16-octet authentication secret for RFC 8291 key derivation.
         auth: String,
     },
     /// Apple Push Notification service registration.
@@ -243,11 +247,11 @@ pub enum PushDeviceCredentials {
     /// Push Service encrypts every notification to them, so FCM only
     /// carries ciphertext.
     Fcm {
-        /// Opaque token returned by the push service for later registration use.
+        /// FCM registration token identifying the receiving app installation.
         registration_token: String,
-        /// Base64url-encoded P-256 client key for Web Push encryption.
+        /// Base64url-encoded, uncompressed P-256 public key for RFC 8291 encryption.
         p256dh: String,
-        /// Authentication credentials and mechanism selection.
+        /// Base64url-encoded 16-octet authentication secret for RFC 8291 key derivation.
         auth: String,
     },
 }
@@ -312,9 +316,9 @@ impl PushDeviceId {
 /// the matching `disable-device` opt-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterDeviceResult {
-    /// PubSub or discovery node selected by the request.
+    /// Assigned XEP-0357 node used in the account server's push-enable request.
     pub node: PushNodeId,
-    /// Identifier of the device associated with this value.
+    /// Push Service device-row identifier used to deregister this device.
     pub device_id: PushDeviceId,
 }
 

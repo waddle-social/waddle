@@ -107,7 +107,7 @@ impl ExtensionEffect {
 /// PubSub node, optional item ID, and validated payload requested for publication.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PubSubPublish {
-    /// PubSub or discovery node selected by the request.
+    /// Destination PubSub node for the extension's publication.
     pub node: PubSubNode,
     /// Identifier of the PubSub item.
     pub item_id: Option<PubSubItemId>,

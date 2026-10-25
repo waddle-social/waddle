@@ -121,7 +121,7 @@ struct LaunchTokenVerification<'a> {
 
 /// Ad-hoc command submission and requester authority dispatched by the extension manager.
 pub struct CommandInvocationRequest<'a> {
-    /// PubSub or discovery node selected by the request.
+    /// Ad-hoc command node used to select the extension and command handler.
     pub node: &'a str,
     /// Identifier of the Waddle community providing invocation context.
     pub waddle_id: WaddleId,

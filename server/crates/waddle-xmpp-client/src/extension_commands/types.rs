@@ -38,7 +38,7 @@ impl ExtensionCommandScope {
 pub struct ExtensionCommandItemRef {
     /// Bare JID of the service handling this request.
     pub service_jid: String,
-    /// PubSub or discovery node selected by the request.
+    /// XEP-0050 command node advertised by the service's command list.
     pub node: String,
     /// Human-readable name advertised to clients.
     pub name: String,
@@ -66,7 +66,7 @@ pub struct ExtensionCommandMetadata {
 pub struct ExtensionCommandDescriptor {
     /// Bare JID of the service handling this request.
     pub service_jid: String,
-    /// PubSub or discovery node selected by the request.
+    /// XEP-0050 command node used to discover and execute this command.
     pub node: String,
     /// Human-readable name advertised to clients.
     pub name: String,
@@ -107,7 +107,7 @@ pub enum ExtensionFieldType {
 }
 
 impl ExtensionFieldType {
-    /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    /// Parse a field type, defaulting missing or unknown values to `TextSingle`.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Self {
         match value {
@@ -147,7 +147,7 @@ impl ExtensionFieldType {
 pub struct ExtensionFormOption {
     /// Human-readable label rendered by the host.
     pub label: Option<String>,
-    /// Underlying validated value.
+    /// Text of the option's `<value/>`, submitted when the option is selected.
     pub value: String,
 }
 
@@ -199,7 +199,7 @@ pub enum ExtensionNoteType {
 }
 
 impl ExtensionNoteType {
-    /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    /// Parse note severity, accepting `warn` or `warning` and defaulting to `Info`.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Self {
         match value {
@@ -215,7 +215,7 @@ impl ExtensionNoteType {
 pub struct ExtensionCommandNote {
     /// Severity of the ad-hoc command note.
     pub note_type: ExtensionNoteType,
-    /// Underlying validated value.
+    /// Nonempty note text with surrounding whitespace trimmed.
     pub value: String,
 }
 

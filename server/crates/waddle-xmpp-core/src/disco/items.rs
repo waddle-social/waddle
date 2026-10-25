@@ -18,7 +18,7 @@ pub const NODE_WADDLE_ROOM_BOTS: &str = "urn:waddle:room:bots:0";
 pub struct DiscoItemsQuery {
     /// Optional destination JID supplied by the request.
     pub target: Option<String>,
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node to enumerate, or `None` for the entity itself.
     pub node: Option<String>,
 }
 
@@ -29,7 +29,7 @@ pub struct DiscoItem {
     pub jid: String,
     /// Human-readable name advertised to clients.
     pub name: Option<String>,
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node identifying this item at its JID, when present.
     pub node: Option<String>,
 }
 

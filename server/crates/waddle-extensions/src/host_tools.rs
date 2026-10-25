@@ -101,7 +101,7 @@ pub struct ListChannelsResponse {
 pub struct SpaceSummary {
     /// Bare JID of the PubSub service hosting this space.
     pub service: BareJid,
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node identifying this space on its hosting service.
     pub node: PubSubNode,
     /// Human-readable name advertised to clients.
     pub name: Option<DisplayText>,
@@ -257,7 +257,7 @@ pub enum RosterAsk {
 pub struct RosterEntry {
     /// Bare JID of the contact represented by this roster entry.
     pub jid: BareJid,
-    /// Human-readable name advertised to clients.
+    /// Contact name stored in the requesting account's roster, when set.
     pub name: Option<DisplayText>,
     /// Direction of the account's presence subscription with this contact.
     pub subscription: RosterSubscription,
@@ -391,7 +391,7 @@ pub struct SendMessageResponse {
 /// Extension-owned PubSub node, optional item selection, and result limit.
 #[derive(Debug, Clone)]
 pub struct PubSubGetItemsRequest {
-    /// PubSub or discovery node selected by the request.
+    /// Extension-owned PubSub node from which to retrieve items.
     pub node: PubSubNode,
     /// Maximum number of retained or returned items.
     pub max_items: Option<u32>,

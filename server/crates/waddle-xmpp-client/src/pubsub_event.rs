@@ -22,9 +22,9 @@ pub struct PubsubEventItem {
 pub struct PubsubEvent {
     /// XMPP address of the sender.
     pub from: Option<Jid>,
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node named by the incoming event's `<items/>` element.
     pub node: String,
-    /// Items carried in the publication or response.
+    /// Published or retracted items carried by the notification.
     pub items: Vec<PubsubEventItem>,
 }
 
@@ -70,9 +70,9 @@ pub struct PubsubRetractedItems {
     /// Notifying service (`from` of the event message); `None` when
     /// the stanza carried no `from` (the account's own PEP service).
     pub service: Option<Jid>,
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node from which the notified items were retracted.
     pub node: String,
-    /// Item identifiers selected by the request.
+    /// Identifiers of retracted items that supplied an `id` attribute.
     pub item_ids: Vec<String>,
 }
 
@@ -89,7 +89,7 @@ pub struct PubsubAttachmentSummaryUpdate {
     pub node: String,
     /// ItemID of the attached-to item the summary describes.
     pub item_id: Option<String>,
-    /// Human-readable summary of the event or content.
+    /// Structured reaction and notice counts parsed from the summary payload.
     pub summary: AttachmentSummaryEvent,
 }
 

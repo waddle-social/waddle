@@ -93,9 +93,9 @@ impl PubSubItem {
 /// Parsed PubSub event notification.
 #[derive(Debug, Clone)]
 pub struct PubSubEvent {
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node whose items are included in the notification.
     pub node: String,
-    /// Items carried in the publication or response.
+    /// Items published to the notified node.
     pub items: Vec<PubSubItem>,
 }
 
@@ -115,7 +115,7 @@ impl PubSubEvent {
 pub enum PubSubRequest {
     /// Publish an item to the selected PubSub node.
     Publish {
-        /// PubSub or discovery node selected by the request.
+        /// Destination PubSub node for the new item.
         node: String,
         /// Item to publish.
         item: PubSubItem,
@@ -124,7 +124,7 @@ pub enum PubSubRequest {
     },
     /// Retract an item from the selected PubSub node.
     Retract {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node containing the item to retract.
         node: String,
         /// Identifier of the PubSub item.
         item_id: String,
@@ -133,7 +133,7 @@ pub enum PubSubRequest {
     },
     /// Retrieve items from the selected PubSub node.
     Items {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node from which to retrieve items.
         node: String,
         /// Maximum number of retained or returned items.
         max_items: Option<u32>,
@@ -142,67 +142,67 @@ pub enum PubSubRequest {
     },
     /// Create a PubSub node.
     CreateNode {
-        /// PubSub or discovery node selected by the request.
+        /// Requested identifier for the new PubSub node.
         node: String,
     },
     /// Request the node's configuration form.
     ConfigureNode {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose configuration form is requested.
         node: String,
     },
     /// Delete the selected PubSub node.
     DeleteNode {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node to delete, including its items and subscriptions.
         node: String,
     },
-    /// Request a subscription to another user's presence.
+    /// Request a subscription to a PubSub node's notifications.
     Subscribe {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node to subscribe to.
         node: String,
-        /// XMPP address identifying the referenced entity.
+        /// JID that will receive node notifications.
         jid: Jid,
     },
-    /// Request removal of a presence subscription.
+    /// Request removal of a PubSub node subscription.
     Unsubscribe {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose subscription is being removed.
         node: String,
-        /// XMPP address identifying the referenced entity.
+        /// Subscriber JID whose subscription is being removed.
         jid: Jid,
         /// Service-assigned identifier distinguishing this subscription.
         subid: Option<String>,
     },
     /// XEP-0060 §8.5 `<purge node='...'/>` (owner-only).
     PurgeNode {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose stored items are to be removed.
         node: String,
     },
     /// XEP-0060 §6.4 `<configure node='...'><x.../>` (owner-only, set form).
     ConfigureNodeSet {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node to reconfigure.
         node: String,
         /// Configuration applied to this operation.
         config: NodeConfigPatch,
     },
     /// XEP-0060 §8.9 `<affiliations node='...'/>` get on owner namespace.
     AffiliationsGet {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose affiliations are requested.
         node: String,
     },
     /// XEP-0060 §8.9.4 `<affiliations node='...'><affiliation jid='...' affiliation='...'/></affiliations>` set.
     AffiliationsSet {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose affiliations are to be changed.
         node: String,
         /// Requested changes, applied in the order supplied.
         changes: Vec<(jid::BareJid, Affiliation)>,
     },
     /// XEP-0060 §8.8 `<subscriptions node='...'/>` get on owner namespace.
     OwnerSubscriptionsGet {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose subscriptions are requested by its owner.
         node: String,
     },
     /// XEP-0060 §8.8 owner subscription delta update.
     OwnerSubscriptionsSet {
-        /// PubSub or discovery node selected by the request.
+        /// PubSub node whose subscriptions are to be changed by its owner.
         node: String,
         /// Requested changes, applied in the order supplied.
         changes: Vec<(jid::Jid, SubscriptionState, Option<String>)>,

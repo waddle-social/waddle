@@ -183,7 +183,7 @@ fn pubsub_node_pattern_matches(pattern: &str, candidate: &str) -> bool {
 /// Discoverable ad-hoc command with optional composer integration hints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandDescriptor {
-    /// PubSub or discovery node selected by the request.
+    /// Ad-hoc command node advertised for discovery and matched during dispatch.
     pub node: CommandNode,
     /// Human-readable name advertised to clients.
     pub name: DisplayText,

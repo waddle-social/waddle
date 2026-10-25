@@ -103,7 +103,7 @@ impl SharedFileDisposition {
 pub struct SharedFile {
     /// Resource URL exposed to the host or user.
     pub url: String,
-    /// Human-readable name advertised to clients.
+    /// File name supplied by the shared file's metadata, when present.
     pub name: Option<String>,
     /// MIME media type of the referenced content.
     pub media_type: Option<String>,
@@ -549,7 +549,7 @@ pub struct ExtensionPayloadElementData {
 pub struct ExtensionPayloadAttributeData {
     /// Unprefixed local XML name of the element or attribute.
     pub name: ExtensionXmlName,
-    /// Underlying validated value.
+    /// Attribute text preserved from the payload XML without value validation.
     pub value: String,
 }
 

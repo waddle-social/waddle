@@ -21,7 +21,7 @@ pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
 pub struct DiscoInfoQuery {
     /// Optional destination JID supplied by the request.
     pub target: Option<String>,
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node to inspect, or `None` for the entity itself.
     pub node: Option<String>,
 }
 
@@ -206,7 +206,7 @@ pub(in crate::disco::info) const NS_DATA_FORMS: &str = "jabber:x:data";
 /// as invalid (do not cache).
 #[derive(Debug, Clone)]
 pub struct DiscoInfoResponse {
-    /// PubSub or discovery node selected by the request.
+    /// Discovery node named by the response's `<query/>` element, when present.
     pub node: Option<String>,
     /// Service identities advertised in the discovery response.
     pub identities: Vec<Identity>,

@@ -675,7 +675,7 @@ pub struct PackRef {
     pub id: PackId,
     /// XMPP address identifying the referenced entity.
     pub jid: Option<BareJid>,
-    /// PubSub or discovery node selected by the request.
+    /// PubSub node hosting the referenced sticker pack, when specified.
     pub node: Option<String>,
 }
 

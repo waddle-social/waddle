@@ -44,7 +44,7 @@ impl ClientConfig {
         Ok(config)
     }
 
-    /// Check this configuration's endpoint, resource, and authentication invariants.
+    /// Validate the transport URL settings and selected authentication configuration.
     ///
     /// # Errors
     ///
@@ -64,7 +64,7 @@ pub enum AuthenticationConfig {
 }
 
 impl AuthenticationConfig {
-    /// Check this configuration's endpoint, resource, and authentication invariants.
+    /// Validate the resource requested by the selected authentication configuration.
     ///
     /// # Errors
     ///
@@ -103,7 +103,7 @@ impl WebSocketConfig {
         Ok(config)
     }
 
-    /// Check this configuration's endpoint, resource, and authentication invariants.
+    /// Check the WebSocket endpoint scheme and host and the optional HTTP origin scheme.
     ///
     /// # Errors
     ///
@@ -168,7 +168,7 @@ impl OAuthBearerConfig {
         Ok(config)
     }
 
-    /// Check this configuration's endpoint, resource, and authentication invariants.
+    /// Reject a blank requested resource; the bearer token is not inspected here.
     ///
     /// # Errors
     ///
@@ -200,7 +200,7 @@ impl ClientResource {
         &self.0
     }
 
-    /// Check this configuration's endpoint, resource, and authentication invariants.
+    /// Reject a resource containing only whitespace without changing the stored value.
     ///
     /// # Errors
     ///
