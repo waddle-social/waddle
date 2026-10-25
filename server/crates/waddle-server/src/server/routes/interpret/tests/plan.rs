@@ -3,6 +3,7 @@ use super::super::effects::direct::DurableDirectEffect;
 use super::super::effects::{
     DurableEffect, Effect, ExternalEffect, PlanEffectDependency, PlanSink, PlanSuppressionPolicy,
 };
+#[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;

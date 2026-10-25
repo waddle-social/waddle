@@ -10,11 +10,13 @@ pub(crate) use super::test_state::{
 use super::transport_xml::{
     build_stream_features_xml, sasl_failure_xml, sasl_success_xml, websocket_stream_close_xml,
 };
+#[cfg(feature = "clustering")]
+use super::StreamManagementState;
 use super::{
     build_iq_error_xml_typed, cleanup, element_to_xml, get_or_create_room_actor, handlers,
-    localpart_to_jid, not_authorized_iq_error, transport_xml, ConnectionRegistry, DeliveryKind,
-    FromStr, InboundEvent, InboxStorage, MamStorage, Message, OutboundStanza, ResolvedPrincipal,
-    RoomConfig, StreamManagementState, XmppServiceDomains, BASE64_STANDARD, SM_NS,
+    localpart_to_jid, not_authorized_iq_error, ConnectionRegistry, DeliveryKind, FromStr,
+    InboundEvent, Message, OutboundStanza, ResolvedPrincipal, RoomConfig, XmppServiceDomains,
+    BASE64_STANDARD,
 };
 
 use super::{
@@ -25,7 +27,6 @@ use super::{
 use crate::db::{DatabaseConfig, DatabasePool, PoolConfig};
 use crate::permissions::{Object, ObjectType, Permission, Relation, Subject, Tuple, WriteTuple};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
-use crate::server::routes::websocket::tests;
 use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac_array;
 use sha2::{Digest, Sha256};

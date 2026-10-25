@@ -11,6 +11,7 @@ use adw::prelude::{
     NavigationPageExt, ObjectExt, TextureExt, ToVariant, WidgetExt,
 };
 use adw::subclass::prelude::ObjectSubclassIsExt;
+use gtk::gio::prelude::FileExtManual;
 use gtk::{gdk, gio, glib};
 use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
 

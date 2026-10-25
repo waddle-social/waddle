@@ -2,10 +2,12 @@ use super::bot::{
     available_bot_nick, available_bot_nick_with_base, plan_bot_groupchat_message,
     prepare_extension_room_message, BotGroupchatDispatch,
 };
+#[cfg(feature = "clustering")]
 use super::dispatch_to_room;
 use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
+#[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOriginKind;
@@ -21,10 +23,9 @@ use super::{
 
 use super::{
     effects, extract_forum_action, interpret, Arc, BareJid, BlockingStorage, ConnectionRegistry,
-    Deps, ForumAction, FullJid, InboxStorage, Jid, MamStorage, Message, OutboundEvent,
-    StanzaDispatcher, XmppMessageType,
+    Deps, ForumAction, InboxStorage, Jid, MamStorage, Message, OutboundEvent, StanzaDispatcher,
+    XmppMessageType,
 };
-use crate::server::routes::interpret::tests;
 use std::io;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
 use waddle_xmpp::Stanza;
