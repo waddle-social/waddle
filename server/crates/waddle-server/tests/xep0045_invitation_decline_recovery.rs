@@ -15,7 +15,7 @@ use waddle_server::ingress_substrate::EffectReceiptKind;
 use waddle_server::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
 use waddle_server::test_support::{
     claim_invite, create_test_session, list_invites, record_invite_at, register_test_connection,
-    websocket_state_with_ingress, OutstandingInvite, RecordOutcome,
+    websocket_state_with_ingress_factory, OutstandingInvite, RecordOutcome,
 };
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::Stanza;
@@ -115,8 +115,8 @@ async fn muc_decline_recovery(
         .expect("shared database pool"),
     );
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let authority = Arc::new(fixture.authority().await);
-    let state = websocket_state_with_ingress(pool, Arc::clone(&authority)).await;
+    let (state, authority) =
+        websocket_state_with_ingress_factory(pool, || fixture.authority()).await;
     let environment: Arc<dyn RecoveryEnvironment> = state.clone();
     authority.bind_recovery_environment(Arc::downgrade(&environment));
     create_test_session(state.as_ref(), "romeo").await;

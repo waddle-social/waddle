@@ -90,6 +90,21 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
     extension_manager: Arc<ExtensionManager>,
     overrides: TestStateOverrides,
 ) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(extension_manager, overrides, || {
+        std::future::ready(None)
+    })
+    .await
+}
+
+pub(crate) async fn create_test_websocket_state_with_ingress_factory<F, Fut>(
+    extension_manager: Arc<ExtensionManager>,
+    overrides: TestStateOverrides,
+    start_ingress: F,
+) -> Arc<WebSocketState>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<Arc<IngressAuthority>>>,
+{
     let TestStateOverrides {
         db_pool: db_pool_override,
         call_sfu,
@@ -340,9 +355,14 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                             waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
                         )))
                     }),
+                    // Finish every schema constructor, including push registration,
+                    // before invoking the deferred authority factory.
                     ingress: match ingress_override {
                         Some(ingress) => ingress,
-                        None => Arc::new(IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
+                        None => match start_ingress().await {
+                            Some(ingress) => ingress,
+                            None => Arc::new(IngressAuthority::for_test(app_state.db_pool.global().clone()).await),
+                        },
                     },
                     link_preview_resolves:
                         crate::server::routes::websocket::default_link_preview_resolve_permits(),

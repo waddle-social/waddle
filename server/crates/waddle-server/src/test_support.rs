@@ -18,7 +18,7 @@ pub use crate::server::routes::websocket::test_state::{
     create_test_session, register_test_connection, seed_local_account,
 };
 use crate::server::routes::websocket::test_state::{
-    create_test_websocket_state_with_extension_manager, empty_extension_manager, TestStateOverrides,
+    create_test_websocket_state_with_ingress_factory, empty_extension_manager, TestStateOverrides,
 };
 pub use crate::server::routes::websocket::WebSocketState;
 
@@ -30,6 +30,41 @@ pub async fn websocket_state_with_ingress(
     db_pool: Arc<DatabasePool>,
     ingress: Arc<IngressAuthority>,
 ) -> Arc<WebSocketState> {
+    build_websocket_state_with_ingress(db_pool, move || std::future::ready(Some(ingress))).await
+}
+
+/// Build all fixture schemas before creating an authority that starts maintenance.
+///
+/// `start_ingress` runs only after the WebSocket state's final schema constructor
+/// completes. The returned handle is the exact authority installed in the state,
+/// so callers can bind recovery and join its real maintenance task.
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state_with_ingress_factory<F, Fut>(
+    db_pool: Arc<DatabasePool>,
+    start_ingress: F,
+) -> (Arc<WebSocketState>, Arc<IngressAuthority>)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = IngressAuthority>,
+{
+    let state = build_websocket_state_with_ingress(db_pool, move || async move {
+        Some(Arc::new(start_ingress().await))
+    })
+    .await;
+    let ingress = Arc::clone(&state.deps.protocol.ingress);
+    (state, ingress)
+}
+
+async fn build_websocket_state_with_ingress<F, Fut>(
+    db_pool: Arc<DatabasePool>,
+    start_ingress: F,
+) -> Arc<WebSocketState>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<Arc<IngressAuthority>>>,
+{
     let database = db_pool.global().clone();
     let pending_delivery_storage = Arc::new(
         DatabasePendingDeliveryStorage::from_database(
@@ -44,15 +79,15 @@ pub async fn websocket_state_with_ingress(
     NotificationOutboxStore::try_new(database)
         .await
         .expect("notification outbox test schema");
-    create_test_websocket_state_with_extension_manager(
+    create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides {
             db_pool: Some(db_pool),
-            ingress: Some(ingress),
             pending_delivery_storage: Some(pending_delivery_storage),
             notification_settings_projection: Some(notification_settings_projection),
             ..Default::default()
         },
+        start_ingress,
     )
     .await
 }
