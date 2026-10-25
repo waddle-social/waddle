@@ -17,6 +17,7 @@ pub struct ExtensionResponse {
 
 /// Host-side effects requested by a guest and filtered against its manifest and grants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtensionEffect {
     /// Return a durable observation payload for host-owned publication.
     PublishRoomResult(ExtensionPayload),

@@ -685,6 +685,7 @@ pub(super) async fn handle_pubsub_admin_request(
         PubSubRequest::Publish { .. }
         | PubSubRequest::Items { .. }
         | PubSubRequest::Retract { .. } => Vec::new(),
+        _ => Vec::new(),
     }
 }
 

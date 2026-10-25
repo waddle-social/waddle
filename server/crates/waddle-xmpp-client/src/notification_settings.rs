@@ -20,8 +20,16 @@ use crate::xep::xep0402::{
 use crate::xep::xep0492::{
     build_fetch_dm_bookmarks_iq, build_publish_dm_bookmark_iq, build_retract_dm_bookmark_iq,
     dm_notify_is_default, merge_notify, merge_notify_into_extensions, read_dm_bookmark_notify,
-    NotifyMode, NS_WADDLE_DM_BOOKMARKS,
+    NotifyMode, RichPushSummary, NS_WADDLE_DM_BOOKMARKS,
 };
+
+fn rich_push_summary(opt_in: bool) -> RichPushSummary {
+    if opt_in {
+        RichPushSummary::OptIn
+    } else {
+        RichPushSummary::OptOut
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Inputs for updating a room bookmark's notification policy.
@@ -38,6 +46,7 @@ pub struct SetRoomNotificationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Outcome of updating a room bookmark notification policy.
+#[non_exhaustive]
 pub enum SetRoomNotificationModeOutcome {
     /// The requested update succeeded and returns the resulting item.
     Ok {
@@ -63,6 +72,7 @@ pub struct SetDmNotificationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Outcome of updating a direct-message bookmark notification policy.
+#[non_exhaustive]
 pub enum SetDmNotificationModeOutcome {
     /// The requested update succeeded and returns the resulting item.
     Ok {
@@ -105,7 +115,7 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     let merged_extensions = merge_notify_into_extensions(
         existing_extensions.as_ref(),
         options.mode,
-        options.rich_payload_opt_in,
+        rich_push_summary(options.rich_payload_opt_in),
     );
     let extensions = merged_extensions.children().cloned().collect();
 
@@ -155,7 +165,7 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     let merged = merge_notify(
         existing_notify.as_ref(),
         options.mode,
-        options.rich_payload_opt_in,
+        rich_push_summary(options.rich_payload_opt_in),
     );
 
     if dm_notify_is_default(&merged, NotifyMode::Always) {

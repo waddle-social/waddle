@@ -90,6 +90,7 @@ pub struct ThreadsPage {
 
 /// Status filter for a threads query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ThreadStatusFilter {
     #[default]
     /// Include all matching entries regardless of read or subscription state.
@@ -112,6 +113,7 @@ impl ThreadStatusFilter {
 
 /// Sort order for a threads query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ThreadSort {
     #[default]
     /// Order threads by their most recent activity.

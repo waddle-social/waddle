@@ -51,6 +51,7 @@ pub(crate) fn status_preference_to_ffi(preference: StatusPreference) -> WaddleSt
                 ManualStatus::Chat => WaddleManualStatus::Chat,
                 ManualStatus::Away => WaddleManualStatus::Away,
                 ManualStatus::Dnd => WaddleManualStatus::Dnd,
+                _ => WaddleManualStatus::Available,
             },
         },
     }

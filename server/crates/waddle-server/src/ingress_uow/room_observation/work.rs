@@ -202,6 +202,7 @@ fn failure_category(failure: ObservationFailure) -> &'static str {
         ObservationFailure::DeadlineExceeded => "deadline_exceeded",
         ObservationFailure::InvalidResult => "invalid_result",
         ObservationFailure::SourceMismatch => "source_mismatch",
+        _ => "unknown",
     }
 }
 
@@ -210,6 +211,7 @@ fn skip_category(skip: ObservationSkip) -> &'static str {
         ObservationSkip::MissingOriginId => "missing_origin_id",
         ObservationSkip::SubscriptionUnavailable => "subscription_unavailable",
         ObservationSkip::NoResult => "no_result",
+        _ => "unknown",
     }
 }
 
@@ -502,6 +504,7 @@ pub(super) async fn finish(
         RoomObservationOutcome::NotApplicable(skip) => {
             ("terminal", skip_category(*skip), now_ms, None)
         }
+        _ => return Ok(false),
     };
     // Retention measures settled history from this commit; a retry stays
     // active and therefore carries no settlement time.
@@ -563,6 +566,7 @@ pub(super) async fn due_rooms(
                 Ok(rooms)
             }
         }
+        _ => Ok(Vec::new()),
     }
 }
 

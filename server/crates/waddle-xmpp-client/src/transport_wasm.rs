@@ -21,6 +21,7 @@ pub struct WasmWebSocket {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Browser WebSocket events delivered to the client driver.
+#[non_exhaustive]
 pub enum WasmTransportEvent {
     /// The browser WebSocket connection opened.
     Open,

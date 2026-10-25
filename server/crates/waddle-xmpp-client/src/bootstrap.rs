@@ -29,6 +29,7 @@ pub const NS_STREAMS: &str = "http://etherx.jabber.org/streams";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// SASL authentication mechanism supported by the client.
+#[non_exhaustive]
 pub enum AuthMechanism {
     /// Authenticate using the SASL OAUTHBEARER mechanism.
     OAuthBearer,
@@ -59,6 +60,7 @@ impl fmt::Display for AuthMechanism {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Bootstrap feature required before advancing the session.
+#[non_exhaustive]
 pub enum RequiredStreamFeature {
     /// The peer must advertise the selected SASL mechanism.
     Authentication(AuthMechanism),
@@ -79,6 +81,7 @@ impl fmt::Display for RequiredStreamFeature {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// RFC 6120 SASL failure condition returned by the authentication peer.
+#[non_exhaustive]
 pub enum SaslFailureCondition {
     /// The peer aborted authentication before it completed.
     Aborted,
@@ -221,6 +224,7 @@ impl StreamFeatures {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Typed authentication exchange to be written to the stream.
+#[non_exhaustive]
 pub enum AuthenticationRequest {
     /// A SASL OAUTHBEARER initial response ready for transmission.
     OAuthBearer(OAuthBearerRequest),
@@ -368,6 +372,25 @@ impl ResourceBindingRequest {
     }
 }
 
+/// Whether the bound session may be resumed with XEP-0198.
+///
+/// Intentionally exhaustive: the two variants replace a bare resumption boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamResumption {
+    /// The peer may resume this stream.
+    Resumable,
+    /// The stream cannot be resumed.
+    NotResumable,
+}
+
+impl StreamResumption {
+    /// Whether this session may be resumed.
+    #[must_use]
+    pub const fn is_resumable(self) -> bool {
+        matches!(self, Self::Resumable)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Full account JID returned by successful resource binding.
 pub struct ResourceBindingResult {
@@ -417,18 +440,19 @@ impl ResourceBindingResult {
     pub fn into_session_binding(
         self,
         stream_id: Option<StreamId>,
-        resumable: bool,
+        resumption: StreamResumption,
     ) -> SessionBinding {
         SessionBinding {
             jid: self.jid,
             stream_id,
-            resumable,
+            resumable: resumption.is_resumable(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Recognized stream-bootstrap response parsed before application stanzas are dispatched.
+#[non_exhaustive]
 pub enum BootstrapElement {
     /// Features advertised by the peer during stream negotiation.
     StreamFeatures(StreamFeatures),

@@ -31,6 +31,7 @@ pub struct ChannelRoomInfo {
 
 /// Supported managed channel types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChannelType {
     /// Standard text chat channel.
     Text,

@@ -155,6 +155,7 @@ impl NotifyMode {
 /// absence of any `<notify/>` element, `always` for direct chats and
 /// private group chats, `on-mention` for public group chats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConversationKind {
     /// One-to-one chat (RFC 6121 §5).
     DirectChat,
@@ -193,6 +194,25 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
         }
         NotifyMode::from_wire_name(child.name())
     })
+}
+
+/// Whether the merged XEP-0492 fallback includes Waddle's rich push summary.
+///
+/// Intentionally exhaustive: the two variants replace a bare opt-in boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichPushSummary {
+    /// Ensure exactly one `<rich-payload/>` inside the fallback's `<advanced/>`.
+    OptIn,
+    /// Remove Waddle's `<rich-payload/>` marker.
+    OptOut,
+}
+
+impl RichPushSummary {
+    /// Whether the rich push summary is requested.
+    #[must_use]
+    pub const fn is_opt_in(self) -> bool {
+        matches!(self, Self::OptIn)
+    }
 }
 
 /// Merge a desired [`NotifyMode`] into an existing XEP-0402
@@ -235,9 +255,10 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///
 /// * The Waddle rich XEP-0357 push-summary opt-in
 ///   (`<advanced><rich-payload xmlns='urn:waddle:push:rich:0'/></advanced>`,
-///   #719) is **ours** to manage, so `rich_payload_opt_in` toggles it
-///   on the new fallback: `true` ensures exactly one `<rich-payload/>`
-///   inside the fallback's `<advanced/>`; `false` removes it. Foreign
+///   #719) is **ours** to manage, so [`RichPushSummary`] toggles it
+///   on the new fallback: [`RichPushSummary::OptIn`] ensures exactly one
+///   `<rich-payload/>` inside the fallback's `<advanced/>`;
+///   [`RichPushSummary::OptOut`] removes it. Foreign
 ///   `<advanced/>` children are preserved either way (§3 ¶1 MUST NOT
 ///   delete/alter unsupported advanced settings); if removing our
 ///   `<rich-payload/>` leaves the `<advanced/>` empty it is dropped
@@ -249,7 +270,7 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 pub fn merge_notify_into_extensions(
     extensions: Option<&Element>,
     mode: NotifyMode,
-    rich_payload_opt_in: bool,
+    rich_payload: RichPushSummary,
 ) -> Element {
     let mut builder = Element::builder("extensions", NS_BOOKMARKS);
     let mut notify_setting_children: Vec<Element> = Vec::new();
@@ -273,7 +294,7 @@ pub fn merge_notify_into_extensions(
         .append(build_merged_notify_element(
             notify_setting_children,
             mode,
-            rich_payload_opt_in,
+            rich_payload.is_opt_in(),
         ))
         .build()
 }
@@ -310,19 +331,19 @@ fn gather_notify_settings(notify: &Element, out: &mut Vec<Element>) {
 /// siblings and foreign `<advanced/>` children are preserved verbatim
 /// (XEP-0492 §3 ¶1); multiple `<notify/>` settings are de-duplicated
 /// and folded; the Waddle `<rich-payload/>` opt-in (#719) is toggled
-/// by `rich_payload_opt_in`. Pure — borrows the input, returns an
+/// by [`RichPushSummary`]. Pure — borrows the input, returns an
 /// owned `<notify/>`.
 #[must_use]
 pub fn merge_notify(
     existing_notify: Option<&Element>,
     mode: NotifyMode,
-    rich_payload_opt_in: bool,
+    rich_payload: RichPushSummary,
 ) -> Element {
     let mut notify_setting_children: Vec<Element> = Vec::new();
     if let Some(existing) = existing_notify {
         gather_notify_settings(existing, &mut notify_setting_children);
     }
-    build_merged_notify_element(notify_setting_children, mode, rich_payload_opt_in)
+    build_merged_notify_element(notify_setting_children, mode, rich_payload.is_opt_in())
 }
 
 /// Build the single `<notify/>` output element from the deduplicated

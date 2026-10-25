@@ -69,6 +69,7 @@ const STATUS_DND: &str = "dnd";
 /// The user's manually-picked status when not in Automatic mode. Mirrors
 /// the chat client's `ManualStatus` (`available | chat | away | dnd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ManualStatus {
     /// Available for message delivery.
     Available,

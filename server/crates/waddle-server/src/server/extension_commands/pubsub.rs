@@ -234,6 +234,7 @@ pub(crate) async fn extension_command_result(
                 ))
             }
             ExtensionEffect::Noop => {}
+            _ => {}
         }
     }
     if notes.is_empty() {

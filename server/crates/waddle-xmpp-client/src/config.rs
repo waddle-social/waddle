@@ -58,6 +58,7 @@ impl ClientConfig {
 
 /// v1 auth boundary: OAUTHBEARER only.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AuthenticationConfig {
     /// SASL OAUTHBEARER credentials and the requested account resource.
     OAuthBearer(OAuthBearerConfig),

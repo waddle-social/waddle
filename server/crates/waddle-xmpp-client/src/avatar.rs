@@ -93,6 +93,7 @@ impl std::fmt::Display for VcardPhotoId {
 /// The resolved avatar identifier, including the content-addressed vCard
 /// fallback which has no pubsub item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AvatarId {
     /// A content-addressed avatar published through XEP-0084 PEP items.
     Item(AvatarItemId),
@@ -149,6 +150,7 @@ pub struct VcardPhoto {
 /// Error classification for request flows that distinguish stanza-level
 /// "not available" failures from transport/runtime failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AvatarRequestFailure<E> {
     /// The peer returned an XMPP stanza-level error.
     StanzaError,

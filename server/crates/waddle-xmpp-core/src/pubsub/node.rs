@@ -98,6 +98,7 @@ impl FromStr for PublishModel {
 
 /// XEP-0060 `pubsub#type` profile identifier for a PubSub node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PubSubNodeType {
     /// A node containing social-feed posts.
     PubsubSocialFeed,

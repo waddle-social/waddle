@@ -112,6 +112,7 @@ impl PubSubEvent {
 
 /// Parsed PubSub request types.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PubSubRequest {
     /// Publish an item to the selected PubSub node.
     Publish {
@@ -216,6 +217,7 @@ pub enum PubSubRequest {
 
 /// PubSub features understood by the parser but not implemented by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PubSubUnsupportedFeature {
     /// The service does not support subscription administration.
     ManageSubscriptions,

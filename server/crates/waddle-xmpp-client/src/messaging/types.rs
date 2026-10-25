@@ -37,6 +37,7 @@ pub struct MarkupSpan {
 
 #[derive(Debug, Clone, PartialEq)]
 /// Formatting or link interpretation applied to a message-body range.
+#[non_exhaustive]
 pub enum MarkupSpanType {
     /// Render the span with bold emphasis.
     Bold,
@@ -56,6 +57,7 @@ pub enum MarkupSpanType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 /// Whether shared content is displayed inline or offered as an attachment.
+#[non_exhaustive]
 pub enum SharedFileDisposition {
     /// Display the file directly in the conversation when supported.
     Inline,
@@ -224,6 +226,7 @@ pub struct InCallReactionPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Call-session signals carried by ordinary XMPP message stanzas.
+#[non_exhaustive]
 pub enum InCallSignal {
     /// An emoji reaction associated with a specific call session.
     Reaction(InCallReactionPayload),
@@ -231,6 +234,7 @@ pub enum InCallSignal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Direct-message or room recipient determining call-reaction addressing and message type.
+#[non_exhaustive]
 pub enum InCallReactionRecipient {
     /// Send a chat signal to the peer's full resource JID.
     Direct(FullJid),
@@ -600,6 +604,7 @@ pub struct ExtensionLaunchContextData {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Extension permissions recognized in incoming enrichment envelopes.
+#[non_exhaustive]
 pub enum ExtensionCapabilityData {
     /// May annotate messages with extension-produced enrichments.
     MessageEnrich,
@@ -1056,6 +1061,7 @@ pub struct MujiPresence {
 
 #[derive(Debug, Clone, PartialEq)]
 /// Typed incoming message, presence, or room lifecycle event.
+#[non_exhaustive]
 pub enum MessagingEvent {
     /// A parsed inbound message and its supported payloads.
     Message(Box<InboundMessage>),

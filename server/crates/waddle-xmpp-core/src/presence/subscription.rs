@@ -104,6 +104,7 @@ impl PresenceSubscriptionRequest {
 
 /// Result of parsing a presence stanza for subscription handling.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PresenceAction {
     /// A presence subscription request, approval, or revocation.
     Subscription(PresenceSubscriptionRequest),

@@ -58,6 +58,7 @@ pub const REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD: &str = "device-id";
 /// `serde_wasm_bindgen` (JS sends `"web"` / `"apns"` / `"fcm"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PushPlatform {
     /// Browser Web Push registration.
     Web,
@@ -88,6 +89,7 @@ impl PushPlatform {
 /// verbatim through the WASM boundary; unknown values fail at
 /// deserialization rather than reaching the IQ builder as typos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum PushEnvironment {
     #[serde(rename = "prod")]
     /// Use the provider's production push endpoint.
@@ -227,6 +229,7 @@ impl PushEnvironment {
 /// Credential strings are copied into the registration form without local
 /// validation; the Push Service validates the submitted provider material.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushDeviceCredentials {
     /// Browser push delivery using an endpoint and encryption keys.
     WebPush {

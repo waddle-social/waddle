@@ -83,6 +83,7 @@ pub struct LiveKitJoin {
 // f-prefixed numerics).
 #[derive(Debug, Clone, PartialEq)]
 /// Call proposal, response, and session actions recognized by the message parser.
+#[non_exhaustive]
 pub enum CallEventKind {
     /// Propose a call session to the recipient.
     Propose {
@@ -459,10 +460,29 @@ pub fn build_ringing(sid: &SessionId) -> Element {
         .build()
 }
 
+/// Whether an XEP-0353 `<reject/>` or `<retract/>` carries a `<tie-break/>` marker.
+///
+/// Intentionally exhaustive: the two variants replace a bare tie-break boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TieBreak {
+    /// Include the XEP-0353 `<tie-break/>` child.
+    Marked,
+    /// Omit the tie-break marker.
+    Plain,
+}
+
+impl TieBreak {
+    /// Whether the marker should be written.
+    #[must_use]
+    pub const fn is_marked(self) -> bool {
+        matches!(self, Self::Marked)
+    }
+}
+
 /// Build an XEP-0353 rejection without a reason or tie-break marker.
 #[must_use]
 pub fn build_reject(sid: &SessionId) -> Element {
-    build_reject_with_options(sid, None, false)
+    build_reject_with_options(sid, None, TieBreak::Plain)
 }
 
 /// Build an XEP-0353 rejection with an optional Jingle reason and tie-break marker.
@@ -470,12 +490,12 @@ pub fn build_reject(sid: &SessionId) -> Element {
 pub fn build_reject_with_options(
     sid: &SessionId,
     reason: Option<JingleReason>,
-    tie_break: bool,
+    tie_break: TieBreak,
 ) -> Element {
     let mut builder = Element::builder("reject", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .append_all(reason.map(reason_element));
-    if tie_break {
+    if tie_break.is_marked() {
         builder = builder.append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
     }
     builder.build()
@@ -484,7 +504,7 @@ pub fn build_reject_with_options(
 /// Build an XEP-0353 proposal withdrawal without a reason or tie-break marker.
 #[must_use]
 pub fn build_retract(sid: &SessionId) -> Element {
-    build_retract_with_options(sid, None, false)
+    build_retract_with_options(sid, None, TieBreak::Plain)
 }
 
 /// Build an XEP-0353 proposal withdrawal with an optional Jingle reason and tie-break marker.
@@ -492,12 +512,12 @@ pub fn build_retract(sid: &SessionId) -> Element {
 pub fn build_retract_with_options(
     sid: &SessionId,
     reason: Option<JingleReason>,
-    tie_break: bool,
+    tie_break: TieBreak,
 ) -> Element {
     let mut builder = Element::builder("retract", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .append_all(reason.map(reason_element));
-    if tie_break {
+    if tie_break.is_marked() {
         builder = builder.append(Element::builder("tie-break", NS_JINGLE_MESSAGE).build());
     }
     builder.build()
@@ -721,13 +741,32 @@ pub fn build_muji_jingle_content(media: &str) -> Element {
         .build()
 }
 
+/// Video content advertised on a Muji session-initiate. Audio is always included.
+///
+/// Intentionally exhaustive: the two variants replace a bare video boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MujiSessionVideo {
+    /// Advertise audio only.
+    AudioOnly,
+    /// Advertise audio and video.
+    WithVideo,
+}
+
+impl MujiSessionVideo {
+    /// Whether a video content description should be written.
+    #[must_use]
+    pub const fn includes_video(self) -> bool {
+        matches!(self, Self::WithVideo)
+    }
+}
+
 /// Build a Jingle session-initiate with the Muji room marker, audio content, and optional video content.
 #[must_use]
 pub fn build_muji_session_initiate(
     sid: &SessionId,
     initiator: &FullJid,
     room_jid: &str,
-    video: bool,
+    video: MujiSessionVideo,
 ) -> Element {
     let muji = Element::builder("muji", NS_MUJI)
         .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)
@@ -744,7 +783,7 @@ pub fn build_muji_session_initiate(
         )
         .append(muji)
         .append(build_muji_jingle_content("audio"));
-    if video {
+    if video.includes_video() {
         jingle = jingle.append(build_muji_jingle_content("video"));
     }
     jingle.build()

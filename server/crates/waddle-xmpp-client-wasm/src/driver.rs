@@ -30,6 +30,7 @@ pub(crate) enum JsSmAckRequestReason {
     ResumedUnackedTail,
     PeerRequest,
     Pagehide,
+    Unknown,
 }
 
 impl From<waddle_xmpp_client::SmAckRequestReason> for JsSmAckRequestReason {
@@ -39,6 +40,7 @@ impl From<waddle_xmpp_client::SmAckRequestReason> for JsSmAckRequestReason {
             waddle_xmpp_client::SmAckRequestReason::ResumedUnackedTail => Self::ResumedUnackedTail,
             waddle_xmpp_client::SmAckRequestReason::PeerRequest => Self::PeerRequest,
             waddle_xmpp_client::SmAckRequestReason::Pagehide => Self::Pagehide,
+            _ => Self::Unknown,
         }
     }
 }
@@ -399,6 +401,15 @@ impl WasmDriverTask {
             }
             Some(WasmTransportEvent::Error) => {
                 self.emit_error("websocket transport error".to_string())
+                    .await;
+                let _ = self
+                    .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
+                    .await;
+                let _ = self.apply_transport_event(TransportEvent::Closed).await;
+                false
+            }
+            Some(_) => {
+                self.emit_error("unhandled websocket transport event".to_string())
                     .await;
                 let _ = self
                     .apply_transport_event(TransportEvent::StateChanged(TransportState::Failed))
@@ -1861,7 +1872,9 @@ mod tests {
 
         runtime
             .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-                waddle_xmpp_client::stream_management::SmState::build_enable(true),
+                waddle_xmpp_client::stream_management::SmState::build_enable(
+                    waddle_xmpp_client::stream_management::SmResume::Requested,
+                ),
             )))
             .expect("unbound enable write is observed but cannot negotiate SM");
         let events = runtime

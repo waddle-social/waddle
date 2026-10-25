@@ -240,6 +240,7 @@ pub(crate) fn room_outcome_to_ffi(
             WaddleSetRoomNotificationModeOutcome::NodeConfigMismatch
         }
         SetRoomNotificationModeOutcome::Error => WaddleSetRoomNotificationModeOutcome::Error,
+        _ => WaddleSetRoomNotificationModeOutcome::Error,
     }
 }
 
@@ -268,6 +269,7 @@ pub(crate) fn dm_outcome_to_ffi(
             WaddleSetDmNotificationModeOutcome::NodeConfigMismatch
         }
         SetDmNotificationModeOutcome::Error => WaddleSetDmNotificationModeOutcome::Error,
+        _ => WaddleSetDmNotificationModeOutcome::Error,
     }
 }
 

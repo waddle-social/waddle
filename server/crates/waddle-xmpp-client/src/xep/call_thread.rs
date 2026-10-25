@@ -13,6 +13,7 @@ pub const NS_WADDLE_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Whether a call-thread anchor belongs to a direct message or MUC room.
+#[non_exhaustive]
 pub enum CallThreadKind {
     /// A direct-message conversation with a single peer.
     Dm,

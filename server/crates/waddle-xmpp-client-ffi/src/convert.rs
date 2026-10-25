@@ -104,9 +104,9 @@ pub(super) fn dispatch_event(
             });
         }
         ClientEvent::Call(call) => {
-            listener.on_event(WaddleClientEvent::Call {
-                event: call_event_to_ffi(*call),
-            });
+            if let Some(event) = call_event_to_ffi(*call) {
+                listener.on_event(WaddleClientEvent::Call { event });
+            }
         }
         ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure)) => {
             listener.on_event(WaddleClientEvent::AuthenticationFailed {
@@ -498,8 +498,8 @@ fn stanza_error_type_to_ffi(
     }
 }
 
-fn markup_span_type_to_ffi(span_type: MarkupSpanType) -> WaddleMarkupSpanType {
-    match span_type {
+fn markup_span_type_to_ffi(span_type: MarkupSpanType) -> Option<WaddleMarkupSpanType> {
+    Some(match span_type {
         MarkupSpanType::Bold => WaddleMarkupSpanType::Bold,
         MarkupSpanType::Italic => WaddleMarkupSpanType::Italic,
         MarkupSpanType::Strikethrough => WaddleMarkupSpanType::Strikethrough,
@@ -507,7 +507,8 @@ fn markup_span_type_to_ffi(span_type: MarkupSpanType) -> WaddleMarkupSpanType {
         MarkupSpanType::CodeBlock => WaddleMarkupSpanType::CodeBlock,
         MarkupSpanType::Blockquote => WaddleMarkupSpanType::Blockquote,
         MarkupSpanType::Link => WaddleMarkupSpanType::Link,
-    }
+        _ => return None,
+    })
 }
 
 /// Wire name of a span kind as consumed by the outbound XEP-0394
@@ -524,20 +525,20 @@ fn markup_span_type_wire_name(span_type: WaddleMarkupSpanType) -> &'static str {
     }
 }
 
-fn markup_span_to_ffi(span: MarkupSpan) -> WaddleMarkupSpan {
-    WaddleMarkupSpan {
-        span_type: markup_span_type_to_ffi(span.span_type),
+fn markup_span_to_ffi(span: MarkupSpan) -> Option<WaddleMarkupSpan> {
+    Some(WaddleMarkupSpan {
+        span_type: markup_span_type_to_ffi(span.span_type)?,
         // Char offsets; a body long enough to overflow u32 cannot
         // cross a real XMPP stream, so saturation is unreachable in
         // practice but keeps the conversion total.
         start: u32::try_from(span.start).unwrap_or(u32::MAX),
         end: u32::try_from(span.end).unwrap_or(u32::MAX),
         uri: span.uri,
-    }
+    })
 }
 
 fn markup_spans_to_ffi(spans: Vec<MarkupSpan>) -> Vec<WaddleMarkupSpan> {
-    spans.into_iter().map(markup_span_to_ffi).collect()
+    spans.into_iter().filter_map(markup_span_to_ffi).collect()
 }
 
 fn reference_to_ffi(reference: ReferenceData) -> WaddleReference {
@@ -567,6 +568,7 @@ fn sasl_condition_to_ffi(
         C::NotAuthorized => WaddleSaslCondition::NotAuthorized,
         C::TemporaryAuthFailure => WaddleSaslCondition::TemporaryAuthFailure,
         C::Unknown => WaddleSaslCondition::Unknown,
+        _ => WaddleSaslCondition::Unknown,
     }
 }
 
@@ -650,6 +652,7 @@ pub(crate) fn link_preview_lookup_to_ffi(lookup: LinkPreviewLookup) -> WaddleLin
         }
         LinkPreviewLookup::Blocked => lookup_status_only(WaddleLinkPreviewLookupStatus::Blocked),
         LinkPreviewLookup::Failed => lookup_status_only(WaddleLinkPreviewLookupStatus::Failed),
+        _ => lookup_status_only(WaddleLinkPreviewLookupStatus::Failed),
     }
 }
 
@@ -773,7 +776,7 @@ pub(super) fn jingle_reason_from_ffi(reason: WaddleJingleReason) -> JingleReason
 /// this point (the upstream `messaging::call` parser handled the
 /// untyped → typed transition at the wire boundary) so this layer
 /// is a pure variant rewrite.
-pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
+pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> Option<WaddleCallEvent> {
     let kind = match event.kind {
         CallEventKind::Propose { media } => WaddleCallEventKind::Propose {
             media: call_media_to_ffi(media),
@@ -806,13 +809,14 @@ pub(super) fn call_event_to_ffi(event: InboundCallEvent) -> WaddleCallEvent {
         CallEventKind::SessionTerminate { reason } => WaddleCallEventKind::SessionTerminate {
             reason: reason.map(jingle_reason_to_ffi),
         },
+        _ => return None,
     };
-    WaddleCallEvent {
+    Some(WaddleCallEvent {
         from: event.from.to_string(),
         to: event.to.map(|jid| jid.to_string()),
         sid: event.sid.0,
         kind,
-    }
+    })
 }
 
 /// Convert a parsed inbound message into the UniFFI record, flattening the
@@ -896,6 +900,7 @@ fn call_thread_to_ffi(
     let kind = match anchor.kind {
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+        _ => "unknown",
     };
     let mut media = Vec::new();
     if anchor.media.audio {
@@ -937,7 +942,7 @@ pub(crate) fn archived_to_ffi(
         .payload
         .call
         .as_ref()
-        .map(|call| call_event_to_ffi((**call).clone()));
+        .and_then(|call| call_event_to_ffi((**call).clone()));
     let (fb_start, fb_end) = parsed
         .and_then(|m| m.reply_fallback)
         .map(|(s, e)| (Some(s), Some(e)))
@@ -1164,6 +1169,7 @@ mod tests {
     //!    flags through unchanged.
     use super::*;
     use minidom::Element;
+    use waddle_xmpp_client::messaging::TieBreak;
 
     fn assert_audio_video(media: &WaddleCallMedia) {
         assert!(media.audio, "audio flag survives the conversion");
@@ -1185,7 +1191,7 @@ mod tests {
         </message>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
         let parsed = messaging::parse_call_event(&stanza).expect("propose parses");
-        let ffi = call_event_to_ffi(parsed);
+        let ffi = call_event_to_ffi(parsed).expect("known call event");
         assert_eq!(ffi.from, "alice@waddle.test/desktop");
         assert_eq!(ffi.to.as_deref(), Some("bob@waddle.test"));
         assert_eq!(ffi.sid, "c1");
@@ -1217,7 +1223,7 @@ mod tests {
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
         let parsed = messaging::parse_call_event(&stanza).expect("session-initiate parses");
-        let ffi = call_event_to_ffi(parsed);
+        let ffi = call_event_to_ffi(parsed).expect("known call event");
         match ffi.kind {
             WaddleCallEventKind::SessionInitiate { join, media } => {
                 assert_eq!(join.url, "wss://livekit.waddle.test");
@@ -1240,7 +1246,7 @@ mod tests {
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
         let parsed = messaging::parse_call_event(&stanza).expect("session-terminate parses");
-        let ffi = call_event_to_ffi(parsed);
+        let ffi = call_event_to_ffi(parsed).expect("known call event");
         match ffi.kind {
             WaddleCallEventKind::SessionTerminate { reason } => {
                 // The wire condition `<success/>` must resolve into
@@ -1264,7 +1270,7 @@ mod tests {
         </iq>"#;
         let stanza: Element = xml.parse().expect("fixture parses");
         let parsed = messaging::parse_call_event(&stanza).expect("session-terminate parses");
-        let ffi = call_event_to_ffi(parsed);
+        let ffi = call_event_to_ffi(parsed).expect("known call event");
         match ffi.kind {
             WaddleCallEventKind::SessionTerminate { reason } => assert_eq!(reason, None),
             other => panic!("expected SessionTerminate, got {other:?}"),
@@ -1291,8 +1297,9 @@ mod tests {
         let reject = call_event_to_ffi(parse_jmi(messaging::build_reject_with_options(
             &sid("c1"),
             Some(JingleReason::Expired),
-            true,
-        )));
+            TieBreak::Marked,
+        )))
+        .expect("known call event");
         match reject.kind {
             WaddleCallEventKind::Reject { reason, tie_break } => {
                 assert_eq!(reason, Some(WaddleJingleReason::Expired));
@@ -1304,8 +1311,9 @@ mod tests {
         let retract = call_event_to_ffi(parse_jmi(messaging::build_retract_with_options(
             &sid("c2"),
             Some(JingleReason::Expired),
-            true,
-        )));
+            TieBreak::Marked,
+        )))
+        .expect("known call event");
         match retract.kind {
             WaddleCallEventKind::Retract { reason, tie_break } => {
                 assert_eq!(reason, Some(WaddleJingleReason::Expired));
@@ -1317,7 +1325,8 @@ mod tests {
 
     #[test]
     fn jmi_ringing_round_trips_through_call_event_to_ffi() {
-        let ringing = call_event_to_ffi(parse_jmi(messaging::build_ringing(&sid("c1"))));
+        let ringing = call_event_to_ffi(parse_jmi(messaging::build_ringing(&sid("c1"))))
+            .expect("known call event");
         assert_eq!(ringing.sid, "c1");
         assert!(matches!(ringing.kind, WaddleCallEventKind::Ringing));
     }
@@ -1328,7 +1337,8 @@ mod tests {
             &sid("old"),
             JingleReason::Expired,
             &sid("new"),
-        )));
+        )))
+        .expect("known call event");
         match finish.kind {
             WaddleCallEventKind::Finish {
                 reason,

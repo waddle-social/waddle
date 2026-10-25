@@ -296,6 +296,7 @@ impl WaddleClient {
                 waddle_xmpp_client::notification_settings::SetRoomNotificationModeOutcome::Error => {
                     WaddleSetRoomNotificationModeOutcome::Error
                 }
+                _ => WaddleSetRoomNotificationModeOutcome::Error,
             };
             to_js_value(&outcome)
         })
@@ -406,6 +407,7 @@ impl WaddleClient {
                 waddle_xmpp_client::notification_settings::SetDmNotificationModeOutcome::Error => {
                     WaddleSetDmNotificationModeOutcome::Error
                 }
+                _ => WaddleSetDmNotificationModeOutcome::Error,
             };
             to_js_value(&outcome)
         })

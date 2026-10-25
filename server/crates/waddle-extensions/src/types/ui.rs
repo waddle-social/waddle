@@ -37,6 +37,7 @@ impl UiView {
 
 /// Renderable text, image, action, form, or list within an extension view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UiBlock {
     /// Display styled text.
     Text(TextBlock),
@@ -65,6 +66,7 @@ impl UiBlock {
 /// Display treatment applied to an extension text block.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum TextStyle {
     /// Ordinary body text.
     Body,

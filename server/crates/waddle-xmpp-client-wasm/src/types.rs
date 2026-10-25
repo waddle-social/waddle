@@ -101,6 +101,7 @@ impl Serialize for SafetyScoreView<'_> {
 /// Ephemeral call signals projected into JavaScript tagged objects.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum WaddleInCallSignal {
     /// An emoji reaction associated with an active call session.
     Reaction {
@@ -271,6 +272,7 @@ fn is_false(value: &bool) -> bool {
     rename_all_fields = "camelCase",
     tag = "kind"
 )]
+#[non_exhaustive]
 pub enum WaddlePubsubEventPayload {
     /// Aggregate reactions and noticed count attached to a message.
     AttachmentSummary {
@@ -1135,6 +1137,7 @@ impl RegisterPushDeviceOptions {
                 p256dh: require_field(self.fcm_p256dh, "fcmP256dh", "fcm")?,
                 auth: require_field(self.fcm_auth, "fcmAuth", "fcm")?,
             }),
+            _ => Err("register_push_device: unsupported platform".to_string()),
         }
     }
 }
@@ -1573,6 +1576,7 @@ pub struct WaddleThreadsPage {
 /// Subset of threads requested from the server.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WaddleThreadStatusFilter {
     /// All threads matching the other query filters.
     All,
@@ -1585,6 +1589,7 @@ pub enum WaddleThreadStatusFilter {
 /// Ordering applied by the server to a thread listing.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WaddleThreadSort {
     /// Most recently active threads first.
     Recent,
@@ -1650,6 +1655,7 @@ pub struct WaddleBookmarkItem {
 /// wasm boundary can still reject.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum WaddleSendMessageOutcome {
     /// The outgoing message was accepted by the transport command.
     Sent {
@@ -1680,6 +1686,7 @@ pub enum WaddleSendMessageOutcome {
 /// Jingle termination.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum WaddleCallSessionTerminateOutcome {
     /// The server acknowledged the Jingle termination.
     Ok,
@@ -1700,6 +1707,7 @@ pub enum WaddleCallSessionTerminateOutcome {
 /// for the typed-payloads hard rule.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum WaddleSetRoomNotificationModeOutcome {
     /// The updated room bookmark was published successfully.
     Ok {
@@ -1791,6 +1799,7 @@ pub struct WaddleDmBookmarkItem {
 /// serialization failures still reject via `JsValue`).
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum WaddleSetDmNotificationModeOutcome {
     /// The DM carried an override; the item was published. Carries the
     /// surfaced item so the chat reconciles without a refetch.

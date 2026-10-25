@@ -60,6 +60,7 @@ pub(super) fn project_channel_type_to_config(
             config.forum = false;
             config.members_only = true;
         }
+        _ => {}
     }
 }
 

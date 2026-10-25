@@ -250,7 +250,8 @@ fn submit_value_field(var: &str, value: &str) -> Element {
 mod tests {
     use super::*;
     use crate::xep::xep0492::{
-        merge_notify_into_extensions, read_fallback_mode, NotifyMode, NS_NOTIFICATION_SETTINGS,
+        merge_notify_into_extensions, read_fallback_mode, NotifyMode, RichPushSummary,
+        NS_NOTIFICATION_SETTINGS,
     };
 
     #[test]
@@ -331,7 +332,7 @@ mod tests {
 
     #[test]
     fn build_conference_round_trips_extension_children() {
-        let merged = merge_notify_into_extensions(None, NotifyMode::Never, false);
+        let merged = merge_notify_into_extensions(None, NotifyMode::Never, RichPushSummary::OptOut);
         let item = BookmarkItem {
             jid: "theplay@conference.example.com".parse().unwrap(),
             name: Some("The Play".into()),

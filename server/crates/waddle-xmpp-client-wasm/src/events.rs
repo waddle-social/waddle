@@ -300,8 +300,11 @@ fn emit_stream_error_callback(
 fn stream_management_error_to_js(
     detail: Option<StreamErrorDetail>,
 ) -> Option<JsStreamManagementError> {
-    detail.map(|StreamErrorDetail::HandledCountTooHigh { h, send_count }| {
-        JsStreamManagementError::HandledCountTooHigh { h, send_count }
+    detail.and_then(|detail| match detail {
+        StreamErrorDetail::HandledCountTooHigh { h, send_count } => {
+            Some(JsStreamManagementError::HandledCountTooHigh { h, send_count })
+        }
+        _ => None,
     })
 }
 

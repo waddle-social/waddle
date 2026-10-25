@@ -19,6 +19,7 @@ use crate::transport::{StreamOpen, TransportEvent, TransportMessage};
 
 /// Public event surface emitted by the client runtime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// The client session changed state, completed binding, or became ready.
     Lifecycle(LifecycleEvent),
@@ -102,6 +103,7 @@ pub enum ClientEvent {
 
 /// Session lifecycle changes exposed to app-facing integrations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum LifecycleEvent {
     /// The application-facing session snapshot changed.
     StateChanged(SessionSnapshot),
@@ -113,6 +115,7 @@ pub enum LifecycleEvent {
 
 /// Typed connection-level milestones and outbound transport instructions.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConnectionEvent {
     /// The host must write this XMPP frame to its transport.
     OutboundMessage(TransportMessage),
@@ -150,6 +153,7 @@ pub enum ConnectionEvent {
 
 /// XEP-0198 stream management lifecycle notifications.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamManagementEvent {
     /// Stream management was enabled with the peer's resumption parameters.
     Enabled {
@@ -191,6 +195,7 @@ pub enum StreamManagementEvent {
 /// This stays a closed protocol value: hosts must not infer protocol state
 /// from XML, counters, or transport diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SmAckRequestReason {
     /// An outbound stanza was written and may require an acknowledgement request.
     OutboundStanza,
@@ -207,6 +212,7 @@ pub enum SmAckRequestReason {
 /// `<undefined-condition/>` with an extension child that names the concrete
 /// failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamErrorDetail {
     /// The peer acknowledged more stanzas than the client has sent.
     HandledCountTooHigh {
@@ -219,6 +225,7 @@ pub enum StreamErrorDetail {
 
 /// RFC 6120 stream-error conditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamErrorCondition {
     /// The peer's stream XML has an invalid structure.
     BadFormat,
@@ -342,6 +349,7 @@ impl StreamErrorCondition {
 /// Delivery status for outbound `<message/>` stanzas tracked through
 /// XEP-0198 stream-management acknowledgements.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MessageDeliveryEvent {
     /// The peer acknowledged handling the outbound stanza.
     Acked {

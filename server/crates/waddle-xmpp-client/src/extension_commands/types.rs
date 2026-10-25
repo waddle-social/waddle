@@ -4,6 +4,7 @@ use crate::xep::xep0050::{AdHocAction, AdHocStatus};
 
 /// `waddle#command_scope` — where a command may be offered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtensionCommandScope {
     /// Offered everywhere (DMs and rooms).
     Global,

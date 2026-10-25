@@ -7,6 +7,7 @@ use crate::error::ClientResult;
 
 /// A typed command sent from [`crate::client::ClientHandle`] to the driver task.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum XmppCommand {
     /// Send a raw stanza (fire-and-forget).
     SendStanza(Element),

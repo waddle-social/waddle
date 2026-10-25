@@ -79,6 +79,7 @@ impl fmt::Display for StanzaId {
 
 /// High-level client requests queued through the runtime boundary.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ClientRequest {
     /// Establish an authenticated XMPP session.
     Connect,
@@ -144,6 +145,7 @@ impl ClientRequest {
 
 /// Stable request categories exposed in diagnostics and event routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestKind {
     /// Establish an authenticated XMPP session.
     Connect,

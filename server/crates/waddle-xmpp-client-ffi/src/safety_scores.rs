@@ -23,20 +23,24 @@ pub(crate) fn safety_scores_fastening_to_ffi(
 fn safety_scores_to_ffi(scores: SafetyScores) -> WaddleSafetyScores {
     WaddleSafetyScores {
         model_version: scores.model_version.as_str().to_owned(),
-        scores: scores.scores.into_iter().map(safety_score_to_ffi).collect(),
+        scores: scores
+            .scores
+            .into_iter()
+            .filter_map(safety_score_to_ffi)
+            .collect(),
     }
 }
 
-fn safety_score_to_ffi(score: SafetyScore) -> WaddleSafetyScore {
-    WaddleSafetyScore {
-        category: safety_category_to_ffi(score.category),
+fn safety_score_to_ffi(score: SafetyScore) -> Option<WaddleSafetyScore> {
+    Some(WaddleSafetyScore {
+        category: safety_category_to_ffi(score.category)?,
         probability: score.probability.value(),
         taxonomy_version: score.taxonomy_version.as_str().to_owned(),
-    }
+    })
 }
 
-fn safety_category_to_ffi(category: SafetyCategory) -> WaddleSafetyCategory {
-    match category {
+fn safety_category_to_ffi(category: SafetyCategory) -> Option<WaddleSafetyCategory> {
+    Some(match category {
         SafetyCategory::IsQuestion => WaddleSafetyCategory::IsQuestion,
         SafetyCategory::HateSpeech => WaddleSafetyCategory::HateSpeech,
         SafetyCategory::Explicit => WaddleSafetyCategory::Explicit,
@@ -45,5 +49,6 @@ fn safety_category_to_ffi(category: SafetyCategory) -> WaddleSafetyCategory {
         SafetyCategory::SelfHarm => WaddleSafetyCategory::SelfHarm,
         SafetyCategory::Spam => WaddleSafetyCategory::Spam,
         SafetyCategory::Scam => WaddleSafetyCategory::Scam,
-    }
+        _ => return None,
+    })
 }

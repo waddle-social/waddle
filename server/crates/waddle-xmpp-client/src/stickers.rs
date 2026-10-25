@@ -49,6 +49,7 @@ pub const NS_HASHES: &str = "urn:xmpp:hashes:2";
 /// only algorithm Waddle publishes; unknown wire values are dropped at
 /// the parse boundary rather than smuggled through as strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HashAlgo {
     /// SHA-256 content hashing.
     Sha256,

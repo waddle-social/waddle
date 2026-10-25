@@ -22,7 +22,7 @@ use crate::event::{
 };
 use crate::request::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use crate::state::{SessionBinding, SessionPhase, SessionSnapshot};
-use crate::stream_management::{SmAcknowledgementClockAction, SmResumeState, SmState};
+use crate::stream_management::{SmAcknowledgementClockAction, SmResume, SmResumeState, SmState};
 use crate::transport::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 use crate::AuthenticationConfig;
 use chrono::{DateTime, Utc};

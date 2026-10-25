@@ -29,6 +29,17 @@ pub const GROUPING_WINDOW_MS: i64 = 5 * 60 * 1000;
 /// Longest reply quote kept on a row, in characters.
 const SNIPPET_CHARS: usize = 120;
 
+/// Whether an archive page is the oldest page the server has.
+///
+/// Intentionally exhaustive: the two variants replace a bare completeness boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryPage {
+    /// No older archive page exists.
+    Complete,
+    /// Older pages may still exist.
+    Partial,
+}
+
 /// A stable identity for one timeline row.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemKey {
@@ -49,6 +60,7 @@ impl ItemKey {
 
 /// Where a row stands in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Delivery {
     /// Someone else's message, from history or live.
     Received,
@@ -225,6 +237,7 @@ pub struct LocalEcho {
 /// A change to the list a UI shows. Indices refer to the list as it stands
 /// after every earlier diff in the same batch has been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimelineDiff {
     /// Insert these items at the front (older history).
     PushFront { items: Vec<TimelineItem> },
@@ -370,18 +383,19 @@ impl Timeline {
 
     /// Add an archive page of older history. `messages` are in archive
     /// order (oldest first); `first_id` is the page's oldest archive id.
-    /// Fastenings in the page apply to rows in it, rows already held, or
-    /// wait for rows still to be paged in.
+    /// `page` says whether this is the oldest page. Fastenings in the page
+    /// apply to rows in it, rows already held, or wait for rows still to be
+    /// paged in.
     pub fn apply_history_page(
         &mut self,
         messages: Vec<IncomingMessage>,
         first_id: Option<String>,
-        complete: bool,
+        page: HistoryPage,
     ) -> Vec<TimelineDiff> {
         if first_id.is_some() {
             self.oldest_archive_id = first_id;
         }
-        self.history_complete = complete;
+        self.history_complete = page == HistoryPage::Complete;
 
         let mut older: Vec<TimelineItem> = Vec::new();
         let mut older_ids: Vec<RowIds> = Vec::new();
@@ -1396,7 +1410,7 @@ mod tests {
                 message("s4", "bob", "four", 4),
             ],
             Some("s3".into()),
-            false,
+            HistoryPage::Partial,
         );
         assert_eq!(diffs.len(), 1);
         assert_eq!(timeline.older_cursor(), Some("s3"));
@@ -1407,7 +1421,7 @@ mod tests {
                 message("s2", "ann", "two", 2),
             ],
             Some("s1".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert!(matches!(&diffs[0], TimelineDiff::PushFront { items } if items.len() == 2));
         assert_eq!(bodies(&timeline), ["one", "two", "three", "four"]);
@@ -1425,7 +1439,7 @@ mod tests {
                 message("s2", "bob", "two", 2),
             ],
             Some("s1".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert!(matches!(&diffs[0], TimelineDiff::PushFront { items } if items.len() == 1));
         assert_eq!(bodies(&timeline), ["one", "two"]);
@@ -1457,7 +1471,7 @@ mod tests {
         timeline.apply_history_page(
             vec![message("s0", "ann", "earlier", 1)],
             Some("s0".into()),
-            false,
+            HistoryPage::Partial,
         );
         let diffs = timeline.apply_history_page(
             vec![IncomingMessage {
@@ -1466,7 +1480,7 @@ mod tests {
                 ..message("s9", "me", "hello", 11)
             }],
             Some("s9".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert!(diffs.is_empty());
         assert_eq!(bodies(&timeline), ["earlier", "hello"]);
@@ -1515,7 +1529,11 @@ mod tests {
         );
 
         // History prepends move the row, but do not lose its rejection.
-        timeline.apply_history_page(vec![message("older", "bob", "earlier", 1)], None, true);
+        timeline.apply_history_page(
+            vec![message("older", "bob", "earlier", 1)],
+            None,
+            HistoryPage::Complete,
+        );
         assert!(timeline.set_delivery("o1", Delivery::Sent).is_empty());
         assert!(timeline.set_delivery("o1", Delivery::Sending).is_empty());
         assert!(timeline.reject_send("o1").is_empty());
@@ -1599,13 +1617,13 @@ mod tests {
         timeline.apply_history_page(
             vec![correction("s5", "bob", "s1", "fixed", 5)],
             Some("s5".into()),
-            false,
+            HistoryPage::Partial,
         );
         assert!(timeline.items().is_empty());
         let diffs = timeline.apply_history_page(
             vec![message("s1", "bob", "fxied", 1)],
             Some("s1".into()),
-            true,
+            HistoryPage::Complete,
         );
         let [TimelineDiff::PushFront { items }] = diffs.as_slice() else {
             panic!("{diffs:?}");
@@ -1618,7 +1636,11 @@ mod tests {
     fn a_held_correction_from_someone_else_is_dropped_when_the_target_arrives() {
         let mut timeline = Timeline::new();
         timeline.apply_live(correction("s5", "mallory", "s1", "forged", 5));
-        timeline.apply_history_page(vec![message("s1", "bob", "real", 1)], None, true);
+        timeline.apply_history_page(
+            vec![message("s1", "bob", "real", 1)],
+            None,
+            HistoryPage::Complete,
+        );
         assert_eq!(bodies(&timeline), ["real"]);
         assert!(!timeline.items()[0].edited);
     }
@@ -1644,7 +1666,7 @@ mod tests {
                 correction("s6", "bob", "s5", "fixed", 6),
             ],
             Some("s1".into()),
-            false,
+            HistoryPage::Partial,
         );
         assert!(matches!(&diffs[0], TimelineDiff::PushFront { items } if items.len() == 1));
         assert!(matches!(&diffs[1], TimelineDiff::Set { index: 1, item } if item.body == "fixed"));
@@ -1660,7 +1682,7 @@ mod tests {
                 ..message("s9", "bob", "", 9)
             }],
             None,
-            false,
+            HistoryPage::Partial,
         );
         timeline.apply_history_page(
             vec![
@@ -1671,7 +1693,7 @@ mod tests {
                 },
             ],
             None,
-            true,
+            HistoryPage::Complete,
         );
         assert!(timeline.items().iter().all(|item| item.retracted));
         assert_eq!(bodies(&timeline), ["", ""]);
@@ -1708,20 +1730,31 @@ mod tests {
         timeline.apply_history_page(
             vec![message("s1", "bob", "hi", 1), reaction("ann", "s1", &[], 9)],
             None,
-            false,
+            HistoryPage::Partial,
         );
         // An older page carries Ann's earlier reaction, and the message it
         // targets is already held.
-        timeline.apply_history_page(vec![reaction("ann", "s1", &["❤️"], 2)], None, true);
+        timeline.apply_history_page(
+            vec![reaction("ann", "s1", &["❤️"], 2)],
+            None,
+            HistoryPage::Complete,
+        );
         assert!(timeline.items()[0].reactions.is_empty());
     }
 
     #[test]
     fn reactions_that_arrive_before_their_message_are_tallied_when_it_lands() {
         let mut timeline = Timeline::new();
-        timeline.apply_history_page(vec![reaction("ann", "s1", &["🎉"], 5)], None, false);
-        let diffs =
-            timeline.apply_history_page(vec![message("s1", "bob", "shipped", 1)], None, true);
+        timeline.apply_history_page(
+            vec![reaction("ann", "s1", &["🎉"], 5)],
+            None,
+            HistoryPage::Partial,
+        );
+        let diffs = timeline.apply_history_page(
+            vec![message("s1", "bob", "shipped", 1)],
+            None,
+            HistoryPage::Complete,
+        );
         let [TimelineDiff::PushFront { items }] = diffs.as_slice() else {
             panic!("{diffs:?}");
         };
@@ -1792,8 +1825,11 @@ mod tests {
                 .and_then(|reply| reply.snippet.clone()),
             None
         );
-        let diffs =
-            timeline.apply_history_page(vec![message("s1", "bob", "Ship it", 1)], None, true);
+        let diffs = timeline.apply_history_page(
+            vec![message("s1", "bob", "Ship it", 1)],
+            None,
+            HistoryPage::Complete,
+        );
         assert!(
             matches!(&diffs[1], TimelineDiff::Set { index: 1, item } if item.reply.as_ref().and_then(|reply| reply.snippet.as_deref()) == Some("Ship it"))
         );
@@ -1880,12 +1916,12 @@ mod tests {
                 },
             ],
             Some("S5".into()),
-            false,
+            HistoryPage::Partial,
         );
         timeline.apply_history_page(
             vec![sent("S1", "ob1", "bob", "lunch at noon?", 1)],
             Some("S1".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert_eq!(
             senders(&timeline),
@@ -1912,7 +1948,7 @@ mod tests {
         timeline.apply_history_page(
             vec![from("S1", "ann", "hi"), from("S2", "bob", "hello")],
             None,
-            true,
+            HistoryPage::Complete,
         );
         assert_eq!(timeline.items().len(), 2);
         // The same sender's copy without a stanza id is still a duplicate.
@@ -1942,12 +1978,12 @@ mod tests {
                 },
             ],
             None,
-            false,
+            HistoryPage::Partial,
         );
         timeline.apply_history_page(
             vec![sent("S1", "ob1", "bob", "my password is hunter2", 1)],
             None,
-            true,
+            HistoryPage::Complete,
         );
         assert!(timeline.items()[0].retracted);
         assert_eq!(timeline.items()[0].body, "");
@@ -1968,9 +2004,13 @@ mod tests {
                 },
             ],
             None,
-            false,
+            HistoryPage::Partial,
         );
-        timeline.apply_history_page(vec![sent("S1", "ob1", "bob", "meet at 1pm", 1)], None, true);
+        timeline.apply_history_page(
+            vec![sent("S1", "ob1", "bob", "meet at 1pm", 1)],
+            None,
+            HistoryPage::Complete,
+        );
         assert_eq!(timeline.items()[0].body, "meet at 3pm");
     }
 
@@ -1991,7 +2031,7 @@ mod tests {
                 },
             ],
             None,
-            true,
+            HistoryPage::Complete,
         );
         assert_eq!(timeline.items()[0].body, "original");
     }
@@ -2131,7 +2171,7 @@ mod judgment_tests {
         timeline.apply_history_page(
             vec![original(), batch("original", 0.6, 4)],
             Some("page-1".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert_eq!(timeline.items().len(), 1);
         assert_eq!(probability(&timeline), Some(0.9));
@@ -2185,13 +2225,13 @@ mod judgment_tests {
         timeline.apply_history_page(
             vec![correction(), batch("revision-2", 0.8, 8)],
             Some("new-page".into()),
-            false,
+            HistoryPage::Partial,
         );
         assert!(timeline.items().is_empty());
         timeline.apply_history_page(
             vec![original(), batch("original", 0.99, 4)],
             Some("old-page".into()),
-            true,
+            HistoryPage::Complete,
         );
         assert_eq!(probability(&timeline), Some(0.8));
         assert_eq!(timeline.items()[0].body, "Now an answer.");
@@ -2243,7 +2283,7 @@ mod judgment_tests {
                 ..IncomingMessage::default()
             }],
             Some("older".into()),
-            true,
+            HistoryPage::Complete,
         );
         let diffs = timeline.apply_live(batch("original", 0.8, 3));
         assert_eq!(diffs.len(), 1);
@@ -2271,7 +2311,11 @@ mod judgment_tests {
             duplicate.origin_id = Some("distinct-origin".into());
             duplicate.reference_id = Some("distinct-row".into());
             let diffs = if archived {
-                timeline.apply_history_page(vec![duplicate], Some("distinct-row".into()), true)
+                timeline.apply_history_page(
+                    vec![duplicate],
+                    Some("distinct-row".into()),
+                    HistoryPage::Complete,
+                )
             } else {
                 timeline.apply_live(duplicate)
             };

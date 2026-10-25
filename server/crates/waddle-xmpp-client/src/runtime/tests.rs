@@ -9,8 +9,8 @@ use waddle_xmpp_core::waddle_status_preference::{ManualStatus, StatusPreference}
 use super::{
     AuthMechanism, AuthenticationRequest, ClientConfig, ClientError, ClientEvent, ClientRequest,
     ConnectionEvent, LifecycleEvent, PagehideAckRequest, RequiredStreamFeature, SessionBinding,
-    SessionPhase, SmNegotiationState, SmState, StanzaId, StreamClose, StreamOpen, TransportEvent,
-    TransportMessage, TransportState, XmppRuntime,
+    SessionPhase, SmNegotiationState, SmResume, SmState, StanzaId, StreamClose, StreamOpen,
+    TransportEvent, TransportMessage, TransportState, XmppRuntime,
 };
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
@@ -1460,7 +1460,7 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
         .unwrap();
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+            SmState::build_enable(SmResume::Requested),
         )))
         .unwrap();
     runtime
@@ -1543,7 +1543,7 @@ fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
         .unwrap();
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+            SmState::build_enable(SmResume::Requested),
         )))
         .unwrap();
     let enabled = Element::builder("enabled", crate::stream_management::NS_SM)
@@ -1831,7 +1831,7 @@ fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
         .unwrap();
     runtime
         .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
-            SmState::build_enable(true),
+            SmState::build_enable(SmResume::Requested),
         )))
         .unwrap();
     runtime

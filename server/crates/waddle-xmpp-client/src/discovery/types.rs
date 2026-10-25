@@ -161,6 +161,7 @@ pub struct DiscoveredSpace {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Supported channel presentation modes advertised through service discovery.
+#[non_exhaustive]
 pub enum DiscoveredChannelType {
     /// A text message or plain text UI block.
     Text,

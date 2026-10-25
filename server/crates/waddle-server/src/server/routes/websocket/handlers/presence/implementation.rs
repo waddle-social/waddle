@@ -108,6 +108,7 @@ pub(crate) async fn handle_ordered_relay_presence_request(
             );
             Err(())
         }
+        Ok(_) => Err(()),
         Err(error) => {
             warn!(
                 target = %target,
@@ -421,6 +422,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn handle_pre
             )
             .await;
         }
+        Ok(_) => {}
         Err(error) => {
             warn!(error = %error, "Invalid presence stanza");
         }

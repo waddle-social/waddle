@@ -18,6 +18,7 @@ pub use native::{DefaultTransportFactory, WebSocketTransport, WebSocketTransport
 
 /// Transport kind supported by the native client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportKind {
     /// RFC 7395 WebSocket transport.
     WebSocket,
@@ -25,6 +26,7 @@ pub enum TransportKind {
 
 /// Connection state surfaced by the transport adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportState {
     /// No connection or bootstrap operation is in progress.
     Idle,
@@ -107,6 +109,7 @@ pub struct StreamClose;
 
 /// Typed transport payloads exchanged across the runtime boundary.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransportMessage {
     /// A stream-open frame starting XMPP negotiation.
     Open(StreamOpen),
@@ -118,6 +121,7 @@ pub enum TransportMessage {
 
 /// Transport-level events surfaced back into the session runtime.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TransportEvent {
     /// The transport changed lifecycle state.
     StateChanged(TransportState),

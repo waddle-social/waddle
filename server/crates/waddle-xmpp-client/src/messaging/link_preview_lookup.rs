@@ -49,6 +49,7 @@ pub struct LinkPreviewLookupReady {
 
 /// Typed outcome of a link-preview lookup IQ.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LinkPreviewLookup {
     /// Preview resolved; token available until `expires_at`.
     Ready(Box<LinkPreviewLookupReady>),

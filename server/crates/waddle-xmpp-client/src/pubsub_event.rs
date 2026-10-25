@@ -30,6 +30,7 @@ pub struct PubsubEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Known PubSub summaries or an unrecognized payload preserved as XML.
+#[non_exhaustive]
 pub enum PubsubEventPayload {
     /// An XEP-0470 attachment-summary update targeting an earlier message.
     AttachmentSummary(AttachmentSummaryEvent),

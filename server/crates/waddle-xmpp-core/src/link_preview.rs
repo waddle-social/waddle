@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 /// Safe image MIME types Waddle accepts for cached link-preview media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PreviewImageMediaType {
     /// PNG image data.
     Png,
@@ -70,6 +71,7 @@ impl std::error::Error for InvalidPreviewImageMediaType {}
 /// `og:video` native path (clients fall back gracefully when it cannot play).
 /// DASH and provider embed pages remain excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DirectVideoMediaType {
     /// MP4 video content.
     Mp4,

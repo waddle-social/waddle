@@ -67,22 +67,40 @@ pub const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 /// `urn:xmpp:jingle:apps:rtp:1` — XEP-0167 RTP description namespace,
 /// used inside Muji content declarations.
 pub const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
+/// Named inputs for [`build_muji_element`].
+///
+/// The fields stay booleans because each one is an independent presence
+/// property, named at the construction site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MujiElementOptions {
+    /// Emit the XEP-0272 `<preparing/>` sentinel.
+    pub preparing: bool,
+    /// Emit an audio `<content/>`.
+    pub audio: bool,
+    /// Emit a video `<content/>`.
+    pub video: bool,
+}
+
 /// Build a `<muji xmlns='urn:xmpp:jingle:muji:0'>` element from typed
-/// inputs. When `audio` or `video` is true, a corresponding
+/// inputs. When `audio` or `video` is set, a corresponding
 /// `<content creator='initiator' name='audio|video'>
 ///   <description xmlns='urn:xmpp:jingle:apps:rtp:1' media='…'/>
 /// </content>` child is emitted (XEP-0272 §Joining content shape;
 /// XEP-0167 §3.2 minimal `<description>`).
 ///
-/// When `preparing` is true, a `<preparing/>` sentinel child is
+/// When `preparing` is set, a `<preparing/>` sentinel child is
 /// emitted (XEP-0272 §Joining two-phase flow). An "empty"
 /// `<muji/>` (no preparing, no contents) is XEP-0272 §Leaving — the
 /// caller should typically omit the element entirely instead.
 ///
-/// CLAUDE.md XML hard rule: callers never hand-roll the element via
-/// raw `Element::builder` strings.
+/// Callers never hand-roll the element via raw `Element::builder` strings.
 #[must_use]
-pub fn build_muji_element(preparing: bool, audio: bool, video: bool) -> minidom::Element {
+pub fn build_muji_element(options: MujiElementOptions) -> minidom::Element {
+    let MujiElementOptions {
+        preparing,
+        audio,
+        video,
+    } = options;
     let mut builder = minidom::Element::builder("muji", NS_MUJI);
     if preparing {
         builder = builder.append(minidom::Element::builder("preparing", NS_MUJI).build());
@@ -154,17 +172,30 @@ pub fn build_idle_element(since: chrono::DateTime<chrono::Utc>) -> minidom::Elem
         .build()
 }
 
+/// Named raised-hand and mute markers for [`build_in_call_presence_state_element`].
+///
+/// The fields stay booleans because each marker is an independent presence
+/// property, named at the construction site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InCallPresenceMarkers {
+    /// Emit `<hand-raised/>`.
+    pub hand_raised: bool,
+    /// Emit `<muted/>`.
+    pub muted: bool,
+}
+
 /// Build the `<in-call xmlns='urn:waddle:in-call:0'>` presence child
 /// (#1029 raised hand / #1030 mute), carried alongside (never inside)
 /// `<muji/>` in MUC call presence. Emits one marker child per advertised
-/// sub-state (`<hand-raised/>`, `<muted/>`); an all-`false` state yields
+/// sub-state (`<hand-raised/>`, `<muted/>`); an all-clear state yields
 /// an empty `<in-call/>`. Mirrors the server-side
 /// `waddle_xmpp::xep::build_in_call_presence_state_element`.
 ///
-/// CLAUDE.md XML hard rule: callers append this typed element rather than
-/// hand-rolling the `<in-call>` shape at the wasm boundary.
+/// Callers append this typed element rather than hand-rolling the
+/// `<in-call>` shape at the wasm boundary.
 #[must_use]
-pub fn build_in_call_presence_state_element(hand_raised: bool, muted: bool) -> minidom::Element {
+pub fn build_in_call_presence_state_element(markers: InCallPresenceMarkers) -> minidom::Element {
+    let InCallPresenceMarkers { hand_raised, muted } = markers;
     let mut builder = minidom::Element::builder("in-call", NS_WADDLE_IN_CALL);
     if hand_raised {
         builder =
@@ -182,7 +213,11 @@ mod tests {
 
     #[test]
     fn builds_preparing_muji() {
-        let elem = build_muji_element(true, false, false);
+        let elem = build_muji_element(MujiElementOptions {
+            preparing: true,
+            audio: false,
+            video: false,
+        });
         assert_eq!(elem.name(), "muji");
         assert_eq!(elem.ns(), NS_MUJI);
         assert!(
@@ -197,7 +232,11 @@ mod tests {
 
     #[test]
     fn builds_audio_video_muji_with_rtp_descriptions() {
-        let elem = build_muji_element(false, true, true);
+        let elem = build_muji_element(MujiElementOptions {
+            preparing: false,
+            audio: true,
+            video: true,
+        });
         let contents: Vec<_> = elem.children().filter(|c| c.name() == "content").collect();
         assert_eq!(contents.len(), 2, "audio + video content children");
         assert!(contents.iter().any(|c| c.attr("name") == Some("audio")));
@@ -246,7 +285,10 @@ mod tests {
 
     #[test]
     fn builds_in_call_hand_raised_element() {
-        let elem = build_in_call_presence_state_element(true, false);
+        let elem = build_in_call_presence_state_element(InCallPresenceMarkers {
+            hand_raised: true,
+            muted: false,
+        });
         assert_eq!(elem.name(), "in-call");
         assert_eq!(elem.ns(), NS_WADDLE_IN_CALL);
         let marker = elem
@@ -262,7 +304,10 @@ mod tests {
 
     #[test]
     fn builds_in_call_muted_element() {
-        let elem = build_in_call_presence_state_element(false, true);
+        let elem = build_in_call_presence_state_element(InCallPresenceMarkers {
+            hand_raised: false,
+            muted: true,
+        });
         let marker = elem
             .children()
             .find(|c| c.name() == "muted")
@@ -276,7 +321,10 @@ mod tests {
 
     #[test]
     fn builds_in_call_hand_raised_and_muted_together() {
-        let elem = build_in_call_presence_state_element(true, true);
+        let elem = build_in_call_presence_state_element(InCallPresenceMarkers {
+            hand_raised: true,
+            muted: true,
+        });
         assert!(elem.children().any(|c| c.name() == "hand-raised"));
         assert!(elem.children().any(|c| c.name() == "muted"));
     }

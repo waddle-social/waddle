@@ -15,6 +15,26 @@ use crate::state::StreamId;
 
 /// Protocol token `urn:xmpp:sm:3`.
 pub const NS_SM: &str = "urn:xmpp:sm:3";
+
+/// Whether an XEP-0198 `<enable/>` asks the peer to allow stream resumption.
+///
+/// Intentionally exhaustive: the two variants are the complete replacement for
+/// a bare `resume` boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmResume {
+    /// Set `resume='true'` so the peer may resume this stream.
+    Requested,
+    /// Omit `resume`. Stream management is enabled without resumption.
+    Omitted,
+}
+
+impl SmResume {
+    /// Whether this choice requests resumption.
+    #[must_use]
+    pub const fn is_requested(self) -> bool {
+        matches!(self, Self::Requested)
+    }
+}
 const NS_CLIENT: &str = "jabber:client";
 const NS_DELAY: &str = "urn:xmpp:delay";
 const NS_STANZA_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
@@ -25,6 +45,7 @@ pub const SM_PROGRESS_TIMEOUT_MS: i64 = 30_000;
 
 /// A bounded outcome for the Rust-owned XEP-0198 acknowledgement clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SmAcknowledgementClockAction {
     /// The host should retry sending the pending acknowledgement request.
     Retry {
@@ -770,17 +791,17 @@ impl SmState {
         false
     }
 
-    /// Build `<enable xmlns='urn:xmpp:sm:3' resume='true'/>`.
+    /// Build `<enable xmlns='urn:xmpp:sm:3'/>`, requesting resumption when asked.
     #[must_use]
-    pub fn build_enable(resume: bool) -> Element {
+    pub fn build_enable(resume: SmResume) -> Element {
         Self::build_enable_with_max(resume, None)
     }
 
     /// Build `<enable/>` with an optional XEP-0198 resumption window request.
     #[must_use]
-    pub fn build_enable_with_max(resume: bool, max: Option<u32>) -> Element {
+    pub fn build_enable_with_max(resume: SmResume, max: Option<u32>) -> Element {
         let mut b = Element::builder("enable", NS_SM);
-        if resume {
+        if resume.is_requested() {
             b = b.attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true");
         }
         if let Some(max) = max {
@@ -1054,7 +1075,7 @@ mod tests {
 
     #[test]
     fn build_enable_with_resume_sets_attribute() {
-        let el = SmState::build_enable(true);
+        let el = SmState::build_enable(SmResume::Requested);
         assert_eq!(el.name(), "enable");
         assert_eq!(el.ns(), NS_SM);
         assert_eq!(el.attr("resume"), Some("true"));
@@ -1064,7 +1085,7 @@ mod tests {
 
     #[test]
     fn build_enable_without_resume_omits_attribute() {
-        let el = SmState::build_enable(false);
+        let el = SmState::build_enable(SmResume::Omitted);
         assert_eq!(el.name(), "enable");
         assert_eq!(el.ns(), NS_SM);
         assert!(el.attr("resume").is_none());

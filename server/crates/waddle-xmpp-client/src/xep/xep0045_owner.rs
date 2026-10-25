@@ -52,6 +52,7 @@ pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
 /// `urn:waddle:roomconfig:pinpermission` values. Wire values mirror
 /// `waddle_xmpp::muc::PinPermission` server-side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RoomPinPermission {
     /// Only room owners and administrators may pin messages.
     AdminsOnly,

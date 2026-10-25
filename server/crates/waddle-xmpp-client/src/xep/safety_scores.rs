@@ -51,6 +51,7 @@ pub const NS_WADDLE_SAFETY_SCORES: &str = "urn:waddle:safety-scores:1";
 
 /// A category in the room extension safety-score payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SafetyCategory {
     /// `is_question`: a community-enrichment signal, not a safety one.
     IsQuestion,

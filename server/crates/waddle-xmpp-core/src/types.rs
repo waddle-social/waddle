@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Connection state in the XMPP stream lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// Initial state, waiting for stream header
     Initial,
@@ -23,6 +24,7 @@ pub enum ConnectionState {
 
 /// Transport type for the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Transport {
     /// WebSocket
     WebSocket,

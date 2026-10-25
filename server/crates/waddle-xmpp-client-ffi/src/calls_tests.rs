@@ -430,7 +430,7 @@ mod xep0215 {
             .expect("valid xml");
         let services: Vec<_> = parse_external_services(&reply)
             .into_iter()
-            .map(external_service_to_ffi)
+            .filter_map(external_service_to_ffi)
             .collect();
 
         assert_eq!(services.len(), 2);

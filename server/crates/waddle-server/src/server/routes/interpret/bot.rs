@@ -311,12 +311,17 @@ pub(crate) struct BotOccupancy {
 pub(crate) fn build_extension_message_markup(spans: &[MessageMarkupSpan]) -> Option<Element> {
     let xep_spans = spans
         .iter()
-        .map(|span| waddle_xmpp::xep::Xep0394MarkupSpan {
-            kind: match span.kind {
-                MessageMarkupKind::Blockquote => waddle_xmpp::xep::Xep0394MarkupKind::Blockquote,
-            },
-            start: span.start,
-            end: span.end,
+        .filter_map(|span| {
+            Some(waddle_xmpp::xep::Xep0394MarkupSpan {
+                kind: match span.kind {
+                    MessageMarkupKind::Blockquote => {
+                        waddle_xmpp::xep::Xep0394MarkupKind::Blockquote
+                    }
+                    _ => return None,
+                },
+                start: span.start,
+                end: span.end,
+            })
         })
         .collect::<Vec<_>>();
     waddle_xmpp::xep::build_message_markup_element(&xep_spans)

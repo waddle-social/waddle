@@ -24,11 +24,12 @@ use super::{
 use super::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
 use super::{DateTime, Utc};
 use super::{SessionBinding, SessionPhase, SessionSnapshot};
-use super::{SmAcknowledgementClockAction, SmResumeState, SmState};
+use super::{SmAcknowledgementClockAction, SmResume, SmResumeState, SmState};
 use super::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
 
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RuntimeStatus {
     /// The runtime is configured but has no active session lifecycle.
     Prepared,
@@ -680,7 +681,7 @@ impl XmppRuntime {
                 return Ok(());
             }
 
-            let binding = result.into_session_binding(None, false);
+            let binding = result.into_session_binding(None, crate::StreamResumption::NotResumable);
             self.finish_binding(binding, events)?;
         }
 
@@ -728,7 +729,12 @@ impl XmppRuntime {
 
         let sm_cfg = &self.config.session.stream_management;
         if sm_cfg.enable_stream_management && self.sm_advertised {
-            let enable = SmState::build_enable_with_max(sm_cfg.allow_resume, sm_cfg.resume_max);
+            let resume = if sm_cfg.allow_resume {
+                SmResume::Requested
+            } else {
+                SmResume::Omitted
+            };
+            let enable = SmState::build_enable_with_max(resume, sm_cfg.resume_max);
             events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
                 TransportMessage::Element(enable),
             )));

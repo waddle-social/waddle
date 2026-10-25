@@ -14,9 +14,9 @@
 //!
 //! Bootstrap reads never mutate the process environment: database and telemetry
 //! workers may already be reading it. The bootstrap variable remains available
-//! to the running process after success and failure. See
-//! `docs/planning/startup-safety-2020-2024.md` for the trust boundary and the
-//! requirement that future child launchers exclude bootstrap secrets explicitly.
+//! to the running process after success and failure. Operators remove
+//! `WADDLE_VAPID_PRIVATE_KEY` from the deployment after the first successful
+//! boot, once the key is stored. See `docs/operations/vapid-bootstrap.md`.
 
 use crate::db::DatabaseDriver;
 use crate::db::Rows;

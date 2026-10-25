@@ -39,6 +39,7 @@ pub(crate) fn markup_span_type_to_string(span_type: MarkupSpanType) -> String {
         MarkupSpanType::CodeBlock => "code_block",
         MarkupSpanType::Blockquote => "blockquote",
         MarkupSpanType::Link => "link",
+        _ => "unknown",
     }
     .to_string()
 }
@@ -75,6 +76,7 @@ fn in_call_signal_to_js(signal: Option<InCallSignal>) -> Option<WaddleInCallSign
             emoji: payload.emoji.as_str().to_string(),
         }),
         None => None,
+        Some(_) => None,
     }
 }
 
@@ -84,6 +86,7 @@ pub(crate) fn call_thread_to_js(
     let kind = match anchor.kind {
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Dm => "dm",
         waddle_xmpp_client::xep::call_thread::CallThreadKind::Muc => "muc",
+        _ => "unknown",
     };
     let mut media = Vec::new();
     if anchor.media.audio {
@@ -341,6 +344,7 @@ fn pubsub_payload_to_js(
             }
         }
         waddle_xmpp_client::PubsubEventPayload::Empty => WaddlePubsubEventPayload::Empty,
+        _ => WaddlePubsubEventPayload::Empty,
     }
 }
 
@@ -777,6 +781,17 @@ pub(crate) fn call_event_to_js(event: InboundCallEvent) -> WaddleCallEvent {
             tie_break: None,
             migrated_to: None,
         },
+        _ => WaddleCallEvent {
+            from,
+            to,
+            sid,
+            kind: "unknown",
+            media: None,
+            join: None,
+            reason: None,
+            tie_break: None,
+            migrated_to: None,
+        },
     }
 }
 
@@ -1052,7 +1067,7 @@ mod inbound_to_js_tests {
         let reject = call_event_to_js(parse_jmi(messaging::build_reject_with_options(
             &sid("c1"),
             Some(messaging::JingleReason::Expired),
-            true,
+            messaging::TieBreak::Marked,
         )));
         assert_eq!(reject.kind, "reject");
         assert_eq!(reject.reason.as_deref(), Some("expired"));
@@ -1062,7 +1077,7 @@ mod inbound_to_js_tests {
         let retract = call_event_to_js(parse_jmi(messaging::build_retract_with_options(
             &sid("c2"),
             Some(messaging::JingleReason::Expired),
-            true,
+            messaging::TieBreak::Marked,
         )));
         assert_eq!(retract.kind, "retract");
         assert_eq!(retract.reason.as_deref(), Some("expired"));

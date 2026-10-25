@@ -34,6 +34,7 @@ impl Probability {
 
 /// Canonical display order, matching the web client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum SafetyCategory {
     IsQuestion,
     HateSpeech,

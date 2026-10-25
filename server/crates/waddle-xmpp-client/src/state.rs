@@ -8,6 +8,7 @@ use crate::transport::TransportState;
 
 /// App-facing state summary derived from the richer session phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientState {
     /// The host may write the prepared acknowledgement request.
     Ready,
@@ -27,6 +28,7 @@ pub enum ClientState {
 
 /// Connection/session phases owned by the client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SessionPhase {
     /// No active XMPP session is established.
     Disconnected,

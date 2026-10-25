@@ -8,6 +8,7 @@ use super::{
 
 /// Explicit extension permissions requested in manifests and granted by the operator.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ExtensionCapability {
     /// Emit a durable room-observation result for host-owned publication.
     #[serde(rename = "room.result.publish")]
@@ -207,6 +208,7 @@ fn is_false(value: &bool) -> bool {
 /// Whether a command applies globally or within a channel.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum CommandScope {
     /// Command applies independently of a channel.
     Global,
@@ -228,6 +230,7 @@ impl CommandScope {
 /// Context required to render an extension route.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum ExtensionRouteScope {
     /// Route is rendered within a channel context.
     Channel,
@@ -246,6 +249,7 @@ impl ExtensionRouteScope {
 /// Host presentation style used to render an extension route.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum ExtensionRouteSurface {
     /// Render items as a visual gallery.
     Gallery,
@@ -285,6 +289,7 @@ pub struct ExtensionRouteDescriptor {
 
 /// Use of a custom payload for validating the matching manifest declaration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PayloadSurface {
     /// Payload returned as a durable room-observation result.
     RoomResult,

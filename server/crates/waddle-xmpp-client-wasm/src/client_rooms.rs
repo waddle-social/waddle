@@ -193,16 +193,20 @@ impl WaddleClient {
                 // re-spelling element/attr names + media tokens at the
                 // wasm boundary.
                 let muji = waddle_xmpp_client::messaging::build_muji_element(
-                    preparing,
-                    active, // audio is implied by "active in a call"
-                    active && video,
+                    waddle_xmpp_client::messaging::MujiElementOptions {
+                        preparing,
+                        audio: active,
+                        video: active && video,
+                    },
                 );
                 builder = builder.append(muji);
                 if in_call.hand_raised || in_call.muted {
                     builder = builder.append(
                         waddle_xmpp_client::messaging::build_in_call_presence_state_element(
-                            in_call.hand_raised,
-                            in_call.muted,
+                            waddle_xmpp_client::messaging::InCallPresenceMarkers {
+                                hand_raised: in_call.hand_raised,
+                                muted: in_call.muted,
+                            },
                         ),
                     );
                 }

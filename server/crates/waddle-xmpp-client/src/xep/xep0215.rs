@@ -21,6 +21,7 @@ pub const NS_EXT_DISCO: &str = "urn:xmpp:extdisco:2";
 /// §3.6.5 `turns` value (TLS-protected TURN) is a distinct variant — it is the
 /// shape Waddle advertises and is absent from `xmpp_parsers`' typed surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExternalServiceType {
     /// `stun` — STUN server (RFC 5389).
     Stun,

@@ -2,7 +2,7 @@
 
 use adw::prelude::{BoxExt, WidgetExt};
 use adw::subclass::prelude::ObjectSubclassIsExt;
-use waddle_client_session::{IncomingMessage, Timeline, TimelineItem};
+use waddle_client_session::{HistoryPage, IncomingMessage, Timeline, TimelineItem};
 
 use super::WaddleWindow;
 use crate::session::Conversation;
@@ -324,7 +324,7 @@ mod tests {
             ..IncomingMessage::default()
         };
         window.edit_conversation(&thread.key(), |timeline| {
-            timeline.apply_history_page(vec![child], Some("child".into()), true)
+            timeline.apply_history_page(vec![child], Some("child".into()), HistoryPage::Complete)
         });
         window.on_arrival(crate::session::Arrival {
             conversation: base.jid.clone(),

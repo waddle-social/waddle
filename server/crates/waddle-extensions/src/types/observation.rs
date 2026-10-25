@@ -49,6 +49,7 @@ impl MessageRevision {
 /// Explicit set of rooms or all hosted rooms selected for durable observation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "rooms", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum RoomObservationScope {
     /// Only the explicitly listed rooms; an empty list revokes all room selection.
     Rooms(Vec<BareJid>),
@@ -149,6 +150,7 @@ pub struct RoomObservationResult {
 
 /// Stable failure categories used by durable observation retry and fencing decisions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ObservationFailure {
     /// Guest or host reported a potentially transient invocation failure.
     TemporaryFailure,
@@ -172,6 +174,7 @@ pub enum ObservationFailure {
 
 /// Reason a durable observation did not apply or produced no result.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ObservationSkip {
     /// The source has no usable sender-assigned origin ID for durable correlation.
     MissingOriginId,
@@ -184,6 +187,7 @@ pub enum ObservationSkip {
 /// Distinguishes safe admission retries, potentially side-effecting failures, and validated
 /// completion.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RoomObservationOutcome {
     /// Observation returned a validated result suitable for host-owned publication.
     Completed(RoomObservationResult),

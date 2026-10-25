@@ -39,6 +39,7 @@ pub const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 /// set open; we keep this closed enum to refuse unknown values at the type
 /// boundary instead of dragging strings through the rest of the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Cipher {
     /// `urn:xmpp:ciphers:aes-128-gcm-nopadding:0`
     Aes128GcmNoPadding,

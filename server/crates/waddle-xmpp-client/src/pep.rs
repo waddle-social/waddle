@@ -78,6 +78,7 @@ pub struct UserTune {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Supported user mood, activity, and tune publications or retractions.
+#[non_exhaustive]
 pub enum PepItem {
     /// A published XEP-0107 user mood.
     Mood(UserMood),

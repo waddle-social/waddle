@@ -47,6 +47,7 @@ fn canonical_scope(scope: &RoomObservationScope) -> RoomObservationScope {
             rooms.dedup();
             RoomObservationScope::Rooms(rooms)
         }
+        _ => scope.clone(),
     }
 }
 

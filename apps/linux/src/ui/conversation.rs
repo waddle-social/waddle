@@ -13,7 +13,9 @@ use adw::prelude::{
 use adw::subclass::prelude::ObjectSubclassIsExt;
 use gtk::gio::prelude::FileExtManual;
 use gtk::{gdk, gio, glib};
-use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
+use waddle_client_session::{
+    Attachment, Delivery, HistoryPage, Reaction, Timeline, TimelineDiff, TimelineItem,
+};
 
 use std::time::Instant;
 
@@ -728,7 +730,15 @@ impl WaddleWindow {
                 .borrow_mut()
                 .entry(key.clone())
                 .or_default()
-                .apply_history_page(selected, page.first_id, page.complete);
+                .apply_history_page(
+                    selected,
+                    page.first_id,
+                    if page.complete {
+                        HistoryPage::Complete
+                    } else {
+                        HistoryPage::Partial
+                    },
+                );
             let current = imp.current.borrow().as_deref() == Some(key.as_str());
             if current {
                 window.apply(&diffs);
@@ -830,6 +840,7 @@ impl WaddleWindow {
                     rows.splice(*index, 1, &[boxed((**item).clone(), Layout::UNPLACED)]);
                     touched.extend([at, at + 1]);
                 }
+                _ => {}
             }
         }
         self.refresh_headers(&rows, touched);
@@ -1342,6 +1353,7 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
             body.add_css_class("error");
         }
         Delivery::Sent | Delivery::Received => {}
+        _ => {}
     }
     body.set_visible(!markup.is_empty());
     body.set_markup(&markup);

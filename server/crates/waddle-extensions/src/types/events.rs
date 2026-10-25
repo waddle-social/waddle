@@ -9,6 +9,7 @@ use super::{
 
 /// Typed lifecycle inputs dispatched to an extension's event handler.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExtensionEvent {
     /// Observe a canonical room message revision through the durable subscription path.
     RoomMessageObserve(RoomMessageObserve),
@@ -191,6 +192,7 @@ pub struct ProviderField {
 
 /// Scalar values admitted by the normalized webhook payload model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProviderFieldValue {
     /// Explicit null value from the provider payload.
     Null,

@@ -19,6 +19,7 @@ const NS_MAM: &str = "urn:xmpp:mam:2";
 
 /// Conversations included in an inbox query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InboxReadFilter {
     /// Include both read and unread conversations.
     #[default]
@@ -29,6 +30,7 @@ pub enum InboxReadFilter {
 
 /// Whether an inbox query embeds each conversation's latest archived message.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InboxMessageContent {
     /// Request entries and counts without archived message payloads.
     Omit,
@@ -39,6 +41,7 @@ pub enum InboxMessageContent {
 
 /// Source surface for one streamed XEP-0430 inbox `<entry/>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InboxStreamEntrySource {
     /// An entry streamed in response to an explicit query.
     QueryResponse,

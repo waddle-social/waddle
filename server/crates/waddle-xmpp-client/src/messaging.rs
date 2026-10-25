@@ -32,7 +32,7 @@ pub use call::{
     build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, jingle_reason_wire_name,
     parse_call_event, parse_jingle_iq, parse_jmi_message, wrap_jmi_message, CallEventKind,
-    CallMedia, InboundCallEvent, LiveKitJoin,
+    CallMedia, InboundCallEvent, LiveKitJoin, MujiSessionVideo, TieBreak,
 };
 pub use link_preview_lookup::{
     build_link_preview_lookup_iq, eligible_preview_url, parse_link_preview_lookup_response,
@@ -42,9 +42,10 @@ pub use mentions::{
     MentionDirectory, MentionTarget, MENTION_URI_EVERYONE, MENTION_URI_HERE, REFERENCE_TYPE_MENTION,
 };
 pub use namespaces::{
-    build_in_call_presence_state_element, build_muji_element, NS_CHAT_MARKERS, NS_CHAT_STATES,
-    NS_CLIENT, NS_JINGLE_RTP, NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI,
-    NS_REACTIONS, NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW, NS_WADDLE_PIN_V0,
+    build_in_call_presence_state_element, build_muji_element, InCallPresenceMarkers,
+    MujiElementOptions, NS_CHAT_MARKERS, NS_CHAT_STATES, NS_CLIENT, NS_JINGLE_RTP,
+    NS_MESSAGE_CORRECT, NS_MESSAGE_MODERATE, NS_MESSAGE_RETRACT, NS_MUJI, NS_REACTIONS,
+    NS_STANZA_ID, NS_WADDLE_IN_CALL, NS_WADDLE_LINK_PREVIEW, NS_WADDLE_PIN_V0,
 };
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use native::MessagingExt;

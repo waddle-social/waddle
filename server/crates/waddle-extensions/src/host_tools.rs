@@ -61,6 +61,7 @@ pub struct DeliveryInvocation {
 
 /// Event category used to scope the authority of host-tool calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum InvocationKind {
     /// Durable room-message observation with host-owned delivery authority.
     RoomMessageObserve,
@@ -348,6 +349,7 @@ pub enum MessageTarget {
 
 /// Supported body annotation carried by host-generated messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MessageMarkupKind {
     /// Render the selected character range as a block quotation.
     Blockquote,

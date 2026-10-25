@@ -10,7 +10,7 @@ use waddle_xmpp_client::messaging::{
     build_proceed, build_propose, build_reject, build_reject_with_options, build_retract,
     build_retract_with_options, build_ringing, build_session_accept, build_session_initiate,
     build_session_terminate, jingle_reason_from_wire_name, wrap_jmi_message, CallMedia,
-    JingleReason, SessionId,
+    JingleReason, MujiSessionVideo, SessionId, TieBreak,
 };
 
 #[cfg(test)]
@@ -156,7 +156,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(
                 &peer_full_jid,
-                build_reject_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+                build_reject_with_options(
+                    &sid(sid_str),
+                    Some(JingleReason::Expired),
+                    TieBreak::Marked,
+                ),
             )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -185,7 +189,11 @@ impl WaddleClient {
         future_to_promise(async move {
             let stanza = message_with_jmi_to_full(
                 &peer_full_jid,
-                build_retract_with_options(&sid(sid_str), Some(JingleReason::Expired), true),
+                build_retract_with_options(
+                    &sid(sid_str),
+                    Some(JingleReason::Expired),
+                    TieBreak::Marked,
+                ),
             )?;
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)
@@ -324,7 +332,16 @@ impl WaddleClient {
             let mixer = calls_mixer_jid(initiator.domain().as_str());
 
             let sid = sid(sid_str);
-            let jingle = build_muji_session_initiate(&sid, &initiator, &room_jid, video);
+            let jingle = build_muji_session_initiate(
+                &sid,
+                &initiator,
+                &room_jid,
+                if video {
+                    MujiSessionVideo::WithVideo
+                } else {
+                    MujiSessionVideo::AudioOnly
+                },
+            );
             let stanza = Element::builder("iq", NS_JABBER_CLIENT)
                 .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
                 .attr(
@@ -632,8 +649,11 @@ mod tests {
     fn jmi_tie_break_response_targets_full_jid_and_carries_expired_reason() {
         use waddle_xmpp_client::messaging::{build_retract_with_options, JingleReason, SessionId};
 
-        let body =
-            build_retract_with_options(&SessionId("c1".into()), Some(JingleReason::Expired), true);
+        let body = build_retract_with_options(
+            &SessionId("c1".into()),
+            Some(JingleReason::Expired),
+            TieBreak::Marked,
+        );
         let stanza = super::message_with_jmi_to_full("bob@waddle.test/phone", body)
             .expect("full JID accepted");
         let retract = stanza

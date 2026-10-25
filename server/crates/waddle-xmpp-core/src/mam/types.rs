@@ -172,6 +172,7 @@ pub struct ArchivedTombstone {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Mutation or tombstone payload associated with an archived message.
+#[non_exhaustive]
 pub enum ArchivedRichPayload {
     /// A replacement body for an earlier message.
     Correction {

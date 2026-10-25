@@ -25,6 +25,7 @@ pub(super) fn finished(
         RoomObservationOutcome::UnresolvedFailure(_) => "unresolved_failure",
         RoomObservationOutcome::PermanentFailure(_) => "permanent_failure",
         RoomObservationOutcome::NotApplicable(_) => "skipped",
+        _ => "unknown",
     };
     waddle_xmpp::histogram_record!(
         "waddle.extension.observation.invocation.duration",
