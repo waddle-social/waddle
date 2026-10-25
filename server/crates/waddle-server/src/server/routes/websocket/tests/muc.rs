@@ -1640,24 +1640,48 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
         "malformed identity must fail closed: {denied:?}"
     );
 
-    // Wait for the dispatch span to actually close before reading it.
-    //
-    // This assertion failed intermittently in CI with an EMPTY exported
-    // set (`exported xmpp.stanza.dispatch spans: []`), never locally.
-    // The reason is structural, not timing luck: the join path leaves
-    // background work holding the span open, and on a `current_thread`
-    // runtime that work can only progress while the test awaits — and
-    // there is no await between the join returning and this read. On an
-    // idle machine the work happens to finish during the awaits inside
-    // the join; under CI contention it does not, so the span is still
-    // open and `tracing-opentelemetry` has nothing to export yet
-    // (a span exports on close, and `exported()` already force-flushes,
-    // so flushing harder cannot help).
-    //
-    // Polling yields the runtime so that work can finish, with a bounded
-    // deadline. This does not weaken the assertion: it still requires
-    // the attribute to be present, and on timeout it reports the empty
-    // set rather than passing.
+    // Kameo messages and SQLite worker commands retain the current span.
+    // Close the fixture resources that handled the join before checking its
+    // export; flushing alone cannot close spans those resources still own.
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        state
+            .deps
+            .protocol
+            .room_registry
+            .stop_gracefully()
+            .await
+            .expect("fixture room registry must stop");
+        state
+            .deps
+            .protocol
+            .room_registry
+            .wait_for_shutdown_result()
+            .await
+            .expect("fixture room registry must finish shutdown");
+
+        let db_actor = state.deps.app_state.db_pool.global_actor();
+        db_actor
+            .stop_gracefully()
+            .await
+            .expect("fixture database actor must stop");
+        db_actor
+            .wait_for_shutdown_result()
+            .await
+            .expect("fixture database actor must finish shutdown");
+        state
+            .deps
+            .app_state
+            .db_pool
+            .global()
+            .sqlite_pool()
+            .expect("fixture must use SQLite")
+            .close()
+            .await;
+    })
+    .await
+    .expect("fixture shutdown must release the dispatch span within five seconds");
+
+    // Allow the final span-close callbacks to reach the exporter after teardown.
     let dispatch_spans =
         await_exported_spans(&spans, "xmpp.stanza.dispatch", StdDuration::from_secs(5)).await;
     let rendered = dispatch_spans
