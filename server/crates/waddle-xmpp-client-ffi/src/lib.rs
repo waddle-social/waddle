@@ -80,6 +80,9 @@ pub use community_admin::{
     WaddleAdminUserEntry, WaddleAdminUsersPage, WaddleSpaceRole,
 };
 pub use error::WaddleError;
+pub use group_dm::WaddleGroupDmHistoryAccess;
+pub use inbox_verbs::{WaddleInboxMessageContent, WaddleInboxReadFilter};
+pub use messaging_verbs::WaddleMessageAudience;
 pub use notify_settings::{
     WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
     WaddleSetRoomNotificationModeOutcome,

@@ -6,9 +6,10 @@
 //! Every method parses its untyped FFI inputs (JID strings, stanza
 //! ids) into typed values immediately, then delegates to the shared
 //! `waddle-xmpp-client` builders / extension traits — the same code
-//! paths the wasm chat client drives. Send-style methods keep the
-//! crate's `bool` / [`WaddleSendMessageOutcome`] shapes; the two
-//! fetch-style methods return `Result<_, WaddleError>`.
+//! paths the wasm chat client drives. Send-style methods return
+//! `bool` or [`WaddleSendMessageOutcome`]; the two fetch-style methods
+//! return `Result<_, WaddleError>`. A direct chat and a MUC are
+//! [`WaddleMessageAudience`], not a bare flag.
 
 use jid::{BareJid, Jid};
 use minidom::Element;
@@ -67,9 +68,27 @@ use crate::{
 // asserts their output against the XEP wire shapes, so the exact
 // stanzas the FFI emits are pinned without a live connection.
 
+/// Direct chat versus multi-user chat for a messaging verb.
+///
+/// `Muc` selects `type='groupchat'` and requires a bare room JID.
+/// `Direct` selects `type='chat'` and accepts a bare or full JID.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleMessageAudience {
+    /// One-to-one chat (`type='chat'`).
+    Direct,
+    /// Multi-user chat (`type='groupchat'`).
+    Muc,
+}
+
+impl WaddleMessageAudience {
+    pub(crate) fn is_muc(self) -> bool {
+        matches!(self, Self::Muc)
+    }
+}
+
 /// RFC 6121 message `type` for the DM/MUC split every verb shares.
-pub(crate) fn verb_message_type(is_muc: bool) -> &'static str {
-    if is_muc {
+pub(crate) fn verb_message_type(audience: WaddleMessageAudience) -> &'static str {
+    if audience.is_muc() {
         "groupchat"
     } else {
         "chat"
@@ -93,11 +112,11 @@ pub(crate) fn reaction_stanza(
     to: &Jid,
     target_stanza_id: &str,
     emojis: &[String],
-    is_muc: bool,
+    audience: WaddleMessageAudience,
 ) -> Element {
     build_reaction_message(
         to.as_str(),
-        verb_message_type(is_muc),
+        verb_message_type(audience),
         target_stanza_id,
         emojis,
         None,
@@ -110,12 +129,12 @@ pub(crate) fn correction_stanza(
     to: &Jid,
     new_body: &str,
     target_id: &str,
-    is_muc: bool,
+    audience: WaddleMessageAudience,
     options: &SendMessageOptions,
 ) -> ClientResult<(StanzaId, Element)> {
     build_correction_message(
         to.as_str(),
-        verb_message_type(is_muc),
+        verb_message_type(audience),
         new_body,
         target_id,
         options,
@@ -169,8 +188,13 @@ impl WaddleClient {
     /// Parse the recipient of a DM/MUC verb: rooms must be bare JIDs,
     /// DM peers may be bare or full. Emits a diagnostic and returns
     /// `None` on parse failure, mirroring the other JID helpers.
-    fn parse_verb_recipient(&self, value: &str, is_muc: bool, op: &'static str) -> Option<Jid> {
-        if is_muc {
+    fn parse_verb_recipient(
+        &self,
+        value: &str,
+        audience: WaddleMessageAudience,
+        op: &'static str,
+    ) -> Option<Jid> {
+        if audience.is_muc() {
             self.parse_bare_jid(value, op).map(Jid::from)
         } else {
             self.parse_jid(value, op)
@@ -191,12 +215,12 @@ impl WaddleClient {
         target_jid: String,
         target_stanza_id: String,
         emojis: Vec<String>,
-        is_muc: bool,
+        audience: WaddleMessageAudience,
     ) -> bool {
-        let Some(to) = self.parse_verb_recipient(&target_jid, is_muc, "send_reaction") else {
+        let Some(to) = self.parse_verb_recipient(&target_jid, audience, "send_reaction") else {
             return false;
         };
-        let stanza = reaction_stanza(&to, &target_stanza_id, &emojis, is_muc);
+        let stanza = reaction_stanza(&to, &target_stanza_id, &emojis, audience);
         self.send_stanza_or_error(stanza, "send_reaction").await
     }
 
@@ -209,10 +233,10 @@ impl WaddleClient {
         peer_jid: String,
         target_id: String,
         new_body: String,
-        is_muc: bool,
+        audience: WaddleMessageAudience,
         options: Option<WaddleSendOptions>,
     ) -> WaddleSendMessageOutcome {
-        let Some(to) = self.parse_verb_recipient(&peer_jid, is_muc, "send_correction") else {
+        let Some(to) = self.parse_verb_recipient(&peer_jid, audience, "send_correction") else {
             return WaddleSendMessageOutcome::InvalidRecipient;
         };
         let opts = match options.map(send_options_from_ffi).transpose() {
@@ -222,14 +246,14 @@ impl WaddleClient {
                 return WaddleSendMessageOutcome::InvalidOptions;
             }
         };
-        let (stanza_id, stanza) = match correction_stanza(&to, &new_body, &target_id, is_muc, &opts)
-        {
-            Ok(built) => built,
-            Err(e) => {
-                self.emit_error(format!("send_correction failed: {e}"));
-                return WaddleSendMessageOutcome::Error;
-            }
-        };
+        let (stanza_id, stanza) =
+            match correction_stanza(&to, &new_body, &target_id, audience, &opts) {
+                Ok(built) => built,
+                Err(e) => {
+                    self.emit_error(format!("send_correction failed: {e}"));
+                    return WaddleSendMessageOutcome::Error;
+                }
+            };
         let Some(handle) = self.clone_handle().await else {
             return WaddleSendMessageOutcome::NotConnected;
         };
@@ -252,9 +276,9 @@ impl WaddleClient {
         &self,
         peer_jid: String,
         target_stanza_id: String,
-        is_muc: bool,
+        audience: WaddleMessageAudience,
     ) -> bool {
-        let Some(to) = self.parse_verb_recipient(&peer_jid, is_muc, "send_retraction") else {
+        let Some(to) = self.parse_verb_recipient(&peer_jid, audience, "send_retraction") else {
             return false;
         };
         let Some(handle) = self.clone_handle().await else {
@@ -264,7 +288,7 @@ impl WaddleClient {
             .retract_message(
                 to.as_str(),
                 &target_stanza_id,
-                verb_message_type(is_muc),
+                verb_message_type(audience),
                 None,
             )
             .await
@@ -301,9 +325,9 @@ impl WaddleClient {
         &self,
         peer_jid: String,
         state: WaddleChatState,
-        is_muc: bool,
+        audience: WaddleMessageAudience,
     ) -> bool {
-        let Some(to) = self.parse_verb_recipient(&peer_jid, is_muc, "send_chat_state") else {
+        let Some(to) = self.parse_verb_recipient(&peer_jid, audience, "send_chat_state") else {
             return false;
         };
         let Some(handle) = self.clone_handle().await else {
@@ -313,7 +337,7 @@ impl WaddleClient {
             .send_chat_state(
                 to.as_str(),
                 chat_state_wire_name(state),
-                verb_message_type(is_muc),
+                verb_message_type(audience),
                 None,
             )
             .await
@@ -328,15 +352,20 @@ impl WaddleClient {
 
     /// XEP-0333: send a `<displayed id='…'/>` marker acknowledging
     /// the message identified by `stanza_id` as read.
-    pub async fn send_displayed(&self, peer_jid: String, stanza_id: String, is_muc: bool) -> bool {
-        let Some(to) = self.parse_verb_recipient(&peer_jid, is_muc, "send_displayed") else {
+    pub async fn send_displayed(
+        &self,
+        peer_jid: String,
+        stanza_id: String,
+        audience: WaddleMessageAudience,
+    ) -> bool {
+        let Some(to) = self.parse_verb_recipient(&peer_jid, audience, "send_displayed") else {
             return false;
         };
         let Some(handle) = self.clone_handle().await else {
             return false;
         };
         match handle
-            .send_displayed_marker(to.as_str(), &stanza_id, verb_message_type(is_muc), None)
+            .send_displayed_marker(to.as_str(), &stanza_id, verb_message_type(audience), None)
             .await
         {
             Ok(()) => true,

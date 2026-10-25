@@ -1,6 +1,8 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.delay
+import social.waddle.client.ffi.WaddleInboxMessageContent
+import social.waddle.client.ffi.WaddleInboxReadFilter
 import social.waddle.client.ffi.WaddleInboxResult
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -10,8 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  * the full generated FFI interface stays within the LargeClass budget.
  */
 class FakeInboxState {
-    /** Recorded (onlyUnread, noMessages) inbox fetches. */
-    val fetchInboxCalls = CopyOnWriteArrayList<Pair<Boolean, Boolean>>()
+    /** Recorded (read filter, message content) inbox fetches. */
+    val fetchInboxCalls = CopyOnWriteArrayList<Pair<WaddleInboxReadFilter, WaddleInboxMessageContent>>()
 
     /** Canned XEP-0430 page served by [fetchInbox]. */
     @Volatile
@@ -33,8 +35,11 @@ class FakeInboxState {
     @Volatile
     var markInboxReadFailure: Throwable? = null
 
-    suspend fun fetchInbox(onlyUnread: Boolean, noMessages: Boolean): WaddleInboxResult {
-        fetchInboxCalls += onlyUnread to noMessages
+    suspend fun fetchInbox(
+        readFilter: WaddleInboxReadFilter,
+        messageContent: WaddleInboxMessageContent,
+    ): WaddleInboxResult {
+        fetchInboxCalls += readFilter to messageContent
         if (fetchInboxDelayMillis > 0) delay(fetchInboxDelayMillis)
         fetchInboxFailure?.let { throw it }
         return inboxResult

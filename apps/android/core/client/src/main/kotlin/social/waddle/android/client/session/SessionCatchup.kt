@@ -113,7 +113,7 @@ internal class SessionCatchup(
         val result = try {
             when (
                 val invocation = activeSession.invokeIfCurrent(lease) {
-                it.fetchInbox(onlyUnread = false, noMessages = true)
+                it.fetchInbox(inboxReadFilter(onlyUnread = false), inboxMessages(noMessages = true))
             }
             ) {
                 ActiveSession.LeaseInvocation.Stale,

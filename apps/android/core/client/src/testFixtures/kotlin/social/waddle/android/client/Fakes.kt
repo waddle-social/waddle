@@ -46,13 +46,17 @@ import social.waddle.client.ffi.WaddleExtensionCommand
 import social.waddle.client.ffi.WaddleExtensionCommandResult
 import social.waddle.client.ffi.WaddleExtensionFormField
 import social.waddle.client.ffi.WaddleExternalService
+import social.waddle.client.ffi.WaddleGroupDmHistoryAccess
 import social.waddle.client.ffi.WaddleInCallPresenceFlags
+import social.waddle.client.ffi.WaddleInboxMessageContent
+import social.waddle.client.ffi.WaddleInboxReadFilter
 import social.waddle.client.ffi.WaddleInboxResult
 import social.waddle.client.ffi.WaddleJingleReason
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
 import social.waddle.client.ffi.WaddleLinkPreviewLookupStatus
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
+import social.waddle.client.ffi.WaddleMessageAudience
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePepProfile
@@ -712,19 +716,27 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
         reason: String?,
     ): WaddleAdminChannelsKickResult = unused()
 
-    /** Recorded (conversation, state, isMuc) typing notifications. */
-    val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, Boolean>>()
+    /** Recorded (conversation, state, audience) typing notifications. */
+    val chatStateCalls = CopyOnWriteArrayList<Triple<String, WaddleChatState, WaddleMessageAudience>>()
 
-    override suspend fun sendChatState(peerJid: String, state: WaddleChatState, isMuc: Boolean): Boolean {
-        chatStateCalls += Triple(peerJid, state, isMuc)
+    override suspend fun sendChatState(
+        peerJid: String,
+        state: WaddleChatState,
+        audience: WaddleMessageAudience,
+    ): Boolean {
+        chatStateCalls += Triple(peerJid, state, audience)
         return true
     }
 
-    /** Recorded (conversation, stanzaId, isMuc) displayed markers. */
-    val displayedCalls = CopyOnWriteArrayList<Triple<String, String, Boolean>>()
+    /** Recorded (conversation, stanzaId, audience) displayed markers. */
+    val displayedCalls = CopyOnWriteArrayList<Triple<String, String, WaddleMessageAudience>>()
 
-    override suspend fun sendDisplayed(peerJid: String, stanzaId: String, isMuc: Boolean): Boolean {
-        displayedCalls += Triple(peerJid, stanzaId, isMuc)
+    override suspend fun sendDisplayed(
+        peerJid: String,
+        stanzaId: String,
+        audience: WaddleMessageAudience,
+    ): Boolean {
+        displayedCalls += Triple(peerJid, stanzaId, audience)
         return true
     }
 
@@ -758,8 +770,10 @@ abstract class FakeRoomAndAdminClient : WaddleClientInterface {
     /** XEP-0430 fake verb state: canned page, recorded calls, knobs. */
     val inbox = FakeInboxState()
 
-    override suspend fun fetchInbox(onlyUnread: Boolean, noMessages: Boolean): WaddleInboxResult =
-        inbox.fetchInbox(onlyUnread, noMessages)
+    override suspend fun fetchInbox(
+        readFilter: WaddleInboxReadFilter,
+        messageContent: WaddleInboxMessageContent,
+    ): WaddleInboxResult = inbox.fetchInbox(readFilter, messageContent)
 
     override suspend fun markInboxRead(partnerJid: String, threadId: String?) =
         inbox.markInboxRead(partnerJid, threadId)
@@ -902,8 +916,11 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun leaveGroupDm(roomJid: String) = groupDm.leaveGroupDm(roomJid)
 
-    override suspend fun inviteToGroupDm(roomJid: String, inviteeJid: String, fullHistory: Boolean) =
-        groupDm.inviteToGroupDm(roomJid, inviteeJid, fullHistory)
+    override suspend fun inviteToGroupDm(
+        roomJid: String,
+        inviteeJid: String,
+        history: WaddleGroupDmHistoryAccess,
+    ) = groupDm.inviteToGroupDm(roomJid, inviteeJid, history)
 
     /** Every recorded `sendCall*` wire verb, in send order. */
     val callVerbs = CopyOnWriteArrayList<RecordedCallVerb>()
@@ -1369,7 +1386,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         targetJid: String,
         targetStanzaId: String,
         emojis: List<String>,
-        isMuc: Boolean,
+        audience: WaddleMessageAudience,
     ): Boolean {
         reactionCalls += Triple(targetJid, targetStanzaId, emojis)
         return reactionResult
@@ -1389,7 +1406,7 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         peerJid: String,
         targetId: String,
         newBody: String,
-        isMuc: Boolean,
+        audience: WaddleMessageAudience,
         options: WaddleSendOptions?,
     ): WaddleSendMessageOutcome {
         correctionCalls += Triple(peerJid, targetId, newBody)
@@ -1403,7 +1420,11 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     @Volatile
     var retractionResult = true
 
-    override suspend fun sendRetraction(peerJid: String, targetStanzaId: String, isMuc: Boolean): Boolean {
+    override suspend fun sendRetraction(
+        peerJid: String,
+        targetStanzaId: String,
+        audience: WaddleMessageAudience,
+    ): Boolean {
         retractionCalls += peerJid to targetStanzaId
         return retractionResult
     }

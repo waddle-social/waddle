@@ -188,7 +188,10 @@ fn inbox_page_maps_fin_counts_and_entries() {
 async fn fetch_inbox_without_session_fails_not_connected() {
     let client = test_client();
     let err = client
-        .fetch_inbox(false, true)
+        .fetch_inbox(
+            crate::WaddleInboxReadFilter::All,
+            crate::WaddleInboxMessageContent::Omit,
+        )
         .await
         .expect_err("no session must fail");
     assert_eq!(err, WaddleError::NotConnected);

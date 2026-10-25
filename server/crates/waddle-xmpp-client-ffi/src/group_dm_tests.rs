@@ -66,7 +66,7 @@ async fn group_dm_verbs_require_connection() {
             .invite_to_group_dm(
                 "gdm-abc@muc.waddle.test".to_string(),
                 "charlie@waddle.test".to_string(),
-                false,
+                crate::WaddleGroupDmHistoryAccess::FromJoin,
             )
             .await
             .unwrap_err(),
@@ -106,7 +106,7 @@ async fn group_dm_verbs_reject_malformed_jids_before_sending() {
             .invite_to_group_dm(
                 "gdm-abc@muc.waddle.test".to_string(),
                 "not a jid".to_string(),
-                true,
+                crate::WaddleGroupDmHistoryAccess::Full,
             )
             .await
             .unwrap_err(),

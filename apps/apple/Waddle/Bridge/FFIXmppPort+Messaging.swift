@@ -20,7 +20,7 @@ extension FFIXmppPort {
             peerJid: conversation.jid.description,
             targetId: targetID,
             newBody: body,
-            isMuc: conversation.isRoom,
+            audience: conversation.isRoom ? .muc : .direct,
             options: FFIOutbound.sendOptions(options, stanzaID: nil)
         )
         return FFIOutbound.sendOutcome(outcome)
@@ -31,12 +31,12 @@ extension FFIXmppPort {
             targetJid: conversation.jid.description,
             targetStanzaId: targetID,
             emojis: emojis,
-            isMuc: conversation.isRoom
+            audience: conversation.isRoom ? .muc : .direct
         )
     }
 
     func sendRetraction(of targetID: String, in conversation: ConversationID) async -> Bool {
-        await client.sendRetraction(peerJid: conversation.jid.description, targetStanzaId: targetID, isMuc: conversation.isRoom)
+        await client.sendRetraction(peerJid: conversation.jid.description, targetStanzaId: targetID, audience: conversation.isRoom ? .muc : .direct)
     }
 
     func sendModeration(of targetID: String, in room: BareJID, reason: String?) async -> Bool {
@@ -47,7 +47,7 @@ extension FFIXmppPort {
         await client.sendChatState(
             peerJid: conversation.jid.description,
             state: FFIOutbound.chatState(state),
-            isMuc: conversation.isRoom
+            audience: conversation.isRoom ? .muc : .direct
         )
     }
 

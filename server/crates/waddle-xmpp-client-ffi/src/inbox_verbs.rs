@@ -4,8 +4,9 @@
 //! reducer (subscribe-before-send, entries folded by MAM `queryid`,
 //! resolved on the closing `<fin/>`); `mark_inbox_read` wraps the
 //! Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ. Both verbs mirror
-//! the wasm `fetch_inbox` / `mark_inbox_read` surface, including its
-//! option polarity (`only_unread`, `no_messages`).
+//! the wasm `fetch_inbox` / `mark_inbox_read` surface. Read scope and
+//! embedded messages are [`WaddleInboxReadFilter`] and
+//! [`WaddleInboxMessageContent`].
 
 use jid::BareJid;
 
@@ -16,6 +17,46 @@ use crate::convert::inbox_entry_to_ffi;
 use crate::error::client_error_to_waddle;
 use crate::messaging_verbs::IQ_TIMEOUT;
 use crate::{WaddleClient, WaddleError, WaddleInboxResult};
+
+/// Conversations included in a XEP-0430 inbox query.
+///
+/// `UnreadOnly` is `unread-only='true'`. `All` asks for every conversation.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleInboxReadFilter {
+    /// Include both read and unread conversations.
+    All,
+    /// Include only conversations with unread messages.
+    UnreadOnly,
+}
+
+/// Whether a XEP-0430 inbox query embeds each conversation's latest message.
+///
+/// `Omit` is the XEP `messages='false'` form. `Include` asks for the bodies.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaddleInboxMessageContent {
+    /// Include the latest archived message for each entry.
+    Include,
+    /// Request entries and counts without archived message payloads.
+    Omit,
+}
+
+fn client_read_filter(filter: WaddleInboxReadFilter) -> waddle_xmpp_client::inbox::InboxReadFilter {
+    match filter {
+        WaddleInboxReadFilter::All => waddle_xmpp_client::inbox::InboxReadFilter::All,
+        WaddleInboxReadFilter::UnreadOnly => waddle_xmpp_client::inbox::InboxReadFilter::UnreadOnly,
+    }
+}
+
+fn client_message_content(
+    content: WaddleInboxMessageContent,
+) -> waddle_xmpp_client::inbox::InboxMessageContent {
+    match content {
+        WaddleInboxMessageContent::Include => {
+            waddle_xmpp_client::inbox::InboxMessageContent::Include
+        }
+        WaddleInboxMessageContent::Omit => waddle_xmpp_client::inbox::InboxMessageContent::Omit,
+    }
+}
 
 /// Folded streamed page → FFI result. The `<fin/>` counts carry the
 /// server-wide unread sum (`all-unread`) alongside the page-scoped
@@ -34,14 +75,13 @@ impl WaddleClient {
     /// Run one XEP-0430 `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
     /// resolve once the server's closing `<fin/>` arrives.
     ///
-    /// `only_unread` maps to `unread-only='true'`; `no_messages`
-    /// inverts the XEP's `messages` attribute (pass `true` to elide
-    /// the embedded MAM `<result/>` bodies — the cheap hydration
-    /// shape the clients use on session-ready).
+    /// `read_filter` selects `unread-only`. `message_content` selects
+    /// whether the page embeds MAM `<result/>` bodies; [`WaddleInboxMessageContent::Omit`]
+    /// is the cheap hydration shape the clients use on session-ready.
     pub async fn fetch_inbox(
         &self,
-        only_unread: bool,
-        no_messages: bool,
+        read_filter: WaddleInboxReadFilter,
+        message_content: WaddleInboxMessageContent,
     ) -> Result<WaddleInboxResult, WaddleError> {
         // Single in-flight query only: `messages='false'` responses
         // carry no MAM queryid, so an overlapping query would fold
@@ -56,16 +96,8 @@ impl WaddleClient {
         match tokio::time::timeout(
             IQ_TIMEOUT,
             handle.fetch_inbox(
-                if only_unread {
-                    waddle_xmpp_client::inbox::InboxReadFilter::UnreadOnly
-                } else {
-                    waddle_xmpp_client::inbox::InboxReadFilter::All
-                },
-                if no_messages {
-                    waddle_xmpp_client::inbox::InboxMessageContent::Omit
-                } else {
-                    waddle_xmpp_client::inbox::InboxMessageContent::Include
-                },
+                client_read_filter(read_filter),
+                client_message_content(message_content),
             ),
         )
         .await
