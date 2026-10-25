@@ -1,9 +1,10 @@
 use super::{
-    fixed_time, fixture_principal, fixture_session, fixture_unacked, Database, DatabaseConfig,
-    DatabaseDriver, DatabaseSmPersistence, DateTime, Duration, IngressCustodyDisposition,
-    KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession, PostgresFencedSmPersistence,
-    SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
+    fixed_time, fixture_principal, fixture_session, fixture_unacked, DatabaseSmPersistence,
+    DateTime, Duration, IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend,
+    PersistedSession, SmPersistenceError, SmPersistenceStorage, SmSessionId, Stanza, Utc,
 };
+#[cfg(feature = "clustering")]
+use super::{Database, DatabaseConfig, DatabaseDriver, PostgresFencedSmPersistence};
 use crate::db::Value;
 use std::sync::Arc;
 use waddle_xmpp::ingress::MessageKey;

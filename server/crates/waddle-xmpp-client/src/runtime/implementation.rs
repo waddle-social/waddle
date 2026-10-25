@@ -1,0 +1,864 @@
+//! Implementation behind the parent module facade.
+
+use super::AuthenticationConfig;
+use super::ClientConfig;
+use super::Element;
+use super::OAuthBearerConfig;
+use super::RequestId;
+use super::RequestKind;
+use super::ResourceBindingResult;
+use super::SaslFailure;
+use super::SmAckRequestReason;
+use super::StreamFeatures;
+use super::VecDeque;
+use super::NS_SM;
+use super::NS_STREAMS;
+use super::{
+    AuthMechanism, AuthenticationRequest, BootstrapElement, RequiredStreamFeature,
+    ResourceBindingRequest,
+};
+use super::{ClientError, ClientResult};
+use super::{
+    ClientEvent, ConnectionEvent, LifecycleEvent, MessageDeliveryEvent, StreamManagementEvent,
+};
+use super::{ClientRequest, PendingRequest, RequestTracker, StanzaId};
+use super::{DateTime, Utc};
+use super::{SessionBinding, SessionPhase, SessionSnapshot};
+use super::{SmAcknowledgementClockAction, SmResumeState, SmState};
+use super::{StreamClose, StreamOpen, TransportEvent, TransportMessage, TransportState};
+
+/// High-level lifecycle of the scaffolded runtime wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    /// The runtime is configured but has no active session lifecycle.
+    Prepared,
+    /// The session lifecycle has left its disconnected phase; transport or XMPP
+    /// negotiation may still be in progress.
+    Active,
+}
+
+/// A typed decision for a host that must write a pagehide `<r/>`
+/// synchronously. The runtime does not mutate acknowledgement state until
+/// [`XmppRuntime::commit_pagehide_ack_written`] confirms the transport write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagehideAckRequest {
+    /// The host may write the prepared acknowledgement request.
+    Ready,
+    /// An acknowledgement request is already outstanding.
+    AlreadyPending,
+}
+
+/// Stateful request/session coordinator for the client runtime boundary.
+#[derive(Debug)]
+pub struct XmppRuntime {
+    pub(in crate::runtime) config: ClientConfig,
+    pub(in crate::runtime) snapshot: SessionSnapshot,
+    pub(in crate::runtime) requests: RequestTracker,
+    pub(in crate::runtime) bootstrap: BootstrapState,
+    pub(in crate::runtime) next_bootstrap_stanza: u64,
+    pub(in crate::runtime) sm_state: SmState,
+    pub(in crate::runtime) sm_negotiation: SmNegotiationState,
+    pub(in crate::runtime) sm_advertised: bool,
+    pub(in crate::runtime) pending_fallback_retries: VecDeque<Element>,
+    pub(in crate::runtime) fallback_resume_state: Option<SmResumeState>,
+    pub(in crate::runtime) fallback_retry_writes_in_flight: VecDeque<Element>,
+}
+
+/// Client-side XEP-0198 negotiation ownership for the current stream.
+///
+/// This is deliberately distinct from the SM counters: sending `<enable/>`
+/// starts the sender counter, while the session becomes enabled only after the
+/// peer's matching `<enabled/>` response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(in crate::runtime) enum SmNegotiationState {
+    #[default]
+    Inactive,
+    AwaitingEnableResponse,
+    Enabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) enum BootstrapState {
+    Idle,
+    AwaitingTransport,
+    AwaitingStreamOpen { authenticated: bool },
+    AwaitingFeatures { authenticated: bool },
+    AwaitingAuthenticationOutcome,
+    AwaitingBindResult { stanza_id: StanzaId },
+    AwaitingResume,
+    Ready,
+}
+
+/// Hosts pulse the XEP-0198 clock every 250ms; a pulse arriving this long
+/// after the previous one means the host did not run in between.
+pub(in crate::runtime) const SM_CLOCK_HOST_SUSPENSION_GAP_MS: i64 = 5_000;
+
+impl XmppRuntime {
+    /// Validate client configuration and restore any retained stream-management replay state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid WebSocket endpoint, origin, or blank resource.
+    pub fn try_new(config: ClientConfig) -> ClientResult<Self> {
+        config.validate()?;
+        let persisted_resume_state = config.session.stream_management.resume_state.clone();
+        let sm_state = persisted_resume_state
+            .as_ref()
+            .map(SmState::from_resume_state)
+            .unwrap_or_default();
+        let fallback_resume_state = persisted_resume_state
+            .filter(|state| !state.is_resumable() && state.has_unhandled_outbound_stanzas());
+        let pending_fallback_retries = fallback_resume_state
+            .as_ref()
+            .map(|_| sm_state.unhandled_stanzas_for_fallback_retry().into())
+            .unwrap_or_default();
+
+        Ok(Self {
+            config,
+            snapshot: SessionSnapshot::new(),
+            requests: RequestTracker::default(),
+            bootstrap: BootstrapState::Idle,
+            next_bootstrap_stanza: 0,
+            sm_state,
+            sm_negotiation: SmNegotiationState::Inactive,
+            sm_advertised: false,
+            pending_fallback_retries,
+            fallback_resume_state,
+            fallback_retry_writes_in_flight: VecDeque::new(),
+        })
+    }
+
+    /// Borrow the validated configuration used by this client or runtime.
+    #[must_use]
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
+    }
+
+    /// Borrow the current session snapshot.
+    #[must_use]
+    pub fn snapshot(&self) -> &SessionSnapshot {
+        &self.snapshot
+    }
+
+    /// Return the resumable stream state, including an outstanding fallback replay tail.
+    #[must_use]
+    pub fn resume_state(&self) -> Option<SmResumeState> {
+        if self.fallback_resume_state.is_some()
+            && (!self.pending_fallback_retries.is_empty()
+                || !self.fallback_retry_writes_in_flight.is_empty())
+        {
+            return self.fallback_resume_state.clone();
+        }
+
+        self.sm_state.resume_state()
+    }
+
+    /// Return a snapshot of pending requests in request-identifier order.
+    #[must_use]
+    pub fn pending_requests(&self) -> Vec<PendingRequest> {
+        self.requests.snapshot()
+    }
+
+    /// Return whether the runtime is prepared or has an active session lifecycle.
+    #[must_use]
+    pub fn status(&self) -> RuntimeStatus {
+        match self.snapshot.phase {
+            SessionPhase::Disconnected => RuntimeStatus::Prepared,
+            _ => RuntimeStatus::Active,
+        }
+    }
+
+    /// Whether the session is established and any advertised stream-management negotiation has completed.
+    #[must_use]
+    pub fn can_send_app_stanza(&self) -> bool {
+        if !matches!(self.snapshot.phase, SessionPhase::Established) {
+            return false;
+        }
+
+        let sm_cfg = &self.config.session.stream_management;
+        if sm_cfg.enable_stream_management && self.sm_advertised {
+            return self.sm_state.enabled;
+        }
+
+        true
+    }
+
+    /// Whether a host timer must continue polling the Rust-owned XEP-0198
+    /// acknowledgement policy.
+    #[must_use]
+    pub fn acknowledgement_clock_pending(&self) -> bool {
+        self.sm_state.acknowledgement_clock_pending()
+    }
+
+    /// Register a request, update the session phase when needed, and emit the resulting lifecycle events.
+    ///
+    /// # Errors
+    ///
+    /// Returns request-correlation errors or an invalid session-phase transition when the request cannot be queued.
+    pub fn queue_request(&mut self, request: ClientRequest) -> ClientResult<Vec<ClientEvent>> {
+        let previous = self.snapshot.clone();
+        let pending = self.requests.register(request)?;
+        self.snapshot.pending_requests = self.requests.pending_len();
+
+        let mut events = vec![ClientEvent::RequestQueued(pending.clone())];
+
+        match pending.kind() {
+            RequestKind::Connect => {
+                self.bootstrap = BootstrapState::AwaitingTransport;
+                self.set_phase(SessionPhase::Connecting)?;
+            }
+            RequestKind::Disconnect => {
+                self.bootstrap = BootstrapState::Idle;
+                self.set_phase(SessionPhase::Disconnecting)?;
+                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                    TransportMessage::Close(StreamClose),
+                )));
+            }
+            _ => {}
+        }
+
+        self.push_state_change(previous, &mut events);
+
+        Ok(events)
+    }
+
+    /// Install the resource binding and emit the session and state-change events.
+    ///
+    /// # Errors
+    ///
+    /// Returns a session-phase transition error if the current session cannot complete binding.
+    pub fn bind_session(&mut self, binding: SessionBinding) -> ClientResult<Vec<ClientEvent>> {
+        let previous = self.snapshot.clone();
+        let mut events = Vec::new();
+        self.finish_binding(binding, &mut events)?;
+        self.push_state_change(previous, &mut events);
+        Ok(events)
+    }
+
+    /// Remove a completed request and emit its correlation event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownRequest` when the request is not pending.
+    pub fn resolve_request(&mut self, request_id: RequestId) -> ClientResult<ClientEvent> {
+        let pending = self.requests.resolve(request_id)?;
+        self.snapshot.pending_requests = self.requests.pending_len();
+        Ok(self.resolved_event(pending))
+    }
+
+    /// Complete the pending request correlated with this stanza identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownStanzaCorrelation` when the stanza has no pending request.
+    pub fn resolve_request_by_stanza_id(
+        &mut self,
+        stanza_id: &StanzaId,
+    ) -> ClientResult<ClientEvent> {
+        let pending = self.requests.resolve_by_stanza_id(stanza_id)?;
+        self.snapshot.pending_requests = self.requests.pending_len();
+        Ok(self.resolved_event(pending))
+    }
+
+    /// Apply an incoming transport event to authentication, session, and request state.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid session transitions, missing bootstrap features, rejected or malformed authentication/binding responses, or a failed request correlation.
+    pub fn apply_transport_event(
+        &mut self,
+        event: TransportEvent,
+    ) -> ClientResult<Vec<ClientEvent>> {
+        let previous = self.snapshot.clone();
+        let mut events = vec![ClientEvent::Transport(event.clone())];
+        self.apply_transport_side_effects(event, &mut events)?;
+        self.push_state_change(previous, &mut events);
+        Ok(events)
+    }
+
+    /// Drive the Rust-owned XEP-0198 acknowledgement clock. Hosts supply time
+    /// so browser and native timer implementations cannot redefine protocol
+    /// cadence and tests can exercise every boundary deterministically.
+    /// Poll the XEP-0198 clock from a host that pulses it on a fixed short
+    /// cadence. `previous_pulse` is when the host last pulsed; a gap far
+    /// beyond the cadence means the host itself was suspended, so the
+    /// deadlines restart instead of reading that gap as peer silence.
+    pub fn pulse_stream_management_clock(
+        &mut self,
+        previous_pulse: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Vec<ClientEvent> {
+        if previous_pulse.is_some_and(|previous| {
+            now >= previous + chrono::Duration::milliseconds(SM_CLOCK_HOST_SUSPENSION_GAP_MS)
+        }) {
+            self.sm_state
+                .restart_acknowledgement_clock_after_host_suspension(now);
+        }
+        self.poll_stream_management_clock(now)
+    }
+
+    /// Advance acknowledgement timers and emit retry, timeout, or reconnect events.
+    pub fn poll_stream_management_clock(&mut self, now: DateTime<Utc>) -> Vec<ClientEvent> {
+        let mut events = Vec::new();
+        for action in self.sm_state.poll_acknowledgement_clock(now) {
+            match action {
+                SmAcknowledgementClockAction::Retry { attempt } => {
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Element(SmState::build_request_ack()),
+                    )));
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::AckRetry { attempt },
+                    )));
+                }
+                SmAcknowledgementClockAction::RequestTimedOut => {
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::AckRequestTimedOut,
+                    )));
+                }
+                SmAcknowledgementClockAction::ProgressTimedOut => {
+                    // A reconnect terminates this stream's acknowledgement
+                    // policy. Actions returned earlier in the same poll (such
+                    // as a retry on the five-second plateau) must not reach
+                    // the transport after retirement. XEP-0198 closure must
+                    // leave the session unfinished so its ID and tail resume.
+                    let previous = self.snapshot.clone();
+                    self.sm_state.stop();
+                    self.sm_negotiation = SmNegotiationState::Inactive;
+                    self.bootstrap = BootstrapState::Idle;
+                    self.snapshot.binding = None;
+                    self.snapshot.phase = SessionPhase::Disconnected;
+                    self.snapshot.transport = TransportState::Closed;
+                    events.clear();
+                    events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                        StreamManagementEvent::ReconnectRequired,
+                    )));
+                    self.push_state_change(previous, &mut events);
+                    events.push(ClientEvent::Connection(ConnectionEvent::CloseTransport));
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    /// Request a peer acknowledgement through the runtime-owned XEP-0198
+    /// builder. Browser callers use this during `pagehide`; the host never
+    /// constructs XML or redefines whether the current stream can carry SM.
+    #[must_use]
+    pub fn request_stream_management_ack(&self) -> Vec<ClientEvent> {
+        if !self.sm_state.enabled {
+            return Vec::new();
+        }
+        vec![
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(
+                SmState::build_request_ack(),
+            ))),
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: crate::event::SmAckRequestReason::Pagehide,
+                },
+            )),
+        ]
+    }
+
+    /// Decide whether pagehide should write an acknowledgement request. This
+    /// is deliberately separate from the post-write state transition: a
+    /// browser can freeze or reject `WebSocket.send` immediately afterwards.
+    #[must_use]
+    pub fn prepare_pagehide_ack(&self) -> PagehideAckRequest {
+        if !self.sm_state.enabled
+            || self.sm_state.acknowledgement_request_outstanding()
+            || !self.sm_state.has_unhandled_outbound_stanzas()
+        {
+            PagehideAckRequest::AlreadyPending
+        } else {
+            PagehideAckRequest::Ready
+        }
+    }
+
+    /// Commit a pagehide acknowledgement request only after its exact typed
+    /// `<r/>` frame has synchronously reached the WebSocket API.
+    pub fn commit_pagehide_ack_written(&mut self, now: DateTime<Utc>) -> bool {
+        self.sm_state.enabled && self.sm_state.arm_acknowledgement_clock(now)
+    }
+
+    pub(in crate::runtime) fn resolved_event(&self, pending: PendingRequest) -> ClientEvent {
+        ClientEvent::RequestResolved(pending.correlation())
+    }
+
+    pub(in crate::runtime) fn apply_transport_side_effects(
+        &mut self,
+        event: TransportEvent,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        self.snapshot.transport = event.transport_state();
+
+        match event {
+            TransportEvent::StateChanged(TransportState::Connecting) => {
+                self.set_phase(SessionPhase::Connecting)?;
+            }
+            TransportEvent::StateChanged(TransportState::Open) => {
+                if matches!(self.bootstrap, BootstrapState::AwaitingTransport) {
+                    self.begin_stream_open(false, events)?;
+                }
+            }
+            TransportEvent::MessageReceived(TransportMessage::Open(open)) => {
+                self.handle_stream_open(open, events)?;
+            }
+            TransportEvent::MessageReceived(TransportMessage::Element(element)) => {
+                self.handle_received_element(element, events)?;
+            }
+            TransportEvent::MessageSent(TransportMessage::Element(element)) => {
+                self.handle_sent_element(&element, events);
+            }
+            TransportEvent::MessageReceived(TransportMessage::Close(_))
+            | TransportEvent::StateChanged(TransportState::Closed)
+            | TransportEvent::Closed => {
+                self.snapshot.binding = None;
+                self.bootstrap = BootstrapState::Idle;
+                self.sm_state.stop();
+                self.sm_negotiation = SmNegotiationState::Inactive;
+                self.set_phase(SessionPhase::Disconnected)?;
+            }
+            TransportEvent::StateChanged(TransportState::Closing) => {
+                self.set_phase(SessionPhase::Disconnecting)?;
+            }
+            TransportEvent::StateChanged(TransportState::Idle)
+            | TransportEvent::MessageSent(_)
+            | TransportEvent::StateChanged(TransportState::Failed) => {}
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_sent_element(
+        &mut self,
+        element: &Element,
+        events: &mut Vec<ClientEvent>,
+    ) {
+        if element.ns() == NS_SM && element.name() == "enable" {
+            if matches!(self.bootstrap, BootstrapState::Ready)
+                && self.snapshot.binding.is_some()
+                && matches!(self.sm_negotiation, SmNegotiationState::Inactive)
+            {
+                self.sm_state.start_outbound();
+                self.sm_negotiation = SmNegotiationState::AwaitingEnableResponse;
+            }
+            return;
+        }
+
+        if self.sm_state.outbound_enabled
+            && matches!(element.name(), "iq" | "message" | "presence")
+            && self.sm_state.record_sent_stanza(element)
+        {
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(SmState::build_request_ack()),
+            )));
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::AckRequested {
+                    reason: SmAckRequestReason::OutboundStanza,
+                },
+            )));
+        }
+        self.mark_fallback_retry_sent(element);
+    }
+
+    pub(in crate::runtime) fn handle_stream_open(
+        &mut self,
+        open: StreamOpen,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        if let BootstrapState::AwaitingStreamOpen { authenticated } = self.bootstrap {
+            self.bootstrap = BootstrapState::AwaitingFeatures { authenticated };
+            events.push(ClientEvent::Connection(ConnectionEvent::StreamOpened(open)));
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_received_element(
+        &mut self,
+        element: minidom::Element,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        use crate::stream_management::NS_SM;
+
+        if element.ns() == NS_SM {
+            self.handle_sm_element(&element, events)?;
+            return Ok(());
+        }
+
+        if element.name() == "error" && element.ns() == NS_STREAMS {
+            self.handle_stream_error_element(&element, events);
+            return Ok(());
+        }
+
+        // Track inbound stanzas for SM once enabled.
+        if self.sm_state.enabled && matches!(element.name(), "iq" | "message" | "presence") {
+            self.sm_state.record_received(1);
+        }
+
+        // Once bootstrap is complete, route to the app-level stanza dispatcher.
+        if matches!(self.bootstrap, BootstrapState::Ready) {
+            events.extend(self.handle_app_stanza(&element));
+            return Ok(());
+        }
+
+        let Some(parsed) = BootstrapElement::parse(&element) else {
+            return Ok(());
+        };
+
+        match parsed? {
+            BootstrapElement::StreamFeatures(features) => {
+                self.handle_stream_features(features, events)?;
+            }
+            BootstrapElement::SaslSuccess => {
+                self.handle_auth_success(events)?;
+            }
+            BootstrapElement::SaslFailure(failure) => {
+                self.handle_auth_failure(failure, events)?;
+            }
+            BootstrapElement::ResourceBindingResult(result) => {
+                self.handle_bind_result(result, events)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_stream_features(
+        &mut self,
+        features: StreamFeatures,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::FeaturesAdvertised(features.clone()),
+        ));
+
+        match self.bootstrap {
+            BootstrapState::AwaitingFeatures {
+                authenticated: false,
+            } => {
+                if !features.supports(AuthMechanism::OAuthBearer) {
+                    return Err(ClientError::MissingStreamFeature {
+                        feature: RequiredStreamFeature::Authentication(AuthMechanism::OAuthBearer),
+                    });
+                }
+
+                let request = AuthenticationRequest::from_config(self.oauth_config());
+                self.bootstrap = BootstrapState::AwaitingAuthenticationOutcome;
+                self.set_phase(SessionPhase::Authenticating)?;
+                events.push(ClientEvent::Connection(
+                    ConnectionEvent::AuthenticationRequested(request.clone()),
+                ));
+                events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                    request.to_transport_message(),
+                )));
+            }
+            BootstrapState::AwaitingFeatures {
+                authenticated: true,
+            } => {
+                if features.stream_management {
+                    self.sm_advertised = true;
+                } else if self.sm_state.previd.is_some() {
+                    // A persisted XEP-0198 tail is only resumable while the
+                    // new stream advertises SM.  Do not bind a fresh session
+                    // while leaving that tail attached to a now-impossible
+                    // `<resume/>`: move it through the same typed fallback
+                    // queue used after an explicit `<failed/>` response.
+                    //
+                    // The queue remains authoritative until the exact retry
+                    // writes are confirmed by `MessageSent`; a transport
+                    // failure before then therefore keeps it available for
+                    // the next connection attempt.  Clearing `previd` here
+                    // also prevents a later feature emission on this stream
+                    // from producing an invalid delayed `<resume/>`.
+                    self.prepare_fresh_stream_fallback(events, false);
+                }
+
+                let sm_cfg = &self.config.session.stream_management;
+                if sm_cfg.enable_stream_management
+                    && sm_cfg.allow_resume
+                    && features.stream_management
+                    && self.sm_state.previd.is_some()
+                {
+                    let resume = SmState::build_resume(
+                        self.sm_state.previd.as_ref().expect("checked above"),
+                        self.sm_state.inbound_count,
+                    );
+                    self.bootstrap = BootstrapState::AwaitingResume;
+                    self.set_phase(SessionPhase::Resuming)?;
+                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                        TransportMessage::Element(resume),
+                    )));
+                    return Ok(());
+                }
+
+                if !features.bind {
+                    return Err(ClientError::MissingStreamFeature {
+                        feature: RequiredStreamFeature::ResourceBinding,
+                    });
+                }
+
+                self.request_resource_binding(events)?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn request_resource_binding(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let request = ResourceBindingRequest::new(
+            self.next_bootstrap_stanza_id()?,
+            self.oauth_config().resource.clone(),
+        );
+        self.bootstrap = BootstrapState::AwaitingBindResult {
+            stanza_id: request.stanza_id.clone(),
+        };
+        self.set_phase(SessionPhase::Binding)?;
+        events.push(ClientEvent::Connection(
+            ConnectionEvent::ResourceBindingRequested(request.clone()),
+        ));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            request.to_transport_message(),
+        )));
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_auth_success(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        if matches!(
+            self.bootstrap,
+            BootstrapState::AwaitingAuthenticationOutcome
+        ) {
+            events.push(ClientEvent::Connection(
+                ConnectionEvent::AuthenticationSucceeded,
+            ));
+            self.begin_stream_open(true, events)?;
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_auth_failure(
+        &mut self,
+        failure: SaslFailure,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        if matches!(
+            self.bootstrap,
+            BootstrapState::AwaitingAuthenticationOutcome
+        ) {
+            self.bootstrap = BootstrapState::Idle;
+            self.set_phase(SessionPhase::Disconnecting)?;
+            events.push(ClientEvent::Connection(
+                ConnectionEvent::AuthenticationFailed(failure),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn handle_bind_result(
+        &mut self,
+        result: ResourceBindingResult,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let expected = match &self.bootstrap {
+            BootstrapState::AwaitingBindResult { stanza_id } => Some(stanza_id.clone()),
+            _ => None,
+        };
+
+        if let Some(expected) = expected {
+            if result.stanza_id != expected {
+                return Ok(());
+            }
+
+            let binding = result.into_session_binding(None, false);
+            self.finish_binding(binding, events)?;
+        }
+
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn begin_stream_open(
+        &mut self,
+        authenticated: bool,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        let open = StreamOpen::from_config(&self.config);
+        self.bootstrap = BootstrapState::AwaitingStreamOpen { authenticated };
+        self.set_phase(SessionPhase::OpeningStream)?;
+        events.push(ClientEvent::Connection(ConnectionEvent::StreamOpening(
+            open.clone(),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Open(open),
+        )));
+        Ok(())
+    }
+
+    pub(in crate::runtime) fn finish_binding(
+        &mut self,
+        binding: SessionBinding,
+        events: &mut Vec<ClientEvent>,
+    ) -> ClientResult<()> {
+        self.snapshot.binding = Some(binding.clone());
+        self.bootstrap = BootstrapState::Ready;
+        self.set_phase(SessionPhase::Established)?;
+
+        events.push(ClientEvent::Connection(ConnectionEvent::ResourceBound(
+            binding.clone(),
+        )));
+        events.push(ClientEvent::Lifecycle(LifecycleEvent::SessionBound(
+            binding.clone(),
+        )));
+        events.push(ClientEvent::Connection(ConnectionEvent::SessionReady(
+            binding.clone(),
+        )));
+        events.push(ClientEvent::Lifecycle(LifecycleEvent::SessionReady(
+            binding,
+        )));
+
+        let sm_cfg = &self.config.session.stream_management;
+        if sm_cfg.enable_stream_management && self.sm_advertised {
+            let enable = SmState::build_enable_with_max(sm_cfg.allow_resume, sm_cfg.resume_max);
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(enable),
+            )));
+        } else {
+            // No SM was advertised after authentication.  A recovered tail
+            // can only be retried after a successful fresh bind, never before
+            // it; this is the no-SM counterpart to `<failed/>` followed by a
+            // fresh `<enabled/>`.
+            self.flush_pending_fallback_retries(events);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn flush_pending_fallback_retries(&mut self, events: &mut Vec<ClientEvent>) {
+        while let Some(element) = self.pending_fallback_retries.pop_front() {
+            self.fallback_retry_writes_in_flight
+                .push_back(element.clone());
+            events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+                TransportMessage::Element(element),
+            )));
+        }
+    }
+
+    /// Convert a persisted, no-longer-resumable SM tail into typed
+    /// fresh-stream retries.  This is intentionally shared by the
+    /// post-auth-no-SM path and the explicit `<failed/>` path so the retry
+    /// identities, XEP-0203 delay handling, and write-confirmed persistence
+    /// semantics cannot diverge.
+    pub(in crate::runtime) fn prepare_fresh_stream_fallback(
+        &mut self,
+        events: &mut Vec<ClientEvent>,
+        stream_management_remains_available: bool,
+    ) {
+        let failed = self.sm_state.unhandled_message_stanza_ids();
+        let cancelled_iqs = self.sm_state.unhandled_iq_stanza_ids();
+        self.fallback_resume_state = self.sm_state.fallback_retry_state();
+        self.pending_fallback_retries
+            .extend(self.sm_state.unhandled_stanzas_for_fallback_retry());
+        self.sm_state.previd = None;
+        self.sm_state.stop();
+        self.sm_negotiation = SmNegotiationState::Inactive;
+        self.sm_advertised = stream_management_remains_available;
+        events.extend(failed.into_iter().map(|stanza_id| {
+            ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed { stanza_id })
+        }));
+        events.extend(
+            cancelled_iqs
+                .into_iter()
+                .map(|stanza_id| ClientEvent::IqCancelled { stanza_id }),
+        );
+    }
+
+    pub(in crate::runtime) fn mark_fallback_retry_sent(&mut self, element: &Element) {
+        if self
+            .fallback_retry_writes_in_flight
+            .front()
+            .is_some_and(|retry| retry == element)
+        {
+            self.fallback_retry_writes_in_flight.pop_front();
+            if self.pending_fallback_retries.is_empty()
+                && self.fallback_retry_writes_in_flight.is_empty()
+            {
+                self.fallback_resume_state = None;
+            }
+        }
+    }
+
+    pub(in crate::runtime) fn oauth_config(&self) -> &OAuthBearerConfig {
+        match &self.config.auth {
+            AuthenticationConfig::OAuthBearer(config) => config,
+        }
+    }
+
+    pub(in crate::runtime) fn next_bootstrap_stanza_id(&mut self) -> ClientResult<StanzaId> {
+        self.next_bootstrap_stanza = self
+            .next_bootstrap_stanza
+            .checked_add(1)
+            .ok_or(ClientError::RequestIdExhausted)?;
+        StanzaId::try_new(format!("bind-{}", self.next_bootstrap_stanza))
+    }
+
+    pub(in crate::runtime) fn push_state_change(
+        &self,
+        previous: SessionSnapshot,
+        events: &mut Vec<ClientEvent>,
+    ) {
+        if previous != self.snapshot {
+            events.push(ClientEvent::Lifecycle(LifecycleEvent::StateChanged(
+                self.snapshot.clone(),
+            )));
+        }
+    }
+
+    pub(in crate::runtime) fn set_phase(&mut self, next: SessionPhase) -> ClientResult<()> {
+        let current = self.snapshot.phase;
+        if current == next {
+            return Ok(());
+        }
+
+        let valid = matches!(
+            (current, next),
+            (SessionPhase::Disconnected, SessionPhase::Connecting)
+                | (SessionPhase::Connecting, SessionPhase::OpeningStream)
+                | (SessionPhase::OpeningStream, SessionPhase::Authenticating)
+                | (SessionPhase::Authenticating, SessionPhase::OpeningStream)
+                | (SessionPhase::OpeningStream, SessionPhase::Binding)
+                | (SessionPhase::OpeningStream, SessionPhase::Resuming)
+                | (SessionPhase::Authenticating, SessionPhase::Binding)
+                | (SessionPhase::Resuming, SessionPhase::Binding)
+                | (SessionPhase::Binding, SessionPhase::Established)
+                | (SessionPhase::Established, SessionPhase::Resuming)
+                | (SessionPhase::Resuming, SessionPhase::Established)
+                | (SessionPhase::Established, SessionPhase::Disconnecting)
+                | (SessionPhase::Connecting, SessionPhase::Disconnecting)
+                | (SessionPhase::OpeningStream, SessionPhase::Disconnecting)
+                | (SessionPhase::Authenticating, SessionPhase::Disconnecting)
+                | (SessionPhase::Binding, SessionPhase::Disconnecting)
+                | (SessionPhase::Disconnecting, SessionPhase::Disconnected)
+                | (_, SessionPhase::Disconnected)
+        );
+
+        if !valid {
+            return Err(ClientError::InvalidPhaseTransition {
+                from: current,
+                to: next,
+            });
+        }
+
+        self.snapshot.phase = next;
+        Ok(())
+    }
+}

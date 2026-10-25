@@ -127,7 +127,7 @@ fn an_older_decoder_ignores_the_added_trace_field() {
 /// failures.
 #[test]
 fn delegated_relay_replies_go_through_the_dispatch_span_helper() {
-    let source = include_str!("../../relay.rs");
+    let source = include_str!("../implementation.rs");
     let production = source
         .split("#[cfg(test)]")
         .next()

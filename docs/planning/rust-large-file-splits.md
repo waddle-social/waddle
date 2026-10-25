@@ -2,19 +2,21 @@
 
 Inventory: 2026-10-25, base `6f2c65b59`. Paths below are relative to `server/crates/`.
 This is the follow-up list for issue #2023; implement one seam at a time, beginning
-with `session_janitors.rs`, with existing behavior covered before extraction.
+with `session_janitors/implementation.rs`, with existing behavior covered before
+extraction. Extracted paths below name their current files; their line counts
+are approximate.
 
 Each future split should preserve the current public module and existing test names, or deliberately update nextest filters and source-reading tests with inventory evidence.
 
-1. `waddle-server/src/server/session_janitors.rs` (15348): first split operational loops by lifetime (session expiry, orphan occupants, detached send attempts, node drain); retain shared scheduler/cancellation wiring in a small facade. Move inline tests with their respective seam while keeping externally filtered paths or updating filters atomically.
+1. `waddle-server/src/server/session_janitors/implementation.rs` (~6400): first split operational loops by lifetime (session expiry, orphan occupants, detached send attempts, node drain); retain shared scheduler/cancellation wiring. The original `session_janitors.rs` facade still holds ~9250 lines of inline tests and test helpers; split those by the same seams while preserving externally filtered test paths or updating filters atomically.
 2. `waddle-server/src/server/routes/websocket/tests/stream_management.rs` (14176): group handshake/resume, ack/window accounting, detach/replay and persistence scenarios; shared fixtures stay in test support.
 3. `waddle-xmpp/src/muc/room_registry_actor/tests.rs` (12285): split registration/ownership, durable restore, joins and teardown cases.
 4. `waddle-xmpp/src/muc/room_actor/tests.rs` (11401): split membership/presence, messages/history, invites and owner/admin commands.
 5. `waddle-server/src/server/routes/websocket/tests/muc.rs` (9787): split joins/presence, configuration/admin, invites, message/archive and restart scenarios.
 6. `waddle-server/src/admin/channels.rs` (9618): separate channel CRUD/membership operations, durable cleanup/cascade integration and test fixtures.
 7. `waddle-xmpp/src/stream_management/session_registry/tests.rs` (9148): separate registration/lookup, resume claims, ack/replay and expiration/ownership scenarios.
-8. `waddle-server/src/muc_durable.rs` (8167): separate durable-room persistence, hydration, orphan cleanup and authority tests.
-9. `waddle-xmpp/src/muc/room_registry_actor.rs` (7131): separate actor messages, ownership transitions and room lifecycle handlers; existing durable_restore extraction is a seam to extend.
+8. `waddle-server/src/muc_durable.rs` (~5670): separate durable-room persistence, hydration, orphan cleanup and authority tests retained in the original facade. Production implementation now lives in `muc_durable/implementation.rs` (~2550), which is below the large-file threshold.
+9. `waddle-xmpp/src/muc/room_registry_actor/implementation.rs` (~7140): separate actor messages, ownership transitions and room lifecycle handlers; existing durable_restore extraction is a seam to extend.
 10. `waddle-server/src/server/routes/websocket/cleanup.rs` (7094): separate disconnect cleanup, detached ingress drain, MUC teardown and replay proof paths.
 11. `waddle-server/src/pending_delivery/tests.rs` (6524): split custody/ack, recovery/reconstruction, cross-node and malformed-storage cases.
 12. `waddle-server/src/server/routes/websocket/tests/messages.rs` (6360): separate direct/group messaging, delivery receipts, offline/recovery and negative cases.
@@ -26,20 +28,20 @@ Each future split should preserve the current public module and existing test na
 
 ## Additional production parent-module inventory
 
-The AST audit also checks self-named source files. The following 43 files declare
-at least one production child module and contain more than 300 lines of direct
-implementation, excluding imports, module declarations, and inline modules.
-Test-only child modules and test files are excluded. Counts describe the current
-mechanical import/facade pass, rather than a public API or test-coverage measure.
+The AST audit also checks self-named source files. The following 43 files
+previously declared at least one production child module and contained more
+than 300 lines of direct implementation, excluding imports, module declarations,
+and inline modules. Test-only child modules and test files are excluded. Counts
+record the inventory before the mechanical facade extraction.
 
-These modules need a follow-up facade extraction with their existing public
-paths and test namespaces preserved. They span actor ownership, protocol
-handlers, persistence and telemetry boundaries, so the next extraction pass
-requires independent architecture review and compiler verification. In
-particular, preserve explicit clustering remote-actor/message identifiers and
-check macro-generated items and private sibling access. Moving a whole
-implementation into one leaf does not finish the responsibility-level splits
-listed above, beginning with `session_janitors.rs`.
+All 43 now keep production implementation in a private `implementation.rs` child
+leaf. Their existing child modules and tests remain in the original facade,
+along with the imports those consumers need. Reexports preserve established
+paths and visibility boundaries. The
+extraction preserves explicit clustering remote-actor/message identifiers,
+serialization shapes and macro behavior. Moving a whole implementation into
+one leaf does not finish the responsibility-level splits listed above,
+beginning with `session_janitors.rs`.
 
 | Source (relative to `server/`) | Direct implementation lines | Production children |
 | --- | ---: | ---: |

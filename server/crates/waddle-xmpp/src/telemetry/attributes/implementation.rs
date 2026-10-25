@@ -1,0 +1,1855 @@
+//! Implementation behind the parent module facade.
+
+use super::sealed;
+use super::IngressEffectKind;
+use super::KeyValue;
+use super::StanzaErrorCondition;
+
+/// A typed metric attribute: a static key and a value drawn from a
+/// closed enum. Sealed — only the allowlist in this module implements
+/// it.
+pub trait MetricAttribute: sealed::Sealed {
+    /// The attribute key, e.g. `"kind"`.
+    fn key(&self) -> &'static str;
+    /// The enumerated attribute value, e.g. `"muc_pm"`.
+    fn value(&self) -> &'static str;
+    /// The OTel key/value pair for this attribute.
+    fn key_value(&self) -> KeyValue {
+        KeyValue::new(self.key(), self.value())
+    }
+}
+
+/// `queue` — the two durable stages of first-party push custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushQueue {
+    Outbox,
+    Provider,
+}
+
+impl sealed::Sealed for PushQueue {}
+
+impl MetricAttribute for PushQueue {
+    fn key(&self) -> &'static str {
+        "queue"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Outbox => "outbox",
+            Self::Provider => "provider",
+        }
+    }
+}
+
+/// `operation` — the externally requested ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOp {
+    Acquire,
+    EnsureClaimed,
+    StealStale,
+    StealForResume,
+    Release,
+    ReleaseExact,
+    ReleaseMany,
+}
+
+impl sealed::Sealed for ClaimOp {}
+impl MetricAttribute for ClaimOp {
+    fn key(&self) -> &'static str {
+        "operation"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Acquire => "acquire",
+            Self::EnsureClaimed => "ensure_claimed",
+            Self::StealStale => "steal_stale",
+            Self::StealForResume => "steal_for_resume",
+            Self::Release => "release",
+            Self::ReleaseExact => "release_exact",
+            Self::ReleaseMany => "release_many",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an ownership mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimResult {
+    Ok,
+    Rejected,
+    Backend,
+}
+
+impl sealed::Sealed for ClaimResult {}
+impl MetricAttribute for ClaimResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+        }
+    }
+}
+
+/// `result` — the bounded result class of an advisory ownership fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceResult {
+    Ok,
+    Rejected,
+    Backend,
+    /// The caller's deadline dropped the fence future before the store
+    /// answered — the outage sample the family exists to expose.
+    Cancelled,
+}
+
+impl sealed::Sealed for FenceResult {}
+impl MetricAttribute for FenceResult {
+    fn key(&self) -> &'static str {
+        "result"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Rejected => "rejected",
+            Self::Backend => "backend",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// `kind` — what flavor of message traffic a sample counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    /// One-to-one chat message.
+    Dm,
+    /// Groupchat message fanned out through a MUC room.
+    Muc,
+    /// Private message addressed to a single MUC occupant.
+    MucPm,
+}
+
+impl sealed::Sealed for MessageKind {}
+impl MetricAttribute for MessageKind {
+    fn key(&self) -> &'static str {
+        "kind"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Dm => "dm",
+            Self::Muc => "muc",
+            Self::MucPm => "muc_pm",
+        }
+    }
+}
+
+/// `janitor` — which background sweep loop a sample belongs to.
+/// One variant per janitor loop in `waddle-server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Janitor {
+    /// Expired detached XEP-0198 stream-management sessions.
+    SmExpiry,
+    /// Orphaned SM/room claims after node loss (clustering).
+    OrphanReaper,
+    /// Orphaned/aged-out pending-delivery claims.
+    PendingDeliveryClaim,
+    /// XEP-0357 push publish-job queue.
+    PushPublishJob,
+    /// Notification outbox drain/retry/dead-letter.
+    NotificationOutbox,
+    /// Durable LiveKit/Muji teardown convergence outbox.
+    CallTeardownOutbox,
+    /// Durable per-room mutation-effect delivery queue.
+    RoomEffectOutbox,
+    /// Expired OAuth/device auth state.
+    AuthState,
+    /// Dormant MUC room eviction.
+    RoomDormancy,
+    /// Empty user-actor reaping.
+    UserActorReaper,
+    /// Remote user-resource mirrors after committed socket-node expiry.
+    RemoteOwnerMirror,
+    /// Remote MUC membership reconciliation (clustering).
+    RemoteMucMembership,
+    /// Retained local MUC departure reconciliation.
+    LocalMucDeparture,
+}
+
+impl sealed::Sealed for Janitor {}
+impl MetricAttribute for Janitor {
+    fn key(&self) -> &'static str {
+        "janitor"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::SmExpiry => "sm_expiry",
+            Self::OrphanReaper => "orphan_reaper",
+            Self::PendingDeliveryClaim => "pending_delivery_claim",
+            Self::PushPublishJob => "push_publish_job",
+            Self::NotificationOutbox => "notification_outbox",
+            Self::CallTeardownOutbox => "call_teardown_outbox",
+            Self::RoomEffectOutbox => "room_effect_outbox",
+            Self::AuthState => "auth_state",
+            Self::RoomDormancy => "room_dormancy",
+            Self::UserActorReaper => "user_actor_reaper",
+            Self::RemoteOwnerMirror => "remote_owner_mirror",
+            Self::RemoteMucMembership => "remote_muc_membership",
+            Self::LocalMucDeparture => "local_muc_departure",
+        }
+    }
+}
+
+/// `outcome` — how a janitor sweep (or comparable bounded operation)
+/// ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepOutcome {
+    /// The sweep ran to completion, including zero-work sweeps.
+    Completed,
+    /// Bounded work or expected contention remains for a later tick.
+    Deferred,
+    /// The sweep aborted on an error.
+    Failed,
+}
+
+impl sealed::Sealed for SweepOutcome {}
+impl MetricAttribute for SweepOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Deferred => "deferred",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// `outcome` — one remote-owner mirror reconciliation attempt. No node or JID labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteOwnerMirrorOutcome {
+    Live,
+    Retired,
+    Superseded,
+    Deferred,
+    Failed,
+}
+
+impl sealed::Sealed for RemoteOwnerMirrorOutcome {}
+impl MetricAttribute for RemoteOwnerMirrorOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Retired => "retired",
+            Self::Superseded => "superseded",
+            Self::Deferred => "deferred",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// `path` — which XEP-0198 replay buffer evicted an unacked stanza.
+///
+/// The same logical eviction signal exists on two code paths:
+/// the live attached stream state and the detached persisted session.
+/// The metric keeps one family and an enumerated `path` label so
+/// aliases and dashboards can preserve the distinction without
+/// proliferating near-duplicate instruments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmEvictionPath {
+    /// A paced batch write grew the replay window past capacity.
+    Batch,
+    /// A replay-tail fallback recorded unsent frames after pacing timed out.
+    ReplayTail,
+    /// A direct outbound write grew the replay window past capacity.
+    DirectOutbound,
+    /// A detach/drain path recorded while no live wire was available.
+    DetachDrain,
+}
+
+impl SmEvictionPath {
+    /// Every allowed value. Startup zero-registration iterates this so
+    /// every path series exists before the first real eviction.
+    pub const ALL: [Self; 4] = [
+        Self::Batch,
+        Self::ReplayTail,
+        Self::DirectOutbound,
+        Self::DetachDrain,
+    ];
+
+    /// Stable string form shared by logs and metrics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::ReplayTail => "replay_tail",
+            Self::DirectOutbound => "direct_outbound",
+            Self::DetachDrain => "detach_drain",
+        }
+    }
+}
+
+impl sealed::Sealed for SmEvictionPath {}
+impl MetricAttribute for SmEvictionPath {
+    fn key(&self) -> &'static str {
+        "path"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `outcome` — how a client XEP-0198 `<a h='N'/>` ack was classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAckOutcome {
+    /// `h` advanced the handled frontier.
+    Advanced,
+    /// `h` exactly matched the already-confirmed handled frontier.
+    Duplicate,
+    /// `h` regressed behind the already-confirmed handled frontier.
+    Regressed,
+    /// `h` claimed more handled stanzas than the server had sent.
+    TooHigh,
+}
+
+impl sealed::Sealed for SmAckOutcome {}
+impl MetricAttribute for SmAckOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Duplicate => "duplicate",
+            Self::Regressed => "regressed",
+            Self::TooHigh => "too_high",
+        }
+    }
+}
+
+/// `outcome` — terminal outcome of an XEP-0198 `<resume/>` attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmResumeOutcome {
+    /// The previous stream resumed successfully.
+    Resumed,
+    /// The client attempted resume after starting a fresh session lifecycle.
+    UnexpectedRequest,
+    /// No resumable session existed for the requested stream id.
+    NotFound,
+    /// Cross-node resume could not reach the claimed owner before the handshake deadline.
+    OwnerUnreachable,
+    /// Graceful shutdown abandoned the attempt before any write-side claim work began.
+    ShutdownAbandoned,
+    /// The authenticated identity did not match the detached session or durable principal.
+    IdentityMismatch,
+    /// The detached replay window no longer covered every stanza the client still needed.
+    ReplayGap,
+    /// The client claimed more handled stanzas than the previous stream had sent.
+    HandledTooHigh,
+    /// The detached session had no durable principal to authorize resume.
+    PrincipalUnavailable,
+    /// The detached snapshot JID diverged from its durable principal.
+    DetachedDivergence,
+    /// A storage-backed dependency was unavailable during resume.
+    Storage,
+    /// The resume path hit an internal registry or server error.
+    Internal,
+}
+
+impl sealed::Sealed for SmResumeOutcome {}
+impl MetricAttribute for SmResumeOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Resumed => "resumed",
+            Self::UnexpectedRequest => "unexpected_request",
+            Self::NotFound => "not_found",
+            Self::OwnerUnreachable => "owner_unreachable",
+            Self::ShutdownAbandoned => "shutdown_abandoned",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::ReplayGap => "replay_gap",
+            Self::HandledTooHigh => "handled_too_high",
+            Self::PrincipalUnavailable => "principal_unavailable",
+            Self::DetachedDivergence => "detached_divergence",
+            Self::Storage => "storage",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+/// `reason` — why an XEP-0357 push notification was suppressed.
+///
+/// This is the metric-facing closed set. `waddle-server` converts its
+/// persisted `SuppressedReason` audit value into this enum before emitting,
+/// so metric labels never cross the crate boundary as strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushSuppressReason {
+    /// The notification would target its sender.
+    Xep0357Self,
+    /// The recipient has no push registration.
+    Xep0357NoRegistration,
+    /// The recipient's push registration is disabled.
+    Xep0357RegistrationDisabled,
+    /// XEP-0492 resolved to `<never/>`.
+    Xep0492Never,
+    /// XEP-0492 `<on-mention/>` did not match.
+    Xep0492OnMentionMiss,
+    /// XEP-0191 blocked the sender or conversation.
+    Xep0191Blocked,
+    /// XEP-0513 `<noping/>` opted out of notification.
+    Xep0513Noping,
+    /// XEP-0513 `<active/>` did not match.
+    Xep0513ActiveMiss,
+    /// Waddle DND is active for the recipient.
+    WaddleDnd,
+    /// The downstream push provider rejected the notification.
+    ProviderRejected,
+    /// The downstream push provider reported an expired token.
+    ProviderTokenExpired,
+    /// The XEP-0357 push service is degraded.
+    Xep0357PushServiceDegraded,
+    /// The unread count reached zero before publish.
+    UnreadZeroAtPublish,
+    /// Policy evaluation exhausted its retry budget.
+    PolicyRetriesExhausted,
+    /// The message is an XEP-0444 reaction-only notification.
+    Xep0444Reaction,
+}
+
+impl PushSuppressReason {
+    /// Every allowed value, in stable legacy-renderer order.
+    pub const ALL: [Self; 15] = [
+        Self::Xep0357Self,
+        Self::Xep0357NoRegistration,
+        Self::Xep0357RegistrationDisabled,
+        Self::Xep0492Never,
+        Self::Xep0492OnMentionMiss,
+        Self::Xep0191Blocked,
+        Self::Xep0513Noping,
+        Self::Xep0513ActiveMiss,
+        Self::WaddleDnd,
+        Self::ProviderRejected,
+        Self::ProviderTokenExpired,
+        Self::Xep0357PushServiceDegraded,
+        Self::UnreadZeroAtPublish,
+        Self::PolicyRetriesExhausted,
+        Self::Xep0444Reaction,
+    ];
+
+    /// Every allowed label value, in stable legacy-renderer order.
+    pub const VALUES: [&'static str; 15] = [
+        Self::Xep0357Self.as_str(),
+        Self::Xep0357NoRegistration.as_str(),
+        Self::Xep0357RegistrationDisabled.as_str(),
+        Self::Xep0492Never.as_str(),
+        Self::Xep0492OnMentionMiss.as_str(),
+        Self::Xep0191Blocked.as_str(),
+        Self::Xep0513Noping.as_str(),
+        Self::Xep0513ActiveMiss.as_str(),
+        Self::WaddleDnd.as_str(),
+        Self::ProviderRejected.as_str(),
+        Self::ProviderTokenExpired.as_str(),
+        Self::Xep0357PushServiceDegraded.as_str(),
+        Self::UnreadZeroAtPublish.as_str(),
+        Self::PolicyRetriesExhausted.as_str(),
+        Self::Xep0444Reaction.as_str(),
+    ];
+
+    /// The byte-stable legacy label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xep0357Self => "xep0357_self",
+            Self::Xep0357NoRegistration => "xep0357_no_registration",
+            Self::Xep0357RegistrationDisabled => "xep0357_registration_disabled",
+            Self::Xep0492Never => "xep0492_never",
+            Self::Xep0492OnMentionMiss => "xep0492_on_mention_miss",
+            Self::Xep0191Blocked => "xep0191_blocked",
+            Self::Xep0513Noping => "xep0513_noping",
+            Self::Xep0513ActiveMiss => "xep0513_active_miss",
+            Self::WaddleDnd => "waddle_dnd",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTokenExpired => "provider_token_expired",
+            Self::Xep0357PushServiceDegraded => "xep0357_push_service_degraded",
+            Self::UnreadZeroAtPublish => "unread_zero_at_publish",
+            Self::PolicyRetriesExhausted => "policy_retries_exhausted",
+            Self::Xep0444Reaction => "xep0444_reaction",
+        }
+    }
+}
+
+impl sealed::Sealed for PushSuppressReason {}
+impl MetricAttribute for PushSuppressReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `reason` — bounded failure classification for XEP-0357 outbox transitions.
+/// Raw error text belongs in logs, never in metric attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushRetryReason {
+    Unknown,
+    Storage,
+    PolicyLookup,
+    RegistrationLookup,
+    InboxLookup,
+    InvalidTarget,
+    Blocked,
+    RegistrationGone,
+    ClaimLost,
+    QueueRefused,
+    QueueUnknown,
+    Malformed,
+    Capacity,
+    ProviderServerError,
+    RateLimited,
+    PreSend,
+    UnknownAfterSend,
+}
+
+impl PushRetryReason {
+    /// Every allowed value, including the legacy fallback.
+    pub const ALL: [Self; 17] = [
+        Self::Unknown,
+        Self::Storage,
+        Self::PolicyLookup,
+        Self::RegistrationLookup,
+        Self::InboxLookup,
+        Self::InvalidTarget,
+        Self::Blocked,
+        Self::RegistrationGone,
+        Self::ClaimLost,
+        Self::QueueRefused,
+        Self::QueueUnknown,
+        Self::Malformed,
+        Self::Capacity,
+        Self::ProviderServerError,
+        Self::RateLimited,
+        Self::PreSend,
+        Self::UnknownAfterSend,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Storage => "storage",
+            Self::PolicyLookup => "policy_lookup",
+            Self::RegistrationLookup => "registration_lookup",
+            Self::InboxLookup => "inbox_lookup",
+            Self::InvalidTarget => "invalid_target",
+            Self::Blocked => "blocked",
+            Self::RegistrationGone => "registration_gone",
+            Self::ClaimLost => "claim_lost",
+            Self::QueueRefused => "queue_refused",
+            Self::QueueUnknown => "queue_unknown",
+            Self::Malformed => "malformed",
+            Self::Capacity => "capacity",
+            Self::ProviderServerError => "provider_server_error",
+            Self::RateLimited => "rate_limited",
+            Self::PreSend => "pre_send",
+            Self::UnknownAfterSend => "unknown_after_send",
+        }
+    }
+}
+
+impl sealed::Sealed for PushRetryReason {}
+impl MetricAttribute for PushRetryReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// Whether an attempted push may already have crossed its send boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushFailureClass {
+    PreSend,
+    ProvenRefusal,
+    UnknownAfterSend,
+}
+impl PushFailureClass {
+    pub const ALL: [Self; 3] = [Self::PreSend, Self::ProvenRefusal, Self::UnknownAfterSend];
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreSend => "pre_send",
+            Self::ProvenRefusal => "proven_refusal",
+            Self::UnknownAfterSend => "unknown_after_send",
+        }
+    }
+}
+impl sealed::Sealed for PushFailureClass {}
+impl MetricAttribute for PushFailureClass {
+    fn key(&self) -> &'static str {
+        "failure_class"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// Scheduling disposition; parking never proves failed delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDisposition {
+    Retry,
+    Parked,
+    DeadLetter,
+    RegistrationRevoked,
+    Backpressure,
+}
+impl PushDisposition {
+    pub const ALL: [Self; 5] = [
+        Self::Retry,
+        Self::Parked,
+        Self::DeadLetter,
+        Self::RegistrationRevoked,
+        Self::Backpressure,
+    ];
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Parked => "parked",
+            Self::DeadLetter => "dead_letter",
+            Self::RegistrationRevoked => "registration_revoked",
+            Self::Backpressure => "backpressure",
+        }
+    }
+}
+impl sealed::Sealed for PushDisposition {}
+impl MetricAttribute for PushDisposition {
+    fn key(&self) -> &'static str {
+        "disposition"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `class` — the closed ingress authority decision vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressDecisionClass {
+    Accepted,
+    ExistingCommitted,
+    ExistingConsistent,
+    ExistingRepaired,
+    ExistingDivergent,
+    OwnerFirstAcceptance,
+    OwnerDuplicate,
+    AliasConflict,
+    SemanticMalformed,
+    AuthorizationDenied,
+    PolicyDenied,
+    CaptureOverflow,
+    PrincipalMissing,
+    ClaimFenceMissing,
+    RoomGenerationStale,
+    FrontierStale,
+    SmOrdinalConflict,
+    IntentContradiction,
+    Storage,
+    SerializationExhaustion,
+    Timeout,
+    AmbiguousCommit,
+    Lineage,
+    EpochUnsupported,
+}
+impl IngressDecisionClass {
+    pub const ALL: [Self; 24] = [
+        Self::Accepted,
+        Self::ExistingCommitted,
+        Self::ExistingConsistent,
+        Self::ExistingRepaired,
+        Self::ExistingDivergent,
+        Self::OwnerFirstAcceptance,
+        Self::OwnerDuplicate,
+        Self::AliasConflict,
+        Self::SemanticMalformed,
+        Self::AuthorizationDenied,
+        Self::PolicyDenied,
+        Self::CaptureOverflow,
+        Self::PrincipalMissing,
+        Self::ClaimFenceMissing,
+        Self::RoomGenerationStale,
+        Self::FrontierStale,
+        Self::SmOrdinalConflict,
+        Self::IntentContradiction,
+        Self::Storage,
+        Self::SerializationExhaustion,
+        Self::Timeout,
+        Self::AmbiguousCommit,
+        Self::Lineage,
+        Self::EpochUnsupported,
+    ];
+    /// Only committed Phase-B decisions authorize the handled count to advance.
+    pub const fn advances(&self) -> bool {
+        matches!(
+            self,
+            Self::Accepted
+                | Self::ExistingCommitted
+                | Self::ExistingConsistent
+                | Self::ExistingRepaired
+                | Self::ExistingDivergent
+                | Self::OwnerFirstAcceptance
+                | Self::OwnerDuplicate
+                | Self::AliasConflict
+                | Self::SemanticMalformed
+                | Self::AuthorizationDenied
+                | Self::PolicyDenied
+                | Self::CaptureOverflow
+        )
+    }
+}
+impl sealed::Sealed for IngressDecisionClass {}
+impl MetricAttribute for IngressDecisionClass {
+    fn key(&self) -> &'static str {
+        "class"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::ExistingCommitted => "existing_committed",
+            Self::ExistingConsistent => "existing_consistent",
+            Self::ExistingRepaired => "existing_repaired",
+            Self::ExistingDivergent => "existing_divergent",
+            Self::OwnerFirstAcceptance => "owner_first_acceptance",
+            Self::OwnerDuplicate => "owner_duplicate",
+            Self::AliasConflict => "alias_conflict",
+            Self::SemanticMalformed => "semantic_malformed",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::PolicyDenied => "policy_denied",
+            Self::CaptureOverflow => "capture_overflow",
+            Self::PrincipalMissing => "principal_missing",
+            Self::ClaimFenceMissing => "claim_fence_missing",
+            Self::RoomGenerationStale => "room_generation_stale",
+            Self::FrontierStale => "frontier_stale",
+            Self::SmOrdinalConflict => "sm_ordinal_conflict",
+            Self::IntentContradiction => "intent_contradiction",
+            Self::Storage => "storage",
+            Self::SerializationExhaustion => "serialization_exhaustion",
+            Self::Timeout => "timeout",
+            Self::AmbiguousCommit => "ambiguous_commit",
+            Self::Lineage => "lineage",
+            Self::EpochUnsupported => "epoch_unsupported",
+        }
+    }
+}
+
+/// `kind` — bounded post-commit effect categories requiring repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressUnresolvedEffectKind {
+    Frame,
+    Direct,
+    Room,
+    Delivery,
+    Terminalization,
+}
+impl IngressUnresolvedEffectKind {
+    pub const ALL: [Self; 5] = [
+        Self::Frame,
+        Self::Direct,
+        Self::Room,
+        Self::Delivery,
+        Self::Terminalization,
+    ];
+}
+impl sealed::Sealed for IngressUnresolvedEffectKind {}
+impl MetricAttribute for IngressUnresolvedEffectKind {
+    fn key(&self) -> &'static str {
+        "kind"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Frame => "frame",
+            Self::Direct => "direct",
+            Self::Room => "room",
+            Self::Delivery => "delivery",
+            Self::Terminalization => "terminalization",
+        }
+    }
+}
+
+/// `phase` — the execution context leaving an ingress effect unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressEffectExecutionPhase {
+    Live,
+    MaintenanceRecovery,
+    MaintenanceTerminalization,
+    StreamRetirement,
+}
+
+impl IngressEffectExecutionPhase {
+    pub const ALL: [Self; 4] = [
+        Self::Live,
+        Self::MaintenanceRecovery,
+        Self::MaintenanceTerminalization,
+        Self::StreamRetirement,
+    ];
+}
+
+impl sealed::Sealed for IngressEffectExecutionPhase {}
+impl MetricAttribute for IngressEffectExecutionPhase {
+    fn key(&self) -> &'static str {
+        "phase"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::MaintenanceRecovery => "maintenance_recovery",
+            Self::MaintenanceTerminalization => "maintenance_terminalization",
+            Self::StreamRetirement => "stream_retirement",
+        }
+    }
+}
+
+/// `outcome` — the closed alias-resolution result set for ingress authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressAliasOutcome {
+    NoOrigin,
+    Inserted,
+    Existing,
+    Conflict,
+}
+
+impl IngressAliasOutcome {
+    pub const ALL: [Self; 4] = [
+        Self::NoOrigin,
+        Self::Inserted,
+        Self::Existing,
+        Self::Conflict,
+    ];
+}
+
+impl sealed::Sealed for IngressAliasOutcome {}
+impl MetricAttribute for IngressAliasOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::NoOrigin => "no_origin",
+            Self::Inserted => "inserted",
+            Self::Existing => "existing",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// `outcome` — how an ingress retention GC run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressGcOutcome {
+    /// The lineage policy did not attest, so collection was skipped.
+    Unattested,
+    /// The run exhausted its cooperative budget after accounting for progress.
+    Partial,
+    /// The run processed all eligible work within its budgets.
+    Completed,
+    /// The run returned an error unrelated to an enforced timeout.
+    Failed,
+    /// The run hit its lock, statement, or hard-envelope timeout.
+    TimedOut,
+}
+
+impl IngressGcOutcome {
+    pub const ALL: [Self; 5] = [
+        Self::Completed,
+        Self::Partial,
+        Self::Failed,
+        Self::TimedOut,
+        Self::Unattested,
+    ];
+}
+
+impl sealed::Sealed for IngressGcOutcome {}
+impl MetricAttribute for IngressGcOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unattested => "unattested",
+            Self::Partial => "partial",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Why maintenance classified an ingress obligation as unrecoverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressUnrecoverableReason {
+    Unsupported,
+    NoDurableProgress,
+}
+
+impl IngressUnrecoverableReason {
+    pub const ALL: [Self; 2] = [Self::Unsupported, Self::NoDurableProgress];
+}
+
+impl sealed::Sealed for IngressUnrecoverableReason {}
+impl MetricAttribute for IngressUnrecoverableReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::NoDurableProgress => "no_durable_progress",
+        }
+    }
+}
+
+impl sealed::Sealed for IngressEffectKind {}
+impl MetricAttribute for IngressEffectKind {
+    fn key(&self) -> &'static str {
+        "kind"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::DmCallThreadState => "dm_call_thread_state",
+            Self::ArchiveAuthoritative => "archive",
+            Self::RouteDirect => "route_direct",
+            Self::RouteMucGroupchat => "route_muc",
+            Self::RouteOccupantPm => "route_occupant_pm",
+            Self::DispatchToRoomRemote => "dispatch_to_room_remote",
+            Self::Carbons => "carbons",
+            Self::RelayCarbons => "relay_carbons",
+            Self::InboxProject => "inbox_project",
+            Self::NotificationActivityPreview => "notification_activity_preview",
+            Self::GroupchatNotificationRecovery => "groupchat_notification_recovery",
+            Self::PendingDelivery => "pending_delivery",
+            Self::LinkPreviewMediaRef => "link_preview_media_ref",
+            Self::RetractionTombstone => "retraction_tombstone",
+            Self::DmPinMutation => "dm_pin_mutation",
+            Self::MucInviteMembershipGrant => "muc_invite_membership_grant",
+            Self::MucInviteLedger => "muc_invite_ledger",
+            Self::GroupDmMembershipGrant => "group_dm_membership_grant",
+            Self::GroupDmInviteLedger => "group_dm_invite_ledger",
+            Self::RoomSubjectMutation => "room_subject_mutation",
+            Self::CallSignal => "call_signal",
+            Self::Pin => "pin",
+            Self::Extension => "extension",
+            Self::RoomObserver => "room_observer",
+            Self::TombstoneReplayDeletion => "tombstone_replay_deletion",
+            Self::ErrorReply => "error_reply",
+        }
+    }
+}
+
+/// `phase` — the bounded ingress maintenance work being measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressMaintenancePhase {
+    Pass,
+    Terminalization,
+    Recovery,
+    RetentionGc,
+    /// Bounded retention of settled room-observer history (#1901).
+    ObserverRetention,
+}
+
+impl IngressMaintenancePhase {
+    pub const ALL: [Self; 5] = [
+        Self::Pass,
+        Self::Terminalization,
+        Self::Recovery,
+        Self::RetentionGc,
+        Self::ObserverRetention,
+    ];
+}
+
+impl sealed::Sealed for IngressMaintenancePhase {}
+impl MetricAttribute for IngressMaintenancePhase {
+    fn key(&self) -> &'static str {
+        "phase"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Terminalization => "terminalization",
+            Self::Recovery => "recovery",
+            Self::RetentionGc => "retention_gc",
+            Self::ObserverRetention => "observer_retention",
+        }
+    }
+}
+
+/// `table` — the room-observer history family reclaimed by observer
+/// retention. `Source` covers retracted source identities and their
+/// revision mappings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserverHistoryTable {
+    Work,
+    Publication,
+    Receipt,
+    Source,
+}
+
+impl ObserverHistoryTable {
+    pub const ALL: [Self; 4] = [Self::Work, Self::Publication, Self::Receipt, Self::Source];
+}
+
+impl sealed::Sealed for ObserverHistoryTable {}
+impl MetricAttribute for ObserverHistoryTable {
+    fn key(&self) -> &'static str {
+        "table"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Publication => "publication",
+            Self::Receipt => "receipt",
+            Self::Source => "source",
+        }
+    }
+}
+
+/// `outcome` — how an ingress maintenance phase or whole pass ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressMaintenanceOutcome {
+    Complete,
+    Partial,
+    Failed,
+    TimedOut,
+}
+
+impl IngressMaintenanceOutcome {
+    pub const ALL: [Self; 4] = [Self::Complete, Self::Partial, Self::Failed, Self::TimedOut];
+}
+
+impl sealed::Sealed for IngressMaintenanceOutcome {}
+impl MetricAttribute for IngressMaintenanceOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+impl sealed::Sealed for StanzaErrorCondition {}
+impl MetricAttribute for StanzaErrorCondition {
+    fn key(&self) -> &'static str {
+        "condition"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `route` — an HTTP route **template** from the router table
+/// (`/api/auth/token`, `/api/channels/{id}`), never a raw request
+/// path. The value space is bounded by the set of `&'static str`
+/// templates in the router definition; constructing one from anything
+/// but a router-table literal is a review error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpRouteTemplate(pub(in crate::telemetry::attributes) &'static str);
+
+impl HttpRouteTemplate {
+    /// Wrap a router-table route template. `template` MUST be the
+    /// matched route pattern registered with the router, not a
+    /// request path.
+    #[must_use]
+    pub const fn new(template: &'static str) -> Self {
+        Self(template)
+    }
+}
+
+impl sealed::Sealed for HttpRouteTemplate {}
+impl MetricAttribute for HttpRouteTemplate {
+    fn key(&self) -> &'static str {
+        "route"
+    }
+    fn value(&self) -> &'static str {
+        self.0
+    }
+}
+
+/// `status_class` — HTTP response status bucketed to its class, so
+/// the status dimension is exactly five values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpStatusClass {
+    Informational,
+    Success,
+    Redirection,
+    ClientError,
+    ServerError,
+}
+
+impl HttpStatusClass {
+    /// Bucket a numeric status code. Out-of-range codes collapse into
+    /// the nearest class boundary (sub-100 → 1xx, 600+ → 5xx) so the
+    /// label set stays closed.
+    #[must_use]
+    pub const fn from_status(status: u16) -> Self {
+        match status {
+            0..=199 => Self::Informational,
+            200..=299 => Self::Success,
+            300..=399 => Self::Redirection,
+            400..=499 => Self::ClientError,
+            _ => Self::ServerError,
+        }
+    }
+}
+
+impl sealed::Sealed for HttpStatusClass {}
+impl MetricAttribute for HttpStatusClass {
+    fn key(&self) -> &'static str {
+        "status_class"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Informational => "1xx",
+            Self::Success => "2xx",
+            Self::Redirection => "3xx",
+            Self::ClientError => "4xx",
+            Self::ServerError => "5xx",
+        }
+    }
+}
+
+/// `stage` — which step of the authentication surface a sample
+/// belongs to (#1328). One variant per rejection choke point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStage {
+    /// OIDC authorization start / redirect handling.
+    OidcAuthorization,
+    /// OIDC IdP callback (code + state redemption).
+    OidcCallback,
+    /// OAuth token exchange (`/api/auth/token`, XMPP code exchange).
+    TokenExchange,
+    /// OIDC userinfo fetch.
+    Userinfo,
+    /// State / CSRF validation.
+    State,
+    /// OAuth device flow (verify / poll / approve).
+    DeviceFlow,
+    /// Native XEP/SASL SCRAM authentication.
+    Scram,
+}
+
+impl sealed::Sealed for AuthStage {}
+impl MetricAttribute for AuthStage {
+    fn key(&self) -> &'static str {
+        "stage"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::OidcAuthorization => "oidc_authorization",
+            Self::OidcCallback => "oidc_callback",
+            Self::TokenExchange => "token_exchange",
+            Self::Userinfo => "userinfo",
+            Self::State => "state",
+            Self::DeviceFlow => "device_flow",
+            Self::Scram => "scram",
+        }
+    }
+}
+
+/// `error_code` — the enumerated authentication failure classes
+/// (#1328). A closed metric-facing set: auth code maps its concrete
+/// errors into these buckets before emitting, so an IdP's free-form
+/// error string can never become a label value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthErrorCode {
+    /// Unknown, reused, or expired `state` (CSRF mismatch included).
+    InvalidState,
+    /// Authorization code missing, unknown, or already redeemed.
+    InvalidCode,
+    /// Token exchange rejected the grant.
+    InvalidGrant,
+    /// Client credentials rejected.
+    InvalidClient,
+    /// Token or handshake artifact expired.
+    Expired,
+    /// Userinfo fetch failed or returned an unusable document.
+    UserinfoFailed,
+    /// The upstream IdP was unreachable or returned a transport error.
+    ProviderUnreachable,
+    /// SCRAM credential verification failed.
+    InvalidCredentials,
+    /// The account is unknown.
+    UnknownUser,
+    /// Structurally malformed request (missing/invalid parameters).
+    Malformed,
+    /// Any rejection not covered by a specific bucket.
+    Other,
+}
+
+impl sealed::Sealed for AuthErrorCode {}
+impl MetricAttribute for AuthErrorCode {
+    fn key(&self) -> &'static str {
+        "error_code"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::InvalidState => "invalid_state",
+            Self::InvalidCode => "invalid_code",
+            Self::InvalidGrant => "invalid_grant",
+            Self::InvalidClient => "invalid_client",
+            Self::Expired => "expired",
+            Self::UserinfoFailed => "userinfo_failed",
+            Self::ProviderUnreachable => "provider_unreachable",
+            Self::InvalidCredentials => "invalid_credentials",
+            Self::UnknownUser => "unknown_user",
+            Self::Malformed => "malformed",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// `event` — call-signaling event kinds (#1319): XEP-0353 Jingle
+/// Message Initiation verbs plus Muji room join/leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSignalEvent {
+    JmiPropose,
+    JmiProceed,
+    JmiReject,
+    JmiRetract,
+    MujiJoin,
+    MujiLeave,
+}
+
+impl sealed::Sealed for CallSignalEvent {}
+impl MetricAttribute for CallSignalEvent {
+    fn key(&self) -> &'static str {
+        "event"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::JmiPropose => "jmi_propose",
+            Self::JmiProceed => "jmi_proceed",
+            Self::JmiReject => "jmi_reject",
+            Self::JmiRetract => "jmi_retract",
+            Self::MujiJoin => "muji_join",
+            Self::MujiLeave => "muji_leave",
+        }
+    }
+}
+
+/// `reason` — why the Muji/SFU token gate refused to mint a LiveKit
+/// JWT (#1319). Closed metric-facing set; the gate maps its concrete
+/// denial into these buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfuDenialReason {
+    /// The requester is not a member/occupant of the room.
+    MembershipDenied,
+    /// The room does not exist.
+    RoomNotFound,
+    /// The requester failed authentication/authorization upstream of
+    /// membership (bad session, missing identity).
+    NotAuthorized,
+    /// The gate itself failed (lookup error, dependency failure).
+    InternalError,
+}
+
+impl sealed::Sealed for SfuDenialReason {}
+impl MetricAttribute for SfuDenialReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::MembershipDenied => "membership_denied",
+            Self::RoomNotFound => "room_not_found",
+            Self::NotAuthorized => "not_authorized",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
+/// `reason` — why a Jingle call setup failed (#1452).
+///
+/// Counted on `waddle.call.setup.failed`, whose denominator is
+/// `waddle.call.setup.attempted`. Every terminal failure of a
+/// `session-initiate` maps into exactly one of these buckets, so the
+/// success rate is `ok / attempted` and the failure taxonomy is
+/// closed. Distinct from [`SfuDenialReason`], which counts only the
+/// token-mint gate: a setup can fail for reasons that never reach the
+/// SFU (rate limit, bad wire shape, unsupported transport).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSetupFailureReason {
+    /// The Muji room has no live room actor — nobody has joined it.
+    RoomNotFound,
+    /// The requester is not an occupant of the requested Muji room.
+    MembershipDenied,
+    /// The `initiator`/`responder` attribute did not match the
+    /// authenticated session (XEP-0166 §7.1 spoofing defense).
+    NotAuthorized,
+    /// The per-JID `session-initiate` rate limit rejected the attempt.
+    RateLimited,
+    /// The stanza was malformed or addressed somewhere it may not be
+    /// (missing `to`, wrong mixer JID, foreign Muji room, unusable sid).
+    BadRequest,
+    /// The offered Jingle transport is not the Waddle LiveKit
+    /// placeholder, or the client tried to supply its own credentials.
+    UnsupportedTransport,
+    /// Cross-domain Jingle: federation is not implemented.
+    FederationUnsupported,
+    /// The SFU refused or failed to mint the join token.
+    TokenMintFailed,
+    /// The server-side membership check itself failed (room-registry
+    /// lookup or room-actor ask error) before the SFU was ever
+    /// contacted.
+    MembershipCheckFailed,
+    /// The room is owned by another node and that node could not be
+    /// reached, so the request never got as far as an authorization
+    /// decision (#1445). Distinct from `MembershipCheckFailed`: the
+    /// membership gate did not fail, it never ran. Keeping relay
+    /// outages out of the membership bucket is what stops a clustering
+    /// incident from reading as a permissions problem.
+    OwnerUnreachable,
+    /// The 1:1 invite was authorized and forwarded, but the routing
+    /// layer could not hand it to any live or detached resource of
+    /// the addressed full JID — confirmed-offline peer, or the
+    /// delivery was dropped (closed channel / replay-buffer failure)
+    /// — and the caller received the undeliverable bounce instead of
+    /// a peer answer (#1488). Recorded by the routing interpreter,
+    /// not the Jingle handler: the disposition is only known after
+    /// the sans-I/O boundary.
+    PeerUnavailable,
+    /// The routed invite's ticket was dropped without any disposition
+    /// — the routing pipeline discarded the invite (or panicked)
+    /// before delivery was resolved. Counted from the ticket's Drop
+    /// guard so `attempted` always gets a terminal `ok`/`failed` and
+    /// the success-rate denominator cannot silently leak (#1611
+    /// review). A nonzero rate here is a routing-pipeline bug, not a
+    /// peer or client condition.
+    RouteAbandoned,
+    /// XEP-0191: the addressed peer blocks the caller, so the invite
+    /// was bounced by the pre-dispatch blocklist gate before any token
+    /// mint or registration. Counted there — the gate returns before a
+    /// `CallSetupAttempt` ever opens, and every terminal initiate must
+    /// contribute one attempted/failed pair (#1612 review round 13).
+    PeerBlocked,
+}
+
+impl CallSetupFailureReason {
+    /// Every allowed value. Startup zero-registration (#1436) iterates
+    /// this so every failure series exists before the first real call.
+    pub const ALL: [Self; 13] = [
+        Self::RoomNotFound,
+        Self::MembershipDenied,
+        Self::NotAuthorized,
+        Self::RateLimited,
+        Self::BadRequest,
+        Self::UnsupportedTransport,
+        Self::FederationUnsupported,
+        Self::TokenMintFailed,
+        Self::MembershipCheckFailed,
+        Self::OwnerUnreachable,
+        Self::PeerUnavailable,
+        Self::RouteAbandoned,
+        Self::PeerBlocked,
+    ];
+}
+
+impl sealed::Sealed for CallSetupFailureReason {}
+impl MetricAttribute for CallSetupFailureReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "room_not_found",
+            Self::MembershipDenied => "membership_denied",
+            Self::NotAuthorized => "not_authorized",
+            Self::RateLimited => "rate_limited",
+            Self::BadRequest => "bad_request",
+            Self::UnsupportedTransport => "unsupported_transport",
+            Self::FederationUnsupported => "federation_unsupported",
+            Self::TokenMintFailed => "token_mint_failed",
+            Self::MembershipCheckFailed => "membership_check_failed",
+            Self::OwnerUnreachable => "owner_unreachable",
+            Self::PeerUnavailable => "peer_unavailable",
+            Self::RouteAbandoned => "route_abandoned",
+            Self::PeerBlocked => "peer_blocked",
+        }
+    }
+}
+
+/// `event` — which LiveKit webhook payload kind a delivery carried
+/// (#1452). Closed set: everything LiveKit sends that Waddle does not
+/// model collapses into [`Self::Other`], and a delivery that failed
+/// verification before the body could be typed is [`Self::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookEventType {
+    /// `participant_joined`.
+    ParticipantJoined,
+    /// `participant_left`.
+    ParticipantLeft,
+    /// `participant_connection_aborted`.
+    ParticipantConnectionAborted,
+    /// `room_finished`.
+    RoomFinished,
+    /// A signature-valid delivery Waddle does not model.
+    Other,
+    /// The delivery never decoded into a typed event (signature or
+    /// JSON failure), so its kind is not knowable.
+    Unknown,
+}
+
+impl sealed::Sealed for WebhookEventType {}
+impl MetricAttribute for WebhookEventType {
+    fn key(&self) -> &'static str {
+        "event"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ParticipantJoined => "participant_joined",
+            Self::ParticipantLeft => "participant_left",
+            Self::ParticipantConnectionAborted => "participant_connection_aborted",
+            Self::RoomFinished => "room_finished",
+            Self::Other => "other",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// `outcome` — LiveKit webhook ingestion outcome (#1319).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookOutcome {
+    /// A fresh, signature-valid event.
+    Received,
+    /// A replay of an already-processed event id.
+    Duplicate,
+    /// Signature verification failed.
+    SignatureFailed,
+    /// The signature was valid, but the body did not decode as an event.
+    DecodeFailed,
+    /// A valid delivery's effects could not be completed and LiveKit was asked to retry.
+    RetryableFailure,
+    /// A valid delivery contained an unrecoverable value and was acknowledged after warning.
+    PermanentFailure,
+}
+
+impl sealed::Sealed for WebhookOutcome {}
+impl MetricAttribute for WebhookOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Duplicate => "duplicate",
+            Self::SignatureFailed => "signature_failed",
+            Self::DecodeFailed => "decode_failed",
+            Self::RetryableFailure => "retryable_failure",
+            Self::PermanentFailure => "permanent_failure",
+        }
+    }
+}
+
+/// `outcome` — generic success/failure for bounded request-shaped
+/// operations (token mint, TURN credential issuance, provider send).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Success,
+    Failure,
+}
+
+impl sealed::Sealed for RequestOutcome {}
+impl MetricAttribute for RequestOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// `surface` — which call-control request surface hit a rate limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallControlRateLimitedSurface {
+    Terminate,
+    MujiAction,
+    Turn,
+}
+
+impl sealed::Sealed for CallControlRateLimitedSurface {}
+impl MetricAttribute for CallControlRateLimitedSurface {
+    fn key(&self) -> &'static str {
+        "surface"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Terminate => "terminate",
+            Self::MujiAction => "muji_action",
+            Self::Turn => "turn",
+        }
+    }
+}
+
+/// `op` — which LiveKit admin control-plane operation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminOp {
+    DeleteRoom,
+    RemoveParticipant,
+    UpdateParticipant,
+    ListRooms,
+    RoomOccupancy,
+}
+
+impl AdminOp {
+    /// Every allowed value. Startup zero-registration iterates this so
+    /// every admin-failure series exists before the first real error.
+    pub const ALL: [Self; 5] = [
+        Self::DeleteRoom,
+        Self::RemoveParticipant,
+        Self::UpdateParticipant,
+        Self::ListRooms,
+        Self::RoomOccupancy,
+    ];
+}
+
+impl sealed::Sealed for AdminOp {}
+impl MetricAttribute for AdminOp {
+    fn key(&self) -> &'static str {
+        "op"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::DeleteRoom => "delete_room",
+            Self::RemoveParticipant => "remove_participant",
+            Self::UpdateParticipant => "update_participant",
+            Self::ListRooms => "list_rooms",
+            Self::RoomOccupancy => "room_occupancy",
+        }
+    }
+}
+
+/// `stage` — where in the push-notification pipeline a sample was
+/// taken (#531). One variant per observable pipeline transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushStage {
+    /// A notification candidate was created from committed state.
+    CandidateCreated,
+    /// The candidate was suppressed (see `PushSuppressReason`).
+    Suppressed,
+    /// The candidate was coalesced into an existing notification.
+    Coalesced,
+    /// The XEP-0357 publish reached the push service.
+    Published,
+    /// The downstream provider accepted the notification.
+    ProviderSent,
+    /// The downstream provider rejected the notification.
+    ProviderRejected,
+    /// The downstream provider reported an expired token.
+    ProviderTokenExpired,
+    /// The outbox scheduled a retry.
+    RetryScheduled,
+    /// The outbox dead-lettered the job.
+    DeadLettered,
+}
+
+impl sealed::Sealed for PushStage {}
+impl MetricAttribute for PushStage {
+    fn key(&self) -> &'static str {
+        "stage"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::CandidateCreated => "candidate_created",
+            Self::Suppressed => "suppressed",
+            Self::Coalesced => "coalesced",
+            Self::Published => "published",
+            Self::ProviderSent => "provider_sent",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ProviderTokenExpired => "provider_token_expired",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::DeadLettered => "dead_lettered",
+        }
+    }
+}
+
+/// `provider` — which push provider a sample refers to (#531).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushProvider {
+    WebPush,
+    Apns,
+    Fcm,
+}
+
+impl sealed::Sealed for PushProvider {}
+impl MetricAttribute for PushProvider {
+    fn key(&self) -> &'static str {
+        "provider"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::WebPush => "web_push",
+            Self::Apns => "apns",
+            Self::Fcm => "fcm",
+        }
+    }
+}
+
+/// `reason` — why post-auth session initialization failed (#1454). One
+/// variant per `SessionInitializationFailed` return site in the WebSocket
+/// registration path, so the `waddle.session.init.failed` rate is
+/// attributable without unbounded values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionInitFailureReason {
+    /// The XEP-0191 blocklist load at bind failed; the bind fails closed
+    /// rather than running the session with an empty blocklist.
+    BlocklistLoad,
+    /// The authoritative `UserActor` registration (or clustered
+    /// remote-resource registration) could not confirm the resource; the
+    /// DashMap registration was rolled back and the bind failed closed
+    /// (ADR-0017 Phase 1: the two views must never disagree in the
+    /// miss-a-resource direction).
+    AuthoritativeRegistration,
+}
+
+impl sealed::Sealed for SessionInitFailureReason {}
+impl MetricAttribute for SessionInitFailureReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::BlocklistLoad => "blocklist_load",
+            Self::AuthoritativeRegistration => "authoritative_registration",
+        }
+    }
+}
+
+/// `outcome` — result of a clustered remote-resource state update ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteResourceUpdateOutcome {
+    Updated,
+    StaleRegistration,
+    Unavailable,
+    AskFailed,
+}
+
+impl RemoteResourceUpdateOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::StaleRegistration => "stale_registration",
+            Self::Unavailable => "unavailable",
+            Self::AskFailed => "ask_failed",
+        }
+    }
+}
+
+impl sealed::Sealed for RemoteResourceUpdateOutcome {}
+impl MetricAttribute for RemoteResourceUpdateOutcome {
+    fn key(&self) -> &'static str {
+        "outcome"
+    }
+
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// `deny_reason` — why a MUC join was refused (#1440). The stanza
+/// error condition alone collapses several very different operational
+/// faults into `resource-constraint`/`internal-server-error`, so every
+/// denial also carries the concrete refusal site. One variant per
+/// join-denial return site in the WebSocket presence handler; the set
+/// is closed by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MucJoinDenyReason {
+    /// The managed-channel lookup for the room failed.
+    ManagedChannelLookup,
+    /// The room-registry lookup performed before the join failed.
+    RoomLookup,
+    /// Snapshotting the existing room actor before the join failed.
+    RoomSnapshot,
+    /// A managed channel was joined without an authenticated session.
+    SessionMissing,
+    /// The authenticated session carried an unparsable identity.
+    SessionIdentityMalformed,
+    /// The permission graph reports the joiner as a channel outcast.
+    ChannelBan,
+    /// The managed channel is members-only and the joiner has no
+    /// membership.
+    MembershipRequired,
+    /// The managed-channel affiliation resolver itself failed.
+    AffiliationResolver,
+    /// Another cluster node currently holds this room's claim and the
+    /// ordered relay could not proxy the join.
+    OwnershipHeldByAnotherNode,
+    /// This room's ownership claim is mid-reconciliation.
+    OwnershipReconciling,
+    /// The room actor could not resolve its ownership at all.
+    OwnershipUnavailable,
+    /// The room's durable state had not finished restoring.
+    DurableRestorePending,
+    /// Getting or creating the room actor failed.
+    RoomCreate,
+    /// The room actor was evicted underneath the join, twice.
+    RoomEvicted,
+    /// The admission revision kept changing under the join.
+    StaleAdmissionRevision,
+    /// The room actor reports the joiner as banned from the room.
+    RoomBan,
+    /// The room actor is members-only and the joiner is unaffiliated.
+    RoomMembersOnly,
+    /// The room has reached its configured occupant limit.
+    RoomFull,
+    /// The room actor refused the join with an otherwise unclassified
+    /// error (typed fail-safe).
+    RoomActorError,
+    /// The room does not exist and the joiner may not create rooms.
+    RoomCreationNotPermitted,
+    /// The requested nickname is already in use by another occupant.
+    NickConflict,
+    /// The session is already in the room under a different nickname
+    /// (XEP-0045 §7.6, nicknames locked to identity).
+    NickLocked,
+}
+
+impl sealed::Sealed for MucJoinDenyReason {}
+impl MetricAttribute for MucJoinDenyReason {
+    fn key(&self) -> &'static str {
+        "deny_reason"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::ManagedChannelLookup => "managed_channel_lookup",
+            Self::RoomLookup => "room_lookup",
+            Self::RoomSnapshot => "room_snapshot",
+            Self::SessionMissing => "session_missing",
+            Self::SessionIdentityMalformed => "session_identity_malformed",
+            Self::ChannelBan => "channel_ban",
+            Self::MembershipRequired => "membership_required",
+            Self::AffiliationResolver => "affiliation_resolver",
+            Self::OwnershipHeldByAnotherNode => "ownership_held_by_another_node",
+            Self::OwnershipReconciling => "ownership_reconciling",
+            Self::OwnershipUnavailable => "ownership_unavailable",
+            Self::DurableRestorePending => "durable_restore_pending",
+            Self::RoomCreate => "room_create",
+            Self::RoomEvicted => "room_evicted",
+            Self::StaleAdmissionRevision => "stale_admission_revision",
+            Self::RoomBan => "room_ban",
+            Self::RoomMembersOnly => "room_members_only",
+            Self::RoomFull => "room_full",
+            Self::RoomActorError => "room_actor_error",
+            Self::RoomCreationNotPermitted => "room_creation_not_permitted",
+            Self::NickConflict => "nick_conflict",
+            Self::NickLocked => "nick_locked",
+        }
+    }
+}
+
+/// `reason` — why a relayed ingress append obligation was not used as a
+/// deduplication key (#1778). `Unauthorized` means the peer's identity was
+/// provably not usable; `Indeterminate` means the receiver could not decide,
+/// which is an availability signal rather than a peer-behaviour signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressAppendAuthorizationFailure {
+    Unauthorized,
+    Indeterminate,
+}
+
+impl sealed::Sealed for IngressAppendAuthorizationFailure {}
+
+impl MetricAttribute for IngressAppendAuthorizationFailure {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// `check` — which groupchat mention-audience check could not be
+/// completed, so the mentioned non-member was excluded (fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MentionAudienceCheck {
+    /// The local account lookup failed.
+    Account,
+    /// The mentioned user's XEP-0191 blocklist could not be read.
+    Blocking,
+    /// The room right-to-enter decision could not be made.
+    RoomAccess,
+}
+
+impl sealed::Sealed for MentionAudienceCheck {}
+
+impl MetricAttribute for MentionAudienceCheck {
+    fn key(&self) -> &'static str {
+        "check"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::Blocking => "blocking",
+            Self::RoomAccess => "room_access",
+        }
+    }
+}
+
+/// `reason` — why a recovery probe could not establish resource absence.
+/// These are observations, not unique messages or occupants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressReachabilityBlockReason {
+    LocalSocket,
+    ResumableSession,
+    SessionProbeFailed,
+    SessionRegistryMissing,
+    PeerPresent,
+    PeerProbeUnproven,
+}
+
+impl sealed::Sealed for IngressReachabilityBlockReason {}
+
+impl MetricAttribute for IngressReachabilityBlockReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::LocalSocket => "local_socket",
+            Self::ResumableSession => "resumable_session",
+            Self::SessionProbeFailed => "session_probe_failed",
+            Self::SessionRegistryMissing => "session_registry_missing",
+            Self::PeerPresent => "peer_present",
+            Self::PeerProbeUnproven => "peer_probe_unproven",
+        }
+    }
+}
