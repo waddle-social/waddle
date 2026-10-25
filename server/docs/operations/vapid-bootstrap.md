@@ -50,19 +50,20 @@ the variable back reintroduces the bootstrap secret.
 
 ### Helm
 
-The chart has no dedicated VAPID value. Inject the bootstrap secret with
-`extraSecretRefs` or `containerExtraEnv`, then remove that key after the
-first successful boot:
+The chart has no dedicated VAPID value. `WADDLE_VAPID_PRIVATE_KEY` comes
+only from a Kubernetes Secret. After the first successful boot, remove the
+variable from that Secret and roll the pods:
 
 - `extraSecretRefs` mounts an external Secret through `envFrom`. Drop
-  `WADDLE_VAPID_PRIVATE_KEY` from that Secret and roll the pods. Set
-  `extraSecretChecksum` when the Secret is managed outside the chart so the
-  rollout sees the change.
-- `containerExtraEnv` / `config.extraEnv` can also carry the variable. Delete
-  the entry and upgrade.
+  `WADDLE_VAPID_PRIVATE_KEY` from that Secret. Set `extraSecretChecksum`
+  when the Secret is managed outside the chart so the rollout sees the
+  change.
+- `containerExtraEnv` may reference the same Secret with
+  `valueFrom.secretKeyRef`. Delete that entry and upgrade once the key is
+  stored.
 
-Do not put the private key in `config.extraEnv`. That field is rendered into
-a ConfigMap.
+`config.extraEnv` is rendered into a ConfigMap. Do not put
+`WADDLE_VAPID_PRIVATE_KEY` there.
 
 ### Containers and other process managers
 

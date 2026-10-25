@@ -346,10 +346,11 @@ This chart supports two extra env mechanisms:
 
 Web Push signing uses a sealed key in the database.
 `WADDLE_VAPID_PRIVATE_KEY` is an optional first-boot bootstrap secret. The
-chart does not render it. Supply it through `extraSecretRefs` or
-`containerExtraEnv` only until the first successful boot has stored the key,
-then remove it from that Secret or env list and roll the pods. The full
-procedure is in
+chart does not render it. Supply it only from a Kubernetes Secret, through
+`extraSecretRefs` or a `containerExtraEnv` `valueFrom.secretKeyRef`, until
+the first successful boot has stored the key, then remove it from that
+Secret and roll the pods. Do not put it in `config.extraEnv`; that field is
+a ConfigMap. The full procedure is in
 [`docs/operations/vapid-bootstrap.md`](../../docs/operations/vapid-bootstrap.md).
 
 ## Graceful drain
