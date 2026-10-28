@@ -101,7 +101,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="grid gap-4">
+  <div class="grid grid-cols-[minmax(0,1fr)] gap-4">
     <div class="grid gap-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex flex-wrap gap-1.5" role="group" aria-label="Discussion status filter">
@@ -194,7 +194,7 @@ onMounted(() => {
         v-for="section in sections"
         v-show="section.entries.length > 0"
         :key="section.id"
-        class="grid gap-2"
+        class="grid grid-cols-[minmax(0,1fr)] gap-2"
       >
         <h2 :class="kickerClass">
           {{ section.label }} · {{ section.entries.length }}
