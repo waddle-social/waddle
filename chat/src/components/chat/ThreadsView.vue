@@ -42,7 +42,7 @@ function joinCall(entry: WasmThreadEntry, media: CallMedia) {
 
 <template>
   <div class="chat-content-pane chat-pane-scroll bg-background">
-    <div class="mx-auto grid w-full max-w-3xl gap-5 px-[var(--chat-content-inline)] py-6">
+    <div class="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-5 px-[var(--chat-content-inline)] py-6">
       <header class="flex items-center gap-3">
         <button
           type="button"
