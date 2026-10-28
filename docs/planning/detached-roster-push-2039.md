@@ -12,11 +12,13 @@ successor epoch (`session_registry/append.rs`, introduced by #1981). Existing
 captures remain immutable. A missing capture can also reflect failed reads or
 unavailable authority; it is not proof of takeover.
 
-## Implementation plan
+## Implementation
 
 1. Return a distinct typed missing-fence error before any fenced append write.
 2. Preserve the exact captured-fence check and fail-closed behavior.
-3. Report subscription roster push failures after local fallback, distinguishing
+3. Deduplicate the detached/claimed discovery snapshot by resource; concurrent
+   resume can otherwise expose the same target in both maps. Report subscription
+   roster push failures after local fallback, distinguishing
    local queue acceptance from unresolved local delivery. Neither means client
    receipt or proven roster catch-up.
 4. Test missing and stale fences through the persistence append interface,
@@ -25,3 +27,36 @@ unavailable authority; it is not proof of takeover.
 No ownership reacquisition, target suppression, protocol changes, or remote
 retry mechanism is justified by the available production evidence. The analogous
 IQ roster-set fanout is outside this focused subscription-path investigation.
+
+## Historical telemetry check
+
+A bounded read-only recheck of the original 2026-10-27 16:38–21:56 UTC window
+returned the same three warnings. All lack captured-fence presence, push ID,
+roster version, and delivery disposition. All three retrieved traces contain
+12 spans with UNSET statuses. Their later `send_to` span has no result or payload
+correlation; a trace-correlated log search returned only the same warnings.
+No production state was changed. These observations cannot establish the
+historical pushes' disposition or the reason their capture was unavailable.
+
+[Original observation window](https://waddlesocial.grafana.net/d/waddle-overview/waddle-overview?from=1793119080000&to=1793138400000)
+
+## Reading future warnings
+
+- `missing captured ownership fence` means the append never reached the
+  transactional owner check. It may reflect failed capture recovery or unavailable
+  authority, and does not prove a successor exists.
+- `fencing check failed` with a supplied capture means exact owner/epoch or local
+  process authority validation rejected the write. It does not by itself identify
+  a successor or its delivery outcome.
+- `disposition=local_queue_accepted` means the final local fallback queue accepted
+  the push. It does not mean a socket write or client acknowledgement succeeded.
+- `disposition=unresolved_locally` means no local fallback acceptance was observed.
+  No remote retry or roster catch-up is implied.
+
+The warning retains its original text for existing log searches. `push_id` and
+`roster_version` correlate the rejected append with its local fallback. Neither
+fence rejection writes a session, replay entry or ingress custody proof.
+
+Roster-version catch-up requires a subsequent client roster query; it is not an
+automatic consequence of a new bind. Existing happy-path replay and stale-version
+query tests establish those mechanisms, not recovery of the three observed pushes.

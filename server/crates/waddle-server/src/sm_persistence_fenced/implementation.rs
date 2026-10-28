@@ -1404,7 +1404,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         append: PersistedDetachedAppend,
         expected_fence: Option<&SmClaimFence>,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
-        let fence = expected_fence.ok_or_else(|| SmPersistenceError::NotOwner {
+        let fence = expected_fence.ok_or_else(|| SmPersistenceError::MissingClaimFence {
             entity: Entity::new(EntityType::SmSession, append.session.stream_id.as_str()),
         })?;
         self.append_detached_under(append, fence).await

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::{
     build_roster_push, send_existing_subscription_ack, warn, AskType, BareJid, BroadcastOutcome,
     DatabaseRosterStorage, RosterItem, RosterItemRow, RosterRowChange, RosterStorageError,
@@ -218,18 +220,16 @@ async fn send_roster_push_to_resources(
             return;
         }
     };
-    let detached: Vec<_> = detached
+    // Discovery reads detached and claimed maps separately. A concurrent
+    // resume can move one resource between those reads; fan out only once.
+    let detached: BTreeSet<_> = detached
         .into_iter()
         .filter(|resource| !delivered_resources.contains(resource))
         .collect();
+    let mut failed_appends = Vec::new();
     for resource in detached {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
+        let push_id = format!("roster-push-{}", uuid::Uuid::new_v4());
+        let push = build_roster_push(&push_id, user_jid, &resource, item, Some(version));
         let stanza = Stanza::Iq(Box::new(push));
         match state
             .deps
@@ -257,10 +257,11 @@ async fn send_roster_push_to_resources(
                 }
             }
             Err(error) => {
-                warn!(error = %error, resource = %resource, "Failed to record detached roster push");
+                failed_appends.push((resource, error, push_id));
             }
         }
     }
+    let mut locally_queued_resources = Vec::new();
     for resource in state
         .deps
         .protocol
@@ -269,18 +270,32 @@ async fn send_roster_push_to_resources(
         .into_iter()
         .filter(|resource| !delivered_resources.contains(resource))
     {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
-        let _ = state
+        let push_id = failed_appends
+            .iter()
+            .find(|(failed_resource, _, _)| failed_resource == &resource)
+            .map(|(_, _, push_id)| push_id.clone())
+            .unwrap_or_else(|| format!("roster-push-{}", uuid::Uuid::new_v4()));
+        let push = build_roster_push(&push_id, user_jid, &resource, item, Some(version));
+        if state
             .deps
             .protocol
             .connection_registry
-            .try_send_to(&resource, Stanza::Iq(Box::new(push)));
+            .try_send_to(&resource, Stanza::Iq(Box::new(push)))
+            == BroadcastOutcome::Delivered
+        {
+            locally_queued_resources.push(resource);
+        }
+    }
+    for (resource, error, push_id) in failed_appends {
+        // Queue acceptance is observable here; client receipt, remote-owner
+        // delivery and later roster-version catch-up are not.
+        let disposition = if locally_queued_resources.contains(&resource) {
+            "local_queue_accepted"
+        } else {
+            "unresolved_locally"
+        };
+        warn!(error = %error, resource = %resource, %push_id, roster_version = %version,
+            disposition, "Failed to record detached roster push");
     }
 }
 
@@ -379,3 +394,6 @@ fn ask_state_str(value: AskType) -> &'static str {
         AskType::Subscribe => "subscribe",
     }
 }
+
+#[cfg(test)]
+mod tests;
