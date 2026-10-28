@@ -257,7 +257,11 @@ async fn send_roster_push_to_resources(
                 }
             }
             Err(error) => {
-                failed_appends.push((resource, error, push_id));
+                // Preserve the observed rejection even if a later append
+                // blocks and the caller cancels fanout before local fallback.
+                warn!(error = %error, resource = %resource, %push_id, roster_version = %version,
+                    disposition = "pending_local_fallback", "Failed to record detached roster push");
+                failed_appends.push((resource, push_id));
             }
         }
     }
@@ -272,8 +276,8 @@ async fn send_roster_push_to_resources(
     {
         let push_id = failed_appends
             .iter()
-            .find(|(failed_resource, _, _)| failed_resource == &resource)
-            .map(|(_, _, push_id)| push_id.clone())
+            .find(|(failed_resource, _)| failed_resource == &resource)
+            .map(|(_, push_id)| push_id.clone())
             .unwrap_or_else(|| format!("roster-push-{}", uuid::Uuid::new_v4()));
         let push = build_roster_push(&push_id, user_jid, &resource, item, Some(version));
         if state
@@ -286,7 +290,7 @@ async fn send_roster_push_to_resources(
             locally_queued_resources.push(resource);
         }
     }
-    for (resource, error, push_id) in failed_appends {
+    for (resource, push_id) in failed_appends {
         // Queue acceptance is observable here; client receipt, remote-owner
         // delivery and later roster-version catch-up are not.
         let disposition = if locally_queued_resources.contains(&resource) {
@@ -294,8 +298,8 @@ async fn send_roster_push_to_resources(
         } else {
             "unresolved_locally"
         };
-        warn!(error = %error, resource = %resource, %push_id, roster_version = %version,
-            disposition, "Failed to record detached roster push");
+        warn!(resource = %resource, %push_id, roster_version = %version,
+            disposition, "Detached roster push local fallback outcome");
     }
 }
 

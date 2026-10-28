@@ -18,11 +18,13 @@ unavailable authority; it is not proof of takeover.
 2. Preserve the exact captured-fence check and fail-closed behavior.
 3. Deduplicate the detached/claimed discovery snapshot by resource; concurrent
    resume can otherwise expose the same target in both maps. Report subscription
-   roster push failures after local fallback, distinguishing
-   local queue acceptance from unresolved local delivery. Neither means client
-   receipt or proven roster catch-up.
+   append rejections immediately, then report the local fallback outcome,
+   distinguishing local queue acceptance from unresolved local delivery. Neither
+   means client receipt or proven roster catch-up.
 4. Test missing and stale fences through the persistence append interface,
-   including unchanged replay rows/counters, and verify fallback diagnostics.
+   including unchanged replay rows/counters. Verify fallback diagnostics and
+   preservation of rejection evidence when a later resource blocks and the
+   caller cancels fanout.
 
 No ownership reacquisition, target suppression, protocol changes, or remote
 retry mechanism is justified by the available production evidence. The analogous
@@ -48,14 +50,21 @@ historical pushes' disposition or the reason their capture was unavailable.
 - `fencing check failed` with a supplied capture means exact owner/epoch or local
   process authority validation rejected the write. It does not by itself identify
   a successor or its delivery outcome.
+- `disposition=pending_local_fallback` on `Failed to record detached roster push`
+  records the append rejection immediately, before awaiting another resource.
+  A caller timeout can cancel fanout without erasing this evidence.
 - `disposition=local_queue_accepted` means the final local fallback queue accepted
   the push. It does not mean a socket write or client acknowledgement succeeded.
 - `disposition=unresolved_locally` means no local fallback acceptance was observed.
   No remote retry or roster catch-up is implied.
 
-The warning retains its original text for existing log searches. `push_id` and
-`roster_version` correlate the rejected append with its local fallback. Neither
-fence rejection writes a session, replay entry or ingress custody proof.
+The immediate rejection warning retains its original text for existing count
+queries: one such warning per rejected append. The separate
+`Detached roster push local fallback outcome` event carries the final disposition.
+`push_id` and `roster_version` correlate both events with the fallback frame.
+A missing final event leaves the outcome unestablished; it does not prove either
+acceptance or failure. Neither fence rejection writes a session, replay entry or
+ingress custody proof.
 
 Roster-version catch-up requires a subsequent client roster query; it is not an
 automatic consequence of a new bind. Existing happy-path replay and stale-version
