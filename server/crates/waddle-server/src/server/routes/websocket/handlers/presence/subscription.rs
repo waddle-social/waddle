@@ -1,9 +1,8 @@
 use super::{
-    build_available_presence, build_roster_push, build_subscription_presence, debug, warn, AskType,
-    BareJid, BroadcastOutcome, DatabaseBlockingStorage, DatabaseRosterStorage, Element, FullJid,
-    GetDatabase, Jid, RosterItem, RosterItemRow, RosterRowChange, RosterStorageError,
-    RosterVersion, Stanza, Subscription, SubscriptionStateMachine, SubscriptionType,
-    WebSocketState,
+    build_available_presence, build_subscription_presence, debug, warn, AskType, BareJid,
+    DatabaseBlockingStorage, DatabaseRosterStorage, Element, FullJid, GetDatabase, Jid, RosterItem,
+    RosterItemRow, RosterRowChange, RosterStorageError, Stanza, Subscription,
+    SubscriptionStateMachine, SubscriptionType, WebSocketState,
 };
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 #[cfg(feature = "clustering")]
@@ -33,7 +32,7 @@ use delivery::{
     send_subscription_presence_side_effects, subscription_presence_recipients,
 };
 #[cfg(feature = "clustering")]
-use roster_state::send_current_roster_push_to_local_resources;
+use roster_state::send_current_roster_push_to_resources;
 use roster_state::update_subscription_roster_state;
 
 mod implementation;

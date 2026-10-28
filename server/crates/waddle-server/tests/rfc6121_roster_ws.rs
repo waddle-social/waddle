@@ -341,6 +341,47 @@ async fn roster_set_pushes_only_to_interested_connected_user_resources() {
         "uninterested resource must not receive roster push: {tablet_frame:?}"
     );
 
+    // Subscription changes share the roster-set interest policy, while also
+    // pushing to the originating interested resource.
+    let approval = xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Subscribed)
+        .with_to("bob@localhost".parse::<jid::Jid>().expect("contact JID"));
+    let approval: minidom::Element = approval.into();
+    let mut approval_xml = Vec::new();
+    approval
+        .write_to(&mut approval_xml)
+        .expect("serialize approval");
+    desktop
+        .send(std::str::from_utf8(&approval_xml).expect("approval UTF-8"))
+        .await
+        .expect("send subscription preapproval");
+    let mut approval_versions = Vec::new();
+    for resource in [&mut desktop, &mut phone] {
+        let push = resource
+            .recv_matching(|frame| {
+                frame.contains("jabber:iq:roster")
+                    && frame.contains("bob@localhost")
+                    && frame.contains("approved='true'")
+            })
+            .await
+            .expect("interested resource receives subscription roster push");
+        approval_versions.push(roster_version(&push));
+        assert_no_frame_matching(
+            resource,
+            Duration::from_millis(250),
+            |frame| frame.contains("jabber:iq:roster"),
+            "one subscription change must not duplicate its roster push",
+        )
+        .await;
+    }
+    assert_eq!(approval_versions[0], approval_versions[1]);
+    assert_no_frame_matching(
+        &mut tablet,
+        Duration::from_millis(250),
+        |frame| frame.contains("jabber:iq:roster"),
+        "subscription changes must not push to an uninterested resource",
+    )
+    .await;
+
     tablet
         .send(
             r#"<iq xmlns="jabber:client" type="set" id="roster-uninterested-source"><query xmlns="jabber:iq:roster"><item jid="carol@localhost" name="Carol"/></query></iq>"#,

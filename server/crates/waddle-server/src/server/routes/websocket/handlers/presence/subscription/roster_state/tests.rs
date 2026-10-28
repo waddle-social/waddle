@@ -85,7 +85,7 @@ async fn failed_append_warning(
     let _subscriber = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .json()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .with_writer(writer)
             .finish(),
     );
@@ -117,7 +117,7 @@ async fn failed_append_warning(
     let user = jid.to_bare();
     let item = RosterItem::new("bob@example.com".parse().expect("contact JID"));
     let version: RosterVersion = "version-after-subscription".parse().expect("version");
-    let fanout = send_roster_push_to_resources(&state, &user, &item, &version);
+    let fanout = send_roster_push_to_resources(&state, &user, &item, &version, None);
     tokio::pin!(fanout);
     assert!(matches!(futures::poll!(fanout.as_mut()), Poll::Pending));
     let (sender, mut receiver) = mpsc::channel(1);
@@ -159,7 +159,7 @@ async fn failed_append_warning(
         events
             .iter()
             .filter(|event| {
-                event["fields"]["message"] == "Detached roster push local fallback outcome"
+                event["fields"]["message"] == "Detached roster push fallback outcome"
             })
             .count(),
         1,
@@ -169,17 +169,14 @@ async fn failed_append_warning(
         .iter()
         .find(|event| event["fields"]["message"] == "Failed to record detached roster push")
         .unwrap_or_else(|| panic!("missing append warning in {logs}"));
-    assert_eq!(
-        initial_warning["fields"]["disposition"],
-        "pending_local_fallback"
-    );
+    assert_eq!(initial_warning["fields"]["disposition"], "pending_fallback");
     assert!(initial_warning["fields"]["error"]
         .as_str()
         .expect("error")
         .contains("detached append source is missing"));
     let warning = events
         .iter()
-        .find(|event| event["fields"]["message"] == "Detached roster push local fallback outcome")
+        .find(|event| event["fields"]["message"] == "Detached roster push fallback outcome")
         .unwrap_or_else(|| panic!("missing fallback outcome in {logs}"));
     assert_eq!(
         initial_warning["fields"]["push_id"],
@@ -211,6 +208,7 @@ async fn failed_append_warning(
 async fn rejected_detached_roster_append_reports_local_queue_acceptance() {
     let (warning, queued) = failed_append_warning(true, false).await;
     assert_eq!(warning["fields"]["disposition"], "local_queue_accepted");
+    assert_eq!(warning["level"], "INFO");
     let Stanza::Iq(push) = queued.expect("fallback queued the roster push").stanza else {
         panic!("expected roster IQ");
     };
@@ -224,7 +222,7 @@ async fn rejected_detached_roster_append_reports_local_queue_acceptance() {
 #[tokio::test(flavor = "current_thread")]
 async fn rejected_detached_roster_append_reports_unresolved_without_local_fallback() {
     let (warning, queued) = failed_append_warning(false, false).await;
-    assert_eq!(warning["fields"]["disposition"], "unresolved_locally");
+    assert_eq!(warning["fields"]["disposition"], "unresolved");
     assert!(queued.is_none());
     assert!(warning["fields"]["push_id"]
         .as_str()
@@ -235,7 +233,7 @@ async fn rejected_detached_roster_append_reports_unresolved_without_local_fallba
 #[tokio::test(flavor = "current_thread")]
 async fn rejected_detached_roster_append_reports_unresolved_when_local_queue_is_full() {
     let (warning, queued) = failed_append_warning(true, true).await;
-    assert_eq!(warning["fields"]["disposition"], "unresolved_locally");
+    assert_eq!(warning["fields"]["disposition"], "unresolved");
     assert!(matches!(
         queued.expect("existing queue entry").stanza,
         Stanza::Presence(_)
@@ -250,7 +248,7 @@ async fn rejected_detached_roster_append_warning_survives_later_resource_cancell
     let _subscriber = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .json()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .with_writer(writer)
             .finish(),
     );
@@ -289,7 +287,7 @@ async fn rejected_detached_roster_append_warning_survives_later_resource_cancell
     let item = RosterItem::new("bob@example.com".parse().expect("contact JID"));
     let version: RosterVersion = "version-before-cancellation".parse().expect("version");
     let mut fanout = Box::pin(send_roster_push_to_resources(
-        &state, &user, &item, &version,
+        &state, &user, &item, &version, None,
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::select! {
@@ -316,13 +314,13 @@ async fn rejected_detached_roster_append_warning_survives_later_resource_cancell
         warning["fields"]["roster_version"],
         "version-before-cancellation"
     );
-    assert_eq!(warning["fields"]["disposition"], "pending_local_fallback");
+    assert_eq!(warning["fields"]["disposition"], "pending_fallback");
     assert!(warning["fields"]["push_id"]
         .as_str()
         .expect("push ID")
         .starts_with("roster-push-"));
     assert!(!events.iter().any(|event| {
-        event["fields"]["message"] == "Detached roster push local fallback outcome"
+        event["fields"]["message"] == "Detached roster push fallback outcome"
             && event["fields"]["resource"] == "alice@example.com/a"
     }));
     assert!(storage

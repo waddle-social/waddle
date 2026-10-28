@@ -18,7 +18,7 @@ use super::{
 #[cfg(test)]
 use crate::clustering::relay::RelayAskError;
 #[cfg(test)]
-use crate::clustering::route_bridge::TEST_CANCELLED_REMOTE_FRAMES;
+use crate::clustering::route_bridge::{TEST_CANCELLED_REMOTE_FRAMES, TEST_REMOTE_FRAME_TRANSPORT};
 use crate::ingress::execute::RelayFrameReceiptCompletion;
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::ingress::identity::IngressRelayAdmission;
@@ -665,6 +665,12 @@ impl OrderedRelayDeliveryBridge {
         };
         #[cfg(test)]
         let offered = message.frame.clone();
+        #[cfg(test)]
+        let result = match TEST_REMOTE_FRAME_TRANSPORT.try_with(Arc::clone) {
+            Ok(transport) => Ok(transport(message).await),
+            Err(_) => handle.deliver_remote_resource_frame(message).await,
+        };
+        #[cfg(not(test))]
         let result = handle.deliver_remote_resource_frame(message).await;
         #[cfg(test)]
         if matches!(&result, Err(RelayAskError::Cancelled)) {

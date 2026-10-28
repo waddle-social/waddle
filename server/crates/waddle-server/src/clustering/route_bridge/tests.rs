@@ -463,5 +463,6 @@ mod owner_sweep;
 mod presence;
 mod reassert;
 mod retention_boundary;
+mod roster_fanout;
 
 pub(crate) mod transient_timestamp;

@@ -1,10 +1,9 @@
-use std::collections::BTreeSet;
+use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_to_resources;
 
 use super::{
-    build_roster_push, send_existing_subscription_ack, warn, AskType, BareJid, BroadcastOutcome,
-    DatabaseRosterStorage, RosterItem, RosterItemRow, RosterRowChange, RosterStorageError,
-    RosterVersion, Stanza, Subscription, SubscriptionStateMachine, SubscriptionType,
-    WebSocketState,
+    send_existing_subscription_ack, warn, AskType, BareJid, DatabaseRosterStorage, RosterItem,
+    RosterItemRow, RosterRowChange, RosterStorageError, Subscription, SubscriptionStateMachine,
+    SubscriptionType, WebSocketState,
 };
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
 
@@ -135,7 +134,8 @@ pub(super) async fn update_subscription_roster_state(
                 RosterRowChange::Upsert(roster_item_to_row(&from_item)),
             )
             .await?;
-        send_roster_push_to_resources(state, &request.from, &from_item, &mutation.version).await;
+        send_roster_push_to_resources(state, &request.from, &from_item, &mutation.version, None)
+            .await;
         // _lock drops at end of this block; from-user's lock released before
         // we acquire to-user's lock below.
     }
@@ -146,7 +146,7 @@ pub(super) async fn update_subscription_roster_state(
                 RosterRowChange::Upsert(roster_item_to_row(&to_item)),
             )
             .await?;
-        send_roster_push_to_resources(state, &request.to, &to_item, &mutation.version).await;
+        send_roster_push_to_resources(state, &request.to, &to_item, &mutation.version, None).await;
     }
 
     Ok(Some(SubscriptionRosterUpdate {
@@ -163,7 +163,7 @@ pub(super) struct SubscriptionRosterUpdate {
 }
 
 #[cfg(feature = "clustering")]
-pub(super) async fn send_current_roster_push_to_local_resources(
+pub(super) async fn send_current_roster_push_to_resources(
     state: &WebSocketState,
     storage: &DatabaseRosterStorage,
     user_jid: &BareJid,
@@ -173,134 +173,8 @@ pub(super) async fn send_current_roster_push_to_local_resources(
         return Ok(());
     };
     let version = storage.get_or_create_roster_version(user_jid).await?;
-    send_roster_push_to_resources(state, user_jid, &item, &version).await;
+    send_roster_push_to_resources(state, user_jid, &item, &version, None).await;
     Ok(())
-}
-
-async fn send_roster_push_to_resources(
-    state: &WebSocketState,
-    user_jid: &BareJid,
-    item: &RosterItem,
-    version: &RosterVersion,
-) {
-    let live_resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid);
-    let mut delivered_resources = Vec::new();
-    for resource in &live_resources {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            resource,
-            item,
-            Some(version),
-        );
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(resource, Stanza::Iq(Box::new(push)))
-            == BroadcastOutcome::Delivered
-        {
-            delivered_resources.push(resource.clone());
-        }
-    }
-    let detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .interested_detached_resources_for_user(user_jid)
-        .await
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            warn!(error = %error, user = %user_jid, "Failed to list detached roster-interested resources");
-            return;
-        }
-    };
-    // Discovery reads detached and claimed maps separately. A concurrent
-    // resume can move one resource between those reads; fan out only once.
-    let detached: BTreeSet<_> = detached
-        .into_iter()
-        .filter(|resource| !delivered_resources.contains(resource))
-        .collect();
-    let mut failed_appends = Vec::new();
-    for resource in detached {
-        let push_id = format!("roster-push-{}", uuid::Uuid::new_v4());
-        let push = build_roster_push(&push_id, user_jid, &resource, item, Some(version));
-        let stanza = Stanza::Iq(Box::new(push));
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
-            .await
-        {
-            Ok(true) => delivered_resources.push(resource.clone()),
-            Ok(false) => {
-                let is_interested = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .is_roster_interested(&resource);
-                if is_interested
-                    && state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .try_send_to(&resource, stanza)
-                        == BroadcastOutcome::Delivered
-                {
-                    delivered_resources.push(resource.clone());
-                }
-            }
-            Err(error) => {
-                // Preserve the observed rejection even if a later append
-                // blocks and the caller cancels fanout before local fallback.
-                warn!(error = %error, resource = %resource, %push_id, roster_version = %version,
-                    disposition = "pending_local_fallback", "Failed to record detached roster push");
-                failed_appends.push((resource, push_id));
-            }
-        }
-    }
-    let mut locally_queued_resources = Vec::new();
-    for resource in state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid)
-        .into_iter()
-        .filter(|resource| !delivered_resources.contains(resource))
-    {
-        let push_id = failed_appends
-            .iter()
-            .find(|(failed_resource, _)| failed_resource == &resource)
-            .map(|(_, push_id)| push_id.clone())
-            .unwrap_or_else(|| format!("roster-push-{}", uuid::Uuid::new_v4()));
-        let push = build_roster_push(&push_id, user_jid, &resource, item, Some(version));
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&resource, Stanza::Iq(Box::new(push)))
-            == BroadcastOutcome::Delivered
-        {
-            locally_queued_resources.push(resource);
-        }
-    }
-    for (resource, push_id) in failed_appends {
-        // Queue acceptance is observable here; client receipt, remote-owner
-        // delivery and later roster-version catch-up are not.
-        let disposition = if locally_queued_resources.contains(&resource) {
-            "local_queue_accepted"
-        } else {
-            "unresolved_locally"
-        };
-        warn!(resource = %resource, %push_id, roster_version = %version,
-            disposition, "Detached roster push local fallback outcome");
-    }
 }
 
 async fn load_existing_roster_item(

@@ -3,11 +3,13 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
+use tracing::Instrument;
 
-use crate::ownership::{Entity, EntityType};
+use crate::ownership::{ClaimError, Entity, EntityType};
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::persistence::{
     KeyedSnapshotOutcome, PersistedDetachedAppend, PersistedUnackedStanza, SmClaimFence,
+    SmPersistenceError,
 };
 use crate::Stanza;
 
@@ -50,41 +52,115 @@ pub(super) fn prepare_detached_append(
     })
 }
 
+/// A failed read-only recovery attempt is not itself an append failure:
+/// portable persistence can legitimately accept a delta without a fence.
+#[derive(Debug)]
+pub(super) enum DetachedAppendFenceFailure {
+    CustodyUnproven,
+    InvalidCapture(SmRegistryError),
+    IdentityDisabled,
+    IdentityChanged,
+    PersistenceUnavailable,
+    SourceReadFailed(SmPersistenceError),
+    SourceMissing,
+    ClaimLookupTimeout,
+    ClaimLookupFailed(ClaimError),
+    ClaimLookupAbsent,
+    ForeignOwner,
+    ReservationPending,
+    RecoveryFailed(SmRegistryError),
+}
+
+impl DetachedAppendFenceFailure {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CustodyUnproven => "custody_unproven",
+            Self::InvalidCapture(_) => "invalid_capture",
+            Self::IdentityDisabled => "identity_disabled",
+            Self::IdentityChanged => "identity_changed",
+            Self::PersistenceUnavailable => "persistence_unavailable",
+            Self::SourceReadFailed(_) => "source_read_failed",
+            Self::SourceMissing => "source_missing",
+            Self::ClaimLookupTimeout => "claim_lookup_timeout",
+            Self::ClaimLookupFailed(_) => "claim_lookup_failed",
+            Self::ClaimLookupAbsent => "claim_lookup_absent",
+            Self::ForeignOwner => "foreign_owner",
+            Self::ReservationPending => "reservation_pending",
+            Self::RecoveryFailed(_) => "recovery_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for DetachedAppendFenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCapture(error) | Self::RecoveryFailed(error) => {
+                std::fmt::Display::fmt(error, f)
+            }
+            Self::SourceReadFailed(error) => std::fmt::Display::fmt(error, f),
+            Self::ClaimLookupFailed(error) => std::fmt::Display::fmt(error, f),
+            _ => f.write_str(self.as_str()),
+        }
+    }
+}
+
+pub(super) fn warn_detached_append_recovery_failure(
+    stream_id: &SmSessionId,
+    recovery: &Result<SmClaimFence, DetachedAppendFenceFailure>,
+    backend_error: &SmPersistenceError,
+) {
+    if let Err(failure) = recovery {
+        tracing::warn!(
+            %stream_id,
+            reason = failure.as_str(),
+            recovery_error = %failure,
+            error = %backend_error,
+            "Detached SM append failed after fence recovery was unavailable"
+        );
+    }
+}
+
 impl InMemorySmSessionRegistry {
     /// Recover only an unrecorded first fence. Existing captures never adopt
-    /// a replacement epoch. Callers retain this stream's operation guard.
+    /// a replacement epoch. Callers retain this stream's operation guard and
+    /// preserve failures until the persistence adapter determines acceptance.
     pub(super) async fn detached_append_fence_locked(
         &self,
         session: &DetachedSession,
-    ) -> Option<SmClaimFence> {
+    ) -> Result<SmClaimFence, DetachedAppendFenceFailure> {
         if let Some(fence) = session.promotion_custody.captured_fence() {
-            return Some(fence.clone());
+            return Ok(fence.clone());
         }
         if !matches!(
             session.promotion_custody,
             super::PromotionCaptureCustody::NeverClaimed(_)
         ) {
-            return None;
+            return Err(DetachedAppendFenceFailure::CustodyUnproven);
         }
-        self.validate_promotion_capture_locked(session).ok()?;
+        self.validate_promotion_capture_locked(session)
+            .map_err(DetachedAppendFenceFailure::InvalidCapture)?;
         let identity = self.node_identity.current();
-        if !identity.is_active()
-            || session
-                .promotion_custody
-                .first_claim_owner()
-                .is_some_and(|owner| owner != &identity)
+        if !identity.is_active() {
+            return Err(DetachedAppendFenceFailure::IdentityDisabled);
+        }
+        if session
+            .promotion_custody
+            .first_claim_owner()
+            .is_some_and(|owner| owner != &identity)
         {
-            return None;
+            return Err(DetachedAppendFenceFailure::IdentityChanged);
         }
         // The delta may only extend a canonical source that still exists.
         // This also prevents fresh admission after a successor consumed it.
         self.persistence
-            .as_ref()?
+            .as_ref()
+            .ok_or(DetachedAppendFenceFailure::PersistenceUnavailable)?
             .get_session(&SmSessionId::new(&session.stream_id))
             .await
-            .ok()??;
+            .map_err(DetachedAppendFenceFailure::SourceReadFailed)?
+            .ok_or(DetachedAppendFenceFailure::SourceMissing)?;
         if self.node_identity.current() != identity {
-            return None;
+            return Err(DetachedAppendFenceFailure::IdentityChanged);
         }
         if session.promotion_custody.first_claim_owner().is_none() {
             // Cancellation may precede registry acquire-on-detach. The fenced
@@ -96,10 +172,14 @@ impl InMemorySmSessionRegistry {
                 self.claim_store.current_claim(&entity),
             )
             .await
-            .ok()?
-            .ok()??;
-            if claim.owner != identity || self.node_identity.current() != identity {
-                return None;
+            .map_err(|_| DetachedAppendFenceFailure::ClaimLookupTimeout)?
+            .map_err(DetachedAppendFenceFailure::ClaimLookupFailed)?
+            .ok_or(DetachedAppendFenceFailure::ClaimLookupAbsent)?;
+            if claim.owner != identity {
+                return Err(DetachedAppendFenceFailure::ForeignOwner);
+            }
+            if self.node_identity.current() != identity {
+                return Err(DetachedAppendFenceFailure::IdentityChanged);
             }
             // Pin only after observing ownership. Portable sources with no
             // claim must retain their legitimate first-admission opportunity.
@@ -115,22 +195,17 @@ impl InMemorySmSessionRegistry {
             )
             .await;
         }
-        if self.node_identity.current() != identity
-            || self.has_claim_fence_reservation(&session.stream_id)
-        {
-            return None;
+        if self.node_identity.current() != identity {
+            return Err(DetachedAppendFenceFailure::IdentityChanged);
         }
-        // Reuse the existing capture/identity/capacity checks. Portable stores
-        // retain their historical ability to write without a claim; fenced
-        // persistence rejects None if recovery is still unavailable.
-        match self.promotion_capture_fence_locked(session).await {
-            Ok(fence) => Some(fence),
-            Err(error) => {
-                tracing::debug!(stream_id = %session.stream_id, %error,
-                    "detached append could not recover its initial ownership fence");
-                None
-            }
+        if self.has_claim_fence_reservation(&session.stream_id) {
+            return Err(DetachedAppendFenceFailure::ReservationPending);
         }
+        // Preserve the adapter contract: portable stores can accept None;
+        // fenced stores reject it without a write. Captured epochs stay exact.
+        self.promotion_capture_fence_locked(session)
+            .await
+            .map_err(DetachedAppendFenceFailure::RecoveryFailed)
     }
 
     pub(super) async fn append_detached_stanza(
@@ -180,12 +255,20 @@ impl InMemorySmSessionRegistry {
             let fence = self.detached_append_fence_locked(&updated).await;
             self.mark_snapshot_stale(&session_id)?;
             let storage = std::sync::Arc::clone(storage);
-            let (outcome, guard) = tokio::spawn(async move {
-                let outcome = storage
-                    .append_detached_stanza_atomic(append, fence.as_ref())
-                    .await;
-                (outcome, guard)
-            })
+            let diagnostic_stream = session_id.clone();
+            let (outcome, guard) = tokio::spawn(
+                async move {
+                    // A failed recovery still becomes None for portable adapters.
+                    let outcome = storage
+                        .append_detached_stanza_atomic(append, fence.as_ref().ok())
+                        .await;
+                    if let Err(error) = &outcome {
+                        warn_detached_append_recovery_failure(&diagnostic_stream, &fence, error);
+                    }
+                    (outcome, guard)
+                }
+                .in_current_span(),
+            )
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
             match outcome.map_err(|error| SmRegistryError::Internal(error.to_string()))? {

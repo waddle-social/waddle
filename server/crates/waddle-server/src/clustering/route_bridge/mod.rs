@@ -404,3 +404,19 @@ tokio::task_local! {
     /// Registered-socket frames offered at the real ask boundary of a stopped bridge.
     pub(crate) static TEST_CANCELLED_REMOTE_FRAMES: std::cell::RefCell<Vec<RemoteResourceOutboundFrame>>;
 }
+
+/// In-process transport for exercising the real socket handler and its typed
+/// reply without starting a swarm. Absent outside the individual test task.
+#[cfg(test)]
+pub(crate) type TestRemoteFrameTransport = Arc<
+    dyn Fn(
+            RelayDeliverRemoteResourceFrame,
+        ) -> Pin<Box<dyn Future<Output = RelayRemoteResourceFrameReply> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_REMOTE_FRAME_TRANSPORT: TestRemoteFrameTransport;
+}
