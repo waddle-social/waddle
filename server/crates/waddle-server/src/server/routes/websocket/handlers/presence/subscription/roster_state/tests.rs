@@ -8,14 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
+use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{
-    DetachedSession, InMemorySmSessionRegistry, PromotionCaptureCustody, SmSessionRegistry,
+    DetachedSession, InMemorySmSessionRegistry, PromotionCaptureCustody, SmClaimCompletion,
+    SmSessionRegistry,
 };
 use waddle_xmpp::Stanza;
-use waddle_xmpp_core::roster::{RosterItem, RosterVersion};
+use waddle_xmpp_core::roster::{RosterItem, RosterVersion, ROSTER_NS};
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 #[derive(Clone, Default)]
@@ -327,6 +329,133 @@ async fn rejected_detached_roster_append_warning_survives_later_resource_cancell
         .list_unacked(&blocked_stream)
         .await
         .expect("blocked replay")
+        .is_empty());
+    drop(blocked_operation);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_roster_resource_receives_immediate_fallback_before_later_resource_cancellation() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let owner = NodeIdentity::new("roster-resume-node", "incarnation");
+    let shared_identity = SharedNodeIdentity::new(owner.clone());
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(
+                Arc::new(InProcessClaimStore::new()),
+                shared_identity.clone(),
+            ),
+    );
+    let resumed_jid: FullJid = "alice@example.com/a".parse().expect("resuming JID");
+    let blocked_jid: FullJid = "alice@example.com/b".parse().expect("blocked JID");
+    let resumed_stream = SmSessionId::new("roster-stream-resuming-during-fanout");
+    let blocked_stream = SmSessionId::new("roster-stream-blocked-after-resume");
+    registry
+        .store_session(detached_session(&resumed_stream, resumed_jid.clone()))
+        .await
+        .expect("store resuming session");
+    registry
+        .store_session(detached_session(&blocked_stream, blocked_jid))
+        .await
+        .expect("store blocked session");
+    registry
+        .claim_session(resumed_stream.as_str())
+        .await
+        .expect("claim resuming session")
+        .expect("resumable source");
+    let state = create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            sm_session_registry: Some(registry.clone()),
+            ..TestStateOverrides::default()
+        },
+    )
+    .await;
+    let resumed_operation = registry
+        .lock_session_operation(resumed_stream.as_str())
+        .await
+        .expect("hold resuming resource operation");
+    let blocked_operation = registry
+        .lock_session_operation(blocked_stream.as_str())
+        .await
+        .expect("hold later resource operation");
+    let user = resumed_jid.to_bare();
+    let item = RosterItem::new("bob@example.com".parse().expect("contact JID"));
+    let version: RosterVersion = "version-during-resume".parse().expect("version");
+    let mut fanout = Box::pin(send_roster_push_to_resources(
+        &state, &user, &item, &version, None,
+    ));
+    // Both detached/claimed resources were discovered, and fanout now waits
+    // for A's operation. Complete its real resume before releasing that guard.
+    assert!(matches!(futures::poll!(fanout.as_mut()), Poll::Pending));
+    let authority = shared_identity
+        .guard_if_current(&owner)
+        .await
+        .expect("current owner authority");
+    let completion = registry
+        .complete_claim_with_authority(resumed_operation, &authority)
+        .await
+        .expect("complete resume under the held operation");
+    assert!(matches!(completion, Some(SmClaimCompletion::Resumed(_))));
+    drop(authority);
+    assert!(storage
+        .get_session(&resumed_stream)
+        .await
+        .expect("resumed source lookup")
+        .is_none());
+    let (sender, mut receiver) = mpsc::channel(2);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(resumed_jid.clone(), sender);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .mark_roster_interested(&resumed_jid);
+    let queued = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            queued = receiver.recv() => queued.expect("resumed resource remains connected"),
+            () = &mut fanout => panic!("fanout must remain blocked on the later resource"),
+        }
+    })
+    .await
+    .expect("resume fallback must enqueue before the later resource unblocks");
+    assert!(matches!(futures::poll!(fanout.as_mut()), Poll::Pending));
+    // A's accepted queue entry survives the handler's cancellation while B's
+    // independent stream operation is still blocked.
+    drop(fanout);
+    let Stanza::Iq(push) = queued.stanza else {
+        panic!("resumed fallback must receive a roster IQ");
+    };
+    let xmpp_parsers::iq::Iq::Set { to, payload, .. } = *push else {
+        panic!("roster push must be IQ set");
+    };
+    assert_eq!(to, Some(resumed_jid.into()));
+    assert!(payload.is("query", ROSTER_NS));
+    assert_eq!(payload.attr("ver"), Some("version-during-resume"));
+    assert!(
+        receiver.try_recv().is_err(),
+        "exactly one resumed-resource IQ"
+    );
+    let blocked = storage
+        .get_session(&blocked_stream)
+        .await
+        .expect("blocked source lookup")
+        .expect("blocked source remains durable");
+    assert_eq!(
+        (
+            blocked.inbound_count,
+            blocked.outbound_count,
+            blocked.last_acked
+        ),
+        (0, 0, 0)
+    );
+    assert!(storage
+        .list_unacked(&blocked_stream)
+        .await
+        .expect("blocked replay lookup")
         .is_empty());
     drop(blocked_operation);
 }

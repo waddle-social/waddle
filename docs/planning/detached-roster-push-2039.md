@@ -16,6 +16,10 @@ checks, source exclusion, deduplication, and correlation IDs.
 Remote backpressure is not acceptance. An uncertain remote reply ends this pass
 without another local or SM allocation that could duplicate the push. A fresh
 same-JID replacement must be roster-interested before receiving a fallback.
+Ready local sockets are queued before I/O. Caller-owned per-resource futures
+keep slow remote replies from blocking independent replay appends; a shared gate
+allows one foreground SM append at a time. Direct RPCs can overlap, as the old
+subscription mirrors' independent forwarders did. Resume fallback is immediate.
 These rules preserve [RFC 6121 roster interest](https://www.rfc-editor.org/rfc/rfc6121.html#section-2.2),
 XEP-0237 versioning, and XEP-0198 ownership fencing.
 

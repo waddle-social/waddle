@@ -1,10 +1,15 @@
 //! Roster IQ fanout shared by subscription changes and roster mutations.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::Ordering;
+
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 
 use jid::{BareJid, FullJid};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
-use waddle_xmpp::registry::BroadcastOutcome;
+use waddle_xmpp::registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
 use waddle_xmpp::roster::{build_roster_push, RosterItem, RosterVersion};
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
@@ -92,16 +97,44 @@ fn report_outcome(
     }
 }
 
+fn try_queue_entry(
+    state: &WebSocketState,
+    resource: &FullJid,
+    push: &Iq,
+    entry: ConnectionEntry,
+) -> Option<Delivery> {
+    if !entry.roster_interested.load(Ordering::Relaxed) {
+        return None;
+    }
+    let stanza = Stanza::Iq(Box::new(push.clone()));
+    (state
+        .deps
+        .protocol
+        .connection_registry
+        .try_send_outbound_if_owner(
+            resource,
+            &entry.carbons_handle(),
+            OutboundStanza::new(stanza),
+        )
+        == BroadcastOutcome::Delivered)
+        .then_some(Delivery::LocalQueueAccepted)
+}
+
 async fn try_live_resource(
     state: &WebSocketState,
     resource: &FullJid,
     push: &Iq,
 ) -> Option<Delivery> {
     let registry = &state.deps.protocol.connection_registry;
-    if !registry.is_roster_interested(resource) {
+    let entry = registry.entry(resource)?;
+    if !entry.roster_interested.load(Ordering::Relaxed) {
         return None;
     }
-    let stanza = Stanza::Iq(Box::new(push.clone()));
+    // A completed resume can leave an old remote registration behind. Prefer
+    // the current real socket, including when its queue reports backpressure.
+    if entry.is_locally_hosted() {
+        return try_queue_entry(state, resource, push, entry);
+    }
     #[cfg(feature = "clustering")]
     if let Some(bridge) = &state
         .deps
@@ -109,6 +142,7 @@ async fn try_live_resource(
         .clustering_claims
         .ordered_relay_delivery_bridge
     {
+        let stanza = Stanza::Iq(Box::new(push.clone()));
         if let Some(outcome) = bridge
             .try_deliver_registered_remote_resource(
                 resource,
@@ -118,9 +152,8 @@ async fn try_live_resource(
             )
             .await
         {
-            // Preserve the IQ path's bounded-pass policy. A remote reply is
-            // conclusive for this attempt, not necessarily acceptance. In
-            // particular, an uncertain ask must not allocate another SM copy.
+            // Some concludes this attempt, not necessarily acceptance. Never
+            // allocate another SM copy after an uncertain remote commitment.
             return Some(match outcome {
                 FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached => {
                     Delivery::RemoteQueueAccepted
@@ -131,11 +164,73 @@ async fn try_live_resource(
             });
         }
     }
-    // Remote cleanup can expose a fresh same-JID connection that has never
-    // requested its roster. Revalidate interest after that await.
-    (registry.is_roster_interested(resource)
-        && registry.try_send_to(resource, stanza) == BroadcastOutcome::Delivered)
-        .then_some(Delivery::LocalQueueAccepted)
+    // Cleanup may have exposed a new, uninterested same-JID replacement. Read
+    // that entry's own interest flag and enqueue only under its owner token.
+    try_queue_entry(state, resource, push, registry.entry(resource)?)
+}
+
+enum Attempt {
+    Finished(FullJid),
+    Pending,
+    Rejected(FullJid),
+}
+
+async fn attempt_resource(
+    state: &WebSocketState,
+    resource: FullJid,
+    push: Iq,
+    version: &RosterVersion,
+    initially_live: bool,
+    append_gate: &Semaphore,
+) -> Attempt {
+    if initially_live {
+        if let Some(outcome) = try_live_resource(state, &resource, &push).await {
+            if outcome != Delivery::LocalQueueAccepted {
+                report_outcome(&resource, &push, version, outcome, false);
+            }
+            return Attempt::Finished(resource);
+        }
+    }
+    // A live resource may have detached during the remote await. Consult the
+    // current SM boundary even when it was absent from detached discovery.
+    let recorded = {
+        let Ok(_permit) = append_gate.acquire().await else {
+            warn!(%resource, "Roster append gate closed before delivery");
+            return Attempt::Pending;
+        };
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .record_stanza_for_detached_resource(
+                &resource,
+                &Stanza::Iq(Box::new(push.clone())),
+                chrono::Utc::now(),
+            )
+            .await
+    }; // Do not hold the DB admission permit across a remote fallback await.
+    let rejected = match recorded {
+        Ok(true) => return Attempt::Finished(resource),
+        Ok(false) => false,
+        Err(error) => {
+            warn!(%error, resource = %resource, push_id = push.id(), roster_version = %version,
+                disposition = "pending_fallback", "Failed to record detached roster push");
+            true
+        }
+    };
+    // Complete a resumed resource's live handoff immediately; an unrelated
+    // blocked recipient must not postpone its accepted queue entry.
+    if let Some(outcome) = try_live_resource(state, &resource, &push).await {
+        if rejected || outcome != Delivery::LocalQueueAccepted {
+            report_outcome(&resource, &push, version, outcome, rejected);
+        }
+        return Attempt::Finished(resource);
+    }
+    if rejected {
+        Attempt::Rejected(resource)
+    } else {
+        Attempt::Pending
+    }
 }
 
 pub(crate) async fn send_roster_push_to_resources(
@@ -147,22 +242,27 @@ pub(crate) async fn send_roster_push_to_resources(
 ) {
     let registry = &state.deps.protocol.connection_registry;
     let included = |resource: &FullJid| excluded != Some(resource);
+    let live = registry.roster_interested_resources_for_user(user);
+    let live_set: BTreeSet<_> = live.iter().cloned().collect();
     let mut pushes = BTreeMap::new();
     // Finished means no further attempt in this pass, not confirmed acceptance.
     let mut finished = BTreeSet::new();
-    for resource in registry.roster_interested_resources_for_user(user) {
-        if !included(&resource) {
+    // Preserve the subscription path's nonblocking local delivery before any
+    // remote or storage await. A forwarding mirror is not a local socket.
+    for resource in &live {
+        if !included(resource) {
             continue;
         }
-        let push = push_for_resource(&mut pushes, &resource, user, item, version);
-        if let Some(outcome) = try_live_resource(state, &resource, push).await {
-            if outcome != Delivery::LocalQueueAccepted {
-                report_outcome(&resource, push, version, outcome, false);
+        if let Some(entry) = registry
+            .entry(resource)
+            .filter(|entry| entry.is_locally_hosted())
+        {
+            let push = push_for_resource(&mut pushes, resource, user, item, version);
+            if try_queue_entry(state, resource, push, entry).is_some() {
+                finished.insert(resource.clone());
             }
-            finished.insert(resource);
         }
     }
-
     let detached = match state
         .deps
         .protocol
@@ -176,63 +276,66 @@ pub(crate) async fn send_roster_push_to_resources(
             Vec::new()
         }
     };
-    // The two discovery maps can theoretically expose the same resource during
-    // a resume transition. A set prevents duplicate attempts in that case.
-    let detached: BTreeSet<_> = detached
+    // Separate discovery maps can theoretically expose a JID twice during
+    // resume. One pipeline per JID prevents duplicate remote/SM allocations.
+    let targets: BTreeSet<_> = live
         .into_iter()
+        .chain(detached)
         .filter(|resource| included(resource) && !finished.contains(resource))
         .collect();
+    let append_gate = Semaphore::new(1);
+    let mut attempts = FuturesUnordered::new();
+    for resource in targets {
+        let push = push_for_resource(&mut pushes, &resource, user, item, version).clone();
+        let initially_live = live_set.contains(&resource);
+        attempts.push(attempt_resource(
+            state,
+            resource,
+            push,
+            version,
+            initially_live,
+            &append_gate,
+        ));
+    }
     let mut rejected = BTreeSet::new();
-    for resource in detached {
-        let push = push_for_resource(&mut pushes, &resource, user, item, version);
-        let stanza = Stanza::Iq(Box::new(push.clone()));
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
-            .await
-        {
-            Ok(true) => {
+    while let Some(attempt) = attempts.next().await {
+        match attempt {
+            Attempt::Finished(resource) => {
                 finished.insert(resource);
             }
-            Ok(false) => {}
-            Err(error) => {
-                // Emit before another resource can block and cancel fanout.
-                warn!(%error, resource = %resource, push_id = push.id(), roster_version = %version,
-                    disposition = "pending_fallback", "Failed to record detached roster push");
+            Attempt::Rejected(resource) => {
                 rejected.insert(resource);
             }
+            Attempt::Pending => {}
         }
     }
-
+    // Pick up connections published during handoff. Pure futures stay owned by
+    // this fanout; cancellation drops them rather than spawning recipient tasks.
     let fallback: BTreeSet<_> = registry
         .roster_interested_resources_for_user(user)
         .into_iter()
         .chain(rejected.iter().cloned())
         .filter(|resource| included(resource) && !finished.contains(resource))
         .collect();
-    let mut outcomes = BTreeMap::new();
+    let mut fallbacks = FuturesUnordered::new();
     for resource in fallback {
-        let push = push_for_resource(&mut pushes, &resource, user, item, version);
-        if let Some(outcome) = try_live_resource(state, &resource, push).await {
-            if !rejected.contains(&resource) && outcome != Delivery::LocalQueueAccepted {
-                report_outcome(&resource, push, version, outcome, false);
-            }
-            outcomes.insert(resource, outcome);
+        let push = push_for_resource(&mut pushes, &resource, user, item, version).clone();
+        fallbacks.push(async move {
+            let outcome = try_live_resource(state, &resource, &push).await;
+            (resource, push, outcome)
+        });
+    }
+    while let Some((resource, push, outcome)) = fallbacks.next().await {
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        let rejected_append = rejected.remove(&resource);
+        if rejected_append || outcome != Delivery::LocalQueueAccepted {
+            report_outcome(&resource, &push, version, outcome, rejected_append);
         }
     }
     for resource in rejected {
         let push = push_for_resource(&mut pushes, &resource, user, item, version);
-        report_outcome(
-            &resource,
-            push,
-            version,
-            outcomes
-                .get(&resource)
-                .copied()
-                .unwrap_or(Delivery::Unresolved),
-            true,
-        );
+        report_outcome(&resource, push, version, Delivery::Unresolved, true);
     }
 }
