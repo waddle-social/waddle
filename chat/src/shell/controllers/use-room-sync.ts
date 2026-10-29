@@ -58,6 +58,27 @@ export function useRoomSync(deps: RoomSyncDeps) {
   function clearPendingChannelRoomJidSelection() {
     pendingChannelRoomJidSelection.value = null;
   }
+  watch(xmppClient, (client, previous, onCleanup) => {
+    if (previous && previous !== client) {
+      selectedChannelRoomJids.value = {};
+      clearPendingChannelRoomJidSelection();
+    }
+    if (!client) return;
+    const unsubscribe = client.onRoomIdAmbiguous?.((id) => {
+      const { [id]: _discard, ...remaining } = selectedChannelRoomJids.value;
+      selectedChannelRoomJids.value = remaining;
+      clearPendingChannelRoomJidSelection();
+      // The directory subscriber clears the active ID synchronously first.
+      if (!waddles.activeChannelId.value || waddles.activeChannelId.value === id) {
+        cancelPendingRoute();
+        activeExtensionRouteKey.value = null;
+        messaging.clearMessages();
+        memberJidByNick.value = {};
+      }
+    });
+    if (unsubscribe) onCleanup(unsubscribe);
+  }, { immediate: true, flush: "sync" });
+
   const activeChannelRoomJid = computed(() => {
     const channelId = waddles.activeChannelId.value;
     const channel = waddles.currentChannel.value;
@@ -100,7 +121,7 @@ export function useRoomSync(deps: RoomSyncDeps) {
 
   function roomJidForChannelId(channelId: string): string | null {
     const sess = session.value;
-    if (!sess) return null;
+    if (!sess || xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return null;
     return resolveRoomJidForChannelId(sess, waddles.channels.value, channelId);
   }
 
@@ -114,6 +135,9 @@ export function useRoomSync(deps: RoomSyncDeps) {
       fromRoute?: boolean;
     } = {},
   ) {
+    xmppClient.value?.assertRoomIdAvailable?.(channelId);
+    // An explicit JID is an observation, not permission to overwrite an ID.
+    if (options.roomJid) xmppClient.value?.rememberRoomJidForChannel(channelId, barePeerJid(options.roomJid));
     if (options.intent !== "automatic" && !options.fromRoute) cancelPendingRoute();
     clearPendingChannelRoomJidSelection();
     ui.activePage.value = "chat";
@@ -128,7 +152,6 @@ export function useRoomSync(deps: RoomSyncDeps) {
         ...selectedChannelRoomJids.value,
         [channelId]: selectedRoomJid,
       };
-      xmppClient.value?.rememberRoomJidForChannel(channelId, selectedRoomJid);
       messaging.rememberChannelRoomJid(channelId, selectedRoomJid);
     }
     waddles.activeChannelId.value = channelId;

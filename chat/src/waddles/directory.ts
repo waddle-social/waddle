@@ -60,10 +60,39 @@ export function useWaddleDirectory(
   const memberSnapshotsByChannelId = new Map<string, MemberSummary[]>();
 
   // Count every change, including leaving and returning before Vue's next tick.
-  watch(activeChannelId, () => {
+  watch(activeChannelId, (id) => {
+    if (id && xmppClient.value?.isRoomIdAmbiguous?.(id)) activeChannelId.value = null;
     selectionRequestId++;
     memberRequestId++;
   }, { flush: "sync" });
+
+  function quarantineChannel(channelId: string) {
+    channels.value = channels.value.filter((channel) => channel.id !== channelId);
+    groupDms.value = groupDms.value.filter((channel) => channel.id !== channelId);
+    memberSnapshotsByChannelId.delete(channelId);
+    const { [channelId]: _discard, ...remainingBots } = botsByChannelId.value;
+    botsByChannelId.value = remainingBots;
+    if (activeChannelId.value === channelId) {
+      activeChannelId.value = null;
+      selectedSpaceId.value = null;
+      memberRequestId++;
+      botRequestId++;
+      members.value = [];
+      memberLoadState.value = "idle";
+      actionError.value = "This channel has conflicting room addresses. Reload after correcting the room directory.";
+    }
+  }
+
+  watch(xmppClient, (client, _previous, onCleanup) => {
+    // A response from a replaced client cannot restore its directory or members.
+    structureRequestId++;
+    memberRequestId++;
+    botRequestId++;
+    if (!client) return;
+    const unsubscribe = client.onRoomIdAmbiguous?.(quarantineChannel);
+    if (unsubscribe) onCleanup(unsubscribe);
+    for (const id of client.listAmbiguousRoomIds?.() ?? []) quarantineChannel(id);
+  }, { immediate: true, flush: "sync" });
 
   const editWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -191,7 +220,7 @@ export function useWaddleDirectory(
     const requestId = ++botRequestId;
     try {
       const bots = await xmppClient.value.listRoomBots(channelId, { roomJid });
-      if (requestId !== botRequestId) return;
+      if (requestId !== botRequestId || xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
       occupantJidDirectory.recordBots(bots.map((bot) => bot.jid));
       botsByChannelId.value = { ...botsByChannelId.value, [channelId]: bots };
     } catch (e) {
@@ -243,7 +272,9 @@ export function useWaddleDirectory(
       }) satisfies SpaceSummary);
       waddles.value = discoveredSpaces;
 
-      const allRooms: ChannelSummary[] = topology.rooms.map((c) => ({
+      const allRooms: ChannelSummary[] = topology.rooms
+        .filter((room) => !xmppClient.value?.isRoomIdAmbiguous?.(room.id))
+        .map((c) => ({
         id: c.id,
         name: c.name,
         jid: c.jid,
@@ -344,6 +375,7 @@ export function useWaddleDirectory(
 
   async function reloadChannelMembers(channelId: string): Promise<void> {
     if (!xmppClient.value) return;
+    xmppClient.value.assertRoomIdAvailable?.(channelId);
 
     const channel = channels.value.find((c) => c.id === channelId);
     const requestId = ++memberRequestId;
@@ -352,7 +384,7 @@ export function useWaddleDirectory(
 
     try {
       const freshMembers = await xmppClient.value.listRoomMembers(channelId, { roomJid: channel?.jid });
-      if (requestId !== memberRequestId) return;
+      if (requestId !== memberRequestId || xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
       completeMemberLoad(channelId, freshMembers);
     } catch (e) {
       if (requestId === memberRequestId) {
@@ -507,6 +539,7 @@ export function useWaddleDirectory(
     }
     isSubmitting.value = true;
     try {
+      client.assertRoomIdAvailable?.(channel.id);
       await configureMucRoom(client, channel.jid, {
         name: editChannelForm.value.name.trim(),
         description: editChannelForm.value.description.trim(),
@@ -577,6 +610,7 @@ export function useWaddleDirectory(
     const spacesService = spacesServiceJid.value ?? spacesServiceDomain(sess.jid);
     isSubmitting.value = true;
     try {
+      client.assertRoomIdAvailable?.(channelId);
       await moveMucToSpace(client.agent, spacesService, targetSpaceId, channel.jid, {
         name: channel.name,
         autojoin: true,

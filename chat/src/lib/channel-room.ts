@@ -1,3 +1,4 @@
+import { AmbiguousRoomIdError, hasConflictingRoomAddresses } from "./xmpp/room-id-bindings";
 import type { ChannelSummary } from "@/lib/chat-types";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid, jidDomainOrEmpty, parseManagedRoomBareJid, roomBareJidFor } from "@/lib/xmpp-client";
@@ -14,6 +15,7 @@ export function roomJidForChannelId(
   channels: readonly Pick<ChannelSummary, "id" | "jid">[],
   channelId: string,
 ): string {
+  if (hasConflictingRoomAddresses(channelId, channels)) throw new AmbiguousRoomIdError();
   const channel = channels.find((c) => c.id === channelId);
   return roomJidForChannelSummary(session, channel ?? { id: channelId });
 }
@@ -29,7 +31,7 @@ export function knownChannelIdForRoomJid(
   const explicit = channels.find((channel) =>
     channel.jid ? barePeerJid(channel.jid).trim().toLowerCase() === normalizedRoomJid : false
   );
-  if (explicit) return explicit.id;
+  if (explicit) return hasConflictingRoomAddresses(explicit.id, channels) ? null : explicit.id;
 
   const roomDomain = jidDomainOrEmpty(normalizedRoomJid);
   const trustedDomain = normalizeManagedMucDomain(managedMucDomain);
