@@ -36,6 +36,7 @@ pub enum ProcessFault {
     Io {
         errno: Option<i32>,
     },
+    ReapNotReady,
     Invariant,
     LatchUnavailable,
     #[cfg(test)]

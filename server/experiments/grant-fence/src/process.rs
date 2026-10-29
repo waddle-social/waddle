@@ -239,9 +239,8 @@ impl Process {
                 let elapsed_ms = u64::try_from(start.elapsed().as_millis())?;
                 let final_snapshot = Some(crate::postgres_diagnostics::capture(self.child.id()));
                 let observed = if status.success() {
+                    self.reap_measured_exit()?;
                     self.measurement_elapsed_ms = Some(elapsed_ms);
-                    self.child.wait()?;
-                    self.reaped = true;
                     ObservedExit::Normal
                 } else {
                     ObservedExit::Abnormal {
@@ -258,6 +257,30 @@ impl Process {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// The measurement already observed normal exit with WNOWAIT. Reaping
+    /// must still be nonblocking; unexpected uncertainty keeps ownership and
+    /// permanently prevents fixture cleanup from claiming success.
+    fn reap_measured_exit(&mut self) -> Result<()> {
+        let result = match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.observed = Some(status);
+                self.reaped = true;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(ProcessFault::PostgresExit {
+                        code: status.code(),
+                        signal: status.signal(),
+                    }
+                    .into())
+                }
+            }
+            Ok(None) => Err(ProcessFault::ReapNotReady.into()),
+            Err(error) => Err(error.into()),
+        };
+        self.record_cleanup(result)
     }
 
     pub fn status(&mut self) -> Result<Option<ExitStatus>> {
@@ -520,6 +543,70 @@ mod tests {
                 eprintln!("retained probe cleanup unverified");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn measurement_reap_uncertainty_retains_fixture_and_child_ownership() -> Result<()> {
+        let mut fixture = crate::fixture::Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
+        command.env_clear().current_dir(&root).arg("30");
+        let mut child = Process::spawn_tracked(
+            &mut command,
+            None,
+            false,
+            fixture.cleanup_latch(),
+            CleanupService::Postgres,
+        )?;
+        // Model an unexpectedly stale normal WNOWAIT observation while the
+        // real owned child is still live. try_wait must return immediately.
+        child.observed = Some(ExitStatus::from_raw(0));
+        let before = Instant::now();
+        let error = child
+            .reap_measured_exit()
+            .expect_err("live child is not reapable");
+        ensure!(
+            before.elapsed() < Duration::from_secs(1)
+                && error.downcast_ref::<ProcessFault>() == Some(&ProcessFault::ReapNotReady)
+                && !child.reaped,
+            "nonblocking reap must preserve owned live child on uncertainty"
+        );
+        let first = fixture
+            .cleanup_failure()
+            .context("measurement reap failure latch")?;
+        ensure!(
+            first.service == CleanupService::Postgres
+                && first.cause == ProcessFault::ReapNotReady
+                && fixture.shutdown().is_err(),
+            "measurement reap uncertainty must forbid cleanup success"
+        );
+        child.stop()?;
+        ensure!(
+            child.reaped,
+            "intentional probe child cleanup must complete"
+        );
+        drop(child);
+        drop(fixture);
+        ensure!(
+            tokio::fs::try_exists(root.join("fixture-id")).await?,
+            "successful retry and Drop must retain failed measurement data"
+        );
+        tokio::fs::remove_dir_all(root).await?;
+
+        let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
+        command.env_clear().arg("0");
+        let mut completed = Process::spawn(&mut command, None, false)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while completed.status()?.is_none() {
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "probe exit deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        completed.reap_measured_exit()?;
+        ensure!(completed.reaped, "observed normal child must be reaped");
+        Ok(())
     }
 
     #[tokio::test]

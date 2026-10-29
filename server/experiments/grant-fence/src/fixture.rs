@@ -364,10 +364,12 @@ impl Fixture {
             if let Some(root) = self.root.as_mut() {
                 root.disable_cleanup(true);
             }
-            return Err(anyhow::Error::new(failure.clone()).context(format!(
-                "process cleanup unverified; private fixture retained at {}",
-                self.settings.root.display()
-            )));
+            return Err(anyhow::Error::new(failure.clone())).with_context(|| {
+                format!(
+                    "process cleanup unverified; private fixture retained at {}",
+                    self.settings.root.display()
+                )
+            });
         }
         let credential_check = if self.root.is_some() {
             self.assert_no_plaintext_credentials(self.settings.root.as_path())
