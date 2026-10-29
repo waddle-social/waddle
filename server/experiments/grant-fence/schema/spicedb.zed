@@ -1,0 +1,6 @@
+definition fence_user {}
+
+definition fence_generation {
+    relation reader: fence_user
+    permission read = reader
+}
