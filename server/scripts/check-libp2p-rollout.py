@@ -20,10 +20,26 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).with_name("fixtures") / "libp2p_rollout_peer.rs"
+KAMEO_PATH = "server/vendor/kameo"
+
+
+def resolve_baseline(reference):
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._/-]*", reference):
+        raise ValueError("baseline must be a commit hash or ASCII branch/tag reference")
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--verify", "--end-of-options", reference + "^{commit}"],
+            cwd=ROOT, text=True, stderr=subprocess.PIPE,
+        ).strip()
+    except subprocess.CalledProcessError as error:
+        raise ValueError("baseline must resolve to a commit") from error
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit):
+        raise ValueError("Git returned an invalid baseline commit ID")
+    return commit
 
 
 def git_file(revision, path):
-    return subprocess.check_output(["git", "show", f"{revision}:{path}"], cwd=ROOT)
+    return subprocess.check_output(["git", "show", f"{revision}:{path}", "--"], cwd=ROOT)
 
 
 def package_version(lockfile, package):
@@ -41,17 +57,17 @@ def prepare_peer(directory, baseline, label):
     if label == "old":
         lockfile = git_file(baseline, "server/Cargo.lock")
         archive = subprocess.check_output(
-            ["git", "archive", baseline, "server/vendor/kameo"], cwd=ROOT
+            ["git", "archive", baseline, "--", KAMEO_PATH], cwd=ROOT
         )
         with tarfile.open(fileobj=io.BytesIO(archive)) as sources:
             # git archive emits only tracked files under this fixed prefix.
             sources.extractall(directory)
-        kameo = directory / "server/vendor/kameo"
+        kameo = directory / KAMEO_PATH
         patch = ""
     else:
         lockfile = (ROOT / "server/Cargo.lock").read_bytes()
         kameo = directory / "kameo"
-        shutil.copytree(ROOT / "server/vendor/kameo", kameo)
+        shutil.copytree(ROOT / KAMEO_PATH, kameo)
         patch = '[patch.crates-io]\nlibp2p-swarm = { path = ' + json.dumps(str(ROOT / "server/vendor/libp2p-swarm")) + ' }\n'
     version = package_version(lockfile, "libp2p")
     (directory / "Cargo.lock").write_bytes(lockfile)
@@ -121,9 +137,8 @@ def run_pair(binaries, transport, dialer):
         print(f"PASS {transport}: {dialer} dialer; actor discovery and remote asks in both directions", flush=True)
     finally:
         for peer in peers.values():
-            if peer.poll() is None:
-                peer.kill()
-                peer.wait()
+            peer.kill()
+            peer.wait()
 
 
 def main():
@@ -131,6 +146,10 @@ def main():
     parser.add_argument("--baseline", default="origin/main", help="Git revision before the dependency upgrade")
     parser.add_argument("--target-dir", type=Path, help="Optional retained Cargo cache; otherwise removed on completion")
     arguments = parser.parse_args()
+    try:
+        baseline = resolve_baseline(arguments.baseline)
+    except ValueError as error:
+        parser.error(str(error))
     with tempfile.TemporaryDirectory(prefix="waddle-libp2p-rollout-") as temporary:
         temporary = Path(temporary)
         target = arguments.target_dir.resolve() if arguments.target_dir else temporary / "target"
@@ -139,7 +158,7 @@ def main():
         environment = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS="2")
         for label in ("old", "new"):
             directory = temporary / label
-            versions[label] = prepare_peer(directory, arguments.baseline, label)
+            versions[label] = prepare_peer(directory, baseline, label)
             subprocess.run(["cargo", "build", "--manifest-path", str(directory / "Cargo.toml")], cwd=ROOT / "server", env=environment, check=True)
             binaries[label] = target / "debug" / f"waddle-libp2p-{label}-probe"
         if versions["old"] == versions["new"]:

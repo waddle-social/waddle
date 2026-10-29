@@ -156,6 +156,7 @@ try {
 		"--persist-to",
 		persist,
 	]);
+	// Each CLI invocation opens the same persisted store; serialize fixture writes.
 	for (const [name, value] of [
 		["BETTER_AUTH_SECRET", authSecret],
 		["GITHUB_CLIENT_SECRET", "local-smoke-github-secret"],
@@ -211,6 +212,7 @@ try {
 	);
 	const deadline = Date.now() + 30_000;
 	let discovery;
+	// Retry after each completed probe; startup readiness checks are sequential.
 	while (Date.now() < deadline) {
 		try {
 			const response = await request("/.well-known/openid-configuration");
@@ -277,7 +279,8 @@ try {
 	const signature = createHmac("sha256", authSecret)
 		.update(sessionToken)
 		.digest("base64");
-	const cookie = `better-auth.session_token=${encodeURIComponent(`${sessionToken}.${signature}`)}`;
+	const signedSessionToken = `${sessionToken}.${signature}`;
+	const cookie = `better-auth.session_token=${encodeURIComponent(signedSessionToken)}`;
 	const session = await json(
 		await request("/api/auth/get-session", { headers: { Cookie: cookie } }),
 	);
@@ -334,13 +337,30 @@ try {
 	});
 	assert.equal(missingDpop.status, 400);
 	assert.equal((await missingDpop.json()).error, "invalid_dpop_proof");
+	const validProof = await dpop(discovery.token_endpoint);
+	const [proofHeader, proofPayload, proofSignature] = validProof.split(".");
+	const invalidSignature = Buffer.from(proofSignature, "base64url");
+	assert.equal(invalidSignature.length, 64);
+	invalidSignature[0] ^= 1;
+	const tamperedProof = [
+		proofHeader,
+		proofPayload,
+		invalidSignature.toString("base64url"),
+	].join(".");
 	const tamperedDpop = await request(discovery.token_endpoint, {
 		method: "POST",
-		headers: { DPoP: `${await dpop(discovery.token_endpoint)}x` },
+		headers: { DPoP: tamperedProof },
 		body: tokenBody,
 	});
 	assert.equal(tamperedDpop.status, 400);
 	assert.equal((await tamperedDpop.json()).error, "invalid_dpop_proof");
+	const malformedDpop = await request(discovery.token_endpoint, {
+		method: "POST",
+		headers: { DPoP: `${validProof}x` },
+		body: tokenBody,
+	});
+	assert.equal(malformedDpop.status, 400);
+	assert.equal((await malformedDpop.json()).error, "invalid_dpop_proof");
 	const token = await json(
 		await request(discovery.token_endpoint, {
 			method: "POST",
@@ -436,6 +456,12 @@ try {
 	console.log(
 		"PASS: built Colony worker, local D1/Secrets Store, discovery, dynamic registration, session, consent, PKCE+DPoP code exchange, verified ID token/JWKS, userinfo, missing/tampered-DPoP/wrong-PKCE/code-replay rejection and GitHub sign-in URL generation (never followed)",
 	);
+} catch (error) {
+	if (logFd !== undefined) {
+		console.error("Local OIDC worker log (synthetic fixtures only):");
+		console.error(readFileSync(resolve(state, "worker.log"), "utf8"));
+	}
+	throw error;
 } finally {
 	if (worker) {
 		worker.kill("SIGTERM");
