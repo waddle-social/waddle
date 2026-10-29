@@ -89,6 +89,7 @@ schema.#Project & {
 				"../bun.lock",
 				"package.json",
 				"scripts/smoke-oidc.mjs",
+				"scripts/oidc-smoke-worker.mjs",
 				"drizzle/**",
 				"dist/**",
 			]

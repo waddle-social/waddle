@@ -19,6 +19,8 @@ on:
     - colony/package.json/**
     - colony/public/**
     - colony/schema/**
+    - colony/scripts/oidc-smoke-worker.mjs
+    - colony/scripts/oidc-smoke-worker.mjs/**
     - colony/scripts/smoke-oidc.mjs
     - colony/scripts/smoke-oidc.mjs/**
     - colony/src/**

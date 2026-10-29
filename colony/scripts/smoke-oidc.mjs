@@ -21,7 +21,8 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const state = mkdtempSync(resolve(tmpdir(), "colony-oidc-smoke-"));
 const persist = resolve(state, "state");
-const wrangler = Bun.which("wrangler") ?? resolve(root, "node_modules/.bin/wrangler");
+const wrangler =
+	Bun.which("wrangler") ?? resolve(root, "node_modules/.bin/wrangler");
 const configPath = resolve(state, "wrangler.json");
 const authSecret = randomBytes(32).toString("hex");
 const sessionToken = randomBytes(32).toString("hex");
@@ -196,18 +197,11 @@ try {
 	logFd = openSync(resolve(state, "worker.log"), "w");
 	worker = Bun.spawn(
 		[
-			wrangler,
-			"dev",
-			"--local",
-			"--config",
+			"node",
+			resolve(root, "scripts/oidc-smoke-worker.mjs"),
 			configPath,
-			"--persist-to",
 			persist,
-			"--ip",
-			"127.0.0.1",
-			"--port",
 			String(port),
-			"--show-interactive-dev-session=false",
 		],
 		{ cwd: state, env: environment, stdout: logFd, stderr: logFd },
 	);
@@ -271,7 +265,10 @@ try {
 		code_challenge: createHash("sha256").update(verifier).digest("base64url"),
 		code_challenge_method: "S256",
 	});
-	const anonymous = await request(authorization);
+	// Exercise browser navigation; OAuth API fetches can return JSON redirect data.
+	const anonymous = await request(authorization, {
+		headers: { Accept: "text/html", "Sec-Fetch-Mode": "navigate" },
+	});
 	assert.equal(anonymous.status, 302);
 	assert.equal(
 		new URL(anonymous.headers.get("location"), issuer).pathname,
@@ -287,7 +284,13 @@ try {
 	);
 	assert.equal(session.user.id, userId);
 	async function authorizationCode(url, requireConsent = false) {
-		const response = await request(url, { headers: { Cookie: cookie } });
+		const response = await request(url, {
+			headers: {
+				Cookie: cookie,
+				Accept: "text/html",
+				"Sec-Fetch-Mode": "navigate",
+			},
+		});
 		assert.equal(response.status, 302);
 		let callback = new URL(response.headers.get("location"), issuer);
 		if (requireConsent) assert.equal(callback.pathname, "/oauth/consent");
@@ -465,7 +468,9 @@ try {
 	}
 	if (logFd !== undefined) closeSync(logFd);
 	if (failure && logFd !== undefined) {
-		console.error("Local OIDC worker log after shutdown (synthetic fixtures only):");
+		console.error(
+			"Local OIDC worker log after shutdown (synthetic fixtures only):",
+		);
 		console.error(readFileSync(resolve(state, "worker.log"), "utf8"));
 	}
 	rmSync(state, { recursive: true, force: true });
