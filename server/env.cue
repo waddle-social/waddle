@@ -156,7 +156,6 @@ schema.#Project & {
 			tasks: [
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
-				_t.federationGrantFenceProof,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -199,11 +198,31 @@ schema.#Project & {
 				"pull-requests": "none"
 			}
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.federationGrantFenceProof,
+				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram,
 				_t.nixFmt, _t.nixClippy,
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
+		}
+		// Test-only native experiment: do not add these inputs to the image
+		// publishing pipeline or its deployment-revision authority.
+		federationGrantFence: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
 		}
 		namespaceRustChecks: {
 			mode:        "expanded"
