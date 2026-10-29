@@ -74,17 +74,37 @@ impl Worker {
         Ok(Self { process, work })
     }
 
+    async fn read_event(
+        &self,
+        name: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<Event>> {
+        let path = self.work.barriers.join(name);
+        match tokio::time::timeout_at(deadline, tokio::fs::read(path))
+            .await
+            .context("parent barrier read deadline")?
+        {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(anyhow::Error::new(error).context("read worker barrier")),
+        }
+    }
+
     async fn wait(&mut self, name: &str) -> Result<Event> {
         let deadline = tokio::time::Instant::now() + BARRIER_BUDGET;
         loop {
-            let path = self.work.barriers.join(name);
-            if path.exists() {
-                return Ok(serde_json::from_slice(&fs::read(path)?)?);
+            if let Some(event) = self.read_event(name, deadline).await? {
+                return Ok(event);
             }
-            ensure!(
-                self.process.status()?.is_none(),
-                "worker exited before barrier {name}"
-            );
+            if self.process.status()?.is_some() {
+                // The process may have published and exited while the first
+                // asynchronous read was pending. Exit orders the final read
+                // after all its writes; a genuinely missing barrier fails.
+                return self
+                    .read_event(name, deadline)
+                    .await?
+                    .with_context(|| format!("worker exited before barrier {name}"));
+            }
             ensure!(
                 tokio::time::Instant::now() < deadline,
                 "parent barrier deadline: {name}"

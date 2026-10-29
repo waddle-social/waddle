@@ -192,7 +192,10 @@ pub fn event(directory: &Path, name: &str, outcome: &str, backend_pid: Option<i3
 pub async fn barrier(directory: &Path, name: &str) -> Result<()> {
     let deadline = tokio::time::Instant::now() + BARRIER_BUDGET;
     loop {
-        if directory.join(name).exists() {
+        if tokio::time::timeout_at(deadline, tokio::fs::try_exists(directory.join(name)))
+            .await
+            .context("worker barrier lookup deadline")??
+        {
             return Ok(());
         }
         ensure!(

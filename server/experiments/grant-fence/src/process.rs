@@ -294,7 +294,7 @@ mod tests {
         }
         process.finish(Duration::from_secs(1)).await?;
         let descendant: i32 = process.output()?.trim().parse()?;
-        if let Ok(stat) = fs::read_to_string(format!("/proc/{descendant}/stat")) {
+        if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{descendant}/stat")).await {
             let state = stat
                 .rsplit_once(") ")
                 .context("descendant stat")?

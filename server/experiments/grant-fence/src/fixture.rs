@@ -76,11 +76,12 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").context("reserve loopback SpiceDB port")?;
         self.settings.grpc_port = listener.local_addr()?.port();
         drop(listener);
-        fs::create_dir(self.settings.root.as_path().join("socket"))?;
-        fs::set_permissions(
+        tokio::fs::create_dir(self.settings.root.as_path().join("socket")).await?;
+        tokio::fs::set_permissions(
             self.settings.root.as_path().join("socket"),
             fs::Permissions::from_mode(0o700),
-        )?;
+        )
+        .await?;
         let mut init = Command::new(&self.binaries.initdb);
         init.env_clear()
             .env(
@@ -483,7 +484,9 @@ mod tests {
             "stopped backend must prevent verified shutdown"
         );
         ensure!(
-            root.join("pgdata/PG_VERSION").is_file(),
+            tokio::fs::metadata(root.join("pgdata/PG_VERSION"))
+                .await?
+                .is_file(),
             "failed shutdown deleted PGDATA"
         );
         ensure!(
@@ -500,12 +503,14 @@ mod tests {
         drop(backend);
         drop(fixture);
         ensure!(
-            root.join("pgdata/PG_VERSION").is_file(),
+            tokio::fs::metadata(root.join("pgdata/PG_VERSION"))
+                .await?
+                .is_file(),
             "Drop removed sticky retained data"
         );
         // Both services have now completed verified shutdown; only this test's
         // marked, private root is removed after checking the retention contract.
-        std::fs::remove_dir_all(root)?;
+        tokio::fs::remove_dir_all(root).await?;
         Ok(())
     }
 }
