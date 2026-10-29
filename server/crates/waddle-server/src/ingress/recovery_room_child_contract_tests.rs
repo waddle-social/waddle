@@ -18,6 +18,7 @@ use crate::ingress_substrate::MessageEnvelope;
 use crate::ingress_uow::{CanonicalMessageRepository, IngressUowError};
 use crate::server::routes::interpret::SmIngressAppendContext;
 use crate::server::routes::websocket::WebSocketState;
+use crate::sm_persistence::DatabaseSmPersistence;
 use jid::FullJid;
 use std::sync::Arc;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
@@ -31,6 +32,7 @@ use waddle_xmpp::muc::room_actor::{
 use waddle_xmpp::muc::room_registry_actor::{
     CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetRoom,
 };
+use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 use waddle_xmpp::{Affiliation, Role, Stanza};
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -209,6 +211,34 @@ async fn postgres_sealed_child_delayed_release_preserves_payload_and_target() {
         2,
         "original recipient and reflection each own one durable append"
     );
+    // A fresh persistence handle reads the custody rows from PostgreSQL; this
+    // assertion cannot be satisfied by the registry's in-memory queue alone.
+    let persisted = DatabaseSmPersistence::open(Some(f.db.database_url()))
+        .await
+        .expect("independent custody reader");
+    let appends = persisted
+        .list_pending_ingress_appends(3)
+        .await
+        .expect("stored custody");
+    let mut stored_targets: Vec<_> = appends
+        .iter()
+        .map(|append| append.key.resource.clone())
+        .collect();
+    stored_targets.sort();
+    assert_eq!(
+        stored_targets,
+        vec![original.clone(), submission.sender.clone()]
+    );
+    for append in appends {
+        assert_eq!(append.key.message_key, key);
+        let Stanza::Message(stored) = append.payload else {
+            panic!("stored room message")
+        };
+        assert!(same_message_content(
+            &occupant_copy_message(frozen.message(), &append.key.resource),
+            &stored,
+        ));
+    }
     assert!(policy_reasons(&f, key).await.is_empty());
     f.close().await;
 }

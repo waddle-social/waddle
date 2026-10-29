@@ -25,7 +25,9 @@ The cases all use PostgreSQL admission storage:
 - `postgres_sealed_child_delayed_release_preserves_payload_and_target`: real room
   planning and sealed commit, then a newcomer and a config revision before delayed
   maintenance. Original recipient and sender reflection receive the frozen content
-  exactly once in persisted SM custody; the newcomer receives nothing.
+  exactly once in persisted SM custody; a fresh persistence handle verifies the
+  stored message key, resource identities and payloads directly from PostgreSQL.
+  The newcomer receives nothing.
 - `postgres_sealed_child_leave_rejoin_retires_original_without_delivery`: a fresh
   occupancy at the same full JID cannot inherit the original accepted child.
 - `postgres_sealed_children_destroy_recreate_retire_without_transport`: both absent
