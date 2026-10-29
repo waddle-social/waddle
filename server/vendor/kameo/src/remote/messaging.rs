@@ -454,12 +454,12 @@ impl Behaviour {
         self.excluded_peers.insert(*peer);
         let addresses: Vec<_> = self.peer_addresses.get(peer).collect();
         for address in &addresses {
-            // libp2p 0.56 still retains this cache and only exposes eviction
+            // libp2p 0.57 still retains this cache and only exposes eviction
             // through its deprecated API. Keep the call local until upstream
             // replaces/removes the cache.
             #[expect(
                 deprecated,
-                reason = "request-response address eviction has no replacement in libp2p 0.56"
+                reason = "request-response address eviction has no replacement in libp2p 0.57"
             )]
             self.request_response.remove_address(peer, address);
             self.peer_addresses.remove(peer, address);

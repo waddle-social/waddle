@@ -129,10 +129,6 @@ features = [
 ]
 default-features = false
 
-[dev-dependencies.tracing-subscriber]
-version = "0.3"
-features = ["env-filter"]
-
 [dev-dependencies.trybuild]
 version = "1.0"
 

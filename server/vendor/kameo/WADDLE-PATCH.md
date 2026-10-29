@@ -18,10 +18,16 @@ fallback or ordered-sequence rollback. Genuine dial failures retain their
 upstream classification, and excluded peers still reject late address events.
 
 The messaging eviction method uses a scoped `#[expect(deprecated)]` because
-libp2p 0.56 exposes its retained request-response address cache's eviction only
+libp2p 0.57 exposes its retained request-response address cache's eviction only
 through `remove_address`; there is no replacement API in this pinned version.
 
 The unused `otel` feature, its optional SDK hooks, and the development subscriber
 dependency are removed to keep the native client's local dependency closure
 free of remote telemetry capabilities. Waddle never enabled this feature;
 normal actor tracing spans and the server's own telemetry remain unchanged.
+
+The libp2p dependency is upgraded to 0.57.1 and libp2p-identity to 0.3 to
+keep one type family with Waddle's clustering swarm and resolve the Hickory
+and Yamux advisories. The GetRecordError::QuorumFailed match arm is removed:
+libp2p-kad 0.49 removed that variant because it was never constructed. Put
+record quorum failures retain their existing handling.
