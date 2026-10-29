@@ -56,6 +56,24 @@ pub(super) async fn handle_sans_io_iq(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
+    if ctx.payload_ns == waddle_xmpp::xep::xep0199::NS_PING
+        && state
+            .deps
+            .protocol
+            .dispatcher
+            .has_iq_handler(ctx.payload_ns)
+    {
+        if let Some(full_jid) = phase.bound_jid() {
+            if let Some(reply) = super::ping_destination::remote_ping_error(
+                ctx.iq,
+                ctx.domain,
+                &state.deps.service_domains,
+                full_jid,
+            ) {
+                return Some(vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))]);
+            }
+        }
+    }
     handle_sans_io_iq_with_relay_override(
         ctx,
         state,
@@ -148,16 +166,6 @@ async fn handle_sans_io_iq_with_relay_override(
                 not_authorized_iq_error("Authentication required."),
             )]);
         };
-        if payload_ns == waddle_xmpp::xep::xep0199::NS_PING {
-            if let Some(reply) = super::ping_destination::remote_ping_error(
-                iq,
-                domain,
-                &state.deps.service_domains,
-                full_jid,
-            ) {
-                return Some(vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))]);
-            }
-        }
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
             if let Some(reply) = peer_jingle_blocklist_reply(state, full_jid, iq, domain).await {
                 return Some(vec![match reply {
