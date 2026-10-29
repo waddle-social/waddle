@@ -16,10 +16,10 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^13.2.0",
+    "@astrojs/cloudflare": "~14.0.0",
     "@better-auth/drizzle-adapter": "^1.6.7",
     "@better-auth/oauth-provider": "^1.6.7",
-    "astro": "^6.1.9",
+    "astro": "~7.3.2",
     "better-auth": "^1.6.7",
     "drizzle-orm": "^0.45.2",
     "wrangler": "^4.84.1"

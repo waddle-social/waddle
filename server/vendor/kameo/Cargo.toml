@@ -100,7 +100,7 @@ version = "0.20.0"
 optional = true
 
 [dependencies.libp2p]
-version = "0.56.0"
+version = "0.57.1"
 features = [
     "cbor",
     "kad",
@@ -115,7 +115,7 @@ features = [
 optional = true
 
 [dependencies.libp2p-identity]
-version = "0.2.9"
+version = "0.3"
 optional = true
 
 [dependencies.linkme]
@@ -154,7 +154,7 @@ version = "0.8"
 features = ["async_tokio"]
 
 [dev-dependencies.libp2p]
-version = "0.56.0"
+version = "0.57.1"
 features = ["serde"]
 
 [dev-dependencies.metrics-exporter-prometheus]

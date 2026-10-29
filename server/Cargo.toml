@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/kameo"]
+exclude = ["vendor/kameo", "vendor/libp2p-swarm"]
 members = [
     "crates/waddle-ecdysis",
     "crates/waddle-server",
@@ -129,9 +129,9 @@ pulldown-cmark = "0.13"
 syntect = "5.3"
 
 # WebAssembly Extension Runtime
-wasmtime = { version = "44", features = ["component-model", "async"] }
-wasmtime-wasi = "44"
-wasmtime-wasi-http = "44"
+wasmtime = { version = "48.0.7", features = ["component-model", "async"] }
+wasmtime-wasi = "48.0.7"
+wasmtime-wasi-http = "48.0.7"
 
 
 [profile.release]
@@ -172,3 +172,4 @@ debug = "line-tables-only"
 
 [patch.crates-io]
 kameo = { path = "vendor/kameo" }
+libp2p-swarm = { path = "vendor/libp2p-swarm" }

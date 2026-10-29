@@ -19,15 +19,12 @@
     "generate-types": "wrangler types"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^13.3.1",
+    "@astrojs/cloudflare": "~14.0.0",
     "@tailwindcss/vite": "^4.2.4",
-    "astro": "^6.2.2",
+    "astro": "~7.3.2",
     "drizzle-orm": "^0.45.2",
     "tailwindcss": "^4.2.4",
     "wrangler": "^4.88.0"
-  },
-  "overrides": {
-    "vite": "^7"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
