@@ -101,6 +101,9 @@ struct ParticipantState {
     /// Occupancy alone cannot distinguish absence from an unbound restoration.
     registration_revision: uuid::Uuid,
     participant_sid: Option<ParticipantSid>,
+    /// Last displaced incarnation, retained while its successor is connecting.
+    /// Its join/leave echoes cannot acquire the successor's registration.
+    retired_participant_sid: Option<ParticipantSid>,
     /// When `participant_sid` was last written from a live observation
     /// (join webhook or occupancy probe). Lets the reconcile probe
     /// advance a stale sid without ever rolling back a newer webhook
@@ -139,6 +142,7 @@ impl ParticipantState {
         Self {
             registration_revision: uuid::Uuid::new_v4(),
             participant_sid: None,
+            retired_participant_sid: None,
             participant_sid_observed_at: None,
             participant_sid_event_at: None,
             participant_sid_contested_at: None,
@@ -159,6 +163,7 @@ impl ParticipantState {
             participant_sid_event_at: None,
             participant_sid_contested_at: None,
             participant_sid,
+            retired_participant_sid: None,
             first_registered_at,
             registered_without_mint: true,
             session: None,
@@ -575,6 +580,62 @@ impl LiveKitTeardownExecutor {
         Ok(TeardownExecution::Executed)
     }
 
+    /// A replacement owns the signaling registration already, so departure
+    /// session/generation comparisons do not apply. Only the captured media
+    /// incarnation can authorize this removal.
+    async fn retire_displaced_participant(
+        &self,
+        intent: &CallTeardownIntentLite,
+        identity: &Identity,
+        participant_sid: &ParticipantSid,
+    ) -> Result<TeardownExecution, SfuError> {
+        let guard = || {
+            if self.calls.get(&intent.call_id).is_some_and(|entry| {
+                entry
+                    .participants
+                    .get(identity)
+                    .is_some_and(|state| state.participant_sid_contested_at.is_some())
+            }) {
+                return TeardownGuard::Unresolved;
+            }
+            self.guard(
+                &intent.call_id,
+                intent.generation,
+                intent.room_sid.as_ref(),
+                Some((identity, Some(participant_sid))),
+                false,
+            )
+        };
+        match guard() {
+            TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
+            TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
+            TeardownGuard::Proceed => {}
+        }
+        // Always consult LiveKit, including when the local SID still names
+        // the displaced participant: the successor's join webhook can lag.
+        let occupancy = self.admin.room_occupancy(&intent.call_id).await?;
+        match occupancy.waddle.iter().find(|(live, _)| live == identity) {
+            None => return Ok(TeardownExecution::Executed),
+            Some((_, Some(live))) if live != participant_sid => {
+                return Ok(TeardownExecution::StaleGeneration);
+            }
+            Some((_, None)) => return Ok(TeardownExecution::Occupied),
+            Some((_, Some(_))) => {}
+        }
+        // Recheck after the probe await. LiveKit has no SID-conditional
+        // removal API: a connection replacing this SID during the subsequent
+        // identity-keyed HTTP request remains a provider-side race.
+        match guard() {
+            TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
+            TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
+            TeardownGuard::Proceed => {}
+        }
+        self.admin
+            .remove_participant(&intent.call_id, identity)
+            .await?;
+        Ok(TeardownExecution::Executed)
+    }
+
     /// LiveKit's current sid for this room name, if the room exists.
     async fn live_room_sid(&self, call_id: &CallId) -> Result<Option<RoomSid>, SfuError> {
         Ok(self
@@ -637,6 +698,13 @@ impl LiveKitTeardownExecutor {
         intent: &CallTeardownIntentLite,
     ) -> Result<TeardownExecution, SfuError> {
         match &intent.target {
+            TeardownTargetLite::DisplacedParticipant {
+                identity,
+                participant_sid,
+            } => {
+                self.retire_displaced_participant(intent, identity, participant_sid)
+                    .await
+            }
             TeardownTargetLite::Participant {
                 identity,
                 participant_sid,
@@ -981,6 +1049,21 @@ impl LiveKitSfu {
             for (identity, participant_sid) in live {
                 if let Some(participant) = entry.participants.get_mut(identity) {
                     if participant_sid.is_some()
+                        && participant_sid == &participant.retired_participant_sid
+                    {
+                        // This is still the displaced media incarnation. A
+                        // fresh authoritative probe resolves an unordered
+                        // webhook contest without adopting it as the successor.
+                        if participant
+                            .participant_sid_contested_at
+                            .is_some_and(|at| at < probe_freshness_boundary)
+                        {
+                            participant.participant_sid_contested_at = None;
+                            participant.advance_registration_revision();
+                        }
+                        continue;
+                    }
+                    if participant_sid.is_some()
                         && participant.participant_sid.is_none()
                         // First-SID learning is freshness-gated too
                         // (#1612 review round 11): a sid-less state
@@ -1270,6 +1353,7 @@ impl LiveKitSfu {
         observed_sids: Option<&ObservedCallSids>,
         direction: SidObservationDirection,
         observed_at: DateTime<Utc>,
+        session_gate: SessionGate<'_>,
     ) -> SidGuardDisposition {
         let Some(observed_sids) = observed_sids else {
             return SidGuardDisposition::Applied {
@@ -1278,6 +1362,19 @@ impl LiveKitSfu {
         };
         let identity_is_tracked = entry.participants.contains_key(identity);
         let mut participant_rejoined = false;
+        if matches!(direction, SidObservationDirection::Leave)
+            && matches!(session_gate, SessionGate::Any)
+            && observed_sids.participant_sid.is_none()
+            && entry
+                .participants
+                .get(identity)
+                .is_some_and(|state| state.retired_participant_sid.is_some())
+        {
+            // A SID-less webhook cannot distinguish old media from the live
+            // successor. Explicit departure gates are validated under this
+            // same entry guard by clear_local_state before any removal.
+            return SidGuardDisposition::StaleSid;
+        }
 
         // Validate the room SID before mutating the entry. A join from a
         // different room incarnation is retryable: the authoritative room
@@ -1314,10 +1411,28 @@ impl LiveKitSfu {
 
         if let Some(participant_sid) = observed_sids.participant_sid.as_ref() {
             if let Some(state) = entry.participants.get_mut(identity) {
+                if state.retired_participant_sid.as_ref() == Some(participant_sid) {
+                    return SidGuardDisposition::StaleSid;
+                }
                 if let Some(stored_participant_sid) = state.participant_sid.as_ref() {
                     if stored_participant_sid != participant_sid {
                         match direction {
                             SidObservationDirection::Join => {
+                                // Keep retired-SID history bounded to the last
+                                // displacement. An unordered join might name an
+                                // older, forgotten incarnation; only an event
+                                // ordered after the current SID, or a fresh
+                                // authoritative occupancy probe, may advance it.
+                                if state.retired_participant_sid.is_some()
+                                    && (observed_sids.observed_event_at.is_none()
+                                        || state.participant_sid_event_at.is_none())
+                                {
+                                    state.participant_sid_contested_at = Some(observed_at);
+                                    state.advance_registration_revision();
+                                    return SidGuardDisposition::Applied {
+                                        participant_rejoined: false,
+                                    };
+                                }
                                 // A join may only ADVANCE the sid when its
                                 // event time postdates the stored sid's
                                 // event lineage: the delivery ledger
@@ -1496,14 +1611,16 @@ impl LiveKitSfu {
             .unwrap_or_else(uuid::Uuid::new_v4);
         // Preserve the established issued -> calls lock order used by minting.
         // Keep a vacant issued entry vacant on a failed comparison.
-        let issued_entry =
-            publication.map(|_| self.issued.entry((call_id.clone(), identity.clone())));
+        let issued_entry = (publication.is_some() || occupant_session.is_some())
+            .then(|| self.issued.entry((call_id.clone(), identity.clone())));
         let call_entry = self.calls.entry(call_id.clone());
         // A departure may have waited ahead of us; stamp publication only
         // after both locks are acquired so its sweep recognizes this token
         // as a later mint.
         let now = Utc::now();
         let mut protected_from_empty_bucket_eject = false;
+        let mut displaced_generation = None;
+        let mut retirement = None;
         let _call_entry = match call_entry {
             dashmap::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -1533,6 +1650,30 @@ impl LiveKitSfu {
                     .participants
                     .entry(identity.clone())
                     .and_modify(|participant| {
+                        if let (Some(previous), Some(next)) =
+                            (participant.occupant_session, occupant_session)
+                        {
+                            if previous != next {
+                                displaced_generation = Some(previous);
+                                if let Some(sid) = participant.participant_sid.as_ref() {
+                                    if participant.retired_participant_sid.as_ref() != Some(sid) {
+                                        retirement = Some(CallTeardownIntentLite {
+                                            call_id: call_id.clone(),
+                                            target: TeardownTargetLite::DisplacedParticipant {
+                                                identity: identity.clone(),
+                                                participant_sid: sid.clone(),
+                                            },
+                                            generation: Some(entry.generation),
+                                            room_sid: entry.room_sid.clone(),
+                                            occupant_session: Some(previous),
+                                            unbound_occupant: UnboundOccupantPolicy::Keep,
+                                            session: participant.session.clone(),
+                                        });
+                                        participant.retired_participant_sid = Some(sid.clone());
+                                    }
+                                }
+                            }
+                        }
                         participant.registration_revision = registration_revision;
                         participant.session = session.cloned();
                         participant.occupant_session = occupant_session;
@@ -1573,20 +1714,33 @@ impl LiveKitSfu {
                 })
             }
         };
-        if let (Some((token, _)), Some(issued_entry)) = (publication, issued_entry) {
+        if let Some(issued_entry) = issued_entry {
             let mut issued = issued_entry.or_default();
-            while issued.len() >= MAX_ISSUED_PER_PARTICIPANT {
-                issued.remove(0);
+            if let Some(displaced) = displaced_generation {
+                issued.retain(|credential| {
+                    if credential.occupant_session == Some(displaced) {
+                        self.revoked.insert(credential.jti.clone(), credential.exp);
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
-            self.last_minted_at
-                .insert((call_id.clone(), identity.clone()), now);
-            issued.push(IssuedJti {
-                jti: token.jti.clone(),
-                exp: token.expires_at,
-                protected_from_empty_bucket_eject,
-                minted_at: now,
-            });
-            self.clear_pending_revocation_eject(call_id, identity);
+            if let Some((token, _)) = publication {
+                while issued.len() >= MAX_ISSUED_PER_PARTICIPANT {
+                    issued.remove(0);
+                }
+                self.last_minted_at
+                    .insert((call_id.clone(), identity.clone()), now);
+                issued.push(IssuedJti {
+                    jti: token.jti.clone(),
+                    exp: token.expires_at,
+                    protected_from_empty_bucket_eject,
+                    minted_at: now,
+                    occupant_session,
+                });
+                self.clear_pending_revocation_eject(call_id, identity);
+            }
         }
         // This registration is only reachable through the authorized
         // Jingle gate (the webhook path uses
@@ -1609,6 +1763,13 @@ impl LiveKitSfu {
             .insert((call_id.clone(), identity.clone()), now);
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        drop(_call_entry);
+        if displaced_generation.is_some() {
+            self.sweep_expired_revoked(Utc::now());
+        }
+        if let Some(retirement) = retirement {
+            self.schedule_displaced_retirement(retirement);
+        }
         true
     }
 
@@ -1767,6 +1928,7 @@ impl LiveKitSfu {
                 observed_sids,
                 SidObservationDirection::Leave,
                 now,
+                session_gate,
             ),
             SidGuardDisposition::StaleSid
         ) {
@@ -2066,6 +2228,24 @@ impl LiveKitSfu {
                     )
                     .await;
             }
+        });
+    }
+
+    fn schedule_displaced_retirement(&self, intent: CallTeardownIntentLite) {
+        // The successor remains registered: retirement never clears MUC
+        // presence and never schedules room deletion.
+        self.teardown_reporter
+            .report(std::iter::once(intent.clone()));
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let Ok(permit) = Arc::clone(&self.admin_permits).try_acquire_owned() else {
+            return;
+        };
+        let executor = self.inline_teardown_executor();
+        runtime.spawn(async move {
+            let _permit = permit;
+            let _ = executor.execute(&intent).await;
         });
     }
 
@@ -2591,6 +2771,7 @@ impl SfuService for LiveKitSfu {
             exp: token.expires_at,
             protected_from_empty_bucket_eject,
             minted_at,
+            occupant_session: None,
         });
         Ok(token)
     }
@@ -2700,6 +2881,7 @@ impl SfuService for LiveKitSfu {
                     Some(observed_sids),
                     SidObservationDirection::Join,
                     now,
+                    SessionGate::Any,
                 ) {
                     SidGuardDisposition::Applied { .. } => {}
                     SidGuardDisposition::RoomRotationPending => {
@@ -2989,6 +3171,7 @@ impl SfuService for LiveKitSfu {
             observed_sids,
             direction,
             now,
+            SessionGate::Any,
         ) {
             SidGuardDisposition::Applied {
                 participant_rejoined,

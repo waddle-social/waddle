@@ -1511,6 +1511,60 @@ fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
 }
 
 #[test]
+fn replacement_muji_initiate_retires_only_the_displaced_generations_token() {
+    let sfu = fixture_livekit_sfu();
+    let jid = test_full_jid();
+    let identity = Identity::from_jid(jid.clone());
+    let call = CallId::try_new("room@muc.waddle.test").expect("room call");
+    let displaced = OccupancySessionGeneration::mint();
+    let old_token = sfu
+        .issue_join_token_with_session(
+            &call,
+            &identity,
+            waddle_sfu::MediaCapabilities::direct_call_peer(),
+            &waddle_sfu::SessionBinding::try_new("displaced").expect("session"),
+            displaced,
+            sfu.participant_registration_expectation(&call, &identity)
+                .expect("expectation"),
+        )
+        .expect("old mint")
+        .expect("old publication");
+    let successor = OccupancySessionGeneration::mint();
+    let mut context = ctx_with_caps_and_session(
+        &jid,
+        Some(waddle_sfu::MediaCapabilities::direct_call_peer()),
+        Some(successor),
+    );
+    context.participant_registration = sfu.participant_registration_expectation(&call, &identity);
+    let iq = muji_session_initiate_iq(
+        TEST_INITIATOR,
+        &calls_mixer_jid(TEST_DOMAIN).to_string(),
+        call.as_str(),
+        "successor",
+    );
+    let events = JingleHandler::new(sfu.clone()).handle(&iq, &context);
+    assert!(first_error_condition(&events).is_none(), "{events:?}");
+    let accept = session_accept_payload_to(&events, TEST_INITIATOR).expect("session accept");
+    let jingle = Jingle::try_from(accept.clone()).expect("Jingle accept");
+    let Some(Transport::Unknown(transport)) = &jingle.contents[0].transport else {
+        panic!("expected LiveKit transport");
+    };
+    let WaddleLiveKitTransport::Issued(issued) =
+        WaddleLiveKitTransport::try_from(transport).expect("transport")
+    else {
+        panic!("expected issued credentials");
+    };
+    let new_jti = issued.token.unverified_jti().expect("issued JTI");
+    assert!(sfu.is_revoked(&old_token.jti));
+    assert!(!sfu.is_revoked(&new_jti));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &identity),
+        Some(successor)
+    );
+    assert_eq!(sfu.issued_count(&call, &identity), 1);
+}
+
+#[test]
 fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
     let sfu = fixture_sfu();
     let room = "room@muc.waddle.test";

@@ -53,7 +53,7 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
                 Some(other) => {
                     return Err(CallTeardownOutboxError::InvalidUnboundOccupantPolicy(
                         other.to_string(),
-                    ))
+                    ));
                 }
             },
             room_sid: row
@@ -97,6 +97,18 @@ fn decode_target(
     thread: ThreadPayloadColumns,
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
+        "retire_displaced_participant" => match (identity, room_jid, participant_sid) {
+            (Some(identity), None, Some(participant_sid)) if !identity.is_empty() => {
+                Ok(TeardownTarget::DisplacedParticipant {
+                    identity: FullJid::from_str(&identity)
+                        .map_err(|_| CallTeardownOutboxError::InvalidFullJid(identity))?,
+                    participant_sid: ParticipantSid::try_new(participant_sid)?,
+                })
+            }
+            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
+                action.to_owned(),
+            )),
+        },
         "remove_participant" => match (identity, room_jid) {
             (Some(identity), None) if !identity.is_empty() => Ok(TeardownTarget::Participant {
                 identity: FullJid::from_str(&identity)

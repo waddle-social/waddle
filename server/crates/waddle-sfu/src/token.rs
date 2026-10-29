@@ -119,6 +119,8 @@ pub(crate) struct IssuedJti {
     /// AFTER the departure was observed belongs to a concurrent
     /// replacement initiate and must survive (#1612 review round 8).
     pub minted_at: DateTime<Utc>,
+    /// Occupancy authority that published this credential; absent for 1:1 calls.
+    pub occupant_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
 }
 
 /// Fully-issued join credential. Returned by

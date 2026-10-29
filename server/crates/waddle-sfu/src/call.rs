@@ -237,6 +237,11 @@ pub struct CallTeardownIntentLite {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TeardownTargetLite {
+    /// Retire an observed media incarnation without departing its successor.
+    DisplacedParticipant {
+        identity: Identity,
+        participant_sid: ParticipantSid,
+    },
     Participant {
         identity: Identity,
         participant_sid: Option<ParticipantSid>,
