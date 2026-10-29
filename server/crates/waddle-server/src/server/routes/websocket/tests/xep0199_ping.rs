@@ -77,10 +77,7 @@ fn assert_remote_not_allowed(reply: &Iq, request: &Iq) {
         panic!("foreign destination must never produce a pong: {reply:?}");
     };
     assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(
-        error.defined_condition,
-        DefinedCondition::ServiceUnavailable
-    );
+    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
     assert_eq!(
         error.by,
         Some(DOMAIN.parse().expect("local error generator"))
