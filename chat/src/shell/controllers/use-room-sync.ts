@@ -7,6 +7,7 @@ import type { ChatShellState } from "@/shell/state";
 import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
 import { barePeerJid } from "@/lib/xmpp-client";
+import { jidLocalpart } from "@/lib/xmpp/jid";
 import {
   isTrustedManagedRoomJid,
   knownChannelIdForRoomJid,
@@ -67,17 +68,29 @@ export function useRoomSync(deps: RoomSyncDeps) {
     const unsubscribe = client.onRoomIdAmbiguous?.((id) => {
       const { [id]: _discard, ...remaining } = selectedChannelRoomJids.value;
       selectedChannelRoomJids.value = remaining;
-      clearPendingChannelRoomJidSelection();
-      // The directory subscriber clears the active ID synchronously first.
-      if (!waddles.activeChannelId.value || waddles.activeChannelId.value === id) {
-        cancelPendingRoute();
-        activeExtensionRouteKey.value = null;
-        messaging.clearMessages();
-        memberJidByNick.value = {};
+      const pendingRoomJid = pendingChannelRoomJidSelection.value;
+      if (pendingRoomJid && jidLocalpart(pendingRoomJid) === id) {
+        clearPendingChannelRoomJidSelection();
       }
+      if (waddles.activeChannelId.value === id) clearQuarantinedSelection();
     });
     if (unsubscribe) onCleanup(unsubscribe);
   }, { immediate: true, flush: "sync" });
+
+  function clearQuarantinedSelection() {
+    cancelPendingRoute();
+    activeExtensionRouteKey.value = null;
+    messaging.clearMessages();
+    memberJidByNick.value = {};
+  }
+  // The directory's ambiguity subscriber clears selection before ours runs.
+  // Observe that exact transition; an unrelated initial route also starts with
+  // no active channel and must retain its request while discovery finishes.
+  watch(waddles.activeChannelId, (id, previous) => {
+    if (!id && previous && xmppClient.value?.isRoomIdAmbiguous?.(previous)) {
+      clearQuarantinedSelection();
+    }
+  }, { flush: "sync" });
 
   const activeChannelRoomJid = computed(() => {
     const channelId = waddles.activeChannelId.value;
