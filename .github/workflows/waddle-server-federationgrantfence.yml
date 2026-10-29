@@ -18,21 +18,6 @@ on:
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
     - server/schema/**
-  pull_request:
-    branches:
-    - main
-    paths:
-    - .github/workflows/waddle-server-federationgrantfence.yml
-    - cue.mod/**
-    - flake.lock
-    - flake.lock/**
-    - flake.nix
-    - flake.nix/**
-    - server/env.cue
-    - server/experiments/grant-fence/**
-    - server/rust-toolchain.toml
-    - server/rust-toolchain.toml/**
-    - server/schema/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
