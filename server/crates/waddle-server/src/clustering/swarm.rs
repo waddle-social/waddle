@@ -1067,9 +1067,8 @@ fn handle_swarm_event(
                 .insert(connection_id, endpoint.get_remote_address().clone());
             // Feed outbound (dialed) addresses to the behaviours: kademlia
             // only inserts a peer into its routing table once it knows a
-            // dialable address for it. kameo's mDNS dev-bootstrap does this on
-            // every discovery; our owned dialing must do it explicitly or the
-            // routing table stays empty and every lookup fails. Inbound remote
+            // dialable address for it. Our owned dialing must supply that address
+            // explicitly or every lookup fails. Inbound remote
             // addresses are ephemeral ports, never dialable — skip those.
             if endpoint.is_dialer() {
                 swarm.add_peer_address(peer_id, endpoint.get_remote_address().clone());

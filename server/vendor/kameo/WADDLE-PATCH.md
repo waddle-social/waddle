@@ -31,3 +31,8 @@ keep one type family with Waddle's clustering swarm and resolve the Hickory
 and Yamux advisories. The GetRecordError::QuorumFailed match arm is removed:
 libp2p-kad 0.49 removed that variant because it was never constructed. Put
 record quorum failures retain their existing handling.
+
+The unused mDNS development bootstrap helpers (`bootstrap` and `bootstrap_on`)
+and the corresponding libp2p mDNS feature are removed. Waddle builds and drives
+its own swarm, resolving configured bootstrap hosts through Tokio. This keeps
+unused mDNS and Hickory DNS code out of the clustering dependency graph.

@@ -1,9 +1,8 @@
 //! The owned libp2p `NetworkBehaviour` for the clustering swarm.
 //!
 //! We compose `kameo::remote::Behaviour` into a behaviour we build and drive
-//! ourselves, rather than using `kameo::remote::bootstrap()` (an mDNS
-//! development helper). This is what lets us own the transports, the event
-//! loop, peer dialing, the peer allowlist, and — in a later slice — the
+//! ourselves. This lets us own the transports, the event loop, peer dialing,
+//! the peer allowlist, and — in a later slice — the
 //! per-peer relay actors.
 
 use kameo::remote;
