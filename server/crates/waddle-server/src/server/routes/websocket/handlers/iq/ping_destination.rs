@@ -37,9 +37,9 @@ pub(super) fn remote_ping_error(
 
     let mut error = StanzaError::new(
         ErrorType::Cancel,
-        DefinedCondition::ServiceUnavailable,
+        DefinedCondition::NotAllowed,
         "en",
-        "Remote ping routing is unavailable.",
+        "Remote ping routing is not allowed by this server.",
     );
     // RFC 6120 §8.3.1: swap the request addresses and identify the local
     // error generator with `by`. An error from the intended target is not a

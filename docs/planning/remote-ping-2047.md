@@ -13,7 +13,11 @@ and `error.by` identifying the home server.
 [RFC 6120 section 8.3.1](https://www.rfc-editor.org/rfc/rfc6120.html#section-8.3.1)
 specifies this swapped-address error form; it reports a local routing failure
 rather than a successful response from the remote target. Use
-`cancel/service-unavailable`, without claiming a DNS lookup or remote timeout.
+[`cancel/not-allowed`](https://www.rfc-editor.org/rfc/rfc6120.html#section-8.3.3.10)
+for the local policy that permits no remote ping routing, without claiming a
+DNS lookup or remote timeout. `service-unavailable` would incorrectly confirm
+remote occupant membership under the existing XEP-0410 self-ping interpretation;
+the foreign-routing error must not do so. Local self-ping behavior is unchanged.
 Cover the WebSocket dispatch path and relevant
 [XEP-0199 v2.0.1](https://xmpp.org/extensions/xep-0199.html) and XEP-0410 behavior;
 no federation transport is enabled by this change.

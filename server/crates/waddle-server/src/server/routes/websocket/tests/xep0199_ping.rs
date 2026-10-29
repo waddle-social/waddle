@@ -8,6 +8,7 @@ use minidom::Element;
 use tokio::sync::mpsc;
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::xep::xep0199::NS_PING;
+use waddle_xmpp::xep::xep0410::{interpret_self_ping_response, SelfPingResult};
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::iq::Iq;
@@ -68,7 +69,7 @@ async fn dispatch(state: &WebSocketState, conn: &mut WsConnState, iq: Iq) -> Vec
     .collect()
 }
 
-fn assert_unavailable(reply: &Iq, request: &Iq) {
+fn assert_remote_not_allowed(reply: &Iq, request: &Iq) {
     assert_eq!(reply.id(), request.id());
     assert_eq!(reply.from(), request.to(), "RFC 6120 swapped target");
     assert_eq!(reply.to(), Some(&Jid::from(origin())), "bound origin");
@@ -111,10 +112,25 @@ async fn foreign_ping_get_and_set_return_locally_attributed_error() {
                 let iq = request(Some(target), set, from);
                 let responses = dispatch(&state, &mut conn, iq.clone()).await;
                 assert_eq!(responses.len(), 1, "{target}, set={set}, from={from:?}");
-                assert_unavailable(&responses[0], &iq);
+                assert_remote_not_allowed(&responses[0], &iq);
             }
         }
     }
+}
+
+#[tokio::test]
+async fn foreign_occupant_ping_cannot_confirm_room_membership() {
+    let state = create_test_websocket_state().await;
+    let mut conn = connection();
+    let iq = request(Some("room@muc.remote.test/alice"), false, Some(ORIGIN));
+    let responses = dispatch(&state, &mut conn, iq.clone()).await;
+    assert_eq!(responses.len(), 1);
+    assert_remote_not_allowed(&responses[0], &iq);
+    // Exercise the existing XEP-0410 interpretation on the actual parsed wire
+    // response: service-unavailable would incorrectly mean still joined.
+    let membership = interpret_self_ping_response(&responses[0]);
+    assert_eq!(membership, SelfPingResult::Disconnected);
+    assert!(membership.should_rejoin());
 }
 
 #[tokio::test]
@@ -191,7 +207,7 @@ async fn configured_service_domains_are_owned_and_replaced_defaults_are_foreign(
         let iq = request(Some(target), false, Some(ORIGIN));
         let responses = dispatch(&state, &mut conn, iq.clone()).await;
         assert_eq!(responses.len(), 1);
-        assert_unavailable(&responses[0], &iq);
+        assert_remote_not_allowed(&responses[0], &iq);
     }
 }
 
@@ -333,7 +349,7 @@ async fn foreign_rejection_settles_sm_inbound_once_and_does_not_block_local_prog
     let iq = request(Some("remote.test"), false, Some(ORIGIN));
     let responses = dispatch(&state, &mut conn, iq.clone()).await;
     assert_eq!(responses.len(), 1);
-    assert_unavailable(&responses[0], &iq);
+    assert_remote_not_allowed(&responses[0], &iq);
     assert_eq!(conn.sm_state.inbound_count(), 1);
     let local = dispatch(&state, &mut conn, request(None, false, Some(ORIGIN))).await;
     assert!(matches!(local.as_slice(), [Iq::Result { .. }]));
