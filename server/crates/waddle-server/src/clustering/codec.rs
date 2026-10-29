@@ -349,6 +349,31 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_attributes_and_namespace_declaration_bombs_are_typed_errors() {
+        assert!(matches!(
+            decode_element("<message xmlns='jabber:client' id='first' id='second'/>"),
+            Err(RemoteCodecError::Malformed(_))
+        ));
+
+        let mut start = quick_xml::events::BytesStart::new("message");
+        start.push_attribute(("xmlns", "jabber:client"));
+        for index in 0..MAX_REMOTE_XML_ATTRIBUTES {
+            let name = format!("xmlns:n{index}");
+            let namespace = format!("urn:example:{index}");
+            start.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        writer
+            .write_event(quick_xml::events::Event::Empty(start))
+            .expect("serialize namespace declarations");
+        let xml = String::from_utf8(writer.into_inner()).expect("UTF-8 XML");
+        assert!(matches!(
+            decode_element(&xml),
+            Err(RemoteCodecError::TooManyAttributes { .. })
+        ));
+    }
+
+    #[test]
     fn oversized_payload_is_a_typed_error() {
         let body = "x".repeat(MAX_REMOTE_XML_BYTES + 1);
         let xml = format!("<message xmlns='jabber:client'><body>{body}</body></message>");

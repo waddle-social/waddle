@@ -53,7 +53,7 @@ schema.#Project & {
 				"id-token": "write"
 				packages:   "none"
 			}
-			"tasks": [tasks.build]
+			"tasks": [tasks.oidcSmoke]
 		}
 	}
 
@@ -77,6 +77,23 @@ schema.#Project & {
 				"dist/**",
 			]
 		}
+		oidcSmoke: schema.#Task & {
+			// Run the installed workspace CLI and local workerd on every pipeline.
+			// D1 and Secrets Store fixtures remain isolated in a temporary directory.
+			hermetic: false
+			command:  "bun"
+			args: ["run", "scripts/smoke-oidc.mjs"]
+			dependsOn: [tasks.build]
+			inputs: [
+				"../package.json",
+				"../bun.lock",
+				"package.json",
+				"scripts/smoke-oidc.mjs",
+				"scripts/oidc-smoke-worker.mjs",
+				"drizzle/**",
+				"dist/**",
+			]
+		}
 		dev: schema.#Task & {
 			command: "bun"
 			args: ["run", "dev"]
@@ -84,7 +101,7 @@ schema.#Project & {
 		migrateProduction: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "d1", "migrations", "apply", "colony", "--remote"]
-			dependsOn: [tasks.build]
+			dependsOn: [tasks.oidcSmoke]
 			inputs: [
 				"wrangler.jsonc",
 				"drizzle/**",
@@ -96,7 +113,7 @@ schema.#Project & {
 		deployPreview: schema.#Task & {
 			command: "bun"
 			args: ["x", "wrangler", "versions", "upload"]
-			dependsOn: [tasks.build]
+			dependsOn: [tasks.oidcSmoke]
 			captures: previewUrl: {
 				pattern: "Version Preview URL: (.+)"
 			}

@@ -129,6 +129,7 @@ function isClientOutput(outputOptions) {
 }
 
 export default defineConfig({
+  compressHTML: true,
   output: "server",
   adapter: cloudflare(),
 

@@ -294,6 +294,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s3_storage_preserves_blob_bytes_metadata_and_missing_key_errors() {
+        use wiremock::matchers::{body_bytes, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let data = bytes::Bytes::from_static(b"fake image data");
+        Mock::given(method("PUT"))
+            .and(path("/test-bucket/test-slot/photo.jpg"))
+            .and(header("content-type", "image/jpeg"))
+            .and(body_bytes(data.to_vec()))
+            .respond_with(ResponseTemplate::new(200).insert_header("etag", "\"test-etag\""))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test-bucket/test-slot/photo.jpg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .insert_header("etag", "\"test-etag\"")
+                    .insert_header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                    .set_body_bytes(data.to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test-bucket/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(
+                "<Error><Code>NoSuchKey</Code><Message>The key does not exist.</Message></Error>",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = AmazonS3Builder::new()
+            .with_endpoint(server.uri())
+            .with_bucket_name("test-bucket")
+            .with_region("us-east-1")
+            .with_access_key_id("test-key")
+            .with_secret_access_key("test-secret")
+            .with_virtual_hosted_style_request(false)
+            .with_allow_http(true)
+            .build()
+            .expect("mock S3 store");
+        let storage = S3Storage {
+            store: Box::new(store),
+        };
+
+        storage
+            .put("test-slot/photo.jpg", data.clone(), "image/jpeg")
+            .await
+            .expect("upload blob");
+        let (downloaded, metadata) = storage.get("test-slot/photo.jpg").await.expect("get blob");
+        assert_eq!(downloaded, data);
+        assert_eq!(metadata.content_type, "image/jpeg");
+        assert!(matches!(
+            storage.get("missing").await,
+            Err(StorageError::NotFound(key)) if key == "missing"
+        ));
+    }
+
+    #[tokio::test]
     async fn dyn_dispatch_works() {
         let dir = std::env::temp_dir().join(format!("waddle-blob-dyn-{}", uuid::Uuid::new_v4()));
         let storage: Arc<dyn BlobStorage> = Arc::new(LocalStorage::new(dir.clone()));

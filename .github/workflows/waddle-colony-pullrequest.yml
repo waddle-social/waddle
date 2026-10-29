@@ -10,6 +10,7 @@ on:
     - bun.lock/**
     - colony/astro.config.ts
     - colony/astro.config.ts/**
+    - colony/dist/**
     - colony/drizzle.config.ts
     - colony/drizzle.config.ts/**
     - colony/drizzle/**
@@ -18,6 +19,10 @@ on:
     - colony/package.json/**
     - colony/public/**
     - colony/schema/**
+    - colony/scripts/oidc-smoke-worker.mjs
+    - colony/scripts/oidc-smoke-worker.mjs/**
+    - colony/scripts/smoke-oidc.mjs
+    - colony/scripts/smoke-oidc.mjs/**
     - colony/src/**
     - colony/tsconfig.json
     - colony/tsconfig.json/**

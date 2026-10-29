@@ -17,6 +17,7 @@
 ## Rust workflow
 
 - Format Rust changes with `cargo fmt` before committing. Do not introduce `unwrap()` in production code; handle or propagate errors explicitly.
+- Preserve unchanged upstream implementations in `vendor/`; the `unwrap()` rule applies to first-party code and locally authored vendor changes. Record provenance and local differences in patch notes. This exemption covers inherited code style only; fix security defects through a patch or upstream upgrade.
 
 ## Ordered relay wire compatibility
 - Any wire-format change to `RemoteStanzaEnvelope` or ordered relay reply types (including `OrderedRelayReply`, `OrderedRelayAck`, `OrderedRelayNack`, and their contained fields) MUST bump the version suffix in the `waddle.clustering.relay.deliver_ordered.vN` remote message ID in `clustering/relay.rs`. Reusing an ID can make mixed-version peers fail during deserialization after a delivery has committed, poisoning the shared ordered channel.
