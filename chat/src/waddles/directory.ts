@@ -52,6 +52,7 @@ export function useWaddleDirectory(
   const hasLoadedStructure = ref(false);
   const isSubmitting = ref(false);
 
+  let clientGeneration = 0;
   let spaceRequestId = 0;
   let structureRequestId = 0;
   let memberRequestId = 0;
@@ -82,17 +83,6 @@ export function useWaddleDirectory(
       actionError.value = "This channel has conflicting room addresses. Reload after correcting the room directory.";
     }
   }
-
-  watch(xmppClient, (client, _previous, onCleanup) => {
-    // A response from a replaced client cannot restore its directory or members.
-    structureRequestId++;
-    memberRequestId++;
-    botRequestId++;
-    if (!client) return;
-    const unsubscribe = client.onRoomIdAmbiguous?.(quarantineChannel);
-    if (unsubscribe) onCleanup(unsubscribe);
-    for (const id of client.listAmbiguousRoomIds?.() ?? []) quarantineChannel(id);
-  }, { immediate: true, flush: "sync" });
 
   const editWaddleForm = ref<CommunityFormData>({
     name: "",
@@ -197,6 +187,16 @@ export function useWaddleDirectory(
   function resetForms() {
     createChannelForm.value = defaultCreateForm();
   }
+
+  watch(xmppClient, (client, previous, onCleanup) => {
+    // Local IDs and their cached roles belong to one client lifetime.
+    // Clear before a replacement can select the same ID at another address.
+    if (previous !== undefined && previous !== client) clearData();
+    if (!client) return;
+    const unsubscribe = client.onRoomIdAmbiguous?.(quarantineChannel);
+    if (unsubscribe) onCleanup(unsubscribe);
+    for (const id of client.listAmbiguousRoomIds?.() ?? []) quarantineChannel(id);
+  }, { immediate: true, flush: "sync" });
 
   function beginMemberLoad(channelId: string) {
     memberLoadState.value = "loading";
@@ -344,6 +344,7 @@ export function useWaddleDirectory(
         members.value = [];
         memberLoadState.value = "idle";
       }
+      if (requestId !== structureRequestId) return null;
       resetForms();
       return nextChannelId;
     } catch (e) {
@@ -402,6 +403,7 @@ export function useWaddleDirectory(
   }
 
   async function createChannel(): Promise<CreateChannelResult | undefined> {
+    const generation = clientGeneration;
     const form = createChannelForm.value;
     if (!xmppClient.value || !session.value) return undefined;
 
@@ -430,9 +432,11 @@ export function useWaddleDirectory(
           mucType: form.muc_type,
         });
 
+        if (generation !== clientGeneration) return undefined;
         const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
+        if (generation !== clientGeneration) return undefined;
         return {
           intent: "muc",
           channelId,
@@ -450,8 +454,10 @@ export function useWaddleDirectory(
           description: form.description.trim() || undefined,
         });
 
+        if (generation !== clientGeneration) return undefined;
         createChannelForm.value = defaultCreateForm();
         await loadStructure(null, { noChannelSelect: true });
+        if (generation !== clientGeneration) return undefined;
         selectedSpaceId.value = node;
         return {
           intent: "space",
@@ -473,9 +479,11 @@ export function useWaddleDirectory(
           spaceNode,
         });
 
+        if (generation !== clientGeneration) return undefined;
         const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
+        if (generation !== clientGeneration) return undefined;
         return {
           intent: "space-muc",
           channelId,
@@ -504,9 +512,11 @@ export function useWaddleDirectory(
           },
         );
 
+        if (generation !== clientGeneration) return undefined;
         const channelId = jidLocalpart(roomJid);
         createChannelForm.value = defaultCreateForm();
         await loadStructure(channelId);
+        if (generation !== clientGeneration) return undefined;
         return {
           intent: "space-with-muc",
           channelId,
@@ -519,14 +529,15 @@ export function useWaddleDirectory(
 
       return undefined;
     } catch (e) {
-      actionError.value = normalizeError(e);
+      if (generation === clientGeneration) actionError.value = normalizeError(e);
       return undefined;
     } finally {
-      isSubmitting.value = false;
+      if (generation === clientGeneration) isSubmitting.value = false;
     }
   }
 
   async function updateChannel(): Promise<boolean> {
+    const generation = clientGeneration;
     const channel = currentChannel.value;
     if (!channel?.jid) {
       actionError.value = "Cannot edit a channel without a known room JID.";
@@ -545,6 +556,7 @@ export function useWaddleDirectory(
         description: editChannelForm.value.description.trim(),
         pinPermission: editChannelForm.value.pinPermission,
       });
+      if (generation !== clientGeneration) return false;
       // Optimistically apply locally so the action-sheet visibility
       // updates without waiting for a re-fetch. The server is
       // authoritative — a subsequent owner-config GET would refresh.
@@ -564,10 +576,10 @@ export function useWaddleDirectory(
       }
       return true;
     } catch (error) {
-      actionError.value = normalizeError(error);
+      if (generation === clientGeneration) actionError.value = normalizeError(error);
       return false;
     } finally {
-      isSubmitting.value = false;
+      if (generation === clientGeneration) isSubmitting.value = false;
     }
   }
 
@@ -591,6 +603,7 @@ export function useWaddleDirectory(
     channelId: string,
     targetSpaceId: string,
   ): Promise<boolean> {
+    const generation = clientGeneration;
     const channel = channels.value.find((c) => c.id === channelId);
     if (!channel?.jid) {
       actionError.value = "Cannot move a channel without a known room JID.";
@@ -615,6 +628,7 @@ export function useWaddleDirectory(
         name: channel.name,
         autojoin: true,
       });
+      if (generation !== clientGeneration) return false;
       // Optimistically update local state so the channel re-groups
       // in the sidebar before the next structure reload.
       const idx = channels.value.findIndex((c) => c.id === channelId);
@@ -622,16 +636,18 @@ export function useWaddleDirectory(
         channels.value[idx] = { ...channels.value[idx], spaceId: targetSpaceId };
       }
       await loadStructure(channelId);
-      return true;
+      return generation === clientGeneration;
     } catch (error) {
-      actionError.value = normalizeError(error);
+      if (generation === clientGeneration) actionError.value = normalizeError(error);
       return false;
     } finally {
-      isSubmitting.value = false;
+      if (generation === clientGeneration) isSubmitting.value = false;
     }
   }
 
   function clearData() {
+    clientGeneration++;
+    selectionRequestId++;
     spaceRequestId++;
     structureRequestId++;
     memberRequestId++;
@@ -649,6 +665,12 @@ export function useWaddleDirectory(
     activeChannelId.value = null;
     selectedSpaceId.value = null;
     hasLoadedStructure.value = false;
+    isLoadingStructure.value = false;
+    isSubmitting.value = false;
+    actionError.value = "";
+    editWaddleForm.value = { name: "", description: "", is_public: true };
+    editChannelForm.value = { name: "", description: "", position: 0 };
+    resetForms();
   }
 
   return {
