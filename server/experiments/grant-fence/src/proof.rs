@@ -76,12 +76,9 @@ impl Worker {
         };
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn_tracked(
+        let process = fixture.spawn_worker(
             &mut command,
             Some(&serde_json::to_vec(&WorkerRequest::Guard(work.clone()))?),
-            false,
-            fixture.cleanup_latch(),
-            crate::cleanup::CleanupService::Worker,
         )?;
         Ok(Self { process, work })
     }
@@ -229,7 +226,9 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             "formal evidence requires a clean committed experiment source"
         );
         report.versions = fixture.versions().await?;
-        fixture.start().await?;
+        fixture
+            .start(crate::model::APP_SCHEMA, crate::model::SPICE_SCHEMA)
+            .await?;
         exercise(&mut fixture, Path::new(worker_binary), &mut report).await?;
         crate::recovery::run(
             &mut fixture,

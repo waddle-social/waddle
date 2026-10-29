@@ -387,6 +387,7 @@ schema.#Project & {
 			args: ["experiments/grant-fence/run-native.sh"]
 			inputs: [
 				"experiments/grant-fence/**",
+				"experiments/native-fixture/**",
 				"../flake.lock",
 				"../flake.nix",
 				"rust-toolchain.toml",

@@ -1,12 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-use crate::process::Process;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Provenance {
@@ -17,28 +13,26 @@ pub struct Provenance {
     pub experiment_source_sha256: String,
 }
 
-async fn git(arguments: &[&str]) -> Result<String> {
-    let mut command = Command::new("git");
-    command
-        .env_clear()
-        .args(arguments)
-        .current_dir(env!("CARGO_MANIFEST_DIR"));
-    let mut process = Process::spawn(&mut command, None, true)?;
-    process.finish(Duration::from_secs(5)).await?;
-    Ok(process.output()?.trim_end().to_owned())
-}
-
 impl Provenance {
     pub async fn capture() -> Result<Self> {
-        let git_head = git(&["rev-parse", "HEAD"]).await?;
+        let git_head =
+            waddle_native_fixture::git_probe::head(Path::new(env!("CARGO_MANIFEST_DIR"))).await?;
         ensure!(
             git_head.len() == 40 && git_head.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "exact repository revision unavailable"
         );
         let git_status =
-            crate::status_capture::capture(Path::new(env!("CARGO_MANIFEST_DIR"))).await?;
+            waddle_native_fixture::status_capture::capture(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .await?;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repository = root.join("../../..").canonicalize()?;
+        let shared = root.join("../native-fixture").canonicalize()?;
         let mut files = vec![
+            shared.join("Cargo.toml"),
+            shared.join("README.md"),
+            repository.join("flake.lock"),
+            repository.join("flake.nix"),
+            repository.join("server/rust-toolchain.toml"),
             root.join("Cargo.toml"),
             root.join("Cargo.lock"),
             root.join("README.md"),
@@ -48,13 +42,19 @@ impl Provenance {
         for directory in ["src", "schema", "tests"] {
             collect(&root.join(directory), &mut files).await?;
         }
+        collect(&shared.join("src"), &mut files).await?;
         files.sort();
         let mut hash = Sha256::new();
         for path in files {
             let relative = path
-                .strip_prefix(root)?
+                .strip_prefix(&repository)?
                 .to_str()
                 .context("UTF-8 experiment source path")?;
+            let kind = tokio::fs::symlink_metadata(&path).await?.file_type();
+            ensure!(
+                kind.is_file() && !kind.is_symlink(),
+                "required source must be a regular file"
+            );
             let bytes = tokio::fs::read(&path)
                 .await
                 .with_context(|| format!("required experiment source missing: {relative}"))?;

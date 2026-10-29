@@ -6,26 +6,9 @@ use prescience::{
 use sqlx::{Connection, PgConnection, Row};
 use uuid::Uuid;
 
-use crate::model::{Guard, Settings, RPC_BUDGET};
+use crate::model::{Guard, Settings};
 
-pub async fn client(settings: &Settings) -> Result<Client> {
-    client_at_port(settings, settings.grpc_port, RPC_BUDGET).await
-}
-
-pub async fn client_at_port(
-    settings: &Settings,
-    port: u16,
-    timeout: std::time::Duration,
-) -> Result<Client> {
-    settings.validate()?;
-    Ok(
-        Client::builder(format!("http://127.0.0.1:{port}"), &settings.preshared_key)
-            .connect_timeout(RPC_BUDGET)
-            .default_timeout(timeout)
-            .build()
-            .await?,
-    )
-}
+pub use waddle_native_fixture::client::{client, client_at_port};
 
 fn resource(guard: &Guard) -> Result<ObjectReference> {
     Ok(ObjectReference::new("fence_generation", guard.graph_id())?)
