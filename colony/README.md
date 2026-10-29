@@ -1,6 +1,6 @@
 # Colony
 
-Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, Better Auth GitHub OAuth, and a Better Auth OIDC provider used by `waddle-server`.
+Bun-based Astro 7 app targeting Cloudflare Workers with D1, Drizzle Kit, Better Auth GitHub OAuth, and a Better Auth OIDC provider used by `waddle-server`.
 
 ## Setup
 
@@ -29,4 +29,12 @@ Bun-based Astro 6 app targeting Cloudflare Workers with D1, Drizzle Kit, Better 
 - `colony` is the remote OIDC issuer for `waddle-server`.
 - Dynamic client registration is enabled and used for first-party and third-party OAuth clients.
 - Redirect URI checks remain exact per registered client redirect URL (no wildcard patterns).
-- `/api/auth/oauth2/token` requires a non-empty `DPoP` header.
+- `/api/auth/oauth2/token` requires a valid signed `DPoP` proof.
+
+## Local OIDC runtime smoke
+
+Run `bun run test:oidc` after installing the workspace dependencies. It builds the app and runs the actual Cloudflare Worker bundle on a loopback port, applies the checked-in D1 migrations to a temporary database, and seeds synthetic local credentials and an authenticated session. The test uses a separate Secrets Store and persistence directory, then stops the worker and deletes its fixtures on completion.
+
+The smoke checks discovery, dynamic client registration, the sign-in redirect, the consent page, a cross-origin form token exchange using PKCE and a signed DPoP proof, ID-token signature and claims against JWKS, userinfo, rejected missing or tampered DPoP proofs, rejected wrong PKCE verifiers, and rejected authorization-code reuse. It also checks GitHub authorization URL generation without following that URL. No GitHub credentials or Cloudflare account are required; this does not validate GitHub's external login or callback.
+
+Pull-request builds, preview uploads, and production migrations/deployments depend on this smoke gate in `env.cue`. The CI task reuses the build output instead of building twice.

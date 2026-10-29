@@ -13,7 +13,8 @@
     "deploy": "wrangler deploy",
     "generate-types": "wrangler types",
     "auth:generate": "sh -ac 'set -a; . ./.auth.env; set +a; bunx @better-auth/cli generate --config src/lib/auth.schema.ts --output src/db/schema.ts --yes'",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "test:oidc": "bun run build && bun run scripts/smoke-oidc.mjs"
   },
   "dependencies": {
     "@astrojs/cloudflare": "~14.0.0",

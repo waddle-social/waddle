@@ -21,6 +21,8 @@ on:
     - colony/package.json/**
     - colony/public/**
     - colony/schema/**
+    - colony/scripts/smoke-oidc.mjs
+    - colony/scripts/smoke-oidc.mjs/**
     - colony/src/**
     - colony/tsconfig.json
     - colony/tsconfig.json/**
