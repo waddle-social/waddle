@@ -56,24 +56,6 @@ pub(super) async fn handle_sans_io_iq(
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
-    if ctx.payload_ns == waddle_xmpp::xep::xep0199::NS_PING
-        && state
-            .deps
-            .protocol
-            .dispatcher
-            .has_iq_handler(ctx.payload_ns)
-    {
-        if let Some(full_jid) = phase.bound_jid() {
-            if let Some(reply) = super::ping_destination::remote_ping_error(
-                ctx.iq,
-                ctx.domain,
-                &state.deps.service_domains,
-                full_jid,
-            ) {
-                return Some(vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))]);
-            }
-        }
-    }
     handle_sans_io_iq_with_relay_override(
         ctx,
         state,
