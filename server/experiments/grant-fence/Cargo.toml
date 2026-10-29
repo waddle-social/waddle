@@ -9,7 +9,10 @@ publish = false
 
 [dependencies]
 anyhow = "=1.0.104"
-tokio-stream = "=0.1.18"
+tokio-stream = { version = "=0.1.18", features = ["net"] }
+# Existing locked transport dependencies, exposed only for the fault proxy.
+tonic = { version = "=0.12.3", features = ["transport"] }
+bytes = "=1.12.1"
 hex = "=0.4.3"
 libc = "=0.2.186"
 prescience = { version = "=0.1.0", features = ["tls-rustls"] }

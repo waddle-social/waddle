@@ -4,11 +4,11 @@ use sqlx::{Connection, Row};
 use super::contender::observe;
 use super::graph;
 use super::model::{
-    Candidate, Fact, Outcome, Pause, Polarity, RecoveryAction, RecoveryWork, Signal,
+    Candidate, Fact, Outcome, Pause, Polarity, RecoveryAction, RecoveryWork, Signal, WriteFailure,
 };
 use super::store;
 use crate::authority::client;
-use crate::model::barrier;
+use crate::model::{barrier, BARRIER_BUDGET, RPC_BUDGET};
 
 pub async fn execute(work: &RecoveryWork) -> Result<()> {
     work.settings.validate()?;
@@ -21,6 +21,7 @@ pub async fn execute(work: &RecoveryWork) -> Result<()> {
             intent,
             previous,
             pause,
+            write_proxy_port,
         } => {
             let mut connection = work
                 .settings
@@ -44,11 +45,56 @@ pub async fn execute(work: &RecoveryWork) -> Result<()> {
                 "mutation fence no longer current before external write"
             );
             let write = async {
-                graph::publish(&client(&work.settings).await?, &work.identity, intent).await
+                let endpoint = crate::authority::client_at_port(
+                    &work.settings,
+                    write_proxy_port.unwrap_or(work.settings.grpc_port),
+                    if write_proxy_port.is_some() {
+                        BARRIER_BUDGET
+                    } else {
+                        RPC_BUDGET
+                    },
+                )
+                .await?;
+                if write_proxy_port.is_some() {
+                    // This local deadline expires before prescience/tonic's
+                    // longer endpoint deadline. Do not fabricate a gRPC code.
+                    match tokio::time::timeout(
+                        RPC_BUDGET,
+                        graph::publish(&endpoint, &work.identity, intent),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            observe(
+                                work,
+                                "write_failed",
+                                Signal::WriteFailed(WriteFailure::CallerDeadlineExceeded),
+                                None,
+                            )?;
+                            return Ok(false);
+                        }
+                    }?;
+                } else {
+                    graph::publish(&endpoint, &work.identity, intent).await?;
+                }
+                Ok::<bool, anyhow::Error>(true)
             }
             .await;
-            if write.is_err() {
-                return done(work, Outcome::AuthorityUnavailable);
+            match write {
+                Ok(true) => {}
+                Ok(false) => return done(work, Outcome::AuthorityUnavailable),
+                Err(error) => {
+                    if write_proxy_port.is_some() {
+                        let failure = error
+                            .downcast_ref::<prescience::Error>()
+                            .and_then(prescience::Error::code)
+                            .map(|code| WriteFailure::GrpcStatus(code as i32))
+                            .unwrap_or(WriteFailure::Other);
+                        observe(work, "write_failed", Signal::WriteFailed(failure), None)?;
+                    }
+                    return done(work, Outcome::AuthorityUnavailable);
+                }
             }
             if work.identity.candidate == Candidate::SpiceDb {
                 store::fact(

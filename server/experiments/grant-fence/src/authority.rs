@@ -9,15 +9,22 @@ use uuid::Uuid;
 use crate::model::{Guard, Settings, RPC_BUDGET};
 
 pub async fn client(settings: &Settings) -> Result<Client> {
+    client_at_port(settings, settings.grpc_port, RPC_BUDGET).await
+}
+
+pub async fn client_at_port(
+    settings: &Settings,
+    port: u16,
+    timeout: std::time::Duration,
+) -> Result<Client> {
     settings.validate()?;
-    Ok(Client::builder(
-        format!("http://127.0.0.1:{}", settings.grpc_port),
-        &settings.preshared_key,
+    Ok(
+        Client::builder(format!("http://127.0.0.1:{port}"), &settings.preshared_key)
+            .connect_timeout(RPC_BUDGET)
+            .default_timeout(timeout)
+            .build()
+            .await?,
     )
-    .connect_timeout(RPC_BUDGET)
-    .default_timeout(RPC_BUDGET)
-    .build()
-    .await?)
 }
 
 fn resource(guard: &Guard) -> Result<ObjectReference> {
