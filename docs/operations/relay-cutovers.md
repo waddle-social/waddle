@@ -1,5 +1,28 @@
 # Relay cutovers and the RollingUpdate guard
 
+## Displaced media retirement cutover (#1732)
+
+This release adds `retire_displaced_participant` to the durable call teardown
+outbox. Previous binaries reject that action during row decoding. The schema
+upgrade preserves existing jobs, but the new rows require a coordinated fleet:
+stop all old readers before any new writer starts. The committed production
+HelmRelease uses `Recreate` for this boundary.
+
+1. Deploy the digest-pinned new server with `Recreate`; retain the deployment UUID.
+2. Verify every replica runs the new image and is ready. Check outbox decoding
+   errors, retry progression, and a same-FullJID replacement whose new media
+   connection is deliberately delayed. The old participant should be removed
+   without clearing the successor's MUC occupancy or credentials.
+3. Repeat with the successor already connected: the old SID retirement must be
+   skipped. LiveKit's identity-keyed API cannot make the final SID probe and
+   removal atomic; do not represent this check as proving that remote race closed.
+4. Restore `RollingUpdate` only in a separate change after fleet verification,
+   through the cutover revision guard below. Before reverting to old binaries,
+   stop writers and explicitly disposition new-action rows; an old binary cannot
+   safely drain a backlog containing them.
+
+This documents the required rollout; no live deployment result is asserted.
+
 ## Extension effect authority cutover (#1660)
 
 V1025 changes collection authority and the guest ABI becomes

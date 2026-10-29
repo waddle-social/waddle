@@ -78,6 +78,13 @@ pub enum TeardownTarget {
         identity: FullJid,
         participant_sid: Option<ParticipantSid>,
     },
+    /// Retire one displaced media incarnation while its successor keeps the
+    /// same signaling identity. The live participant SID is the authority;
+    /// ordinary departure/session supersession must not discard this effect.
+    DisplacedParticipant {
+        identity: FullJid,
+        participant_sid: ParticipantSid,
+    },
     Room,
     MujiPresenceClear {
         room_jid: BareJid,
@@ -151,7 +158,9 @@ impl CallTeardownIntent {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
             | TeardownTarget::MujiRoomSweep { room_jid }
             | TeardownTarget::CallThreadEndRetry { room_jid, .. } => Some(room_jid.clone()),
-            TeardownTarget::Participant { .. } | TeardownTarget::Room => {
+            TeardownTarget::Participant { .. }
+            | TeardownTarget::DisplacedParticipant { .. }
+            | TeardownTarget::Room => {
                 // Muji uses the bare room JID verbatim as CallId. Raw 1:1
                 // call IDs are opaque values which do not parse as JIDs.
                 self.call_id.as_str().parse().ok()

@@ -80,7 +80,7 @@ pub(super) async fn drain_due_at(
                     TeardownTarget::Participant {
                         participant_sid: Some(_),
                         ..
-                    }
+                    } | TeardownTarget::DisplacedParticipant { .. }
                 );
             match guard {
                 Some(guard) => Some(guard),
@@ -301,6 +301,7 @@ fn stale_superseded_by_live_participant(
         // Completion-only and room-wide targets carry no participant to
         // supersede (CallThreadEndRetry is additionally non-destructive).
         TeardownTarget::Room
+        | TeardownTarget::DisplacedParticipant { .. }
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => return false,
     };
@@ -408,7 +409,9 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
 /// Muji presence effects require the owning room actor and stay gated.
 fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
     match &intent.target {
-        TeardownTarget::CallThreadEndRetry { .. } => true,
+        TeardownTarget::CallThreadEndRetry { .. } | TeardownTarget::DisplacedParticipant { .. } => {
+            true
+        }
         TeardownTarget::Participant {
             participant_sid, ..
         } => participant_sid.is_some(),
@@ -658,6 +661,13 @@ async fn execute_intent(
             identity,
             participant_sid,
         } => TeardownTargetLite::Participant {
+            identity: Identity::from_jid(identity.clone()),
+            participant_sid: participant_sid.clone(),
+        },
+        TeardownTarget::DisplacedParticipant {
+            identity,
+            participant_sid,
+        } => TeardownTargetLite::DisplacedParticipant {
             identity: Identity::from_jid(identity.clone()),
             participant_sid: participant_sid.clone(),
         },

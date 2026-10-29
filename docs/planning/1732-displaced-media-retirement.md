@@ -29,5 +29,24 @@ preserving the successor's registration, tokens, and LiveKit participant.
   successor protection, and retry behavior.
 - Muji/XEP-0272: occupancy generation flows from signaling into SFU replacement.
 
-No new XMPP wire format or production activation is planned. Live deployment
-verification is separate from native regression and CI evidence.
+No new XMPP wire format is planned. The durable retirement action requires a
+coordinated Recreate rollout because old outbox readers cannot decode it. Live
+deployment verification is separate from native regression and CI evidence.
+
+## Authority and limits
+
+- Retirement has a distinct typed/persisted action. It never clears the MUC
+  occupant or deletes the room. Ordinary departure session/generation gates
+  remain unchanged.
+- A captured old participant SID is mandatory. The executor always probes live
+  LiveKit occupancy and checks local fences again after the probe. Missing SID
+  evidence cannot authorize identity-only removal; remote retirement without a
+  captured old SID remains deferred.
+- LiveKit's public RemoveParticipant API accepts room and identity, with no
+  conditional participant-SID parameter. A successor connecting between the last
+  check and that remote request remains an API limitation. These native tests
+  establish protection before and during the probe, not atomic remote removal.
+  Source: https://github.com/livekit/protocol/blob/main/protobufs/livekit_room.proto
+- JTI revocation is Waddle's per-issuance bookkeeping; self-hosted LiveKit does
+  not consult that map when accepting a token. Participant retirement removes
+  existing media access; this change does not add provider token admission.

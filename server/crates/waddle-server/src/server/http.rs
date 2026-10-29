@@ -860,6 +860,13 @@ async fn create_websocket_state(
                     let sink_store = Arc::clone(&call_teardown_outbox);
                     let failure_sink: waddle_sfu::TeardownFailureSink = Arc::new(move |lite| {
                         let target = match lite.target {
+                            waddle_sfu::TeardownTargetLite::DisplacedParticipant {
+                                identity,
+                                participant_sid,
+                            } => TeardownTarget::DisplacedParticipant {
+                                identity: identity.as_jid().clone(),
+                                participant_sid,
+                            },
                             waddle_sfu::TeardownTargetLite::Participant {
                                 identity,
                                 participant_sid,

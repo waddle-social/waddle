@@ -43,12 +43,9 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      # #1976: the ACK-journal cutover reached both replicas via Recreate.
-      # Keep the publisher-derived live cutover guard enabled for rolling upgrades.
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      # #1732 adds a durable retirement action that old drainers cannot decode.
+      # Stop old readers before new writers; restore rolling in a separate change.
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
