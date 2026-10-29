@@ -1,4 +1,4 @@
-# PostgreSQL grant-fence first-stage experiment
+# Grant-fence and canonical leaf recovery experiments
 
 This standalone, unpublished Linux test workspace is excluded from Waddle's
 production workspace and images. It implements a disposable experiment, not a
@@ -127,9 +127,9 @@ bytes occur. They contain nonsecret barrier observations and the following expli
 | Independent scope during a held lock | Implemented |
 | PostgreSQL lock timeout | Implemented, explicit SQLSTATE and no effect |
 | SpiceDB outage and same-database process restart | Implemented; checks fail closed, graph persistence checked |
-| SpiceDB-canonical variant and P/S comparison | **PENDING** |
+| Bounded canonical leaf P/S comparison | Implemented in #2051; full production authority selection/recovery remains **PENDING** |
 | Unknown accepted external writes and durable recovery | **PENDING** |
-| PostgreSQL restart, restore, graph loss/rebuild | **PENDING** |
+| PostgreSQL restart, restore, full graph loss/rebuild | **PENDING**; controlled closed leaf/marker removal is covered separately |
 | Moves, all lifecycle writers, schema/dependency drift | **PENDING** |
 | Multi-edge graphs, actor/claim fences, codec migration | **PENDING** |
 | Frozen room-child acceptance and sink/byte drain | **PENDING** |
@@ -169,3 +169,44 @@ observed elapsed time, not crash-recovery correctness or formal proof. Kernel
 wait symbols and whitelisted numeric owned-process IO counters are diagnostic
 observations. These measurements do not retroactively identify the cause of
 any earlier failure whose first cause was not recorded.
+
+## Canonical authority recovery comparison (#2051)
+
+The runner preserves the original nine PostgreSQL guard scenarios and adds 23
+bounded recovery scenarios. This compares two leaf models; it does not select
+a production authority. Evidence independently names AdmissionClosed,
+CanonicalMutationCommitted, and ProjectionVerified, each grouped under the full
+candidate/scope/incarnation/generation/operation/digest identity. Facts describe
+what was observed, including historical commitment before deliberate corruption;
+they do not assert that corrupted canonical data remains present. Verification
+is separate from exact SQL activation.
+
+The PostgreSQL candidate stores the complete subject, relation, and grant/revoke
+polarity in its authoritative SQL journal. A fresh recovery process loads that
+exact current journal record before rebuilding. The SpiceDB candidate stores no
+canonical payload in SQL, and its fresh Recover request carries only identity,
+digest and pause control. It obtains payload from real SpiceDB. Both the marker
+and grant or positive revoke tombstone are committed in one acknowledged atomic
+write. Verification reads the whole bounded object in one FullyConsistent RPC,
+requires equal read_at revisions for every row, validates the two exact
+relationships and reconstructed digest, and never infers revoke from absence.
+The subsequent permission check uses that same exact snapshot.
+
+| Additional scenario | Evidence and boundary |
+| --- | --- |
+| Grant and revoke during SpiceDB outage, both candidates | Both close SQL admission; only PostgreSQL commits canonical intent during outage. No verification or success is inferred from failure. |
+| Closed marker loss and closed tuple/tombstone loss independently | PostgreSQL rebuilds from its exact current SQL journal; SpiceDB remains closed with canonical state missing. |
+| Worker death after acknowledged write, grant and revoke | Fresh process verifies committed marker+leaf. This is explicitly **not** a lost RPC-response test. |
+| Stale activation before and after newer revoke commit | Exact PostgreSQL blocker observation or postcommit CAS rejection; a pending closed operation can be superseded. |
+| Activation completes before revoke begins | It may activate first; the subsequent newer revoke closes it. |
+| Healthy independent scope while mutation lock held | Actual mutation and admission complete despite another scope's held exclusive lock. |
+| ACTIVE canonical deletion after allowed check | Expected unsafe negative control: SQL guard alone permits admission when canonical state is deleted without closing it. |
+
+Loss injection always observes an exact committed closed fence first, except
+the explicitly labeled ACTIVE negative control. The test does not establish
+arbitrary active-corruption detection, lost-response recovery, multi-edge
+closure, schema immutability, restore safety, production writer/actor closure,
+accepted room-child behavior, final byte draining or federation readiness.
+The accepted-child contract needs separate tests through actual ingress/replay
+code. Global SpiceDB outage denies protected reads for both candidates;
+independent-scope progress is demonstrated only with healthy SpiceDB.

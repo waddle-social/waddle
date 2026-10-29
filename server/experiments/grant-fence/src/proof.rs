@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::authority::{check, client, grant, publish};
 use crate::fixture::Fixture;
-use crate::model::{write_private, Action, Event, Guard, Work, BARRIER_BUDGET};
+use crate::model::{write_private, Action, Event, Guard, Work, WorkerRequest, BARRIER_BUDGET};
 use crate::process::Process;
 use crate::provenance::Provenance;
 use crate::worker::fresh_guard;
@@ -34,6 +34,7 @@ struct Report {
     authority: &'static str,
     outcome: String,
     cases: Vec<Case>,
+    recovery_cases: Vec<crate::recovery::RecoveryCase>,
     pending: Vec<&'static str>,
 }
 
@@ -49,6 +50,7 @@ struct EvidenceSummary<'a> {
     versions: &'a [String],
     authority: &'static str,
     cases: &'a [Case],
+    recovery_cases: &'a [crate::recovery::RecoveryCase],
     pending: &'a [&'static str],
 }
 
@@ -74,7 +76,7 @@ impl Worker {
         command.env_clear();
         let process = Process::spawn_tracked(
             &mut command,
-            Some(&serde_json::to_vec(&work)?),
+            Some(&serde_json::to_vec(&WorkerRequest::Guard(work.clone()))?),
             false,
             fixture.cleanup_latch(),
             crate::cleanup::CleanupService::Worker,
@@ -206,13 +208,13 @@ pub async fn run(worker_binary: &str) -> Result<()> {
     let measure_shutdown = std::env::var("FENCE_MEASURE_POSTGRES_SHUTDOWN").as_deref() == Ok("1");
     let mut report = Report {
         formal_evidence: provenance.clean && !measure_shutdown, provenance: provenance.clone(), cleanup_verified: false, cleanup_failure: None, versions: Vec::new(),
-        authority: "PostgreSQL canonical grant, immutable generation-qualified single-edge SpiceDB projection",
-        outcome: "running".to_owned(), cases: Vec::new(),
+        authority: "Bounded PostgreSQL/SpiceDB canonical leaf recovery comparison plus original PostgreSQL guard proof",
+        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(),
         pending: vec![
-            "SpiceDB-canonical authority variant and P/S comparison",
+            "production canonical authority selection and complete P/S recovery comparison",
             "unknown accepted external-write outcomes and durable recovery protocol",
             "PostgreSQL process restart and physical/logical restore",
-            "graph loss/rebuild and multi-edge dependency closure",
+            "physical/logical graph loss, restore and multi-edge dependency closure",
             "schema/dependency drift and immutable schema enforcement",
             "cross-scope moves and complete delete/recreate lifecycle writer closure",
             "production writer inventory, codecs, actors, cluster claims, ingress frozen-child contract",
@@ -226,7 +228,10 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         );
         report.versions = fixture.versions().await?;
         fixture.start().await?;
-        exercise(&mut fixture, Path::new(worker_binary), &mut report).await
+        exercise(&mut fixture, Path::new(worker_binary), &mut report).await?;
+        report.recovery_cases =
+            crate::recovery::run(&mut fixture, Path::new(worker_binary)).await?;
+        Ok(())
     }
     .await;
     if measure_shutdown {
@@ -275,6 +280,7 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         versions: &report.versions,
         authority: report.authority,
         cases: &report.cases,
+        recovery_cases: &report.recovery_cases,
         pending: &report.pending,
     };
     let summary = serde_json::to_vec(&summary)?;

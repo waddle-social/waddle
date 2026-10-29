@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = "=1.0.104"
+tokio-stream = "=0.1.18"
 hex = "=0.4.3"
 libc = "=0.2.186"
 prescience = { version = "=0.1.0", features = ["tls-rustls"] }

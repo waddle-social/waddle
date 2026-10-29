@@ -159,6 +159,12 @@ pub struct Work {
     pub barriers: PathBuf,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub enum WorkerRequest {
+    Guard(Work),
+    Recovery(crate::recovery::RecoveryWork),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub outcome: String,
