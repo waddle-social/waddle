@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 
+use crate::cleanup::{CleanupLatch, CleanupService};
 use crate::process::Process;
 
 pub struct Binaries {
@@ -32,7 +33,7 @@ impl Binaries {
         })
     }
 
-    pub async fn attest(&self) -> Result<Vec<String>> {
+    pub async fn attest(&self, cleanup: &CleanupLatch) -> Result<Vec<String>> {
         let mut versions = Vec::new();
         for (binary, argument, expected) in [
             (&self.postgres, "--version", "postgres (PostgreSQL) 17.11"),
@@ -41,7 +42,8 @@ impl Binaries {
         ] {
             let mut command = Command::new(binary);
             command.env_clear().arg(argument);
-            let mut process = Process::spawn(&mut command, None, true)?;
+            let mut process =
+                Process::spawn_tracked(&mut command, None, true, cleanup, CleanupService::Version)?;
             process.finish(Duration::from_secs(3)).await?;
             let version = process.output()?.trim().to_owned();
             ensure!(

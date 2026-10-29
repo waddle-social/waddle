@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use crate::authority::client;
 use crate::binaries::Binaries;
+use crate::cleanup::{CleanupFailure, CleanupLatch, CleanupService};
 use crate::model::{write_private, Settings, APP_SCHEMA, SPICE_SCHEMA};
-use crate::process::Process;
+use crate::process::{Process, POSTGRES_SHUTDOWN_BUDGET};
 
 pub struct Fixture {
     root: Option<TempDir>,
@@ -24,7 +25,7 @@ pub struct Fixture {
     postgres: Option<Process>,
     spice: Option<Process>,
     spice_run: u32,
-    cleanup_failed: bool,
+    cleanup: CleanupLatch,
     #[cfg(test)]
     inject_shutdown_failure: bool,
     #[cfg(test)]
@@ -63,16 +64,16 @@ impl Fixture {
             postgres: None,
             spice: None,
             spice_run: 0,
-            cleanup_failed: false,
+            cleanup: CleanupLatch::default(),
             #[cfg(test)]
             inject_shutdown_failure: false,
             #[cfg(test)]
-            postgres_shutdown_budget: Duration::from_secs(5),
+            postgres_shutdown_budget: POSTGRES_SHUTDOWN_BUDGET,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.binaries.attest().await?;
+        self.binaries.attest(&self.cleanup).await?;
         let listener = TcpListener::bind("127.0.0.1:0").context("reserve loopback SpiceDB port")?;
         self.settings.grpc_port = listener.local_addr()?.port();
         drop(listener);
@@ -100,10 +101,12 @@ impl Fixture {
             .arg("--auth-local=scram-sha-256")
             .arg("--auth-host=scram-sha-256")
             .arg("--pwfile=/dev/stdin");
-        Process::spawn(
+        Process::spawn_tracked(
             &mut init,
             Some(self.settings.admin_password.as_bytes()),
             false,
+            &self.cleanup,
+            CleanupService::Initdb,
         )?
         .finish(Duration::from_secs(30))
         .await?;
@@ -136,7 +139,7 @@ impl Fixture {
             .arg("log_min_error_statement=panic")
             .arg("-c")
             .arg("log_min_messages=panic");
-        self.postgres = Some(Process::postgres(&mut postgres)?);
+        self.postgres = Some(Process::postgres(&mut postgres, &self.cleanup)?);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut admin = loop {
             if let Ok(connection) = self
@@ -228,9 +231,15 @@ impl Fixture {
             .arg("migrate")
             .arg("head")
             .arg("--migration-timeout=30s");
-        Process::spawn(&mut migrate, None, false)?
-            .finish(Duration::from_secs(40))
-            .await?;
+        Process::spawn_tracked(
+            &mut migrate,
+            None,
+            false,
+            &self.cleanup,
+            CleanupService::Migration,
+        )?
+        .finish(Duration::from_secs(40))
+        .await?;
         self.start_spice().await?;
         client(&self.settings)
             .await?
@@ -267,7 +276,13 @@ impl Fixture {
             .arg("--datastore-conn-pool-read-max-open=4")
             .arg("--datastore-conn-pool-write-min-open=0")
             .arg("--datastore-conn-pool-write-max-open=4");
-        self.spice = Some(Process::spawn(&mut command, None, false)?);
+        self.spice = Some(Process::spawn_tracked(
+            &mut command,
+            None,
+            false,
+            &self.cleanup,
+            CleanupService::SpiceDb,
+        )?);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             if let Ok(client) = client(&self.settings).await {
@@ -304,17 +319,55 @@ impl Fixture {
         Ok(())
     }
 
+    pub async fn measure_shutdown(&mut self) -> Result<crate::shutdown_measurement::Measurement> {
+        let app_session =
+            crate::shutdown_measurement::durability(&self.settings, "fence_app").await?;
+        let spice_role_session =
+            crate::shutdown_measurement::durability(&self.settings, "fence_spice").await?;
+        let filesystem_magic = crate::shutdown_measurement::filesystem_magic(&self.settings.root)?;
+        if self.spice.is_some() {
+            self.stop_spice()?;
+        }
+        let timing = self
+            .postgres
+            .as_mut()
+            .context("owned measurement postmaster")?
+            .measure_postgres_shutdown()
+            .await?;
+        Ok(crate::shutdown_measurement::Measurement {
+            formal_proof: false,
+            app_session,
+            spice_role_session,
+            filesystem_magic,
+            timing,
+        })
+    }
+
+    pub fn cleanup_failure(&self) -> Option<CleanupFailure> {
+        self.cleanup.failure()
+    }
+
+    #[cfg(test)]
+    pub fn services_stopped(&self) -> bool {
+        self.postgres.is_none() && self.spice.is_none()
+    }
+
+    pub fn cleanup_latch(&self) -> &CleanupLatch {
+        &self.cleanup
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
-        let result = self.stop_services();
-        if result.is_err() || self.cleanup_failed {
-            self.cleanup_failed = true;
+        if let Err(failure) = self.stop_services() {
+            self.cleanup.record(failure);
+        }
+        if let Some(failure) = self.cleanup.failure() {
             if let Some(root) = self.root.as_mut() {
                 root.disable_cleanup(true);
             }
-            anyhow::bail!(
+            return Err(anyhow::Error::new(failure.clone()).context(format!(
                 "process cleanup unverified; private fixture retained at {}",
                 self.settings.root.display()
-            );
+            )));
         }
         let credential_check = if self.root.is_some() {
             self.assert_no_plaintext_credentials(self.settings.root.as_path())
@@ -327,13 +380,20 @@ impl Fixture {
         credential_check
     }
 
-    fn stop_services(&mut self) -> Result<()> {
+    fn stop_services(&mut self) -> std::result::Result<(), CleanupFailure> {
         #[cfg(test)]
-        ensure!(!self.inject_shutdown_failure, "injected supervisor failure");
+        if self.inject_shutdown_failure {
+            return Err(CleanupFailure {
+                service: CleanupService::Fixture,
+                cause: crate::cleanup::ProcessFault::InjectedShutdown,
+            });
+        }
         // Retain each handle until its own stop verifies completion. In
         // particular, PostgreSQL backends deliberately escape the parent PGID.
         let spice_result = if let Some(process) = self.spice.as_mut() {
-            process.stop()
+            process
+                .stop()
+                .map_err(|error| CleanupFailure::capture(CleanupService::SpiceDb, &error))
         } else {
             Ok(())
         };
@@ -343,9 +403,11 @@ impl Fixture {
         #[cfg(test)]
         let budget = self.postgres_shutdown_budget;
         #[cfg(not(test))]
-        let budget = Duration::from_secs(5);
+        let budget = POSTGRES_SHUTDOWN_BUDGET;
         let postgres_result = if let Some(process) = self.postgres.as_mut() {
-            process.stop_postgres(budget)
+            process
+                .stop_postgres(budget)
+                .map_err(|error| CleanupFailure::capture(CleanupService::Postgres, &error))
         } else {
             Ok(())
         };
@@ -408,7 +470,7 @@ impl Fixture {
     }
 
     pub async fn versions(&self) -> Result<Vec<String>> {
-        self.binaries.attest().await
+        self.binaries.attest(&self.cleanup).await
     }
 }
 
@@ -425,6 +487,7 @@ mod tests {
     use anyhow::{ensure, Context, Result};
 
     use super::Fixture;
+    use crate::process::POSTGRES_SHUTDOWN_BUDGET;
 
     #[test]
     fn shutdown_error_then_drop_retains_private_data() -> Result<()> {
@@ -432,6 +495,19 @@ mod tests {
         let root = fixture.settings.root.clone();
         fixture.inject_shutdown_failure = true;
         ensure!(fixture.shutdown().is_err(), "injected shutdown must fail");
+        let first = fixture
+            .cleanup_failure()
+            .context("first typed cleanup failure")?;
+        ensure!(
+            first.service == crate::cleanup::CleanupService::Fixture
+                && first.cause == crate::cleanup::ProcessFault::InjectedShutdown,
+            "injected cause was not captured"
+        );
+        fixture.inject_shutdown_failure = false;
+        ensure!(
+            fixture.shutdown().is_err() && fixture.cleanup_failure().as_ref() == Some(&first),
+            "later successful stop must retain the first failure and data"
+        );
         drop(fixture);
         ensure!(
             root.join("fixture-id").is_file(),
@@ -493,8 +569,29 @@ mod tests {
             fixture.postgres.is_some(),
             "failed shutdown lost process ownership"
         );
+        let failure = fixture
+            .cleanup_failure()
+            .context("PostgreSQL deadline diagnostic")?;
+        let crate::cleanup::ProcessFault::Deadline {
+            phase: crate::cleanup::StopPhase::Postgres,
+            postgres: Some(snapshot),
+        } = &failure.cause
+        else {
+            anyhow::bail!("stopped backend must retain its typed PostgreSQL deadline cause");
+        };
+        let backend_observation = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.pid == u32::try_from(backend_pid).expect("backend PID"))
+            .context("stopped owned backend missing from deadline snapshot")?;
+        ensure!(
+            backend_observation.parent == u32::try_from(postmaster_pid)?
+                && backend_observation.state == crate::postgres_diagnostics::TaskState::Stopped,
+            "deadline snapshot must identify exact stopped child"
+        );
+        fixture.assert_public_evidence(&serde_json::to_vec(&failure)?)?;
         drop(stopped);
-        fixture.postgres_shutdown_budget = std::time::Duration::from_secs(5);
+        fixture.postgres_shutdown_budget = POSTGRES_SHUTDOWN_BUDGET;
         fixture.stop_services()?;
         ensure!(
             fixture.postgres.is_none() && fixture.spice.is_none(),

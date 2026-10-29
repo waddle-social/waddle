@@ -11,7 +11,8 @@ use crate::process::Process;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Provenance {
     pub git_head: String,
-    pub git_status: String,
+    pub git_status_bytes: u64,
+    pub git_status_sha256: String,
     pub clean: bool,
     pub experiment_source_sha256: String,
 }
@@ -34,7 +35,8 @@ impl Provenance {
             git_head.len() == 40 && git_head.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "exact repository revision unavailable"
         );
-        let git_status = git(&["status", "--porcelain=v1", "--untracked-files=all"]).await?;
+        let git_status =
+            crate::status_capture::capture(Path::new(env!("CARGO_MANIFEST_DIR"))).await?;
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = vec![
             root.join("Cargo.toml"),
@@ -63,8 +65,9 @@ impl Provenance {
         }
         Ok(Self {
             git_head,
-            clean: git_status.is_empty(),
-            git_status,
+            clean: git_status.bytes == 0,
+            git_status_bytes: git_status.bytes,
+            git_status_sha256: git_status.sha256,
             experiment_source_sha256: hex::encode(hash.finalize()),
         })
     }

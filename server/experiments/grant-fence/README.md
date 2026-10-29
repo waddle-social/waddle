@@ -54,9 +54,11 @@ untracked source:
 FENCE_REQUIRE_PINNED=1 cargo test --locked -- --nocapture
 ```
 
-Development runs record their exact Git HEAD, full dirty/untracked status, and a
+Development runs record their exact Git HEAD, byte count and full SHA-256 digest of dirty/untracked status, and a
 SHA-256 fingerprint of this workspace's manifest, lockfile, sources, schemas,
-tests, README, and native runner. They label formal evidence false until the tree is committed
+tests, README, and native runner. Status paths are not retained or printed.
+Status stdout is drained while Git runs, with a five-second execution deadline
+and a 16MiB input cap; larger output fails closed without a pipe-buffer deadlock. They label formal evidence false until the tree is committed
 and clean. Missing provenance, source changes during a run, or cleanup failure
 fail the run. A prototype pass does not establish a completed F0 gate.
 
@@ -72,6 +74,26 @@ leaders, avoiding signals to reused PGIDs. PostgreSQL uses bounded fast shutdown
 the postmaster must exit normally after coordinating and reaping its separately
 grouped backends. There is no SIGKILL fallback for PostgreSQL. Any unverified
 shutdown permanently retains that private directory, including on later Drop.
+The first cleanup failure is retained as bounded typed service/phase/errno/status
+metadata in a shared fixture-owned latch and evidence; workers, initdb,
+migration, services and fixture version probes attach it before postspawn
+fallible work or stdin. Explicit stop and Drop record into the same sticky
+latch; later successful service cleanup cannot clear it, and mutex poison is
+uncertainty. At a PostgreSQL deadline, a separate diagnostic scan observes only
+the owned postmaster and direct children: up to 64 PID/PPID/start-tick/state and
+validated kernel wait-symbol records, with a cooperative 100ms scan deadline checked between bounded file reads
+(individual kernel reads are not a hard real-time guarantee). Truncation/read uncertainty is explicit and never changes the original
+failed shutdown. The normal PostgreSQL shutdown budget is 30 seconds: engineering margin after
+three measured single-workload stops of 3570/3651/3740ms and a separate parallel
+shutdown observation blocked in filesystem synchronization beyond five seconds
+with eventual valid shutdown. This is not a proven upper bound or an explanation
+of the older failure whose first cause was lost. Forced 200ms timeout tests and
+the diagnostic-only five-second threshold remain unchanged. No process arguments, environment or output
+are captured. Linux ESRCH from a proc stat read means the task exited between
+open and read, and is treated as vanished. A real opened-FD regression covers
+that race; unrelated I/O failures and EACCES/EPERM still fail closed as typed
+uncertainty. The runner therefore requires process-stat visibility sufficient
+to verify cleanup; inaccessible tasks are never assumed to have disappeared.
 Before reporting success, the fixture scans stopped data for exact plaintext
 credential bytes and removes it. Cleanup regressions cover an exited worker
 leader with a live descendant, injected supervisor failure followed by Drop,
@@ -119,3 +141,31 @@ bytes are emitted afterward, nor does it alter Waddle's existing frozen-child
 acceptance contract. SpiceDB process persistence is not PostgreSQL restart or
 unknown-write recovery. The pinned native SpiceDB version is not automatically
 equivalent to the deployment operator's `stable` channel.
+
+For a separate shutdown timing diagnosis, run inside the pinned native shell:
+
+```sh
+FENCE_MEASURE_POSTGRES_SHUTDOWN=1 cargo test --test postgres_guard --locked -- --nocapture
+```
+
+This opt-in mode runs the actual proof workload, verifies `fsync`,
+`synchronous_commit`, and `full_page_writes` remain enabled in fresh application
+and SpiceDB-role sessions, and records only the numeric filesystem kind.
+Connection establishment and the combined durability query/close each have an
+explicit two-second client deadline; a connected SIGSTOP backend regression
+verifies that the query cannot wedge shutdown. A
+dedicated controller uses a separate five-second PostgreSQL diagnostic threshold
+exactly once (the normal cleanup budget is thirty seconds),
+recording time immediately before its successful SIGINT and at observed normal
+exit before reap. If that deadline expires it remains a failed, retained run;
+the controller only observes afterward, up to thirty seconds total from the
+first signal. It sends no further signals during observation and never clears
+the failure latch. Normal cleanup/Drop semantics outside that controller are
+unchanged. Healthy fixtures are removed only after verified process stops and
+credential scans; failed/unverified data stays private.
+
+The separate `shutdown-measurement.json` and bounded stdout timing describe
+observed elapsed time, not crash-recovery correctness or formal proof. Kernel
+wait symbols and whitelisted numeric owned-process IO counters are diagnostic
+observations. These measurements do not retroactively identify the cause of
+any earlier failure whose first cause was not recorded.

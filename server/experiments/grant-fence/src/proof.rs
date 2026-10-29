@@ -29,6 +29,7 @@ struct Report {
     provenance: Provenance,
     formal_evidence: bool,
     cleanup_verified: bool,
+    cleanup_failure: Option<crate::cleanup::CleanupFailure>,
     versions: Vec<String>,
     authority: &'static str,
     outcome: String,
@@ -43,6 +44,7 @@ struct EvidenceSummary<'a> {
     source_clean: bool,
     formal_evidence: bool,
     cleanup_verified: bool,
+    cleanup_failure: Option<crate::cleanup::CleanupFailure>,
     outcome: &'static str,
     versions: &'a [String],
     authority: &'static str,
@@ -70,7 +72,13 @@ impl Worker {
         };
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn(&mut command, Some(&serde_json::to_vec(&work)?), false)?;
+        let process = Process::spawn_tracked(
+            &mut command,
+            Some(&serde_json::to_vec(&work)?),
+            false,
+            fixture.cleanup_latch(),
+            crate::cleanup::CleanupService::Worker,
+        )?;
         Ok(Self { process, work })
     }
 
@@ -195,8 +203,9 @@ pub async fn run(worker_binary: &str) -> Result<()> {
     let mut fixture = Fixture::new()?;
     let provenance = Provenance::capture().await?;
     let require_pinned = std::env::var("FENCE_REQUIRE_PINNED").as_deref() == Ok("1");
+    let measure_shutdown = std::env::var("FENCE_MEASURE_POSTGRES_SHUTDOWN").as_deref() == Ok("1");
     let mut report = Report {
-        formal_evidence: provenance.clean, provenance: provenance.clone(), cleanup_verified: false, versions: Vec::new(),
+        formal_evidence: provenance.clean && !measure_shutdown, provenance: provenance.clone(), cleanup_verified: false, cleanup_failure: None, versions: Vec::new(),
         authority: "PostgreSQL canonical grant, immutable generation-qualified single-edge SpiceDB projection",
         outcome: "running".to_owned(), cases: Vec::new(),
         pending: vec![
@@ -220,11 +229,30 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         exercise(&mut fixture, Path::new(worker_binary), &mut report).await
     }
     .await;
+    if measure_shutdown {
+        match fixture.measure_shutdown().await {
+            Ok(measurement) => {
+                fixture.save("shutdown-measurement.json", &measurement)?;
+                let bytes = serde_json::to_vec(&measurement)?;
+                ensure!(
+                    bytes.len() <= 32768,
+                    "shutdown measurement exceeds diagnostic bound"
+                );
+                fixture.assert_public_evidence(&bytes)?;
+                println!(
+                    "grant-fence shutdown measurement: {}",
+                    String::from_utf8(bytes)?
+                );
+            }
+            Err(error) => outcome = Err(error.context("shutdown measurement")),
+        }
+    }
     if let Err(error) = fixture.shutdown() {
         outcome = Err(error.context("fixture cleanup"));
     } else {
         report.cleanup_verified = true;
     }
+    report.cleanup_failure = fixture.cleanup_failure();
     match Provenance::capture().await {
         Ok(after) if after == provenance => {}
         Ok(_) => outcome = Err(anyhow::anyhow!("source/revision changed during experiment")),
@@ -242,6 +270,7 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         source_clean: report.provenance.clean,
         formal_evidence: report.formal_evidence,
         cleanup_verified: report.cleanup_verified,
+        cleanup_failure: report.cleanup_failure.clone(),
         outcome: if outcome.is_ok() { "passed" } else { "failed" },
         versions: &report.versions,
         authority: report.authority,
