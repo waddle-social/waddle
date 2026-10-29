@@ -71,17 +71,7 @@ Safety and correctness are part of this change:
 
 The current [nextest configuration](https://github.com/waddle-social/waddle/blob/c6169598d2426e483c1c7a2c062ca7f1aba352ac/server/.config/nextest.toml) documents why database serialization and whole-machine reservations exist. Do not remove them to make the timing chart look better. The longest observed individual test was about 61 seconds; the three-and-a-half-minute shard budget remains an experiment because grouping and distribution also matter.
 
-## 4. Fix CodeQL and scheduling in parallel
-
-File: `.github/workflows/codeql.yml`; runner capacity settings.
-
-The Rust job uses four query threads and approximately 14.6 GB of CodeQL RAM. Its bottleneck is extraction and analysis, not a long Cargo autobuild step. Benchmark Rust alone on 8 CPU / 32 GB and, if necessary, 16 CPU / 32 GB runners, with explicit resource settings. Target completion within ten minutes including startup. Leave the smaller language jobs on their existing economical runners. GitHub recommends [increasing available memory or cores](https://docs.github.com/en/code-security/reference/code-scanning/troubleshoot-analysis-errors/analysis-takes-too-long) for this case.
-
-Retain the current query coverage and cross-crate analysis. Do not remove production code, split security data-flow boundaries blindly, or defer Rust security scanning to a scheduled run to claim sub-15-minute PR checks. Add same-PR cancellation to CodeQL, which currently lacks a concurrency block. Generated server workflows already cancel superseded runs.
-
-Measure eligible-to-start delay and reserve sufficient builder and execution capacity for the new fan-out. Start expensive builds early; consolidate short setup-heavy checks only where failure reporting remains clear. Preserve the dependency-prewarm job until an A/B test establishes that removing its dependency will not duplicate cold builds or recreate concurrent cache-compression memory pressure. Reducing queue time is a separate requirement from reducing execution time.
-
-## 5. Reuse verified outputs and align PR with main
+## 4. Reuse verified outputs and align PR with main
 
 Files: `server/env.cue`, `flake.nix`, `ci/contributors/nix.cue`, generated workflows and cache documentation.
 
