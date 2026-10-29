@@ -204,6 +204,25 @@ schema.#Project & {
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
+		// Native PostgreSQL characterization is independent of image publishing.
+		roomChildContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.roomChildContractPostgres]
+		}
 		namespaceRustChecks: {
 			mode:        "expanded"
 			derivePaths: true
@@ -274,6 +293,15 @@ schema.#Project & {
 	}
 
 	tasks: {
+		roomChildContractPostgres: schema.#Task & {
+			// Provision an isolated native database and require the dedicated
+			// tests; an absent prerequisite must fail this lane.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/room-child/run-native.sh"]
+			inputs: list.Concat([_nixInputs, ["experiments/room-child/**"]])
+		}
+
 		checkCiDrift: schema.#Task & {
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
