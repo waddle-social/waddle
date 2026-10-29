@@ -29,6 +29,13 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
+      # Registry libp2p crates need the patched swarm's real API even
+      # when Crane replaces application sources with dependency stubs.
+      swarmDummyScript = ''
+        rm -rf "$out/vendor/libp2p-swarm"
+        cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
+        chmod -R u+w "$out/vendor/libp2p-swarm"
+      '';
       # cuengine (a waddle-server dev-dependency) links a cgo archive of its
       # Go bridge. Its build.rs otherwise `go build`s it from source, which
       # downloads Go modules and cannot work in the Nix sandbox; every
@@ -355,13 +362,7 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverPackageSrc;
-            # Registry libp2p crates need the patched swarm's real API even
-            # when Crane replaces application sources with dependency stubs.
-            extraDummyScript = ''
-              rm -rf "$out/vendor/libp2p-swarm"
-              cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
-              chmod -R u+w "$out/vendor/libp2p-swarm"
-            '';
+            extraDummyScript = swarmDummyScript;
             strictDeps = true;
             cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
             nativeBuildInputs = [
@@ -541,13 +542,7 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverCheckSrc;
-            # Registry libp2p crates need the patched swarm's real API even
-            # when Crane replaces application sources with dependency stubs.
-            extraDummyScript = ''
-              rm -rf "$out/vendor/libp2p-swarm"
-              cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
-              chmod -R u+w "$out/vendor/libp2p-swarm"
-            '';
+            extraDummyScript = swarmDummyScript;
             strictDeps = true;
             CUE_BRIDGE_PATH = mkCueBridge pkgs;
             nativeBuildInputs = [

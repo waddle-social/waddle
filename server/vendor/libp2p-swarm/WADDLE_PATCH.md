@@ -17,6 +17,13 @@ incompatibility is not asserted for this dependency graph. Browser libp2p is
 untested: revisit this patch before enabling it for wasm. Remove the patch
 when an upstream release supports the workspace's binding versions.
 
+Track [upstream PR #6671](https://github.com/libp2p/rust-libp2p/pull/6671),
+which replaces the exact cap. Its proposed `^0.4.79` range still excludes
+Waddle's `0.4.70`, so merging it alone is not the removal trigger. Remove this
+patch after a published swarm release accepts the workspace's matched binding
+family, or after upgrading that family together, and verify native clustering
+and the browser WASM build with the replacement.
+
 The upstream development log subscriber dependency and four test-only log
 initializers are removed from both manifests and the unit test modules. This
 keeps local patched sources within Waddle's native client dependency guard,
