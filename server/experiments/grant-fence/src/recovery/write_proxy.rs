@@ -77,7 +77,7 @@ struct ProxyService {
     used: Arc<AtomicBool>,
 }
 impl tonic::server::NamedService for ProxyService {
-    const NAME: &'static str = "authzed.api.v1.PermissionsService";
+    const NAME: &str = "authzed.api.v1.PermissionsService";
 }
 impl<B> Service<http::Request<B>> for ProxyService
 where
@@ -226,8 +226,8 @@ impl Proxy {
             .settings
             .root
             .join(Uuid::new_v4().simple().to_string());
-        fs::create_dir(&barriers)?;
-        fs::set_permissions(&barriers, fs::Permissions::from_mode(0o700))?;
+        tokio::fs::create_dir(&barriers).await?;
+        tokio::fs::set_permissions(&barriers, fs::Permissions::from_mode(0o700)).await?;
         let work = ProxyWork {
             settings: fixture.settings.clone(),
             identity: identity.clone(),
