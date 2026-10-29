@@ -223,7 +223,7 @@ and final successful gRPC status. Only then does the proxy record
 The control records `RequestNotForwarded` without invoking the backend write.
 An independent real read verifies presence or absence of the exact marker/leaf.
 Unauthenticated, unsupported-method and oversized requests are rejected before
-the one accepted write; all native cases exercise those receiving boundaries.
+the one accepted write; all twelve positive schedules exercise those receiving boundaries.
 
 The writer captures an absolute two-second `CLOCK_MONOTONIC` deadline before
 starting the write and arms that exact deadline using Linux timerfd with
