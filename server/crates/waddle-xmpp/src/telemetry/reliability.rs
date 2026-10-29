@@ -90,7 +90,8 @@ use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
     IngressMaintenanceOutcome, IngressMaintenancePhase, IngressUnrecoverableReason,
     IngressUnresolvedEffectKind, Janitor, ObserverHistoryTable, PushRetryReason,
-    PushSuppressReason, SmAckOutcome, SmEvictionPath, SmResumeOutcome, SweepOutcome,
+    PushSuppressReason, SmAckOutcome, SmDetachedAppendRejectionReason, SmEvictionPath,
+    SmResumeOutcome, SweepOutcome,
 };
 
 /// One table entry: a private `mod <helper> { fn add(count) }` holding
@@ -170,6 +171,22 @@ fn add_sm_acks(count: u64, outcome: SmAckOutcome) {
         count,
         outcome,
     );
+}
+
+fn add_sm_detached_append_rejected(count: u64, reason: SmDetachedAppendRejectionReason) {
+    crate::counter_add!(
+        "xmpp.sm.detached.append.rejected",
+        "{stanza}",
+        "Fenced detached SM append attempts reporting an error, by bounded reason.",
+        count,
+        reason,
+    );
+}
+
+/// Count one actual fenced append error. `Other` may include uncertain backend
+/// completion; this counter does not imply that every such attempt wrote nothing.
+pub fn increment_sm_detached_append_rejected(reason: SmDetachedAppendRejectionReason) {
+    add_sm_detached_append_rejected(1, reason);
 }
 
 /// Count one client XEP-0198 `<a/>` acknowledgement by outcome.
@@ -352,6 +369,9 @@ pub fn register_reliability_counters() {
     super::remote_owner::add_mirror_attempt(0, super::attributes::RemoteOwnerMirrorOutcome::Failed);
     for path in SmEvictionPath::ALL {
         add_sm_unacked_evicted(0, path);
+    }
+    for reason in SmDetachedAppendRejectionReason::ALL {
+        add_sm_detached_append_rejected(0, reason);
     }
     for outcome in IngressGcOutcome::ALL {
         add_ingress_gc_runs(0, outcome);
@@ -835,6 +855,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detached_append_rejection_registration_exports_zero_by_reason() {
+        let guard = setup().await;
+        register_reliability_counters();
+        let mut samples = guard
+            .counter_samples("xmpp.sm.detached.append.rejected")
+            .expect("rejected detached append counter is zero-registered");
+        samples.sort();
+        assert_eq!(
+            samples,
+            vec![
+                (0, vec![("reason".to_string(), "missing_fence".to_string())]),
+                (0, vec![("reason".to_string(), "not_owner".to_string())]),
+                (0, vec![("reason".to_string(), "other".to_string())]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_append_rejection_helpers_export_only_bounded_reason_samples() {
+        let guard = setup().await;
+        increment_sm_detached_append_rejected(SmDetachedAppendRejectionReason::MissingFence);
+        for _ in 0..2 {
+            increment_sm_detached_append_rejected(SmDetachedAppendRejectionReason::NotOwner);
+        }
+        for _ in 0..3 {
+            increment_sm_detached_append_rejected(SmDetachedAppendRejectionReason::Other);
+        }
+        let mut samples = guard
+            .counter_samples("xmpp.sm.detached.append.rejected")
+            .expect("rejection counter exports");
+        samples.sort();
+        assert_eq!(
+            samples,
+            vec![
+                (1, vec![("reason".to_string(), "missing_fence".to_string())]),
+                (2, vec![("reason".to_string(), "not_owner".to_string())]),
+                (3, vec![("reason".to_string(), "other".to_string())]),
+            ]
+        );
+        assert_eq!(
+            guard.metric_unit("xmpp.sm.detached.append.rejected"),
+            Some("{stanza}".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn sm_helper_emits() {
         let guard = setup().await;
         add_sm_promotion_storage_failed(3);
@@ -1252,9 +1318,11 @@ mod tests {
         );
     }
 
-    /// The counters `register_reliability_counters` zeroes that carry
-    /// no attributes, beyond the macro table.
-    const REGISTERED_SM_COUNTERS: &[&str] = &["xmpp.sm.unacked_evicted"];
+    /// Typed SM counters zero-registered outside the attribute-free macro table.
+    const REGISTERED_SM_COUNTERS: &[&str] = &[
+        "xmpp.sm.unacked_evicted",
+        "xmpp.sm.detached.append.rejected",
+    ];
 
     /// The counters `register_reliability_counters` zeroes that carry
     /// no attributes, beyond the macro table.

@@ -89,6 +89,7 @@ pub use implementation::RequestOutcome;
 pub use implementation::SessionInitFailureReason;
 pub use implementation::SfuDenialReason;
 pub use implementation::SmAckOutcome;
+pub use implementation::SmDetachedAppendRejectionReason;
 pub use implementation::SmEvictionPath;
 pub use implementation::SmResumeOutcome;
 pub use implementation::SweepOutcome;

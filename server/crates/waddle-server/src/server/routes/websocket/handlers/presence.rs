@@ -14,8 +14,7 @@ use waddle_xmpp::presence::subscription::{
     build_available_presence, build_subscription_presence, build_unavailable_presence,
     parse_subscription_presence, PresenceAction, SubscriptionStateMachine, SubscriptionType,
 };
-use waddle_xmpp::registry::BroadcastOutcome;
-use waddle_xmpp::roster::{build_roster_push, AskType, RosterItem, RosterVersion, Subscription};
+use waddle_xmpp::roster::{AskType, RosterItem, Subscription};
 use waddle_xmpp::xep::NS_DELAY;
 use waddle_xmpp::{Affiliation, Role, Stanza};
 use xmpp_parsers::minidom::Element;

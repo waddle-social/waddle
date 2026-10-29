@@ -1,5 +1,8 @@
 //! Implementation behind the parent module facade.
 
+use waddle_xmpp::telemetry::attributes::SmDetachedAppendRejectionReason;
+use waddle_xmpp::telemetry::reliability::increment_sm_detached_append_rejected;
+
 use super::async_trait;
 
 use super::Arc;
@@ -1404,10 +1407,23 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         append: PersistedDetachedAppend,
         expected_fence: Option<&SmClaimFence>,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
-        let fence = expected_fence.ok_or_else(|| SmPersistenceError::NotOwner {
-            entity: Entity::new(EntityType::SmSession, append.session.stream_id.as_str()),
-        })?;
-        self.append_detached_under(append, fence).await
+        let outcome = match expected_fence {
+            Some(fence) => self.append_detached_under(append, fence).await,
+            None => Err(SmPersistenceError::MissingClaimFence {
+                entity: Entity::new(EntityType::SmSession, append.session.stream_id.as_str()),
+            }),
+        };
+        if let Err(error) = &outcome {
+            let reason = match error {
+                SmPersistenceError::MissingClaimFence { .. } => {
+                    SmDetachedAppendRejectionReason::MissingFence
+                }
+                SmPersistenceError::NotOwner { .. } => SmDetachedAppendRejectionReason::NotOwner,
+                _ => SmDetachedAppendRejectionReason::Other,
+            };
+            increment_sm_detached_append_rejected(reason);
+        }
+        outcome
     }
 
     async fn store_session_atomic_with_ingress_append(

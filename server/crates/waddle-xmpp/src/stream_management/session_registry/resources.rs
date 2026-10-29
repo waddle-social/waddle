@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use jid::{BareJid, FullJid};
+use tracing::Instrument;
 use xmpp_parsers::presence::Show;
 
 use super::core::InMemorySmSessionRegistry;
@@ -605,31 +606,44 @@ impl InMemorySmSessionRegistry {
         let storage = Arc::clone(storage);
         // `guard` moves into the task: the shard stays locked until the write
         // resolves, even if this future is dropped first.
-        let settle = tokio::spawn(async move {
-            let _guard = guard;
-            let outcome = storage
-                .append_detached_stanza_atomic(delta, fence.as_ref())
-                .await
-                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
-            match outcome {
-                KeyedSnapshotOutcome::ObligationAlreadyResolved => {
-                    // Discard the speculative clone: another sink or policy
-                    // already settled this obligation without SM allocation.
-                    Ok(SmKeyedAppendOutcome::Suppressed)
+        let settle = tokio::spawn(
+            async move {
+                let _guard = guard;
+                // Preserve portable None acceptance while retaining the recovery
+                // reason until the operation-owned task observes the write result.
+                let outcome = storage
+                    .append_detached_stanza_atomic(delta, fence.as_ref().ok())
+                    .await;
+                if let Err(error) = &outcome {
+                    super::append::warn_detached_append_recovery_failure(
+                        &accepting_stream,
+                        &fence,
+                        error,
+                    );
                 }
-                KeyedSnapshotOutcome::Committed => {
-                    // Publication may report displacement, but the transaction still
-                    // allocated the entry. Promotion reconciles the captured queue.
-                    registry.publish_detached_snapshot(&accepting_stream, updated)?;
-                    Ok(SmKeyedAppendOutcome::Appended { accepting_stream })
-                }
-                KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream } => {
-                    // Discard the clone, including evictions and counters. Keep the
-                    // stale mark: the winning writer may have updated durable state.
-                    Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
+                let outcome =
+                    outcome.map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+                match outcome {
+                    KeyedSnapshotOutcome::ObligationAlreadyResolved => {
+                        // Discard the speculative clone: another sink or policy
+                        // already settled this obligation without SM allocation.
+                        Ok(SmKeyedAppendOutcome::Suppressed)
+                    }
+                    KeyedSnapshotOutcome::Committed => {
+                        // Publication may report displacement, but the transaction still
+                        // allocated the entry. Promotion reconciles the captured queue.
+                        registry.publish_detached_snapshot(&accepting_stream, updated)?;
+                        Ok(SmKeyedAppendOutcome::Appended { accepting_stream })
+                    }
+                    KeyedSnapshotOutcome::ObligationAlreadyAllocated { accepting_stream } => {
+                        // Discard the clone, including evictions and counters. Keep the
+                        // stale mark: the winning writer may have updated durable state.
+                        Ok(SmKeyedAppendOutcome::AlreadyAppended { accepting_stream })
+                    }
                 }
             }
-        });
+            .in_current_span(),
+        );
         settle
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?

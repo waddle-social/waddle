@@ -3,7 +3,7 @@
 #[cfg(feature = "clustering")]
 use super::parse_subscription_state;
 #[cfg(feature = "clustering")]
-use super::send_current_roster_push_to_local_resources;
+use super::send_current_roster_push_to_resources;
 use super::try_route_presence_to_bare_remote;
 use super::update_subscription_roster_state;
 use super::OrderedRelayRouteOrigin;
@@ -125,8 +125,7 @@ pub(in crate::server::routes::websocket::handlers::presence) async fn try_handle
             .remove_pending_subscribe(&request.from, &request.to);
     }
     if let Err(error) =
-        send_current_roster_push_to_local_resources(state, &storage, &request.from, &request.to)
-            .await
+        send_current_roster_push_to_resources(state, &storage, &request.from, &request.to).await
     {
         warn!(
             error = %error,

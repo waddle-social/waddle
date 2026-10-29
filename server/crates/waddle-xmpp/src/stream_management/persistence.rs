@@ -99,6 +99,13 @@ pub enum SmPersistenceError {
         detail: String,
     },
 
+    /// A clustered detached append had no captured ownership fence. The
+    /// operation was rejected before checking durable ownership or writing any
+    /// session, replay row or ingress proof. This does not establish a takeover:
+    /// capture recovery can also fail when storage or authority is unavailable.
+    #[error("missing captured ownership fence for entity '{entity}'")]
+    MissingClaimFence { entity: Entity },
+
     /// A fenced write's own fencing check (ADR-0017 Phase 3 Slice 4,
     /// element 4) observed that this node no longer holds — or never
     /// acquired — the entity's ownership claim at the epoch it believed
@@ -680,6 +687,9 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// deleted session or extend its original resume window. A ledger conflict
     /// rolls back every mutation and returns the winning allocation. Clustered
     /// backends require the caller's captured fence, checked in this transaction.
+    /// A missing capture returns [`SmPersistenceError::MissingClaimFence`]; a
+    /// supplied fence rejected by ownership validation returns
+    /// [`SmPersistenceError::NotOwner`]. Both reject without mutating durable state.
     /// Unsupported adapters fail closed rather than rewriting a full snapshot.
     async fn append_detached_stanza_atomic(
         &self,

@@ -1,15 +1,16 @@
+use crate::server::routes::websocket::handlers::roster_fanout::send_roster_push_to_resources;
+
 use super::{
-    build_roster_push, build_subscription_presence, chrono, roster_item_to_row, roster_row_to_item,
-    warn, BareJid, BroadcastOutcome, DatabaseRosterStorage, FullJid, RosterItem, RosterRowChange,
-    RosterVersion, Stanza, Subscription, SubscriptionStateMachine, SubscriptionType,
-    WebSocketState,
+    build_subscription_presence, chrono, roster_item_to_row, roster_row_to_item, warn, BareJid,
+    BroadcastOutcome, DatabaseRosterStorage, FullJid, RosterItem, RosterRowChange, RosterVersion,
+    Stanza, Subscription, SubscriptionStateMachine, SubscriptionType, WebSocketState,
 };
 
 // Everything in this module runs after the primary roster mutation has
 // succeeded and the client's IQ result is already determined: contact-side
 // updates, detached-resource lookups, and push recording are best-effort
-// fanout. Failures here degrade delivery (the resource catches up at next
-// bind via roster versioning) and log at warn without marking the dispatch
+// fanout. Failures here degrade delivery; a subsequent roster-version query
+// can recover state. They log at warn without marking the dispatch
 // span — `status=error` stays reserved for operations whose outcome actually
 // failed (#1428), matching `send_blocking_pushes`.
 pub(super) async fn send_roster_remove_subscription_side_effects(
@@ -71,7 +72,7 @@ async fn send_roster_remove_subscription_stanza(
                 {
                     Ok((mutation, _lock)) => {
                         // _lock held until the push enqueue below completes.
-                        send_roster_push_to_all_resources(state, to, &item, &mutation.version)
+                        send_roster_push_to_resources(state, to, &item, &mutation.version, None)
                             .await;
                     }
                     Err(error) => {
@@ -166,122 +167,6 @@ async fn send_roster_remove_subscription_stanza(
     }
 }
 
-async fn send_roster_push_to_all_resources(
-    state: &WebSocketState,
-    user_jid: &BareJid,
-    item: &RosterItem,
-    version: &RosterVersion,
-) {
-    let live_resources = state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid);
-    let mut delivered_resources = Vec::new();
-    for resource in &live_resources {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push));
-        if try_deliver_registered_remote_resource(state, resource, &stanza).await {
-            delivered_resources.push(resource.clone());
-            continue;
-        }
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(resource, stanza)
-            == BroadcastOutcome::Delivered
-        {
-            delivered_resources.push(resource.clone());
-        }
-    }
-    let detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .interested_detached_resources_for_user(user_jid)
-        .await
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            warn!(error = %error, user = %user_jid, "Failed to list detached resources for roster push");
-            return;
-        }
-    };
-    let detached: Vec<_> = detached
-        .into_iter()
-        .filter(|resource| !delivered_resources.contains(resource))
-        .collect();
-    for resource in detached {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push));
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
-            .await
-        {
-            Ok(true) => delivered_resources.push(resource.clone()),
-            Ok(false) => {
-                if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
-                    delivered_resources.push(resource.clone());
-                    continue;
-                }
-                if state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .try_send_to(&resource, stanza)
-                    == BroadcastOutcome::Delivered
-                {
-                    delivered_resources.push(resource.clone());
-                }
-            }
-            Err(error) => {
-                warn!(error = %error, resource = %resource, "Failed to record detached roster push");
-            }
-        }
-    }
-    for resource in state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid)
-        .into_iter()
-        .filter(|resource| !delivered_resources.contains(resource))
-    {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push));
-        if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
-            continue;
-        }
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&resource, stanza);
-    }
-}
-
 async fn try_deliver_registered_remote_resource(
     state: &WebSocketState,
     target: &FullJid,
@@ -322,124 +207,5 @@ pub(crate) async fn send_roster_push_to_sibling_resources(
     item: &RosterItem,
     version: &RosterVersion,
 ) {
-    let live_resources: Vec<_> = state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid)
-        .into_iter()
-        .filter(|resource| resource != source_jid)
-        .collect();
-    let mut delivered_resources = Vec::new();
-    for resource in &live_resources {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push));
-        if try_deliver_registered_remote_resource(state, resource, &stanza).await {
-            delivered_resources.push(resource.clone());
-            continue;
-        }
-        if state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(resource, stanza)
-            == BroadcastOutcome::Delivered
-        {
-            delivered_resources.push(resource.clone());
-        }
-    }
-    let detached = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .interested_detached_resources_for_user(user_jid)
-        .await
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            warn!(error = %error, user = %user_jid, "Failed to list detached roster-interested resources");
-            return;
-        }
-    };
-    let detached: Vec<_> = detached
-        .into_iter()
-        .filter(|resource| resource != source_jid)
-        .filter(|resource| !delivered_resources.contains(resource))
-        .collect();
-    for resource in detached {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push.clone()));
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .record_stanza_for_detached_resource(&resource, &stanza, chrono::Utc::now())
-            .await
-        {
-            Ok(true) => delivered_resources.push(resource.clone()),
-            Ok(false) => {
-                let is_interested = state
-                    .deps
-                    .protocol
-                    .connection_registry
-                    .is_roster_interested(&resource);
-                if is_interested {
-                    if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
-                        delivered_resources.push(resource.clone());
-                        continue;
-                    }
-                    if state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .try_send_to(&resource, stanza)
-                        == BroadcastOutcome::Delivered
-                    {
-                        delivered_resources.push(resource.clone());
-                    }
-                }
-            }
-            Err(error) => {
-                warn!(error = %error, resource = %resource, "Failed to record detached roster push");
-            }
-        }
-    }
-    for resource in state
-        .deps
-        .protocol
-        .connection_registry
-        .roster_interested_resources_for_user(user_jid)
-        .into_iter()
-        .filter(|resource| resource != source_jid)
-        .filter(|resource| !delivered_resources.contains(resource))
-    {
-        let push = build_roster_push(
-            &format!("roster-push-{}", uuid::Uuid::new_v4()),
-            user_jid,
-            &resource,
-            item,
-            Some(version),
-        );
-        let stanza = Stanza::Iq(Box::new(push));
-        if try_deliver_registered_remote_resource(state, &resource, &stanza).await {
-            continue;
-        }
-        let _ = state
-            .deps
-            .protocol
-            .connection_registry
-            .try_send_to(&resource, stanza);
-    }
+    send_roster_push_to_resources(state, user_jid, item, version, Some(source_jid)).await;
 }

@@ -1,4 +1,5 @@
 mod acknowledgements;
+mod append_diagnostics;
 mod expired_completion;
 mod incremental_append;
 mod keyed_append;

@@ -307,6 +307,37 @@ impl MetricAttribute for SmEvictionPath {
     }
 }
 
+/// `reason` — bounded error class for a fenced detached SM append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmDetachedAppendRejectionReason {
+    /// The caller supplied no captured ownership fence.
+    MissingFence,
+    /// Exact process identity or ownership validation rejected a supplied fence.
+    NotOwner,
+    /// Another append error, including potentially uncertain backend completion.
+    Other,
+}
+
+impl SmDetachedAppendRejectionReason {
+    /// Every bounded error class, seeded at startup for reliable zero values.
+    pub const ALL: [Self; 3] = [Self::MissingFence, Self::NotOwner, Self::Other];
+}
+
+impl sealed::Sealed for SmDetachedAppendRejectionReason {}
+impl MetricAttribute for SmDetachedAppendRejectionReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::MissingFence => "missing_fence",
+            Self::NotOwner => "not_owner",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// `outcome` — how a client XEP-0198 `<a h='N'/>` ack was classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmAckOutcome {

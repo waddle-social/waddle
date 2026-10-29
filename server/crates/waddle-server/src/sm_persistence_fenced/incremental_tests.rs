@@ -457,6 +457,7 @@ async fn first_database_detach_timestamp_survives_every_fenced_snapshot_refresh(
 #[tokio::test]
 async fn fenced_delta_is_atomic_and_rejects_a_captured_stolen_fence() {
     let Some(f) = fixture().await else { return };
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let mut session = fixture_session("fenced-delta");
     session.outbound_count = 2;
     session.last_acked = 0;
@@ -507,11 +508,59 @@ async fn fenced_delta_is_atomic_and_rejects_a_captured_stolen_fence() {
         ingress_append: Some(proof.clone()),
         new_delivery: false,
     };
+    let missing_fence = f
+        .fenced
+        .append_detached_stanza_atomic(request.clone(), None)
+        .await
+        .expect_err("a missing captured fence must fail closed");
+    assert_eq!(
+        missing_fence.to_string(),
+        format!("missing captured ownership fence for entity '{entity}'")
+    );
+    assert!(matches!(missing_fence,
+        SmPersistenceError::MissingClaimFence { entity: rejected } if rejected == entity
+    ));
+    let unchanged = f
+        .fenced
+        .get_session(&session.stream_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            unchanged.inbound_count,
+            unchanged.outbound_count,
+            unchanged.last_acked,
+            unchanged.replay_gap_through
+        ),
+        (7, 2, 0, None)
+    );
+    assert_eq!(unchanged.detached_at, detached_at);
+    assert_eq!(
+        f.fenced
+            .list_unacked(&session.stream_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(f
+        .fenced
+        .get_ingress_append(&proof.key)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(current_claim_epoch(&f, &entity).await, epoch);
+    let mut invalid = request.clone();
+    invalid.new_delivery = true;
+    invalid.ingress_append = None;
     assert!(matches!(
         f.fenced
-            .append_detached_stanza_atomic(request.clone(), None)
+            .append_detached_stanza_atomic(invalid, Some(&fence))
             .await,
-        Err(SmPersistenceError::NotOwner { .. })
+        Err(SmPersistenceError::Other(_))
     ));
     assert_eq!(
         f.fenced
@@ -631,4 +680,12 @@ async fn fenced_delta_is_atomic_and_rejects_a_captured_stolen_fence() {
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
+
+    for reason in ["missing_fence", "not_owner", "other"] {
+        assert_eq!(
+            metrics.counter_sum("xmpp.sm.detached.append.rejected", &[("reason", reason)]),
+            Some(1),
+            "one error per actual append rejection: {reason}"
+        );
+    }
 }
