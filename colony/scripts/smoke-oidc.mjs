@@ -38,6 +38,7 @@ const redirectUri = `${issuer}/smoke-callback`;
 const environment = { ...process.env, WRANGLER_SEND_METRICS: "false" };
 let worker;
 let logFd;
+let failure;
 
 async function run(args) {
 	const child = Bun.spawn([wrangler, ...args, "--config", configPath], {
@@ -75,13 +76,13 @@ async function request(path, options = {}) {
 }
 
 async function json(response, status = 200) {
-	const body = await response.json();
+	const body = await response.text();
 	assert.equal(
 		response.status,
 		status,
-		`Unexpected HTTP status (${body.error ?? "no OAuth error"})`,
+		`Unexpected HTTP response: ${response.status} ${response.statusText}\nHeaders: ${JSON.stringify(Object.fromEntries(response.headers))}\nBody: ${body}`,
 	);
-	return body;
+	return JSON.parse(body);
 }
 
 const encode = (value) =>
@@ -335,8 +336,7 @@ try {
 		method: "POST",
 		body: tokenBody,
 	});
-	assert.equal(missingDpop.status, 400);
-	assert.equal((await missingDpop.json()).error, "invalid_dpop_proof");
+	assert.equal((await json(missingDpop, 400)).error, "invalid_dpop_proof");
 	const validProof = await dpop(discovery.token_endpoint);
 	// Keep malformed input first so the verifier is exercised before any valid-length proof.
 	const malformedDpop = await request(discovery.token_endpoint, {
@@ -344,8 +344,7 @@ try {
 		headers: { DPoP: `${validProof}x` },
 		body: tokenBody,
 	});
-	assert.equal(malformedDpop.status, 400);
-	assert.equal((await malformedDpop.json()).error, "invalid_dpop_proof");
+	assert.equal((await json(malformedDpop, 400)).error, "invalid_dpop_proof");
 	const [proofHeader, proofPayload, proofSignature] = validProof.split(".");
 	const invalidSignature = Buffer.from(proofSignature, "base64url");
 	assert.equal(invalidSignature.length, 64);
@@ -360,8 +359,7 @@ try {
 		headers: { DPoP: tamperedProof },
 		body: tokenBody,
 	});
-	assert.equal(tamperedDpop.status, 400);
-	assert.equal((await tamperedDpop.json()).error, "invalid_dpop_proof");
+	assert.equal((await json(tamperedDpop, 400)).error, "invalid_dpop_proof");
 	const token = await json(
 		await request(discovery.token_endpoint, {
 			method: "POST",
@@ -458,10 +456,7 @@ try {
 		"PASS: built Colony worker, local D1/Secrets Store, discovery, dynamic registration, session, consent, PKCE+DPoP code exchange, verified ID token/JWKS, userinfo, missing/tampered-DPoP/wrong-PKCE/code-replay rejection and GitHub sign-in URL generation (never followed)",
 	);
 } catch (error) {
-	if (logFd !== undefined) {
-		console.error("Local OIDC worker log (synthetic fixtures only):");
-		console.error(readFileSync(resolve(state, "worker.log"), "utf8"));
-	}
+	failure = error;
 	throw error;
 } finally {
 	if (worker) {
@@ -469,5 +464,9 @@ try {
 		await worker.exited;
 	}
 	if (logFd !== undefined) closeSync(logFd);
+	if (failure && logFd !== undefined) {
+		console.error("Local OIDC worker log after shutdown (synthetic fixtures only):");
+		console.error(readFileSync(resolve(state, "worker.log"), "utf8"));
+	}
 	rmSync(state, { recursive: true, force: true });
 }
