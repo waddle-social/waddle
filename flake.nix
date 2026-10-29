@@ -355,6 +355,13 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverPackageSrc;
+            # Registry libp2p crates need the patched swarm's real API even
+            # when Crane replaces application sources with dependency stubs.
+            extraDummyScript = ''
+              rm -rf "$out/vendor/libp2p-swarm"
+              cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
+              chmod -R u+w "$out/vendor/libp2p-swarm"
+            '';
             strictDeps = true;
             cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
             nativeBuildInputs = [
@@ -534,6 +541,13 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverCheckSrc;
+            # Registry libp2p crates need the patched swarm's real API even
+            # when Crane replaces application sources with dependency stubs.
+            extraDummyScript = ''
+              rm -rf "$out/vendor/libp2p-swarm"
+              cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
+              chmod -R u+w "$out/vendor/libp2p-swarm"
+            '';
             strictDeps = true;
             CUE_BRIDGE_PATH = mkCueBridge pkgs;
             nativeBuildInputs = [
