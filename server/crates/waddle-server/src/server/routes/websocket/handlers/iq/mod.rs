@@ -110,6 +110,7 @@ mod muc_self_ping;
 mod pep_addressing;
 mod permissions;
 mod pin_query;
+mod ping_destination;
 mod pubsub_admin;
 mod pubsub_dispatch;
 mod push;

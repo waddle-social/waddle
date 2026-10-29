@@ -148,6 +148,16 @@ async fn handle_sans_io_iq_with_relay_override(
                 not_authorized_iq_error("Authentication required."),
             )]);
         };
+        if payload_ns == waddle_xmpp::xep::xep0199::NS_PING {
+            if let Some(reply) = super::ping_destination::remote_ping_error(
+                iq,
+                domain,
+                &state.deps.service_domains,
+                full_jid,
+            ) {
+                return Some(vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))]);
+            }
+        }
         if payload_ns == waddle_xmpp::xep::xep0166::NS_JINGLE {
             if let Some(reply) = peer_jingle_blocklist_reply(state, full_jid, iq, domain).await {
                 return Some(vec![match reply {
