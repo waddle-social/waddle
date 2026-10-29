@@ -7,13 +7,14 @@ use serde::Serialize;
 
 use super::cases::{assert_no_admission, closed, completed, connection, mutate, plan, recover};
 use super::contender::Contender;
+use super::deadline::{Deadline, MonotonicNanos};
 use super::graph;
 use super::model::{
     Candidate, Fact, Identity, Intent, Outcome, Pause, Polarity, RecoveryAction, Signal,
     WriteFailure,
 };
 use super::store;
-use super::write_proxy::{Fault, Observation, Proxy};
+use super::write_proxy::{Event, Fault, Observation, Proxy};
 use crate::authority::client;
 use crate::fixture::Fixture;
 use crate::model::RPC_BUDGET;
@@ -21,6 +22,10 @@ use crate::model::RPC_BUDGET;
 #[derive(Serialize)]
 pub struct LostResponseCase {
     identity: Identity,
+    polarity: Polarity,
+    deadline: Deadline,
+    caller_elapsed_at: MonotonicNanos,
+    ordering_accepted: bool,
     fault: Fault,
     proxy_observation: Observation,
     writer_outcome: Outcome,
@@ -94,7 +99,8 @@ pub async fn run(fixture: &Fixture, binary: &Path) -> Result<Vec<LostResponseCas
             );
         }
     }
-    ensure!(cases.len() == 12, "lost-response scenario inventory");
+    cases.push(inverted_order(fixture, binary).await?);
+    ensure!(cases.len() == 13, "lost-response scenario inventory");
     Ok(cases)
 }
 
@@ -124,18 +130,12 @@ async fn exercise(
     closed(fixture, &identity).await?;
     let observation = proxy.wait("observed").await?;
     ensure!(
-        !tokio::time::timeout(
-            RPC_BUDGET,
-            tokio::fs::try_exists(writer.work.barriers.join("done"))
-        )
-        .await??,
-        "proxy must observe its fault boundary before the caller deadline completes"
-    );
-    ensure!(
-        observation
+        observation.event
             == match fault {
-                Fault::DropSuccess => Observation::BackendAcknowledged,
-                Fault::NeverForward => Observation::RequestNotForwarded,
+                Fault::DropSuccess => Event::BackendAcknowledged,
+                Fault::AfterCallerDeadline =>
+                    anyhow::bail!("late control is not a positive schedule"),
+                Fault::NeverForward => Event::RequestNotForwarded,
             },
         "wrong fault boundary observed"
     );
@@ -165,6 +165,11 @@ async fn exercise(
         writer.wait("write_failed").await?.signal
             == Signal::WriteFailed(WriteFailure::CallerDeadlineExceeded),
         "writer must reach its own local deadline before the proxy releases anything"
+    );
+    let (deadline, elapsed) = writer_deadline(&mut writer).await?;
+    ensure!(
+        deadline.precedes_expiry(observation.at, elapsed),
+        "proxy fault boundary must precede the actual absolute caller deadline"
     );
     proxy.release()?;
     no_writer_success(&writer).await?;
@@ -228,6 +233,10 @@ async fn exercise(
     }
     Ok(LostResponseCase {
         identity,
+        polarity,
+        deadline,
+        caller_elapsed_at: elapsed,
+        ordering_accepted: true,
         fault,
         proxy_observation: observation,
         writer_outcome: Outcome::AuthorityUnavailable,
@@ -237,5 +246,101 @@ async fn exercise(
         facts_after_recovery: after,
         newer_revoke,
         independent_scope_admitted: true,
+    })
+}
+
+async fn writer_deadline(worker: &mut Contender) -> Result<(Deadline, MonotonicNanos)> {
+    let Signal::DeadlineArmed(deadline) = worker.wait("deadline").await?.signal else {
+        anyhow::bail!("writer absolute deadline missing");
+    };
+    let Signal::DeadlineElapsed(elapsed) = worker.wait("elapsed").await?.signal else {
+        anyhow::bail!("writer timerfd expiration missing");
+    };
+    ensure!(
+        deadline.expires <= elapsed,
+        "timer preceded recorded absolute deadline"
+    );
+    Ok((deadline, elapsed))
+}
+
+async fn inverted_order(fixture: &Fixture, binary: &Path) -> Result<LostResponseCase> {
+    let intent = Intent::grant();
+    let identity = Identity::fresh(Candidate::SpiceDb, &intent);
+    let mut proxy = Proxy::spawn(binary, fixture, &identity, Fault::AfterCallerDeadline).await?;
+    let mut writer = Contender::spawn(
+        binary,
+        fixture,
+        &identity,
+        RecoveryAction::Mutate {
+            intent: intent.clone(),
+            previous: None,
+            pause: Pause::AfterCallerDeadline,
+            write_proxy_port: Some(proxy.port),
+        },
+    )?;
+    ensure!(
+        writer.wait("write_failed").await?.signal
+            == Signal::WriteFailed(WriteFailure::CallerDeadlineExceeded),
+        "negative control must expire caller first"
+    );
+    let (deadline, elapsed) = writer_deadline(&mut writer).await?;
+    closed(fixture, &identity).await?;
+    ensure!(
+        graph::verify(&client(&fixture.settings).await?, &identity)
+            .await?
+            .is_none(),
+        "late request already forwarded"
+    );
+    proxy.allow_late_forward()?;
+    let observation = proxy.wait("observed").await?;
+    ensure!(
+        observation.event == Event::BackendAcknowledged && observation.at > elapsed,
+        "negative control must really commit after caller expiration"
+    );
+    ensure!(
+        graph::verify(&client(&fixture.settings).await?, &identity)
+            .await?
+            .is_some(),
+        "late write did not commit"
+    );
+    ensure!(
+        !tokio::time::timeout(
+            RPC_BUDGET,
+            tokio::fs::try_exists(writer.work.barriers.join("done"))
+        )
+        .await??,
+        "negative control must retain the old done-absence illusion"
+    );
+    ensure!(
+        !deadline.precedes_expiry(observation.at, elapsed),
+        "inverted timing was accepted"
+    );
+    no_writer_success(&writer).await?;
+    writer.release()?;
+    writer.done(Outcome::AuthorityUnavailable).await?;
+    proxy.release()?;
+    proxy.stop()?;
+    let before = facts(fixture, &identity).await?;
+    ensure!(
+        before == vec![Fact::AdmissionClosed],
+        "late write fabricated writer commitment"
+    );
+    recover(binary, fixture, &identity, Outcome::Activated).await?;
+    let after = facts(fixture, &identity).await?;
+    Ok(LostResponseCase {
+        identity,
+        polarity: Polarity::Grant,
+        deadline,
+        caller_elapsed_at: elapsed,
+        ordering_accepted: false,
+        fault: Fault::AfterCallerDeadline,
+        proxy_observation: observation,
+        writer_outcome: Outcome::AuthorityUnavailable,
+        caller_failure: WriteFailure::CallerDeadlineExceeded,
+        facts_before_recovery: before,
+        recovery_outcome: Outcome::Activated,
+        facts_after_recovery: after,
+        newer_revoke: None,
+        independent_scope_admitted: false,
     })
 }

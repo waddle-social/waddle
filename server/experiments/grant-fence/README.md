@@ -214,7 +214,7 @@ independent-scope progress is demonstrated only with healthy SpiceDB.
 
 ## Lost write response and caller deadline
 
-The same native runner adds twelve leaf scenarios to the original 32. Each uses
+The same native runner adds twelve leaf scenarios and one inverted-order negative control to the original 32. Each uses
 an owned, supervised proxy process listening only on an ephemeral loopback port.
 It accepts one authenticated `WriteRelationships` request, forwards its exact
 bounded protobuf bytes, and lets tonic validate the actual backend unary body
@@ -225,8 +225,11 @@ An independent real read verifies presence or absence of the exact marker/leaf.
 Unauthenticated, unsupported-method and oversized requests are rejected before
 the one accepted write; all native cases exercise those receiving boundaries.
 
-The writer uses an explicit two-second local deadline around the write, with a
-ten-second prescience endpoint timeout. Evidence requires
+The writer captures an absolute two-second `CLOCK_MONOTONIC` deadline before
+starting the write and arms that exact deadline using Linux timerfd with
+`TFD_TIMER_ABSTIME`; recording a barrier never restarts the duration. The
+prescience endpoint timeout is ten seconds. Clock reads, arithmetic and timer
+setup fail closed. Evidence requires
 `CallerDeadlineExceeded`, not merely an unavailable service or a worker killed
 after acknowledgement. This is a local elapsed deadline, **not** a claimed
 remote gRPC `DeadlineExceeded` status: pinned tonic 0.12.3 maps its own transport
@@ -234,7 +237,10 @@ timeout to `Cancelled`. Unexpected gRPC statuses are recorded separately and
 fail these scenarios. The controller releases the proxy only after the worker
 has exited with that local deadline and without acknowledgement, verification
 or activation. The proxy's eventual error is not the caller's observed result.
-The fault observation must precede worker completion. The proxy's own waits,
+The independently timestamped proxy fault observation must fall between the
+writer's armed time and its exact absolute deadline, strictly before expiry.
+The writer records actual timerfd expiration on the same shared monotonic clock.
+Checking absence of a completion file is not accepted as ordering evidence. The proxy's own waits,
 wire messages (8KiB), readbacks and native process cleanup are bounded; raw
 requests, metadata, credentials and responses never enter files or reports.
 It uses the existing stdin-only credential transfer, process-group ownership,
@@ -258,3 +264,16 @@ failure, historical canonical facts, recovery outcome and the newer identity.
 No production writer closure, arbitrary corruption recovery, PostgreSQL restart,
 restore safety, inherited/multi-edge policy, accepted-child contract change,
 byte draining or federation readiness is established by these cases.
+
+
+The inverted-order control deliberately pauses a real worker after its local
+absolute deadline but before its `done` observation. Only then is the proxy's
+one owned request task allowed to forward the write. The real backend commits,
+the marker/leaf is independently read back, and `done` is still absent, yet the
+monotonic ordering check must reject that schedule. The controller later releases
+the worker and recovers the actual committed state in a fresh process. The report
+labels this `AfterCallerDeadline` with `ordering_accepted: false`; it is not a
+passing pre-deadline response-loss observation. The bounded upstream task belongs
+to the supervised proxy process and survives downstream cancellation for this
+control. Explicit process-group stop and the sticky cleanup latch cover that
+runtime and all its tasks; no detached task can outlive verified process cleanup.

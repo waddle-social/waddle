@@ -5,10 +5,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{ensure, Context, Result};
@@ -19,6 +17,7 @@ use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::deadline::MonotonicNanos;
 use super::model::Identity;
 use super::wire_codec::{WireCodec, MAX_MESSAGE_BYTES};
 use crate::fixture::Fixture;
@@ -30,12 +29,18 @@ const WRITE_PATH: &str = "/authzed.api.v1.PermissionsService/WriteRelationships"
 pub enum Fault {
     DropSuccess,
     NeverForward,
+    AfterCallerDeadline,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Observation {
+pub enum Event {
     Listening(u16),
     BackendAcknowledged,
     RequestNotForwarded,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    pub event: Event,
+    pub at: MonotonicNanos,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProxyWork {
@@ -49,13 +54,16 @@ struct Record {
     identity: Identity,
     observation: Observation,
 }
-fn record(work: &ProxyWork, name: &str, observation: Observation) -> Result<()> {
+fn record(work: &ProxyWork, name: &str, event: Event) -> Result<()> {
     let temporary = work.barriers.join(format!("{name}.writing"));
     write_private(
         &temporary,
         &serde_json::to_vec(&Record {
             identity: work.identity.clone(),
-            observation,
+            observation: Observation {
+                event,
+                at: MonotonicNanos::now()?,
+            },
         })?,
     )?;
     fs::rename(temporary, work.barriers.join(name))?;
@@ -113,44 +121,62 @@ impl tonic::server::UnaryService<Bytes> for ProxyService {
             if service.used.swap(true, Ordering::SeqCst) {
                 return Err(Status::resource_exhausted("one fault request only"));
             }
-            let observation = match service.work.fault {
-                Fault::NeverForward => Observation::RequestNotForwarded,
-                Fault::DropSuccess => {
-                    // Tonic checks backend headers, unary body AND final gRPC
-                    // status before this returns success. No synthesized ack.
-                    let mut upstream = tonic::client::Grpc::new(service.channel)
-                        .max_decoding_message_size(MAX_MESSAGE_BYTES)
-                        .max_encoding_message_size(MAX_MESSAGE_BYTES);
-                    let response = tokio::time::timeout(RPC_BUDGET, async {
-                        upstream
-                            .ready()
-                            .await
-                            .map_err(|_| Status::unavailable("upstream readiness"))?;
-                        upstream
-                            .unary(
-                                request,
-                                http::uri::PathAndQuery::from_static(WRITE_PATH),
-                                WireCodec,
-                            )
-                            .await
-                    })
-                    .await
-                    .map_err(|_| Status::deadline_exceeded("upstream deadline"))??;
-                    if response.get_ref().is_empty() {
-                        return Err(Status::internal("missing upstream write receipt"));
-                    }
-                    Observation::BackendAcknowledged
-                }
-            };
-            record(&service.work, "observed", observation)
-                .map_err(|_| Status::internal("proxy observation failed"))?;
-            // The controller can admit an independent scope or commit a newer
-            // revoke while this caller still has no successful response.
-            barrier(&service.work.barriers, "release")
+            // The one accepted forward operation belongs to this supervised
+            // proxy process. Downstream cancellation must not cancel a request
+            // already received upstream; the late-commit control exercises it.
+            // Every await inside is bounded, and process-group cleanup owns
+            // the runtime even when the downstream future is dropped.
+            tokio::spawn(service.forward(request))
                 .await
-                .map_err(|_| Status::deadline_exceeded("fault release deadline"))?;
-            Err(Status::unavailable("injected unavailable response"))
+                .map_err(|_| Status::internal("owned proxy request task failed"))?
+                .map_err(|status| *status)
         })
+    }
+}
+impl ProxyService {
+    async fn forward(self, request: Request<Bytes>) -> Result<Response<Bytes>, Box<Status>> {
+        if self.work.fault == Fault::AfterCallerDeadline {
+            barrier(&self.work.barriers, "forward")
+                .await
+                .map_err(|_| Status::deadline_exceeded("late forward deadline"))?;
+        }
+        let observation = match self.work.fault {
+            Fault::NeverForward => Event::RequestNotForwarded,
+            Fault::DropSuccess | Fault::AfterCallerDeadline => {
+                // Tonic checks backend headers, unary body AND final gRPC
+                // status before success. The request body is forwarded unchanged.
+                let mut upstream = tonic::client::Grpc::new(self.channel)
+                    .max_decoding_message_size(MAX_MESSAGE_BYTES)
+                    .max_encoding_message_size(MAX_MESSAGE_BYTES);
+                let response = tokio::time::timeout(RPC_BUDGET, async {
+                    upstream
+                        .ready()
+                        .await
+                        .map_err(|_| Status::unavailable("upstream readiness"))?;
+                    upstream
+                        .unary(
+                            request,
+                            http::uri::PathAndQuery::from_static(WRITE_PATH),
+                            WireCodec,
+                        )
+                        .await
+                })
+                .await
+                .map_err(|_| Status::deadline_exceeded("upstream deadline"))??;
+                if response.get_ref().is_empty() {
+                    return Err(Box::new(Status::internal("missing upstream write receipt")));
+                }
+                Event::BackendAcknowledged
+            }
+        };
+        record(&self.work, "observed", observation)
+            .map_err(|_| Status::internal("proxy observation failed"))?;
+        barrier(&self.work.barriers, "release")
+            .await
+            .map_err(|_| Status::deadline_exceeded("fault release deadline"))?;
+        Err(Box::new(Status::unavailable(
+            "injected unavailable response",
+        )))
     }
 }
 
@@ -169,7 +195,7 @@ pub async fn execute(work: &ProxyWork) -> Result<()> {
     record(
         work,
         "ready",
-        Observation::Listening(listener.local_addr()?.port()),
+        Event::Listening(listener.local_addr()?.port()),
     )?;
     Server::builder()
         .concurrency_limit_per_connection(1)
@@ -224,7 +250,7 @@ impl Proxy {
             work,
             port: 0,
         };
-        let Observation::Listening(port) = proxy.wait("ready").await? else {
+        let Event::Listening(port) = proxy.wait("ready").await?.event else {
             anyhow::bail!("proxy readiness observation");
         };
         ensure!(port != 0, "proxy listener port missing");
@@ -328,6 +354,9 @@ impl Proxy {
             "rejected request reached fault boundary"
         );
         Ok(())
+    }
+    pub fn allow_late_forward(&self) -> Result<()> {
+        write_private(&self.work.barriers.join("forward"), b"forward")
     }
     pub fn release(&self) -> Result<()> {
         write_private(&self.work.barriers.join("release"), b"release")

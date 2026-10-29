@@ -165,6 +165,7 @@ pub enum Pause {
     None,
     BeforeFenceCommit,
     AfterAcknowledgedWrite,
+    AfterCallerDeadline,
     BeforeActivation,
 }
 
@@ -214,6 +215,8 @@ pub enum WriteFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
     WriteFailed(WriteFailure),
+    DeadlineArmed(super::deadline::Deadline),
+    DeadlineElapsed(super::deadline::MonotonicNanos),
     FenceHeld,
     AdmissionClosed,
     AcknowledgedWrite,

@@ -1,6 +1,7 @@
 //! Bounded canonical leaf recovery comparison, independent of production policy.
 mod cases;
 mod contender;
+mod deadline;
 mod graph;
 mod lost_response;
 mod model;

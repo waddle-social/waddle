@@ -58,23 +58,20 @@ pub async fn execute(work: &RecoveryWork) -> Result<()> {
                 if write_proxy_port.is_some() {
                     // This local deadline expires before prescience/tonic's
                     // longer endpoint deadline. Do not fabricate a gRPC code.
-                    match tokio::time::timeout(
-                        RPC_BUDGET,
-                        graph::publish(&endpoint, &work.identity, intent),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            observe(
-                                work,
-                                "write_failed",
-                                Signal::WriteFailed(WriteFailure::CallerDeadlineExceeded),
-                                None,
-                            )?;
+                    let deadline = super::deadline::Deadline::after(RPC_BUDGET)?;
+                    observe(work, "deadline", Signal::DeadlineArmed(deadline), None)?;
+                    tokio::select! {
+                        biased;
+                        elapsed = deadline.elapsed() => {
+                            observe(work, "elapsed", Signal::DeadlineElapsed(elapsed?), None)?;
+                            observe(work, "write_failed", Signal::WriteFailed(WriteFailure::CallerDeadlineExceeded), None)?;
+                            if *pause == Pause::AfterCallerDeadline {
+                                barrier(&work.barriers, "release").await?;
+                            }
                             return Ok(false);
                         }
-                    }?;
+                        result = graph::publish(&endpoint, &work.identity, intent) => { result?; }
+                    }
                 } else {
                     graph::publish(&endpoint, &work.identity, intent).await?;
                 }
