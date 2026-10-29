@@ -26,6 +26,8 @@ class BaselineValidationTests(unittest.TestCase):
             "HEAD\x00--output=/tmp/rollout-injected",
             "HEAD\t--output=/tmp/rollout-injected",
             "HEAD;touch /tmp/rollout-injected",
+            "ＨＥＡＤ",
+            "origіn/main",
         ):
             with self.subTest(baseline=repr(baseline)):
                 with patch.object(sys, "argv", [str(SCRIPT), "--baseline=" + baseline]):

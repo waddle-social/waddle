@@ -338,6 +338,14 @@ try {
 	assert.equal(missingDpop.status, 400);
 	assert.equal((await missingDpop.json()).error, "invalid_dpop_proof");
 	const validProof = await dpop(discovery.token_endpoint);
+	// Keep malformed input first so the verifier is exercised before any valid-length proof.
+	const malformedDpop = await request(discovery.token_endpoint, {
+		method: "POST",
+		headers: { DPoP: `${validProof}x` },
+		body: tokenBody,
+	});
+	assert.equal(malformedDpop.status, 400);
+	assert.equal((await malformedDpop.json()).error, "invalid_dpop_proof");
 	const [proofHeader, proofPayload, proofSignature] = validProof.split(".");
 	const invalidSignature = Buffer.from(proofSignature, "base64url");
 	assert.equal(invalidSignature.length, 64);
@@ -354,13 +362,6 @@ try {
 	});
 	assert.equal(tamperedDpop.status, 400);
 	assert.equal((await tamperedDpop.json()).error, "invalid_dpop_proof");
-	const malformedDpop = await request(discovery.token_endpoint, {
-		method: "POST",
-		headers: { DPoP: `${validProof}x` },
-		body: tokenBody,
-	});
-	assert.equal(malformedDpop.status, 400);
-	assert.equal((await malformedDpop.json()).error, "invalid_dpop_proof");
 	const token = await json(
 		await request(discovery.token_endpoint, {
 			method: "POST",

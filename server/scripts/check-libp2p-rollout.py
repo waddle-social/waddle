@@ -24,7 +24,7 @@ KAMEO_PATH = "server/vendor/kameo"
 
 
 def resolve_baseline(reference):
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._/-]*", reference):
+    if not re.fullmatch(r"\w[\w./-]*", reference, flags=re.ASCII):
         raise ValueError("baseline must be a commit hash or ASCII branch/tag reference")
     try:
         commit = subprocess.check_output(
