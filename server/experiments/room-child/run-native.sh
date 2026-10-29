@@ -22,11 +22,9 @@ room_child_start_attempted=0
 cleanup() {
   local result=$?
   trap - EXIT INT TERM
-  if (( room_child_start_attempted )); then
-    if ! "$ROOM_CHILD_POSTGRES_BIN/pg_ctl" -D "$room_child_root/data" -w -t 30 -m fast stop >/dev/null 2>&1; then
-      echo "PostgreSQL shutdown unconfirmed; retaining $room_child_root" >&2
-      exit 1
-    fi
+  if (( room_child_start_attempted )) && ! "$ROOM_CHILD_POSTGRES_BIN/pg_ctl" -D "$room_child_root/data" -w -t 30 -m fast stop >/dev/null 2>&1; then
+    echo "PostgreSQL shutdown unconfirmed; retaining $room_child_root" >&2
+    exit 1
   fi
   rm -rf -- "$room_child_root"
   exit "$result"
