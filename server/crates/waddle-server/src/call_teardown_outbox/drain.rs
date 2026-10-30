@@ -747,9 +747,7 @@ pub(crate) async fn canonical_retirement_room_snapshot(
                 return None;
             }
             let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
-            let Some(fence) = snapshot.claim_fence.as_ref() else {
-                return None;
-            };
+            let fence = snapshot.claim_fence.as_ref()?;
             if fence.entity != entity || fence.owner != me {
                 return None;
             }
