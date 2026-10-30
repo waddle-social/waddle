@@ -147,6 +147,15 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
+				// The Postgres + all-features shard lane (nixTestLocal) needs
+				// the privileged 32-core Namespace runner the PR rustTests
+				// workflow uses: the all-features compile peaks at ~10 GB and
+				// the four Nix-sandboxed shards take eight CPUs each. cuenv
+				// 0.57.3 has no per-task runner (task resources are never
+				// compiled) and keeps only the first label of a runner list,
+				// so the two-label runner is one expression for the whole
+				// pipeline, which runs only on main and manual dispatch.
+				runner: "${{ fromJSON('[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]') }}"
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -164,6 +173,9 @@ schema.#Project & {
 				_t.renderDeployment,
 				_t.nixBuildImageStream,
 				_t.nixBuildExtensionModules,
+				// Publish evidence: Postgres + all-features shards with the
+				// required-cluster-tests.txt executed-name check (#1796).
+				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
 		}
@@ -471,6 +483,9 @@ schema.#Project & {
 					"scripts/plan_nextest_binary_shards.py", "scripts/test_plan_nextest_binary_shards.py",
 					"scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
+					"scripts/check_required_tests.py", "scripts/test_check_required_tests.py",
+					"scripts/check-test-postgres-env.py", "scripts/test_check_test_postgres_env.py",
+					".config/required-cluster-tests.txt",
 					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
 				tasks.checkCiDrift.inputs,
 				tasks.checkSwitchableAlternativeProgram.inputs,
@@ -1238,6 +1253,9 @@ schema.#Project & {
 				tasks.renderDeployment,
 				tasks.nixBuildImageStream,
 				tasks.nixBuildExtensionModules,
+				// No image ships unless the Postgres + all-features lane ran
+				// every required cluster test on this exact commit.
+				tasks.nixTestLocal,
 			]
 		}
 

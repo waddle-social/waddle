@@ -98,3 +98,10 @@ threads-required = 'num-cpus'
 fail-fast = false
 # Flaky tests must fail loudly; retries mask flakiness.
 retries = 0
+
+# The Postgres shard lane reads executed test names from this report and
+# fails when a test in `.config/required-cluster-tests.txt` did not run
+# (`scripts/check_required_tests.py`). Written under the store directory,
+# `target/nextest/ci/junit.xml`.
+[profile.ci.junit]
+path = "junit.xml"

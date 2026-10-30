@@ -76,6 +76,8 @@ workflow: {
 						python3 server/scripts/test_plan_nextest_binary_shards.py
 						python3 server/scripts/test_pin_nextest_shard.py
 						python3 server/scripts/test_run_nextest_shards.py
+						python3 server/scripts/test_check_required_tests.py
+						python3 server/scripts/test_check_test_postgres_env.py
 						"""
 				},
 				{

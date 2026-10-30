@@ -320,10 +320,28 @@
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
                   ${archiveOutput}/shared-inventory.json.gz "$out/shared-inventory.json" \
                   > "$out/shared-coverage.json"
+                # Keep each run's JUnit report (the `ci` profile writes it to
+                # the remapped workspace's target/nextest/ci): the lane checks
+                # executed test names against required-cluster-tests.txt.
+                take_junit_report() {
+                  local roots=("$PWD" "$extracted")
+                  if [ -n "''${CARGO_TARGET_DIR:-}" ] && [ -d "$CARGO_TARGET_DIR" ]; then
+                    roots+=("$CARGO_TARGET_DIR")
+                  fi
+                  local reports
+                  mapfile -t reports < <(find "''${roots[@]}" -path '*/nextest/ci/junit.xml' -type f | sort -u)
+                  if [ "''${#reports[@]}" -ne 1 ]; then
+                    echo "expected exactly one nextest JUnit report, found ''${#reports[@]}: ''${reports[*]}" >&2
+                    return 1
+                  fi
+                  mv "''${reports[0]}" "$out/$1"
+                }
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$whole_filter"
+                take_junit_report junit-whole.xml
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$shared_filter" --partition "hash:${toString partition}/4"
+                take_junit_report junit-shared.xml
                 runHook postCheck
               '';
             };
