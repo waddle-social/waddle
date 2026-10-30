@@ -517,9 +517,13 @@ schema.#Project & {
 
 		// The immutable archives and four sandboxed shards stay on one
 		// 32-core builder. The runner enforces eight disjoint CPUs per shard.
+		// cuenv 0.57.3 emits no timeout-minutes for the main-pipeline job (it
+		// gates publish), so the lane bounds itself inside the PR job's 60
+		// minutes; a timeout fails the lane with diagnostics instead of
+		// holding publish for GitHub's six-hour default.
 		nixTestLocal: schema.#Task & {
-			command: "bash"
-			args: ["scripts/run-nextest-shards.sh"]
+			command: "timeout"
+			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false

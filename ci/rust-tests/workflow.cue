@@ -71,9 +71,9 @@ workflow: {
 					run:   "bash server/scripts/check-ci-helper-contracts.sh"
 				},
 				{
-					name:                "Compile and run four isolated test shards"
-					shell:               "bash"
-					run:                 "\(_testTask.command) \(_testTask.args[0])"
+					name:  "Compile and run four isolated test shards"
+					shell: "bash"
+					run: strings.Join(list.Concat([[_testTask.command], _testTask.args]), " ")
 					"working-directory": "server"
 				},
 				{

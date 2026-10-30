@@ -159,7 +159,7 @@ jobs:
         run: bash server/scripts/check-ci-helper-contracts.sh
       - name: Compile and run four isolated test shards
         shell: bash
-        run: bash scripts/run-nextest-shards.sh
+        run: timeout --kill-after=2m 55m bash scripts/run-nextest-shards.sh
         working-directory: server
       - name: Upload compiler and coverage diagnostics
         if: ${{ !cancelled() }}
