@@ -86,6 +86,86 @@ pub(super) fn order_subject_persistence_after_archive(
     events
 }
 
+/// Maximum `check_fenced_fanout` calls per groupchat dispatch (#2046 W1.4):
+/// one attempt plus two retries.
+#[cfg(feature = "clustering")]
+pub(super) const FENCED_FANOUT_CHECK_ATTEMPTS: usize = 3;
+
+/// Pause before each retry of a failed fenced fan-out check, indexed by the
+/// attempt that just failed.
+#[cfg(feature = "clustering")]
+const FENCED_FANOUT_RETRY_BACKOFF: [std::time::Duration; FENCED_FANOUT_CHECK_ATTEMPTS - 1] = [
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(100),
+];
+
+/// Wall-clock cap on every fenced fan-out attempt and pause together. The
+/// check runs inline in the sending connection's turn, so a database whose
+/// pool acquire hangs must not hold that turn for the pool's own timeout.
+#[cfg(feature = "clustering")]
+pub(super) const FENCED_FANOUT_CHECK_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
+/// Result of the bounded fenced fan-out backstop.
+#[cfg(feature = "clustering")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencedFanoutVerdict {
+    /// The published claim fence is still held: fan out.
+    Serving,
+    /// Definitive non-serving result: demote the exact actor and bounce.
+    NotServing,
+    /// Every attempt failed or the budget elapsed: bounce, never demote.
+    Unavailable,
+}
+
+/// Run the legacy cache-backed fenced fan-out check with bounded retries.
+///
+/// At most [`FENCED_FANOUT_CHECK_ATTEMPTS`] calls, separated by
+/// [`FENCED_FANOUT_RETRY_BACKOFF`], all inside
+/// [`FENCED_FANOUT_CHECK_BUDGET`]. A definitive `Ok` answer returns at once
+/// and is never retried; only backend uncertainty (`Err`) or the budget
+/// elapsing yields [`FencedFanoutVerdict::Unavailable`]. An attempt cut off
+/// by the budget is a standalone fenced `SELECT ... FOR SHARE` with no
+/// side effect to undo.
+#[cfg(feature = "clustering")]
+async fn check_fenced_fanout_bounded(
+    store: &dyn waddle_xmpp::muc::MucDurableStore,
+    room_jid: &jid::BareJid,
+) -> FencedFanoutVerdict {
+    let deadline = tokio::time::Instant::now() + FENCED_FANOUT_CHECK_BUDGET;
+    for attempt in 1..=FENCED_FANOUT_CHECK_ATTEMPTS {
+        match tokio::time::timeout_at(deadline, store.check_fenced_fanout(room_jid)).await {
+            Ok(Ok(true)) => return FencedFanoutVerdict::Serving,
+            Ok(Ok(false)) => return FencedFanoutVerdict::NotServing,
+            Ok(Err(error)) => warn!(
+                room = %room_jid,
+                attempt,
+                max_attempts = FENCED_FANOUT_CHECK_ATTEMPTS,
+                %error,
+                "DispatchToRoom: fenced ownership check failed (backend unavailable)"
+            ),
+            Err(_elapsed) => {
+                warn!(
+                    room = %room_jid,
+                    attempt,
+                    budget_ms = FENCED_FANOUT_CHECK_BUDGET.as_millis(),
+                    "DispatchToRoom: fenced ownership check exceeded its retry budget"
+                );
+                return FencedFanoutVerdict::Unavailable;
+            }
+        }
+        // No pause follows the final attempt.
+        let Some(backoff) = FENCED_FANOUT_RETRY_BACKOFF.get(attempt - 1).copied() else {
+            break;
+        };
+        if tokio::time::Instant::now() + backoff >= deadline {
+            break;
+        }
+        tokio::time::sleep(backoff).await;
+    }
+    FencedFanoutVerdict::Unavailable
+}
+
 pub(super) async fn dispatch_to_room(
     deps: &Deps<'_>,
     room_jid: jid::BareJid,
@@ -357,9 +437,14 @@ pub(super) async fn dispatch_to_room(
     // `GetRoomSnapshot`-based sans-I/O chain and carries no live
     // production caller). `None` (clustering disabled, non-Postgres, or a
     // build without the `clustering` feature) skips this entirely —
-    // single-node behavior, unchanged. A transient backend error fails
-    // open (logged, not blocking); only a definitive non-serving result
-    // demotes. That includes a missing exact row and local identity rotation.
+    // single-node behavior, unchanged. Only a definitive non-serving result
+    // demotes; that includes a missing exact row and local identity rotation.
+    // Backend uncertainty fails closed WITHOUT demotion (#2046 W1.4): after
+    // the bounded retry in `check_fenced_fanout_bounded` the sender gets a
+    // retryable bounce and nothing fans out, but the actor stays registered,
+    // because demoting on uncertainty would retire every room on a database
+    // switchover. This remains the legacy cache-backed boundary; #1283 owns
+    // its replacement.
     #[cfg(feature = "clustering")]
     if let Some(store) = state
         .deps
@@ -369,9 +454,9 @@ pub(super) async fn dispatch_to_room(
         .as_ref()
         .filter(|_| !deps.effects.is_planning())
     {
-        match store.check_fenced_fanout(&room_jid).await {
-            Ok(true) => {}
-            Ok(false) => {
+        match check_fenced_fanout_bounded(store.as_ref(), &room_jid).await {
+            FencedFanoutVerdict::Serving => {}
+            FencedFanoutVerdict::NotServing => {
                 warn!(
                     room = %room_jid,
                     "DispatchToRoom: retained room fence is non-serving; evicting the local \
@@ -408,13 +493,24 @@ pub(super) async fn dispatch_to_room(
 
                 return outcome;
             }
-            Err(error) => {
+            FencedFanoutVerdict::Unavailable => {
                 warn!(
                     room = %room_jid,
-                    %error,
-                    "DispatchToRoom: fenced ownership check failed (transient backend \
-                     error); failing open, not demoting"
+                    "DispatchToRoom: fenced ownership check stayed unavailable after bounded \
+                     retries; bouncing the sender without demoting the room actor"
                 );
+                waddle_xmpp::telemetry::reliability::increment_muc_fanout_fence_unavailable();
+                push_sender_error_reply(
+                    deps,
+                    &mut outcome,
+                    &incoming,
+                    &room_jid,
+                    &sender_full,
+                    resource_constraint_error(
+                        "Room ownership could not be verified; please retry.",
+                    ),
+                );
+                return outcome;
             }
         }
     }

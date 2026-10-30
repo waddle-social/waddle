@@ -43,6 +43,9 @@ pub(super) struct SubjectMutationStore {
     block_next_load: std::sync::atomic::AtomicBool,
     load_started: tokio::sync::Notify,
     fanout_check_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    fanout_check_calls: std::sync::atomic::AtomicUsize,
+    fanout_check_errors_remaining: std::sync::atomic::AtomicUsize,
+    fanout_check_hangs: std::sync::atomic::AtomicBool,
 }
 
 impl SubjectMutationStore {
@@ -56,6 +59,9 @@ impl SubjectMutationStore {
             block_next_load: std::sync::atomic::AtomicBool::new(false),
             load_started: tokio::sync::Notify::new(),
             fanout_check_barrier: std::sync::Mutex::new(None),
+            fanout_check_calls: std::sync::atomic::AtomicUsize::new(0),
+            fanout_check_errors_remaining: std::sync::atomic::AtomicUsize::new(0),
+            fanout_check_hangs: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -83,6 +89,29 @@ impl SubjectMutationStore {
             .lock()
             .expect("fanout barrier lock") = Some(Arc::clone(&barrier));
         barrier
+    }
+
+    /// Make the next `count` fenced fan-out checks report backend
+    /// unavailability, exactly as the Postgres store does when it cannot
+    /// prove the exact fence.
+    #[cfg(feature = "clustering")]
+    fn fail_fanout_checks(&self, count: usize) {
+        self.fanout_check_errors_remaining
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make every fenced fan-out check hang, like a pool acquire against an
+    /// unreachable database.
+    #[cfg(feature = "clustering")]
+    fn hang_fanout_checks(&self) {
+        self.fanout_check_hangs
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "clustering")]
+    fn fanout_check_calls(&self) -> usize {
+        self.fanout_check_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Simulate the durable destruction of the current room era so an
@@ -152,9 +181,29 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
 
     fn check_fenced_fanout<'a>(
         &'a self,
-        _room_jid: &'a jid::BareJid,
+        room_jid: &'a jid::BareJid,
     ) -> waddle_xmpp::muc::MucDurableFuture<'a, bool> {
         Box::pin(async move {
+            use std::sync::atomic::Ordering;
+
+            self.fanout_check_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fanout_check_hangs.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            if self
+                .fanout_check_errors_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(waddle_xmpp::XmppError::OwnershipUnavailable {
+                    entity: waddle_xmpp::ownership::Entity::new(
+                        waddle_xmpp::ownership::EntityType::RoomActor,
+                        room_jid.to_string(),
+                    ),
+                });
+            }
             let barrier = self
                 .fanout_check_barrier
                 .lock()
@@ -1437,5 +1486,334 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
             .iter()
             .all(|occupant| occupant.nick != "bob"),
         "revoked member cannot receive messages"
+    );
+}
+
+/// One clustered room with a joined, registered sender, wired to `store` as
+/// the production `muc_durable_store`, for exercising `dispatch_to_room`'s
+/// fenced pre-fan-out backstop (#2046 W1.4).
+#[cfg(feature = "clustering")]
+struct FencedFanoutFixture {
+    state: Arc<crate::server::routes::websocket::WebSocketState>,
+    room_jid: jid::BareJid,
+    sender: jid::FullJid,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    sender_rx: tokio::sync::mpsc::Receiver<waddle_xmpp::registry::OutboundStanza>,
+}
+
+#[cfg(feature = "clustering")]
+impl FencedFanoutFixture {
+    async fn new(store: &Arc<SubjectMutationStore>) -> Self {
+        use waddle_xmpp::muc::room_actor::Join;
+        use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+        use waddle_xmpp::muc::RoomConfig;
+        use waddle_xmpp::{Affiliation, Role};
+
+        let clustering = crate::clustering::ClusteringHandles {
+            muc_durable_store: Some(Arc::clone(store) as Arc<dyn waddle_xmpp::muc::MucDurableStore>),
+            ..Default::default()
+        };
+        let state =
+            crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
+                clustering,
+                Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+            )
+            .await;
+        let room_jid: jid::BareJid = "fenced@muc.example.com".parse().expect("room JID");
+        let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender JID");
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room_jid.clone(),
+                waddle_id: "w-fenced".to_string(),
+                channel_id: "c-fenced".to_string(),
+                config: RoomConfig::default(),
+            })
+            .await
+            .expect("create room");
+        actor
+            .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                nick: "alice".to_string(),
+                real_jid: sender.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join room");
+        let (sender_tx, sender_rx) = tokio::sync::mpsc::channel(8);
+        register_into_both_tiers(
+            &state.deps.protocol.connection_registry,
+            &state.deps.protocol.user_registry,
+            &sender,
+            sender_tx,
+        )
+        .await;
+        Self {
+            state,
+            room_jid,
+            sender,
+            actor,
+            sender_rx,
+        }
+    }
+
+    fn deps(&self) -> Deps<'_> {
+        let state = self.state.as_ref();
+        Deps {
+            dispatch_probe_budget: None,
+            ingress_delivery_uow: None,
+            ingress_delivery_stop: None,
+            delivery_execution_context: super::super::DeliveryExecutionContext::Live,
+            connection_registry: &state.deps.protocol.connection_registry,
+            user_registry: Some(&state.deps.protocol.user_registry),
+            sm_session_registry: Some(&state.deps.protocol.sm_session_registry),
+            mam_storage: Some(&state.deps.protocol.mam_storage),
+            inbox_storage: Some(&state.deps.protocol.inbox_storage),
+            extension_manager: Some(&state.deps.protocol.extension_manager),
+            room_registry: Some(&state.deps.protocol.room_registry),
+            web_socket_state: Some(state),
+            authenticated_principal: None,
+            local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            blocking_storage: Some(&state.deps.protocol.blocking_storage),
+            message_dispatcher: Some(&state.deps.protocol.dispatcher),
+            pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
+            ordered_relay_origin: None,
+            sfu: None,
+            ingress_effect_capture: None,
+            direct_route_identity: None,
+            host_sender: None,
+            host_copy_consumer: None,
+            ingress_append_context: None,
+            effects: &crate::server::routes::interpret::effects::ImmediateSink,
+        }
+    }
+
+    async fn dispatch(&self, body: &str) -> super::super::InterpretOutcome {
+        let mut message = Message::new(Some(jid::Jid::from(self.room_jid.clone())));
+        message.from = Some(jid::Jid::from(self.sender.clone()));
+        message.type_ = XmppMessageType::Groupchat;
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), body.to_string());
+        interpret(
+            vec![OutboundEvent::DispatchToRoom {
+                room: self.room_jid.clone(),
+                message: Box::new(message),
+            }],
+            &self.deps(),
+        )
+        .await
+    }
+
+    async fn archived_message_count(&self) -> usize {
+        use waddle_xmpp::mam::{MamArchiveKind, MamQuery};
+
+        self.state
+            .deps
+            .protocol
+            .mam_storage
+            .query_messages(&self.room_jid, MamArchiveKind::Room, &MamQuery::default())
+            .await
+            .expect("room archive query")
+            .messages
+            .len()
+    }
+
+    /// The exact actor created by the fixture is still the registered one.
+    async fn assert_actor_not_demoted(&self) {
+        let registered = self
+            .state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: self.room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .expect("backend uncertainty must not demote the room actor");
+        assert_eq!(registered.id(), self.actor.id());
+    }
+
+    fn assert_nothing_reflected(&mut self) {
+        assert!(
+            matches!(
+                self.sender_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "a bounced message must not be reflected to the occupant"
+        );
+    }
+}
+
+#[cfg(feature = "clustering")]
+const FANOUT_FENCE_UNAVAILABLE_COUNTER: &str = "xmpp.muc.fanout_fence.unavailable";
+
+#[cfg(feature = "clustering")]
+fn assert_retryable_resource_constraint_bounce(outcome: &super::super::InterpretOutcome) {
+    assert_eq!(
+        outcome.frames.len(),
+        1,
+        "sender receives exactly one bounce"
+    );
+    let bounce: xmpp_parsers::minidom::Element =
+        outcome.frames[0].parse().expect("bounce frame parses");
+    let bounce = Message::try_from(bounce).expect("message bounce");
+    assert_eq!(bounce.type_, XmppMessageType::Error);
+    let error = bounce
+        .payloads
+        .iter()
+        .find_map(|payload| xmpp_parsers::stanza_error::StanzaError::try_from(payload.clone()).ok())
+        .expect("bounce carries a stanza error");
+    assert_eq!(
+        error.type_,
+        xmpp_parsers::stanza_error::ErrorType::Wait,
+        "RFC 6120 §8.3.2: the sender may retry after waiting"
+    );
+    assert_eq!(
+        error.defined_condition,
+        xmpp_parsers::stanza_error::DefinedCondition::ResourceConstraint
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep_0045_fenced_fanout_backend_error_retries_then_bounces_without_demotion() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store));
+    let mut fixture = FencedFanoutFixture::new(&store).await;
+    store.fail_fanout_checks(usize::MAX);
+
+    let outcome = fixture.dispatch("must not fan out unfenced").await;
+
+    assert_eq!(
+        store.fanout_check_calls(),
+        super::super::room_dispatch::FENCED_FANOUT_CHECK_ATTEMPTS,
+        "every bounded attempt runs before the bounce, and no more"
+    );
+    assert_retryable_resource_constraint_bounce(&outcome);
+    assert!(!outcome.close, "the bounce does not close the stream");
+    fixture.assert_actor_not_demoted().await;
+    assert_eq!(fixture.archived_message_count().await, 0);
+    fixture.assert_nothing_reflected();
+    assert_eq!(
+        metrics.counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[]),
+        Some(1)
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep_0045_fenced_fanout_transient_error_recovers_within_retry_bound() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store));
+    let mut fixture = FencedFanoutFixture::new(&store).await;
+    store.fail_fanout_checks(super::super::room_dispatch::FENCED_FANOUT_CHECK_ATTEMPTS - 1);
+
+    let outcome = fixture.dispatch("fans out after a retry").await;
+
+    assert_eq!(
+        store.fanout_check_calls(),
+        super::super::room_dispatch::FENCED_FANOUT_CHECK_ATTEMPTS
+    );
+    assert!(
+        outcome.frames.iter().all(|frame| !frame.contains("error")),
+        "a check that recovers inside the retry bound does not bounce: {:?}",
+        outcome.frames
+    );
+    fixture.assert_actor_not_demoted().await;
+    assert_eq!(fixture.archived_message_count().await, 1);
+    assert!(
+        fixture.sender_rx.try_recv().is_ok(),
+        "the recovered message is reflected to the occupant"
+    );
+    assert_eq!(
+        metrics
+            .counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[])
+            .unwrap_or(0),
+        0,
+        "a recovered check is not counted as a bounce"
+    );
+}
+
+#[cfg(feature = "clustering")]
+// Real time on purpose: the fixture's SQLite stores run on blocking threads,
+// where a paused clock's auto-advance could fire unrelated timeouts.
+#[tokio::test]
+async fn xep_0045_fenced_fanout_hung_check_bounces_at_budget_without_demotion() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store));
+    let mut fixture = FencedFanoutFixture::new(&store).await;
+    store.hang_fanout_checks();
+
+    let started = tokio::time::Instant::now();
+    let outcome = fixture.dispatch("must not wait on a hung database").await;
+
+    let elapsed = started.elapsed();
+    let budget = super::super::room_dispatch::FENCED_FANOUT_CHECK_BUDGET;
+    assert!(
+        elapsed >= budget && elapsed <= budget + std::time::Duration::from_secs(1),
+        "the hung check is cut off at the budget, took {elapsed:?}"
+    );
+    assert_eq!(
+        store.fanout_check_calls(),
+        1,
+        "a hung attempt consumes the budget"
+    );
+    assert_retryable_resource_constraint_bounce(&outcome);
+    fixture.assert_actor_not_demoted().await;
+    assert_eq!(fixture.archived_message_count().await, 0);
+    fixture.assert_nothing_reflected();
+    assert_eq!(
+        metrics.counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[]),
+        Some(1)
+    );
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep_0045_fenced_fanout_definitive_non_serving_demotes_once_without_retry() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+    let store = Arc::new(SubjectMutationStore::new(claim_store));
+    let mut fixture = FencedFanoutFixture::new(&store).await;
+    store.set_fanout_owned(false);
+
+    let outcome = fixture.dispatch("non-serving room").await;
+
+    assert_eq!(
+        store.fanout_check_calls(),
+        1,
+        "a definitive answer is not retried"
+    );
+    assert_retryable_resource_constraint_bounce(&outcome);
+    assert!(
+        fixture
+            .state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: fixture.room_jid.clone(),
+            })
+            .await
+            .expect("room lookup")
+            .is_none(),
+        "a definitive non-serving result still demotes the exact actor"
+    );
+    assert_eq!(fixture.archived_message_count().await, 0);
+    fixture.assert_nothing_reflected();
+    assert_eq!(
+        metrics
+            .counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[])
+            .unwrap_or(0),
+        0,
+        "the definitive path is not counted as backend unavailability"
     );
 }
