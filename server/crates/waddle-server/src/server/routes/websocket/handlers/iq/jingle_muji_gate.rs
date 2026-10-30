@@ -294,37 +294,72 @@ pub(super) async fn participant_registration_expectation(
     sfu.prepare_participant_registration(&call, &identity).await
 }
 
-/// After a Muji initiate registered the SFU participant, re-check that the
-/// room still holds this connection's generation: a same-FullJID replacement
-/// that re-joined between the pre-dispatch check and the registration would
-/// otherwise have been overwritten. On mismatch the just-made registration
-/// is revoked only if its exact publication revision still matches. Returns whether
-/// the initiate stands.
-pub(super) async fn initiate_still_current(
+/// Commit every displaced-media obligation before interpreting token-bearing
+/// replies. Revalidate the minted grant and generation after the database wait;
+/// a failure suppresses credentials and rolls back only this publication.
+pub(super) async fn finalize_muji_publication(
     state: &WebSocketState,
     room: &BareJid,
     full_jid: &FullJid,
     generation: waddle_xmpp_core::OccupancySessionGeneration,
     registration: Option<waddle_sfu::ParticipantRegistrationExpectation>,
-) -> bool {
-    if matches!(
-        relayed_muji_generation_is_current(state, room, full_jid, generation).await,
-        Ok(true)
-    ) {
-        return true;
+    granted: Option<MediaCapabilities>,
+) -> Result<(), Box<StanzaError>> {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return Err(Box::new(internal_server_error_iq_error(
+            "media service unavailable; please retry",
+        )));
+    };
+    let call = waddle_sfu::CallId::try_new(room.to_string())
+        .map_err(|_| Box::new(internal_server_error_iq_error("invalid media room")))?;
+    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+    let rollback = || {
+        if let Some(expected) = registration {
+            let _ = sfu.rollback_participant_registration(&call, &identity, expected);
+        }
+    };
+    // Snapshot, never take: a concurrent publication must see every older
+    // obligation until a confirmed SQL commit. The detached reporter may be
+    // processing the same receipt; outbox enqueueing is idempotent.
+    for receipt in sfu.pending_media_retirements(&call, &identity) {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .enqueue(crate::call_teardown_outbox::CallTeardownIntent::from(
+                receipt.intent.clone(),
+            ))
+            .await
+        {
+            tracing::warn!(room = %room, %error, "cannot acknowledge Muji publication before retirement is persisted");
+            rollback();
+            return Err(Box::new(internal_server_error_iq_error(
+                "could not persist call setup; please retry",
+            )));
+        }
+        sfu.acknowledge_media_retirement(&receipt);
     }
-    if let (Some(sfu), Ok(call_id), Some(registration)) = (
-        state.deps.protocol.sfu.as_ref(),
-        waddle_sfu::CallId::try_new(room.to_string()),
-        registration,
-    ) {
-        let _ = sfu.rollback_participant_registration(
-            &call_id,
-            &waddle_sfu::Identity::from_jid(full_jid.clone()),
-            registration,
-        );
+    // Database waits can outlive the role or connection that minted the held
+    // JWT. Never release a credential carrying stale publish permissions.
+    let error = match verify_room_membership(state, full_jid, room, false).await {
+        GateOutcome::Allow { media_capabilities } if media_capabilities == granted => {
+            current_muji_generation_error(state, room, full_jid, generation)
+                .await
+                .map(Box::new)
+        }
+        GateOutcome::Allow { .. } => Some(Box::new(forbidden_iq_error(
+            "media permissions changed; retry call setup",
+        ))),
+        GateOutcome::Deny(error) => Some(error),
+        GateOutcome::RoomNotLocal { .. } => Some(Box::new(internal_server_error_iq_error(
+            "room ownership changed; retry call setup",
+        ))),
+    };
+    if let Some(error) = error {
+        rollback();
+        return Err(error);
     }
-    false
+    Ok(())
 }
 
 pub(super) fn muji_session_terminate_session(iq: &Iq) -> Option<waddle_sfu::SessionBinding> {

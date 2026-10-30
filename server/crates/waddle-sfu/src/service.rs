@@ -6,8 +6,8 @@ use super::Pin;
 use super::SfuError;
 use super::{ApiSecret, WebsocketUrl};
 use super::{
-    CallId, Identity, MediaCapabilities, ObservedCallSids, SessionBinding, SessionScopedTeardown,
-    SidObservationDirection, SidObservationDisposition, TeardownDisposition,
+    CallId, CallTeardownIntentLite, Identity, MediaCapabilities, ObservedCallSids, SessionBinding,
+    SessionScopedTeardown, SidObservationDirection, SidObservationDisposition, TeardownDisposition,
 };
 use super::{JoinToken, Jti};
 use super::{TurnCredential, TurnHost};
@@ -75,7 +75,30 @@ impl ParticipantRegistrationExpectation {
     }
 }
 
+/// A displaced-media obligation that has not yet completed durable persistence.
+/// The opaque receipt prevents an older persistence acknowledgement from
+/// removing a newer report of the same intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMediaRetirement {
+    pub intent: CallTeardownIntentLite,
+    pub(crate) receipt_id: uuid::Uuid,
+}
+
 pub trait SfuService: Send + Sync + 'static {
+    /// Snapshot unpersisted takeover obligations, including work currently
+    /// being persisted by a background sink. Reading never consumes them.
+    fn pending_media_retirements(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Vec<PendingMediaRetirement> {
+        Vec::new()
+    }
+
+    /// Acknowledge only after this exact receipt's intent has committed to
+    /// durable storage. Acknowledging a superseded receipt is a no-op.
+    fn acknowledge_media_retirement(&self, _receipt: &PendingMediaRetirement) {}
+
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
     /// carries the LiveKit websocket URL, the room name, and an

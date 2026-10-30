@@ -8,6 +8,7 @@ use crate::config::ApiSecret;
 use crate::LiveParticipant;
 use crate::LiveParticipantsFuture;
 use crate::ParticipantRegistrationExpectation;
+use crate::PendingMediaRetirement;
 use crate::ReconcileFuture;
 use crate::ReconcilePassSummary;
 use crate::SidEvidence;
@@ -435,17 +436,112 @@ struct TeardownReporter {
 struct TeardownReporterState {
     running: bool,
     pending: HashSet<CallTeardownIntentLite>,
+    /// Keep receipts while a sink is in flight or unavailable. Draining the
+    /// dispatch queue must not hide an obligation from the reply barrier.
+    unpersisted: HashMap<CallTeardownIntentLite, uuid::Uuid>,
 }
 
 impl TeardownReporter {
-    fn report(&self, intents: impl IntoIterator<Item = CallTeardownIntentLite>) {
+    /// Data-only staging is safe under the registration lock. It never calls
+    /// a sink, starts a task, or acquires a call-registry guard.
+    fn stage(
+        &self,
+        intents: impl IntoIterator<Item = CallTeardownIntentLite>,
+    ) -> Vec<PendingMediaRetirement> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        let mut receipts = Vec::new();
+        for intent in intents {
+            let receipt_id = uuid::Uuid::new_v4();
+            state.unpersisted.insert(intent.clone(), receipt_id);
+            state.pending.insert(intent.clone());
+            receipts.push(PendingMediaRetirement { intent, receipt_id });
+        }
+        receipts
+    }
+
+    fn acknowledge(state: &mut TeardownReporterState, receipt: &PendingMediaRetirement) {
+        if state.unpersisted.get(&receipt.intent) == Some(&receipt.receipt_id) {
+            state.unpersisted.remove(&receipt.intent);
+            state.pending.remove(&receipt.intent);
+        }
+    }
+
+    fn pending_media_retirements(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Vec<PendingMediaRetirement> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        state
+            .unpersisted
+            .iter()
+            .filter(|(intent, _)| {
+                &intent.call_id == call_id
+                    && matches!(&intent.target,
+                        TeardownTargetLite::DisplacedParticipant { identity: candidate, .. }
+                        if candidate == identity)
+            })
+            .map(|(intent, receipt_id)| PendingMediaRetirement {
+                intent: intent.clone(),
+                receipt_id: *receipt_id,
+            })
+            .collect()
+    }
+
+    fn acknowledge_media_retirement(&self, receipt: &PendingMediaRetirement) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        Self::acknowledge(&mut state, receipt);
+    }
+
+    fn take_dispatch_batch(state: &mut TeardownReporterState) -> Vec<PendingMediaRetirement> {
+        let pending = state.pending.drain().collect::<Vec<_>>();
+        pending
+            .into_iter()
+            .filter_map(|intent| {
+                state
+                    .unpersisted
+                    .get(&intent)
+                    .map(|receipt_id| PendingMediaRetirement {
+                        receipt_id: *receipt_id,
+                        intent,
+                    })
+            })
+            .collect()
+    }
+
+    /// Invoke sinks only after the caller releases registration/token locks.
+    fn dispatch(&self, ordered: Vec<PendingMediaRetirement>) {
         let Some(sink) = &self.sink else {
             return;
         };
-        let intents = intents.into_iter().collect::<Vec<_>>();
         let Some(runtime) = self.runtime.as_ref() else {
-            for intent in intents {
-                drop(sink(intent));
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+                for receipt in &ordered {
+                    if state.unpersisted.get(&receipt.intent) == Some(&receipt.receipt_id) {
+                        state.pending.remove(&receipt.intent);
+                    }
+                }
+            }
+            // Synchronous embedders have always observed participant teardown
+            // before its room teardown. Keep the report's input order here;
+            // the asynchronous worker still coalesces its pending HashSet.
+            for receipt in ordered {
+                // A dropped future has not persisted anything. Retain its
+                // receipt for the asynchronous reply barrier or later retry.
+                drop(sink(receipt.intent));
             }
             return;
         };
@@ -454,8 +550,7 @@ impl TeardownReporter {
                 .state
                 .lock()
                 .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-            state.pending.extend(intents);
-            if state.running {
+            if state.running || state.pending.is_empty() {
                 return;
             }
             state.running = true;
@@ -468,10 +563,14 @@ impl TeardownReporter {
                     let mut state = state
                         .lock()
                         .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-                    state.pending.drain().collect::<Vec<_>>()
+                    Self::take_dispatch_batch(&mut state)
                 };
-                for intent in batch {
-                    sink(intent).await;
+                for receipt in batch {
+                    sink(receipt.intent.clone()).await;
+                    let mut state = state
+                        .lock()
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+                    Self::acknowledge(&mut state, &receipt);
                 }
                 let mut state = state
                     .lock()
@@ -482,6 +581,11 @@ impl TeardownReporter {
                 }
             }
         });
+    }
+
+    fn report(&self, intents: impl IntoIterator<Item = CallTeardownIntentLite>) {
+        let staged = self.stage(intents);
+        self.dispatch(staged);
     }
 }
 
@@ -1855,7 +1959,9 @@ impl LiveKitSfu {
                                 participant.occupant_session.is_some_and(|old| old != next)
                                     || previous.is_some_and(|old| old != next);
                             if replaced {
-                                displaced_generation = participant.occupant_session;
+                                displaced_generation = participant
+                                    .occupant_session
+                                    .filter(|previous| *previous != next);
                                 retirement = previous.filter(|old| *old != next).and_then(|old| {
                                     retirement_intent(
                                         call_id,
@@ -1866,7 +1972,9 @@ impl LiveKitSfu {
                                     )
                                 });
                                 if let Some(intent) = retirement.as_mut() {
-                                    intent.session = participant.session.clone();
+                                    if participant.occupant_session == intent.occupant_session {
+                                        intent.session = participant.session.clone();
+                                    }
                                 }
                                 participant.participant_sid = None;
                                 participant.media_generation = None;
@@ -1969,11 +2077,15 @@ impl LiveKitSfu {
             .insert((call_id.clone(), identity.clone()), now);
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
+        // Publish the obligation under the same CAS guard as the new
+        // registration. A following takeover cannot observe this
+        // publication before its displaced-media receipt is visible.
+        let staged = retirement
+            .map(|retirement| self.teardown_reporter.stage(std::iter::once(retirement)))
+            .unwrap_or_default();
         drop(_call_entry);
         self.sweep_expired_revoked(Utc::now());
-        if let Some(retirement) = retirement {
-            self.schedule_displaced_retirement(retirement);
-        }
+        self.teardown_reporter.dispatch(staged);
         true
     }
 
@@ -2394,12 +2506,6 @@ impl LiveKitSfu {
                     .await;
             }
         });
-    }
-
-    fn schedule_displaced_retirement(&self, intent: CallTeardownIntentLite) {
-        // Persist the takeover obligation before attempting the remote effect.
-        // Its provider fences can execute on any drainer after an owner restart.
-        self.teardown_reporter.report(std::iter::once(intent));
     }
 
     /// Move every outstanding JTI for `(call_id, identity)` into the
@@ -2891,6 +2997,19 @@ impl crate::SfuReconciler for LiveKitSfu {
 }
 
 impl SfuService for LiveKitSfu {
+    fn pending_media_retirements(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Vec<PendingMediaRetirement> {
+        self.teardown_reporter
+            .pending_media_retirements(call_id, identity)
+    }
+
+    fn acknowledge_media_retirement(&self, receipt: &PendingMediaRetirement) {
+        self.teardown_reporter.acknowledge_media_retirement(receipt);
+    }
+
     fn issue_join_token(
         &self,
         call_id: &CallId,
