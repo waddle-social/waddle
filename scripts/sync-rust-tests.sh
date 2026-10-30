@@ -13,6 +13,17 @@ workflow="$repo_root/.github/workflows/waddle-server-rusttests.yml"
 generated="$(mktemp)"
 trap 'rm -f "$generated"' EXIT
 
+# The workflow is evaluated through server/env.cue, which cue 0.17.x cannot
+# evaluate (#1763; see the cue hold in flake.nix). Refuse any other version
+# rather than failing with an unrelated-looking evaluation error.
+required_cue=v0.16.1
+cue_language="$(cue version 2>/dev/null | sed -n 's/^CUE language version //p' | head -n 1)"
+if [[ "$cue_language" != "$required_cue" ]]; then
+  echo "scripts/sync-rust-tests.sh needs cue $required_cue (got: ${cue_language:-unknown})." >&2
+  echo "Run it from the repository dev shell: nix develop -c bash scripts/sync-rust-tests.sh${1:+ $1}" >&2
+  exit 2
+fi
+
 cd "$repo_root"
 {
   printf '%s\n' \
