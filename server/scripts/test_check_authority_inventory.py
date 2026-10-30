@@ -1,9 +1,13 @@
 """Negative controls for the manual, deliberately lexical source-drift check."""
+import contextlib
 import copy
+import io
+import json
 import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import check_authority_inventory as inventory
 
@@ -85,6 +89,31 @@ class InventoryTests(unittest.TestCase):
         (self.root / inventory.SCOPES[1]).rmdir()
         with self.assertRaises(ValueError):
             inventory.lexical_snapshot(self.root, self.manifest["lexical_tokens"])
+
+    def test_main_reports_missing_source_and_invalid_manifest_details(self):
+        manifest_path = self.root / "inventory.json"
+        manifest_path.write_text(json.dumps(self.manifest))
+        self.source.unlink()
+        output = io.StringIO()
+        with mock.patch.object(inventory, "ROOT", self.root), mock.patch.object(
+            inventory, "MANIFEST", manifest_path
+        ), contextlib.redirect_stdout(output):
+            self.assertEqual(inventory.main(), 1)
+        self.assertIn("ValueError: missing Rust source file: " + self.relative, output.getvalue())
+
+        manifest_path.write_text(json.dumps({"format": 1, "baseline_commit": "a" * 40}))
+        output = io.StringIO()
+        with mock.patch.object(inventory, "MANIFEST", manifest_path), contextlib.redirect_stdout(output):
+            self.assertEqual(inventory.main(), 1)
+        self.assertIn("ValueError: unsupported inventory format or baseline", output.getvalue())
+
+    def test_main_reports_unreadable_manifest_path(self):
+        missing = self.root / "missing-inventory.json"
+        output = io.StringIO()
+        with mock.patch.object(inventory, "MANIFEST", missing), contextlib.redirect_stdout(output):
+            self.assertEqual(inventory.main(), 1)
+        self.assertIn("FileNotFoundError:", output.getvalue())
+        self.assertIn(str(missing), output.getvalue())
 
     def test_invalid_manifest_and_unfingerprinted_anchor_fail_closed(self):
         for field, value in [

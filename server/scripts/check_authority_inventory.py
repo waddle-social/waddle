@@ -21,16 +21,16 @@ def source_path(root: Path, relative: str) -> Path:
     """Only inspect regular, in-scope source files; never follow symlinks."""
     parts = Path(relative).parts
     if Path(relative).is_absolute() or ".." in parts:
-        raise ValueError("invalid source path")
+        raise ValueError(f"invalid source path: {relative}")
     if not any(relative.startswith(scope + "/") for scope in SCOPES):
-        raise ValueError("source path outside reviewed scan scopes")
+        raise ValueError(f"source path outside reviewed scan scopes: {relative}")
     path = root
     for part in parts:
         path /= part
         if path.is_symlink():
-            raise ValueError("symlink in source path")
+            raise ValueError(f"symlink in source path: {path}")
     if path.suffix != ".rs" or not path.is_file():
-        raise ValueError("missing Rust source file")
+        raise ValueError(f"missing Rust source file: {relative}")
     return path
 
 
@@ -55,11 +55,13 @@ def rust_sources(root: Path):
     for scope in SCOPES:
         directory = root / scope
         if directory.is_symlink() or not directory.is_dir():
-            raise ValueError("missing or symlinked scan scope")
+            raise ValueError(f"missing or symlinked scan scope: {scope}")
         candidates = []
         for current, directories, files in os.walk(directory, onerror=scan_error):
-            if any((Path(current) / name).is_symlink() for name in directories):
-                raise ValueError("symlinked directory in scan scope")
+            for name in directories:
+                candidate = Path(current) / name
+                if candidate.is_symlink():
+                    raise ValueError(f"symlinked directory in scan scope: {candidate}")
             candidates.extend(Path(current) / name for name in files if name.endswith(".rs"))
         for candidate in sorted(candidates):
             relative = candidate.relative_to(root).as_posix()
@@ -157,7 +159,7 @@ def main() -> int:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         failures = check(ROOT, manifest)
     except (OSError, ValueError, KeyError, TypeError) as error:
-        print(f"Authority inventory STALE/INVALID: {type(error).__name__}")
+        print(f"Authority inventory STALE/INVALID: {type(error).__name__}: {error}")
         return 1
     if failures:
         print("Authority inventory STALE: review findings before updating evidence.")
