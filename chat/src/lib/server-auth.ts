@@ -33,6 +33,7 @@ export function createServerAuth(serverBaseUrl: string) {
     async getProviders(): Promise<AuthProvider[]> {
       const response = await fetch(`${baseUrl}/api/auth/providers`, {
         credentials: "include",
+        redirect: "error",
       });
 
       if (!response.ok) {
@@ -61,6 +62,7 @@ export function createServerAuth(serverBaseUrl: string) {
 
       const response = await fetch(url.toString(), {
         credentials: "include",
+        redirect: "error",
       });
 
       if (response.status === 401 || response.status === 404) {
@@ -84,6 +86,7 @@ export function createServerAuth(serverBaseUrl: string) {
       const init: RequestInit = {
         method: "POST",
         credentials: "include",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
         },
