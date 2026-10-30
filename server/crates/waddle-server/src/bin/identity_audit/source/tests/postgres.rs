@@ -282,6 +282,20 @@ async fn native_postgres_namespace_replacement_cannot_hide_rows() {
                 seen, [true; 2],
                 "vulnerable control would report both sources empty"
             );
+            // Check each branch separately: a users mismatch must not mask a
+            // still-vulnerable native_users sentinel later in the union.
+            let protected = sqlx::query_as::<_, crate::source::PgStoredRow>(crate::source::PG_ROWS)
+                .bind(13i64)
+                .fetch_all(&mut *snapshot)
+                .await
+                .expect("explicit whole-row query");
+            assert_eq!(protected.len(), 2);
+            for row in protected {
+                assert!(matches!(
+                    crate::source::bind_postgres_row(row, &bindings, &mut [false; 2]),
+                    Err(AuditError::Schema)
+                ));
+            }
         }
         let observed =
             crate::source::scan_postgres(&mut snapshot, &bindings, "home.example.test", 10).await;
