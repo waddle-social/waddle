@@ -109,6 +109,15 @@ class PinnedCuenvContracts(unittest.TestCase):
             dependency_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
             self.assertEqual(dependency_result.returncode, 0, dependency_result.stderr)
             self.assertEqual((root / "trace").read_text(), "beforeafter")
+            for option_name in ("--help", "--dry-run"):
+                with self.subTest(task_name=option_name):
+                    quoted_name = json.dumps(option_name)
+                    option_task = named.replace("_tasks.reject", "_tasks[" + quoted_name + "]").replace("tasks: reject:", "tasks: " + quoted_name + ":")
+                    (root / "env.cue").write_text(option_task)
+                    self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
+                    option_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+                    self.assertNotEqual(option_result.returncode, 0)
+                    self.assertIn("failed with exit code 1", option_result.stderr)
 
 
 if __name__ == "__main__":

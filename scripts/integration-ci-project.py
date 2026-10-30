@@ -70,7 +70,7 @@ def main():
         print(json.dumps(result, sort_keys=True), flush=True)
         if args.run:
             for name in result["task_names"]:
-                subprocess.run(["cuenv", "task", "--path", args.path, name], check=True)
+                subprocess.run(["cuenv", "task", "--path", args.path, "--", name], check=True)
     except (KeyError, TypeError, ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Integration project discovery failed: {error}") from None
 
