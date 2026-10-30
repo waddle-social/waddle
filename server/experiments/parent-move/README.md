@@ -42,11 +42,13 @@ memory or private child input/environment and never enter controller argv,
 logs or evidence. Shared fixture limitations, including trusted workers and
 no host-crash guarantees, still apply.
 
-The Linux-only dev dependency is excluded from the server workspace. All three
-Nix source closures include the fixture plus its owning workspace manifest so
-Cargo can resolve it. Release targets have no normal dependency edge to it.
+The Linux-only dev dependency is excluded from the server workspace. The release
+and check source closures include the fixture plus its owning workspace manifest
+so Cargo can resolve it. The formatter additionally stages that workspace's Rust
+source and test targets, preserving the full `cargo fmt --all` traversal.
+Release targets have no normal dependency edge to the fixture.
 Dedicated PR and main/manual pipelines run this nonpublishing proof and a
-release/all-feature Nix build check. Existing publisher workflow bytes and
+release/all-feature/format Nix build check. Existing publisher workflow bytes and
 cutover input policy remain unchanged. A separate Cargo-resolution input list
 stages the fixture for local build and nextest tasks; Namespace's hermetic
 inputs include it too. Eleven local Nix delegators explicitly use the caller's

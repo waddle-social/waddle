@@ -544,23 +544,34 @@
                 python3 observer/scripts/observer_release.py fetch > "$TMPDIR/jev.wasm"
                 cp "$TMPDIR/jev.wasm" "$out"
               '';
+          serverCheckFiles = lib.fileset.unions [
+            ./server/Cargo.toml
+            ./server/Cargo.lock
+            ./server/.config/nextest.toml
+            ./server/README.md
+            ./server/capabilities.toml
+            ./server/scripts/check-poison-recovery.py
+            ./server/scripts/check-rust-structure.py
+            ./server/scripts/check-test-postgres-env.py
+            ./server/crates
+            ./server/extensions
+            ./server/vendor
+            ./server/experiments/native-fixture
+            ./server/experiments/grant-fence/Cargo.toml
+            ./server/wit
+          ];
           serverCheckSrc = lib.fileset.toSource {
             root = ./server;
+            fileset = serverCheckFiles;
+          };
+          # cargo fmt --all follows the native fixture's owning workspace and
+          # visits its library, binary and integration-test targets as well.
+          serverFmtSrc = lib.fileset.toSource {
+            root = ./server;
             fileset = lib.fileset.unions [
-              ./server/Cargo.toml
-              ./server/Cargo.lock
-              ./server/.config/nextest.toml
-              ./server/README.md
-              ./server/capabilities.toml
-              ./server/scripts/check-poison-recovery.py
-              ./server/scripts/check-rust-structure.py
-              ./server/scripts/check-test-postgres-env.py
-              ./server/crates
-              ./server/extensions
-              ./server/vendor
-              ./server/experiments/native-fixture
-              ./server/experiments/grant-fence/Cargo.toml
-              ./server/wit
+              serverCheckFiles
+              ./server/experiments/grant-fence/src
+              ./server/experiments/grant-fence/tests
             ];
           };
           baseArgs = {
@@ -728,7 +739,7 @@
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";
-            src = serverCheckSrc;
+            src = serverFmtSrc;
             cargoExtraArgs = "--all";
           };
           waddle-server-clippy = craneLib.cargoClippy (

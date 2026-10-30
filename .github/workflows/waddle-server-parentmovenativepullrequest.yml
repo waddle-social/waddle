@@ -29,6 +29,8 @@ on:
     - server/experiments/grant-fence/Cargo.toml/**
     - server/experiments/grant-fence/native.nix
     - server/experiments/grant-fence/native.nix/**
+    - server/experiments/grant-fence/src/**
+    - server/experiments/grant-fence/tests/**
     - server/experiments/native-fixture/**
     - server/experiments/parent-move/**
     - server/extensions/**
@@ -72,7 +74,7 @@ jobs:
         upstream-cache-filter: 'true'
         version: v2.0.0
     - name: parentMoveNativeBuildClosure
-      run: nix build --no-link ../#waddle-server ../#checks.x86_64-linux.waddle-server-clippy
+      run: nix build --no-link ../#waddle-server ../#checks.x86_64-linux.waddle-server-clippy ../#checks.x86_64-linux.waddle-server-fmt
       working-directory: server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

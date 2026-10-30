@@ -49,7 +49,7 @@ let _namespaceRustTaskInputs = list.Concat([_rustInputs, [
 ]])
 
 // These inputs preserve publisher trigger policy. Nix delegator tasks run
-// uncached in the live checkout: the three flake filesets supply the complete
+// uncached in the live checkout: the flake filesets supply the complete
 // dev-dependency closure to Nix's own sandbox and derivation cache.
 let _nixInputs = [
 	"../flake.nix",
@@ -460,8 +460,8 @@ schema.#Project & {
 		parentMoveNativeBuildClosure: schema.#Task & {
 			hermetic: false
 			command:  "nix"
-			args: ["build", "--no-link", "../#waddle-server", "../#checks.x86_64-linux.waddle-server-clippy"]
-			inputs: list.Concat([_nixInputs, _cargoResolutionInputs, ["../namespace.cue", "experiments/parent-move/**"]])
+			args: ["build", "--no-link", "../#waddle-server", "../#checks.x86_64-linux.waddle-server-clippy", "../#checks.x86_64-linux.waddle-server-fmt"]
+			inputs: list.Concat([_nixInputs, _cargoResolutionInputs, ["../namespace.cue", "experiments/parent-move/**", "experiments/grant-fence/src/**", "experiments/grant-fence/tests/**"]])
 		}
 
 		checkAuthzIdCodec: schema.#Task & {
