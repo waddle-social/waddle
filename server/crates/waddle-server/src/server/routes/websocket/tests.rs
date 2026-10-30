@@ -657,22 +657,6 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .flatten()
     }
 
-    fn participant_media_evidence(
-        &self,
-        call_id: &waddle_sfu::CallId,
-        identity: &waddle_sfu::Identity,
-    ) -> Option<waddle_sfu::ObservedCallSids> {
-        self.registered_calls
-            .lock()
-            .expect("recording lock")
-            .iter()
-            .rev()
-            .find(|(registered_call, registered_identity, _)| {
-                registered_call == call_id && registered_identity == identity
-            })
-            .map(|(_, _, evidence)| evidence.clone())
-    }
-
     fn unregister_call_participant_if_occupant_matches(
         &self,
         call_id: &waddle_sfu::CallId,
@@ -837,6 +821,48 @@ impl waddle_sfu::SfuService for RecordingSfu {
     }
 }
 
+type CallAdminFuture<'a, T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, waddle_sfu::SfuError>> + Send + 'a>,
+>;
+
+/// Call-signaling fixtures have no connected provider media. Keep discovery
+/// explicit and local while exercising real token signing and registration.
+struct EmptyCallAdmin;
+
+impl waddle_sfu::LiveKitAdmin for EmptyCallAdmin {
+    fn list_rooms(&self) -> CallAdminFuture<'_, Vec<waddle_sfu::ListedRoom>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn room_occupancy<'a>(
+        &'a self,
+        _: &'a waddle_sfu::CallId,
+    ) -> CallAdminFuture<'a, waddle_sfu::RoomOccupancy> {
+        Box::pin(async { Ok(waddle_sfu::RoomOccupancy::default()) })
+    }
+
+    fn remove_participant<'a>(
+        &'a self,
+        _: &'a waddle_sfu::CallId,
+        _: &'a waddle_sfu::Identity,
+    ) -> CallAdminFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete_room<'a>(&'a self, _: &'a waddle_sfu::CallId) -> CallAdminFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn update_participant<'a>(
+        &'a self,
+        _: &'a waddle_sfu::CallId,
+        _: &'a waddle_sfu::Identity,
+        _: waddle_sfu::MediaCapabilities,
+    ) -> CallAdminFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// A self-contained [`waddle_sfu::LiveKitSfu`] for tests. Mints real
 /// JWTs locally (no network), so the XEP-0166 Jingle handler can
 /// rewrite the Waddle LiveKit transport exactly as it does in
@@ -858,7 +884,10 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
         token_ttl: chrono::Duration::seconds(3600),
         turn_ttl: chrono::Duration::seconds(3600),
     };
-    Arc::new(waddle_sfu::LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(waddle_sfu::LiveKitSfu::with_admin(
+        cfg,
+        Arc::new(EmptyCallAdmin),
+    ))
 }
 
 /// Build a test [`WebSocketState`] whose dispatcher has the XEP-0166

@@ -178,6 +178,25 @@ async fn handle_sans_io_iq_with_relay_override(
                 mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
             }
         }
+        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
+        // A Muji initiate from this connection must still hold the room's
+        // CURRENT occupancy for its full JID (#1703): a superseded
+        // connection's initiate would otherwise mint a token and rebind the
+        // SFU registration over the replacement's. Terminates are fenced by
+        // the registry's occupant+sid gate instead. Mirrors the relayed path.
+        let participant_registration = if muji_terminate_room.is_none() {
+            if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
+                super::jingle_muji_gate::participant_registration_expectation(
+                    state, &room, full_jid,
+                )
+                .await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // XMPP-native MUC-call membership gate (XEP-0272 Muji): a
         // session may only mint a LiveKit JWT for a room it has
         // actually joined through the XEP-0045 path. The pure
@@ -253,18 +272,6 @@ async fn handle_sans_io_iq_with_relay_override(
                 }
             }
         }
-        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
-        // A Muji initiate from this connection must still hold the room's
-        // CURRENT occupancy for its full JID (#1703): a superseded
-        // connection's initiate would otherwise mint a token and rebind the
-        // SFU registration over the replacement's. Terminates are fenced by
-        // the registry's occupant+sid gate instead. Mirrors the relayed path.
-        let participant_registration =
-            super::jingle_muji_gate::relayed_muji_room(iq).and_then(|room| {
-                super::jingle_muji_gate::participant_registration_expectation(
-                    state, &room, full_jid,
-                )
-            });
         if muji_terminate_room.is_none() {
             if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
                 match super::jingle_muji_gate::relayed_muji_generation_is_current(

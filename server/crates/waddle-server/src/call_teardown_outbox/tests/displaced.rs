@@ -2,20 +2,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use waddle_sfu::{
-    CallId, Identity, LiveParticipant, ObservedCallSids, ParticipantSid, RoomOccupancy,
-    SessionBinding, SfuService,
+    CallId, Identity, LiveParticipant, ParticipantSid, RoomOccupancy, SessionBinding, SfuService,
 };
 
 use super::{
-    create_test_server_owner_session, drain_due, fixture_config, get_room_actor,
-    handle_muc_join_with_occupancy_session, occupant_generation, participant_intent,
-    state_with_executor, store, CallTeardownIntent, CallTeardownStatus, FullJid, RecordingAdmin,
-    TeardownTarget,
+    create_test_websocket_state_with_clustering, drain_due, fixture_config, occupant_generation,
+    participant_intent, state_with_executor, store, CallTeardownIntent, CallTeardownStatus,
+    FullJid, RecordingAdmin, TeardownTarget,
 };
 use crate::call_teardown_outbox::{CallTeardownIntentId, CallTeardownOutboxStore};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
-use waddle_xmpp::muc::room_actor::{GetSnapshot, RestoreLiveRoster};
-use waddle_xmpp::muc::MucRoom;
+use waddle_xmpp::ownership::{
+    ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+};
 
 fn retirement_intent() -> CallTeardownIntent {
     CallTeardownIntent {
@@ -318,40 +317,31 @@ async fn postgres_mandatory_sid_upgrade_accepts_unresolved_generation() {
 }
 
 #[derive(Clone, Copy)]
-enum CanonicalSeat {
-    Successor,
-    Candidate,
-    MissingGeneration,
-    Absent,
-}
-
-#[derive(Clone, Copy)]
 enum RetirementEvidence {
     SidAndGeneration,
     GenerationOnly,
     SidOnly,
 }
 
-async fn drain_retirement(
-    live_sid: &str,
+async fn drain_ownerless_retirement(
+    connected_successor: bool,
     fail_remove: bool,
     evidence: RetirementEvidence,
-    canonical_seat: CanonicalSeat,
+    foreign_claim: bool,
 ) {
-    let unresolved_sid = matches!(evidence, RetirementEvidence::GenerationOnly);
     let jid: FullJid = "alice@example.com/web".parse().expect("participant JID");
     let identity = Identity::from_jid(jid.clone());
     let candidate = occupant_generation();
-    let candidate_is_current = matches!(canonical_seat, CanonicalSeat::Candidate);
-    let successor = if candidate_is_current {
-        candidate
+    let successor = occupant_generation();
+    let live_sid = if connected_successor {
+        "PA_successor"
     } else {
-        occupant_generation()
+        "PA_displaced"
     };
-    let provider_generation = if live_sid == "PA_displaced" {
-        candidate
-    } else {
+    let provider_generation = if connected_successor {
         successor
+    } else {
+        candidate
     };
     let admin = Arc::new(RecordingAdmin {
         fail_remove,
@@ -369,96 +359,66 @@ async fn drain_retirement(
         fixture_config(),
         admin.clone() as Arc<_>,
     ));
-    let state = state_with_executor(sfu.clone()).await;
-    let room_jid = "retirement-authority@muc.example.com"
-        .parse()
-        .expect("room JID");
-    let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
-    handle_muc_join_with_occupancy_session(
-        state.as_ref(),
-        "example.com",
-        &room_jid,
-        &jid,
-        "alice",
-        None,
-        (successor, Some(&owner_session)),
-    )
-    .await;
-    if matches!(
-        canonical_seat,
-        CanonicalSeat::MissingGeneration | CanonicalSeat::Absent
-    ) {
-        let actor = get_room_actor(state.as_ref(), &room_jid)
+    let call_id = CallId::try_new("ownerless-retirement@muc.example.com").expect("room call ID");
+    let state = if foreign_claim {
+        let claims = Arc::new(InProcessClaimStore::new());
+        claims
+            .acquire(
+                &Entity::new(EntityType::RoomActor, call_id.as_str().to_owned()),
+                &NodeIdentity::new("foreign-owner", "foreign-epoch"),
+            )
             .await
-            .expect("room actor");
-        let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-        let mut room = MucRoom::new(
-            room_jid.clone(),
-            snapshot.room.waddle_id.clone(),
-            snapshot.room.channel_id.clone(),
-            snapshot.room.config.clone(),
-        );
-        if matches!(canonical_seat, CanonicalSeat::MissingGeneration) {
-            // Simulate a legacy restored seat whose signaling generation is
-            // unavailable; media observations cannot supply that authority.
-            room.occupants = snapshot.room.occupants.clone();
-        }
-        actor
-            .ask(RestoreLiveRoster {
-                room,
-                occupancy_revision: snapshot.occupancy_revision,
-                departures: snapshot.departures,
-                live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
-                occupancy_incarnation: snapshot.occupancy_incarnation,
-                pending_affiliation_departures: snapshot.pending_affiliation_departures,
-                pending_admin_projection: None,
-                admin_mutation_resolutions: snapshot.admin_mutation_resolutions,
-            })
-            .await
-            .expect("restore canonical seat");
-    }
-    let mut intent = CallTeardownIntent {
-        call_id: CallId::try_new(room_jid.to_string()).expect("call ID"),
+            .expect("fresh foreign room claim");
+        let mut state = create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                claim_store: Some(claims as Arc<_>),
+                node_identity: Some(SharedNodeIdentity::new(NodeIdentity::new(
+                    "drainer",
+                    "drainer-epoch",
+                ))),
+                ..crate::clustering::ClusteringHandles::default()
+            },
+            Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+        )
+        .await;
+        let protocol = &mut Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol;
+        protocol.sfu = Some(sfu.clone() as Arc<dyn SfuService>);
+        protocol.call_teardown_executor = Some(sfu.teardown_executor());
+        state
+    } else {
+        state_with_executor(sfu.clone()).await
+    };
+    let intent = CallTeardownIntent {
+        call_id,
         target: TeardownTarget::DisplacedParticipant {
             identity: jid,
-            participant_sid: (!unresolved_sid)
+            participant_sid: (!matches!(evidence, RetirementEvidence::GenerationOnly))
                 .then(|| ParticipantSid::try_new("PA_displaced").expect("SID")),
         },
         occupant: (!matches!(evidence, RetirementEvidence::SidOnly)).then_some(candidate),
+        room_sid: None,
         ..retirement_intent()
     };
     let successor_session = SessionBinding::try_new("successor-session").expect("session");
-    // Deliberately disagree with the authoritative actor in the stale-producer
-    // case: local SFU generation must never authorize retiring the actor's seat.
-    let cached_generation = if candidate_is_current {
-        occupant_generation()
-    } else {
-        successor
-    };
-    let has_cache = !unresolved_sid || candidate_is_current;
+    let has_cache = !matches!(evidence, RetirementEvidence::GenerationOnly);
     if has_cache {
-        sfu.register_call_participant_observed(
-            &intent.call_id,
-            &identity,
-            &ObservedCallSids::new(
-                intent.room_sid.clone(),
-                Some(ParticipantSid::try_new("PA_displaced").expect("old SID")),
-            ),
-        );
         sfu.register_call_participant_with_session(
             &intent.call_id,
             &identity,
             &successor_session,
-            cached_generation,
+            successor,
         );
-    } else {
-        // A restarted owner has neither the producer's SFU registry nor its
-        // observed SIDs. Its persisted generation must resolve the target.
-        intent.room_sid = None;
     }
     let store = &state.deps.protocol.call_teardown_outbox;
-    let id = store.enqueue(intent.clone()).await.expect("enqueue");
-    // Reopening proves unresolved work survives beyond the producer's cache.
+    // Older than the ordinary owner deadline: an authorized takeover receipt
+    // must execute without waiting for this room to acquire a local owner.
+    let id = store
+        .enqueue_at(intent.clone(), crate::time::now_ms() - 48 * 60 * 60 * 1_000)
+        .await
+        .expect("enqueue");
     let reopened = CallTeardownOutboxStore::try_new(store.db.clone())
         .await
         .expect("reopen");
@@ -473,13 +433,12 @@ async fn drain_retirement(
     );
     let summary = drain_due(&state, 8).await.expect("drain");
     let stored = store.find(&id).await.expect("find").expect("stored");
-    let authority_unknown = matches!(canonical_seat, CanonicalSeat::MissingGeneration);
-    let should_remove = live_sid == "PA_displaced" && !candidate_is_current && !authority_unknown;
+    let should_remove = !connected_successor;
     assert_eq!(
         admin.remove_calls.lock().expect("calls").len(),
         usize::from(should_remove)
     );
-    if (should_remove && fail_remove) || authority_unknown {
+    if should_remove && fail_remove {
         assert_eq!(summary.requeued, 1);
         assert_eq!(stored.status, CallTeardownStatus::Queued);
         assert_eq!(stored.attempt_count, 1);
@@ -489,7 +448,7 @@ async fn drain_retirement(
     }
     assert_eq!(
         sfu.participant_occupant_session(&intent.call_id, &identity),
-        has_cache.then_some(cached_generation)
+        has_cache.then_some(successor)
     );
     assert_eq!(
         sfu.participant_session_binding(&intent.call_id, &identity),
@@ -498,124 +457,41 @@ async fn drain_retirement(
 }
 
 #[tokio::test]
-async fn retirement_drain_is_not_suppressed_by_the_successor_session() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::SidAndGeneration,
-        CanonicalSeat::Successor,
-    )
-    .await;
+async fn authorized_retirement_executes_without_a_room_owner() {
+    drain_ownerless_retirement(false, false, RetirementEvidence::SidAndGeneration, false).await;
 }
 
 #[tokio::test]
-async fn retirement_drain_skips_a_connected_successor() {
-    drain_retirement(
-        "PA_successor",
-        false,
-        RetirementEvidence::SidAndGeneration,
-        CanonicalSeat::Successor,
-    )
-    .await;
+async fn ownerless_retirement_preserves_the_connected_successor() {
+    drain_ownerless_retirement(true, false, RetirementEvidence::SidAndGeneration, false).await;
 }
 
 #[tokio::test]
-async fn retirement_drain_requeues_failed_admin_removal_without_clearing_successor() {
-    drain_retirement(
-        "PA_displaced",
-        true,
-        RetirementEvidence::SidAndGeneration,
-        CanonicalSeat::Successor,
-    )
-    .await;
+async fn retirement_executes_despite_a_fresh_foreign_room_claim() {
+    drain_ownerless_retirement(false, false, RetirementEvidence::SidAndGeneration, true).await;
 }
 
 #[tokio::test]
-async fn retirement_reopened_without_sid_resolves_the_tagged_displaced_generation() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::GenerationOnly,
-        CanonicalSeat::Successor,
-    )
-    .await;
+async fn foreign_owner_retirement_preserves_the_connected_successor() {
+    drain_ownerless_retirement(true, false, RetirementEvidence::SidAndGeneration, true).await;
 }
 
 #[tokio::test]
-async fn retirement_never_removes_the_current_actor_generation_despite_stale_sfu_cache() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::GenerationOnly,
-        CanonicalSeat::Candidate,
-    )
-    .await;
+async fn ownerless_retirement_requeues_failed_admin_removal_without_clearing_successor() {
+    drain_ownerless_retirement(false, true, RetirementEvidence::SidAndGeneration, false).await;
 }
 
 #[tokio::test]
-async fn known_sid_retirement_cannot_remove_the_current_actor_generation() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::SidAndGeneration,
-        CanonicalSeat::Candidate,
-    )
-    .await;
+async fn reopened_generation_only_retirement_resolves_provider_evidence_without_a_room_owner() {
+    drain_ownerless_retirement(false, false, RetirementEvidence::GenerationOnly, false).await;
 }
 
 #[tokio::test]
-async fn unowned_retirement_keeps_its_responsibility_after_the_ownership_deadline() {
-    let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
-        fixture_config(),
-        Arc::new(RecordingAdmin::default()),
-    ));
-    let state = state_with_executor(sfu).await;
-    let intent = CallTeardownIntent {
-        call_id: CallId::try_new("unowned-retirement@muc.example.com").expect("room ID"),
-        ..unresolved_retirement_intent()
-    };
-    let store = &state.deps.protocol.call_teardown_outbox;
-    let id = store
-        .enqueue_at(intent, crate::time::now_ms() - 48 * 60 * 60 * 1000)
-        .await
-        .expect("enqueue");
-    let summary = drain_due(&state, 8).await.expect("drain");
-    assert_eq!(summary.failed, 0);
-    assert_eq!(summary.drained, 0);
-    let stored = store.find(&id).await.expect("find").expect("stored");
-    assert_eq!(stored.status, CallTeardownStatus::Queued);
-    assert_eq!(stored.attempt_count, 0);
+async fn generation_only_retirement_with_foreign_room_owner_preserves_successor() {
+    drain_ownerless_retirement(true, false, RetirementEvidence::GenerationOnly, true).await;
 }
 
 #[tokio::test]
-async fn retirement_retries_a_seated_actor_with_unknown_generation() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::GenerationOnly,
-        CanonicalSeat::MissingGeneration,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn retirement_can_remove_a_proven_absent_occupant() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::GenerationOnly,
-        CanonicalSeat::Absent,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn historical_sid_only_retirement_preserves_the_current_tagged_generation() {
-    drain_retirement(
-        "PA_displaced",
-        false,
-        RetirementEvidence::SidOnly,
-        CanonicalSeat::Candidate,
-    )
-    .await;
+async fn historical_sid_only_retirement_preserves_a_different_live_sid() {
+    drain_ownerless_retirement(true, false, RetirementEvidence::SidOnly, false).await;
 }

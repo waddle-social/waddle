@@ -330,7 +330,7 @@ async fn unbound_registration_survives_a_redriven_muji_clear_but_not_the_live_co
 }
 
 #[tokio::test]
-async fn actor_present_muji_clear_with_matching_session_and_captured_generation_clears() {
+async fn actor_present_muji_clear_with_matching_session_still_clears() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
         fixture_config(),
@@ -379,7 +379,7 @@ async fn actor_present_muji_clear_with_matching_session_and_captured_generation_
         &room_jid,
         &alice,
         None,
-        Some(occupant),
+        None,
         waddle_sfu::UnboundOccupantPolicy::Keep,
         Some(&current),
     )
@@ -388,6 +388,6 @@ async fn actor_present_muji_clear_with_matching_session_and_captured_generation_
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert!(
         room.muji_for_session("alice", &alice).is_none(),
-        "matching-session clear carrying the original generation must remove the advertisement"
+        "matching-session clear must remove the advertisement"
     );
 }

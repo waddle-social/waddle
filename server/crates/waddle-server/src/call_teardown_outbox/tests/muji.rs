@@ -107,7 +107,7 @@ async fn unfenced_muji_presence_clear_rejoin_is_skipped_and_preserves_room_muji_
 }
 
 #[tokio::test]
-async fn legacy_unfenced_muji_clear_without_sfu_registration_preserves_actor_advertisement() {
+async fn unfenced_muji_presence_clear_without_live_registration_still_clears_room_muji_state() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
         fixture_config(),
@@ -141,11 +141,6 @@ async fn legacy_unfenced_muji_clear_without_sfu_registration_preserves_actor_adv
         .expect("muji update")
         .expect("occupant update");
 
-    assert!(
-        sfu.participants_for_call(&call_id).is_empty(),
-        "fixture has no SFU registration to supply generation evidence"
-    );
-
     let intent_id = state
         .deps
         .protocol
@@ -171,8 +166,8 @@ async fn legacy_unfenced_muji_clear_without_sfu_registration_preserves_actor_adv
     assert_eq!(summary.drained, 1);
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert!(
-        room.muji_for_session("alice", &alice).is_some(),
-        "legacy work without captured generation cannot clear the actor's current advertisement"
+        room.muji_for_session("alice", &alice).is_none(),
+        "non-stale clear must remove the Muji advertisement"
     );
     assert!(admin
         .remove_calls
@@ -420,12 +415,10 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let departed_generation = occupant_generation();
-    let mut observed_sids = ObservedCallSids::new(
+    let observed_sids = ObservedCallSids::new(
         Some(RoomSid::try_new("RM_match").expect("room sid")),
         Some(ParticipantSid::try_new("PA_match").expect("participant sid")),
     );
-    observed_sids.media_generation = Some(departed_generation);
 
     let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
@@ -434,7 +427,7 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
         &alice,
         "alice",
         None,
-        (departed_generation, Some(&owner_session.clone())),
+        (occupant_generation(), Some(&owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -465,10 +458,8 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
                 participant_sid: observed_sids.participant_sid.clone(),
             },
             generation: None,
-            // This confirmed provider departure retains the generation from
-            // its original seat/observation, even if the SFU cache is unbound.
-            occupant: Some(departed_generation),
-            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::TearDown,
+            occupant: None,
+            unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
             room_sid: observed_sids.room_sid.clone(),
             session: None,
         })
@@ -506,7 +497,8 @@ async fn sid_fenced_muji_presence_clear_matching_sid_still_clears_room_muji_stat
     );
 }
 
-async fn assert_room_sweep_requires_provider_generation(tagged: bool) {
+#[tokio::test]
+async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
         fixture_config(),
@@ -518,12 +510,10 @@ async fn assert_room_sweep_requires_provider_generation(tagged: bool) {
     let alice: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let call_id = CallId::try_new(room_jid.to_string()).expect("call id");
     let identity = Identity::from_jid(alice.clone());
-    let generation = occupant_generation();
-    let mut observed_sids = ObservedCallSids::new(
+    let observed_sids = ObservedCallSids::new(
         Some(RoomSid::try_new("RM_sweep").expect("room sid")),
         Some(ParticipantSid::try_new("PA_sweep").expect("participant sid")),
     );
-    observed_sids.media_generation = tagged.then_some(generation);
 
     let _ = handle_muc_join_with_occupancy_session(
         state.as_ref(),
@@ -532,7 +522,7 @@ async fn assert_room_sweep_requires_provider_generation(tagged: bool) {
         &alice,
         "alice",
         None,
-        (generation, Some(&owner_session.clone())),
+        (occupant_generation(), Some(&owner_session.clone())),
     )
     .await;
     get_room_actor(state.as_ref(), &room_jid)
@@ -572,12 +562,11 @@ async fn assert_room_sweep_requires_provider_generation(tagged: bool) {
     let summary = drain_due(&state, 8).await.expect("drain");
 
     assert_eq!(summary.drained, 1);
-    assert_eq!(sfu.has_call_participant(&call_id, &identity), !tagged);
+    assert!(!sfu.has_call_participant(&call_id, &identity));
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
-    assert_eq!(
-        room.muji_for_session("alice", &alice).is_some(),
-        !tagged,
-        "only provider-tagged generation evidence may clear Muji state"
+    assert!(
+        room.muji_for_session("alice", &alice).is_none(),
+        "owner-gated room sweep must clear remaining local Muji state"
     );
     assert!(admin
         .remove_calls
@@ -599,17 +588,7 @@ async fn assert_room_sweep_requires_provider_generation(tagged: bool) {
 }
 
 #[tokio::test]
-async fn muji_room_sweep_clears_owner_local_participants_with_matching_room_sid() {
-    assert_room_sweep_requires_provider_generation(true).await;
-}
-
-#[tokio::test]
-async fn muji_room_sweep_dispositions_legacy_generationless_participant_without_clearing_it() {
-    assert_room_sweep_requires_provider_generation(false).await;
-}
-
-#[tokio::test]
-async fn muji_room_sweep_preserves_actor_advertisement_without_provider_generation() {
+async fn muji_room_sweep_clears_actor_advertisement_absent_from_sfu_registry() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
         fixture_config(),
@@ -672,8 +651,8 @@ async fn muji_room_sweep_preserves_actor_advertisement_without_provider_generati
     assert_eq!(summary.drained, 1);
     let room = snapshot_room(state.as_ref(), &room_jid).await.room;
     assert!(
-        room.muji_for_session("alice", &alice).is_some(),
-        "an old room event cannot authorize clearing actor-only Muji state"
+        room.muji_for_session("alice", &alice).is_none(),
+        "room sweep must enumerate and clear actor-held Muji state even when the local SFU registry is empty"
     );
     assert!(admin
         .remove_calls

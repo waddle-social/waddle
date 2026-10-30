@@ -98,6 +98,18 @@ pub trait SfuService: Send + Sync + 'static {
         None
     }
 
+    /// Recover provider media before asynchronous Muji authorization. The
+    /// returned expectation fences both that observation and token publication.
+    /// A failed probe or concurrent registration returns `None`; retry the setup.
+    fn prepare_participant_registration<'a>(
+        &'a self,
+        call_id: &'a CallId,
+        identity: &'a Identity,
+    ) -> ParticipantPreparationFuture<'a> {
+        let expected = self.participant_registration_expectation(call_id, identity);
+        Box::pin(async move { expected })
+    }
+
     /// Publish a join token and signaling registration only if the exact
     /// registration still matches the value read before MUC authorization. The
     /// comparison, token tracking and registration must share one critical
@@ -440,44 +452,6 @@ pub trait SfuService: Send + Sync + 'static {
         direction: SidObservationDirection,
     ) -> SidObservationDisposition;
 
-    /// One atomic provider observation; this is not logical MUC ownership.
-    fn participant_media_evidence(
-        &self,
-        _call_id: &CallId,
-        _identity: &Identity,
-    ) -> Option<ObservedCallSids> {
-        None
-    }
-
-    /// Non-destructive departure preflight with caller-held occupancy/session
-    /// evidence. Provider attributes remain observations, not MUC authority.
-    fn observe_call_participant_departure(
-        &self,
-        call_id: &CallId,
-        identity: &Identity,
-        observed_sids: Option<&ObservedCallSids>,
-        occupant: Option<OccupancySessionGeneration>,
-        unbound: UnboundOccupantPolicy,
-        sid: SidEvidence<'_>,
-    ) -> SidObservationDisposition {
-        if let Some(presented) = occupant {
-            match self.participant_occupant_session(call_id, identity) {
-                Some(current) if current == presented => {}
-                None if unbound == UnboundOccupantPolicy::TearDown => {}
-                _ => return SidObservationDisposition::StaleSid,
-            }
-        }
-        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
-            return SidObservationDisposition::StaleSid;
-        }
-        self.observe_call_participant_sids(
-            call_id,
-            identity,
-            observed_sids,
-            SidObservationDirection::Leave,
-        )
-    }
-
     /// Push replacement media grants to a live participant after an
     /// XEP-0045 voice change, without disconnecting them: losing voice
     /// becomes listen-only immediately (the SFU force-unpublishes
@@ -543,6 +517,11 @@ pub trait SfuService: Send + Sync + 'static {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }
 
+/// Preparation is the asynchronous adapter seam; authorization and publication
+/// remain separate, and the existing synchronous publication uses its CAS fence.
+pub type ParticipantPreparationFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<ParticipantRegistrationExpectation>> + Send + 'a>>;
+
 /// Future returned by [`SfuReconciler::reconcile_active_calls`]. Named
 /// so the boxed-future shape stays readable at the trait + impl sites.
 pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary> + Send + 'a>>;
@@ -551,34 +530,17 @@ pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary>
 /// `waddle-server` translates these values into process metrics.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcilePassSummary {
-    pub swept: Vec<SweptParticipant>,
-    pub live_media: Vec<LiveMediaObservation>,
+    pub swept: Vec<(CallId, Identity)>,
     pub rooms_examined: u64,
     pub rooms_adopted: u64,
     pub rooms_swept: u64,
     pub occupancy_failures: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SweptParticipant {
-    pub call_id: CallId,
-    pub identity: Identity,
-    pub occupant_session: Option<OccupancySessionGeneration>,
-    pub observed_sids: ObservedCallSids,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveMediaObservation {
-    pub call_id: CallId,
-    pub room_sid: Option<crate::RoomSid>,
-    pub participant: crate::LiveParticipant,
-}
-
 /// Periodic reconciliation against the SFU's ground truth.
 ///
-/// Separate from [`SfuService`] because it is inherently async (an
-/// HTTP round-trip to LiveKit's `ListParticipants`) whereas
-/// `SfuService` is deliberately sync. A background task in
+/// Separate periodic provider I/O from [`SfuService`]'s call setup and
+/// accounting operations. A background task in
 /// `waddle-server` drives this on an interval so that a lost
 /// `participant_left` / `room_finished` webhook delivery cannot leave
 /// a permanent ghost in the registry (and therefore in MUC presence):

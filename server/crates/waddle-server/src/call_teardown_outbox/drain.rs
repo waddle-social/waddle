@@ -7,10 +7,10 @@ use std::collections::HashSet;
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use waddle_sfu::{
-    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, ObservedCallSids,
-    OccupancyAuthority, SfuService, TeardownExecution, TeardownTargetLite,
+    CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, ObservedCallSids, SfuService,
+    TeardownExecution, TeardownTargetLite,
 };
-use waddle_xmpp::muc::room_actor::{GetSnapshot, RoomSnapshot};
+use waddle_xmpp::muc::room_actor::GetActiveMujiSessions;
 use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
 
@@ -33,10 +33,9 @@ pub(crate) struct CallTeardownDrainSummary {
     pub failed: u64,
 }
 
-/// Drain a bounded batch. Muji call IDs are room JIDs and therefore run only
-/// on the node whose room registry currently owns that room. A raw 1:1 call
-/// ID is process-local and runs only on the exact process incarnation that
-/// produced it.
+/// Drain a bounded batch. Ordinary Muji effects require the room owner and
+/// raw 1:1 effects require their producing process. Authorized retirement
+/// receipts travel across owners and execute under exact provider fences.
 pub(crate) async fn drain_due(
     state: &WebSocketState,
     batch_size: usize,
@@ -51,7 +50,12 @@ pub(super) async fn drain_due_at(
 ) -> Result<CallTeardownDrainSummary, CallTeardownOutboxError> {
     let store = &state.deps.protocol.call_teardown_outbox;
     let jobs = store.claim_due_at(batch_size, now_ms).await?;
-    let needs_room_ownership = jobs.iter().any(|job| job.intent.room_scope().is_some());
+    let needs_room_ownership = jobs.iter().any(|job| {
+        !matches!(
+            job.intent.target,
+            TeardownTarget::DisplacedParticipant { .. }
+        ) && job.intent.room_scope().is_some()
+    });
     let local_rooms = if needs_room_ownership {
         local_room_jids(&state.deps.protocol.room_registry).await
     } else {
@@ -60,8 +64,19 @@ pub(super) async fn drain_due_at(
     let mut summary = CallTeardownDrainSummary::default();
 
     for job in jobs {
-        let room_scope = job.intent.room_scope();
-        let _producing_node_guard = if room_scope.is_none() {
+        // Only an authorized successful publication can create retirement
+        // work. Its receipt travels across room owners; provider generation
+        // and SID checks fence execution without a live room dependency.
+        let retirement = matches!(
+            job.intent.target,
+            TeardownTarget::DisplacedParticipant { .. }
+        );
+        let room_scope = if retirement {
+            None
+        } else {
+            job.intent.room_scope()
+        };
+        let _producing_node_guard = if !retirement && room_scope.is_none() {
             let guard = match job.producing_node.as_ref() {
                 Some(producer) => store.guard_if_current_producer(producer).await,
                 None => None,
@@ -80,7 +95,7 @@ pub(super) async fn drain_due_at(
                     TeardownTarget::Participant {
                         participant_sid: Some(_),
                         ..
-                    } | TeardownTarget::DisplacedParticipant { .. }
+                    }
                 );
             match guard {
                 Some(guard) => Some(guard),
@@ -135,16 +150,6 @@ pub(super) async fn drain_due_at(
                 }
             };
             if !owned {
-                // Retirement is authorized against the current room occupant,
-                // never by a stale producer's local SFU registration. Keep the
-                // responsibility until an owner can answer that question.
-                if matches!(
-                    job.intent.target,
-                    TeardownTarget::DisplacedParticipant { .. }
-                ) {
-                    store.release_claim_at(&job, now_ms).await?;
-                    continue;
-                }
                 // Some targets need no room actor and may execute here
                 // when NOBODY owns the room; when another node owns it,
                 // keep releasing so the owner runs it with its live
@@ -420,7 +425,7 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
 fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
     match &intent.target {
         TeardownTarget::CallThreadEndRetry { .. } => true,
-        TeardownTarget::DisplacedParticipant { .. } => false,
+        TeardownTarget::DisplacedParticipant { .. } => true,
         TeardownTarget::Participant {
             participant_sid, ..
         } => participant_sid.is_some(),
@@ -593,42 +598,51 @@ async fn execute_intent(
             );
             return IntentExecution::Permanent(CallTeardownLastError::MissingRoomSid);
         };
-        if canonical_retirement_room_snapshot(state, room_jid)
-            .await
-            .is_none()
-        {
-            return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+        let observed_sids = ObservedCallSids::new(Some(room_sid), None);
+        let mut departed: HashSet<_> = sfu
+            .participants_for_call(&intent.call_id)
+            .into_iter()
+            .map(|identity| identity.as_jid().clone())
+            .collect();
+        match get_room_actor_result(state, room_jid).await {
+            Ok(Some(actor)) => match actor
+                .ask(GetActiveMujiSessions)
+                .reply_timeout(ROOM_OWNERSHIP_LOOKUP_TIMEOUT)
+                .await
+            {
+                Ok(actor_sessions) => departed.extend(actor_sessions),
+                Err(error) => {
+                    tracing::warn!(
+                        room = %room_jid,
+                        error = ?error,
+                        "muji room sweep could not enumerate actor-held advertisements"
+                    );
+                    return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    "muji room sweep lost its locally owned room actor before enumeration"
+                );
+                return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    room = %room_jid,
+                    %error,
+                    "muji room sweep could not resolve the room actor"
+                );
+                return IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClear);
+            }
         }
-        // A room-finished event names a provider incarnation, not whichever
-        // logical sessions the room actor currently owns. Only atomically
-        // captured provider evidence can tie a participant to that old room.
-        for identity in sfu.participants_for_call(&intent.call_id) {
-            let Some(observed_sids) = sfu.participant_media_evidence(&intent.call_id, &identity)
-            else {
-                continue;
-            };
-            if observed_sids
-                .room_sid
-                .as_ref()
-                .is_some_and(|observed| observed != &room_sid)
-            {
-                return IntentExecution::Stale;
-            }
-            if observed_sids.room_sid.as_ref() != Some(&room_sid)
-                || observed_sids.media_generation.is_none()
-            {
-                // Legacy unknown evidence cannot justify Any-clearing a
-                // successor. Disposition this old sweep without inventing
-                // authority; tagged departures have their own exact work.
-                continue;
-            }
-            let departed_jid = identity.as_jid();
+        for departed_jid in departed {
             let outcome = match tokio::time::timeout(
                 ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
                 crate::server::routes::muc_muji_clear::clear_muji_presence_for_departure(
                     state,
                     room_jid,
-                    departed_jid,
+                    &departed_jid,
                     Some(&observed_sids),
                     None,
                     waddle_sfu::UnboundOccupantPolicy::Keep,
@@ -690,19 +704,9 @@ async fn execute_intent(
         occupant_session: intent.occupant,
         unbound_occupant: intent.unbound_occupant,
     };
-    let execution = if matches!(intent.target, TeardownTarget::DisplacedParticipant { .. }) {
-        executor
-            .execute_with_occupancy_authority(&lite, || retirement_authority(state, intent))
-            .await
-    } else {
-        executor.execute(&lite).await
-    };
-    match execution {
+    match executor.execute(&lite).await {
         Ok(TeardownExecution::Executed) => IntentExecution::Done,
         Ok(TeardownExecution::StaleGeneration) => IntentExecution::Stale,
-        Ok(TeardownExecution::AuthorityUnavailable) => {
-            IntentExecution::Retryable(CallTeardownRetryReason::RetirementAuthorityUnavailable)
-        }
         Ok(TeardownExecution::Occupied) => {
             IntentExecution::Retryable(CallTeardownRetryReason::LiveKitOccupied)
         }
@@ -713,83 +717,6 @@ async fn execute_intent(
                 "durable LiveKit teardown attempt failed; scheduling retry"
             );
             IntentExecution::Retryable(CallTeardownRetryReason::LiveKitAdmin)
-        }
-    }
-}
-
-/// A cached room actor is not a cluster lease. The immutable snapshot fence
-/// must still match this node's fresh authoritative room claim. Callers may
-/// reuse the returned snapshot only within their current bounded operation.
-pub(crate) async fn canonical_retirement_room_snapshot(
-    state: &WebSocketState,
-    room_jid: &BareJid,
-) -> Option<RoomSnapshot> {
-    let actor = match get_room_actor_result(state, room_jid).await {
-        Ok(Some(actor)) => actor,
-        Ok(None) | Err(_) => return None,
-    };
-    let snapshot = match actor
-        .ask(GetSnapshot)
-        .reply_timeout(ROOM_OWNERSHIP_LOOKUP_TIMEOUT)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(_) => return None,
-    };
-    let app = &state.deps.app_state;
-    match (
-        &app.clustering_claims.claim_store,
-        &app.clustering_claims.node_identity,
-    ) {
-        (Some(store), Some(node_identity)) => {
-            let me = node_identity.current();
-            if !me.is_active() {
-                return None;
-            }
-            let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
-            let fence = snapshot.claim_fence.as_ref()?;
-            if fence.entity != entity || fence.owner != me {
-                return None;
-            }
-            match tokio::time::timeout(ROOM_OWNERSHIP_LOOKUP_TIMEOUT, store.current_claim(&entity))
-                .await
-            {
-                Ok(Ok(Some(claim)))
-                    if claim.owner_lease_fresh
-                        && claim.owner == me
-                        && claim.claim_epoch == fence.epoch
-                        && node_identity.current() == me => {}
-                _ => return None,
-            }
-        }
-        (None, None) if !app.clustering_enabled && snapshot.claim_fence.is_none() => {}
-        _ => return None,
-    }
-    Some(snapshot)
-}
-
-/// The executor invokes this before its provider probe and again immediately
-/// before removal, so neither actor membership nor claim authority is cached
-/// across the provider await.
-async fn retirement_authority(
-    state: &WebSocketState,
-    intent: &CallTeardownIntent,
-) -> OccupancyAuthority {
-    let TeardownTarget::DisplacedParticipant { identity, .. } = &intent.target else {
-        return OccupancyAuthority::Unavailable;
-    };
-    let Some(room_jid) = intent.room_scope() else {
-        return OccupancyAuthority::Unavailable;
-    };
-    let Some(snapshot) = canonical_retirement_room_snapshot(state, &room_jid).await else {
-        return OccupancyAuthority::Unavailable;
-    };
-    if snapshot.room.find_occupant_by_real_jid(identity).is_none() {
-        OccupancyAuthority::Absent
-    } else {
-        match snapshot.room.session_generation(identity) {
-            Some(current) => OccupancyAuthority::Current(current),
-            None => OccupancyAuthority::Unavailable,
         }
     }
 }

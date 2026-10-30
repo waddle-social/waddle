@@ -1,54 +1,44 @@
 # Relay cutovers and the RollingUpdate guard
 
-## Displaced media retirement cutover (#1732)
+## Displaced media retirement rollout (#1732)
 
-This release adds generation-attributed media and generation-only retirement to
-`call_teardown_outbox`. Old binaries cannot drain the new action/shape. Waddle
-uses `Recreate`, but its restart does not terminate LiveKit media or invalidate
-already-issued JWTs. Activation therefore requires a coordinated media-authority
-cutover in an explicitly authorized maintenance window.
+Only an authorized fresh Jingle publication creates displaced-media retirement.
+Ordinary joins, cached-token reloads and polling never classify a generation
+mismatch as a takeover. Existing untagged media keeps its legacy lifecycle;
+there is no requirement to drain LiveKit or rotate signing keys for this scope.
+JWT expiry limits initial admission, not an already-connected participant's
+lifetime. Do not claim strict generation retirement for untagged legacy media.
 
-1. Merge the independent startup filesystem prerequisite (PR #2058) before this
-   cutover. Prepare the digest-pinned media-retirement image and a replacement
-   LiveKit API key/secret through the existing secret-management paths. Do not
-   expose secrets in logs, Git, or verification evidence.
-2. Close new XMPP/WebSocket and SFU admission for the window and stop old Waddle
-   writers/drainers. Expect a full connection interruption and dropped active
-   calls. Drain every existing LiveKit participant or restart the SFU while
-   admission is closed. Token expiry alone does not end connected media.
-3. Remove every legacy token-signing API key from LiveKit and install the new
-   credentials consistently in LiveKit and Waddle (`LIVEKIT_API_KEY` /
-   `LIVEKIT_API_SECRET`). Align LiveKit's webhook signing key and Waddle's
-   `LIVEKIT_WEBHOOK_SECRET` as configured. Confirm a token signed by a retired
-   key is rejected; do not retain old keys as a compatibility path.
-4. Start the new Waddle fleet with `Recreate`, keeping the deployment UUID. Verify
-   every replica is ready on the pinned image, old writers are gone, the outbox
-   schema accepts generation-only retirement, and fresh Muji media has the
-   signed `waddle.occupancy_generation` attribute with client metadata updates
-   denied. Reopen admission only after these checks pass.
-5. Test g1 connected while g2 re-initiates but delays its media connection. Delay
-   the old SID observation as well: the persisted generation-only action must
-   recover it from the provider and remove g1 without clearing g2's MUC occupancy
-   or credentials. Repeat across a Waddle restart, and preserve a genuine
-   same-generation resume.
-6. Repeat with g2 already connected: the canonical owner's generation must reject
-   retirement of g2. Check stale-owner and old-webhook retries, outbox decoding
-   errors, and retry progression. LiveKit's identity-keyed API cannot atomically
-   combine the final SID probe with removal; these checks do not prove that
-   provider-side race closed.
-7. Freeze unrelated server changes (including documentation) until fleet
-   verification and the separate `RollingUpdate` restoration PR are complete.
-   The cutover guard must use the actual publisher-triggering revision that
-   reached every replica. A necessary roll-forward change requires repeating
-   fleet verification against its new revision before restoring rolling updates.
-8. Prefer roll-forward recovery. Old binaries cannot read new outbox rows, and
-   restoring retired signing keys would reauthorize legacy JWTs. Binary rollback
-   requires closed admission, stopped writers, explicit disposition of new-format
-   work, and a compatible credential/media plan; it is not a clean two-way door.
+The new `call_teardown_outbox` action remains incompatible with old readers.
+Main auto-deploys, so merge in an explicitly authorized Recreate window. Expect
+an XMPP connection interruption; verify call recovery instead of assuming it.
 
-Record image revisions, credential-rotation identifiers (never secrets), fresh
-claim/attribute evidence and the pass/fail results above separately from merge
-CI. No live deployment or credential rotation is asserted by this document.
+1. The independent startup prerequisite (#2058) is merged. Prepare the reviewed,
+   digest-pinned server image. Preserve the deployment UUID and existing LiveKit
+   credentials. Recreate must stop old readers before new writers start.
+2. Verify the new fleet is ready, old readers are gone, new Muji tokens carry
+   `waddle.occupancy_generation`, and clients cannot change metadata. Check the
+   outbox schema accepts generation-only retirement.
+3. Exercise cached-token tab reload with a new XMPP occupancy generation and no
+   Jingle setup: its media must survive joins and polling. Then explicitly
+   re-initiate: g1 must retire when g2 delays its media connection, while a
+   connected g2 and its cached-token reload survive an older g1 retirement.
+4. Test a cold-cache restart followed immediately by explicit re-initiation,
+   delayed/missing SID evidence, room rotation during preparation, ownerless
+   and foreign-owner outbox draining, and admin-request retry/convergence.
+   Record fleet and live acceptance separately from native tests and CI.
+5. Restore RollingUpdate in a separate change after fleet verification, using
+   the publisher revision accepted by the guard below. Keep unrelated
+   publisher-triggering changes out of the gap.
+
+Prefer roll-forward recovery. An old binary cannot read the new action; binary
+rollback requires stopped writers and explicit disposition of incompatible
+rows before restarting old drainers. No signing keys need restoring. This
+procedure records requirements; it does not authorize or assert a deployment.
+
+LiveKit removal is identity-keyed: a successor connecting after the final SID
+probe can still be removed. Local JTI revocation is bookkeeping, not provider
+admission enforcement. Neither limitation is changed by this rollout.
 
 ## Extension effect authority cutover (#1660)
 

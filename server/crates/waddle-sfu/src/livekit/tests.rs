@@ -5,6 +5,7 @@
 //! here assert on directly.
 
 mod retirement;
+mod takeover_preparation;
 
 use super::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, DateTime, Identity, Jti, LiveKitSfu,
@@ -67,14 +68,6 @@ fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> Obser
         room_sid.map(fixture_room_sid),
         participant_sid.map(fixture_participant_sid),
     )
-}
-
-fn swept_identities(summary: &crate::ReconcilePassSummary) -> Vec<(CallId, Identity)> {
-    summary
-        .swept
-        .iter()
-        .map(|participant| (participant.call_id.clone(), participant.identity.clone()))
-        .collect()
 }
 
 fn fixture_occupancy_session() -> OccupancySessionGeneration {
@@ -2584,7 +2577,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert_eq!(swept_identities(&swept), vec![(call.clone(), bob.clone())]);
+    assert_eq!(swept.swept, vec![(call.clone(), bob.clone())]);
     assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
     assert!(
         !sfu.has_call_participant(&call, &bob),
@@ -2836,7 +2829,7 @@ async fn reconcile_failed_pass_resets_absence_streak() {
     assert_eq!(sfu.participant_count(&call), 1);
     // Second CONSECUTIVE absent pass → swept.
     let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(swept_identities(&fourth), vec![(call.clone(), alice)]);
+    assert_eq!(fourth.swept, vec![(call.clone(), alice)]);
     assert_eq!(sfu.participant_count(&call), 0);
 }
 
@@ -2903,10 +2896,7 @@ async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_
 
     let second_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert_eq!(second_absent.rooms_swept, 1);
-    assert_eq!(
-        swept_identities(&second_absent),
-        vec![(call.clone(), alice.clone())]
-    );
+    assert_eq!(second_absent.swept, vec![(call.clone(), alice.clone())]);
     assert!(!sfu.has_call_participant(&call, &alice));
 }
 
@@ -2929,10 +2919,7 @@ async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
     assert_eq!(first.rooms_adopted, 0);
     assert!(first.swept.is_empty());
     let second = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(
-        swept_identities(&second),
-        vec![(call.clone(), alice.clone())]
-    );
+    assert_eq!(second.swept, vec![(call.clone(), alice.clone())]);
     assert_eq!(admin.occupancy_calls.load(Ordering::SeqCst), 2);
     assert_eq!(admin.delete_snapshot().len(), 0);
     assert!(!sfu.has_call_participant(&call, &alice));
