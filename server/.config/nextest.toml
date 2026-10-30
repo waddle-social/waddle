@@ -8,7 +8,9 @@
 # interleave with other tests on the shared WADDLE_TEST_POSTGRES_URL
 # database. Every test that touches that database must run in this
 # single-threaded group. If you add a new test module that reads
-# WADDLE_TEST_POSTGRES_URL, add it to the filter below.
+# WADDLE_TEST_POSTGRES_URL (through
+# waddle_ws_test_support::require_test_postgres_url), add it to the filter
+# below.
 [test-groups]
 postgres = { max-threads = 1 }
 

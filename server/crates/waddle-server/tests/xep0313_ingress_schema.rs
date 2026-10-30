@@ -223,7 +223,7 @@ struct Fixture {
 
 impl Fixture {
     async fn open(name: &str) -> Option<Self> {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (XEP-0313 schema)");
             return None;
         };

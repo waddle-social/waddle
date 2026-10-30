@@ -532,6 +532,7 @@
               ./server/capabilities.toml
               ./server/scripts/check-poison-recovery.py
               ./server/scripts/check-rust-structure.py
+              ./server/scripts/check-test-postgres-env.py
               ./server/crates
               ./server/extensions
               ./server/vendor
@@ -628,6 +629,10 @@
               pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses= -c deadlock_timeout=50ms" -w start
               createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
+              # Postgres is provisioned here, so a Postgres-backed test that
+              # finds no URL is a lane defect: require_test_postgres_url()
+              # panics instead of letting the test return early as a pass.
+              export WADDLE_TEST_REQUIRE_POSTGRES=1
             '';
           };
           # Lint/test derivations build with the `ci-test` cargo profile
@@ -711,6 +716,7 @@
               preBuild = baseArgs.preBuild + ''
                 ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
                 ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
+                ${pkgs.python3}/bin/python3 scripts/check-test-postgres-env.py
               '';
             }
           );

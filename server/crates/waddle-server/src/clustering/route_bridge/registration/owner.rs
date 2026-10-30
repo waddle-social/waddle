@@ -1129,7 +1129,7 @@ mod tests {
     }
 
     async fn single_connection_authority_database() -> Option<crate::db::Database> {
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return None;
         };
         let mut config = crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url);

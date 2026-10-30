@@ -662,7 +662,7 @@ fn cluster_e2e_serial_lock() -> &'static tokio::sync::Mutex<()> {
 /// scenario steps build on each other.
 #[tokio::test(flavor = "multi_thread")]
 async fn cluster_exit_criteria_end_to_end() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -1688,7 +1688,7 @@ const DEFAULT_MESH_TIMING: [(&str, &str); 6] = [
 /// treating startup admission lag as a partition and rotating its identities.
 #[tokio::test(flavor = "multi_thread")]
 async fn cold_mesh_admits_registered_peers_before_default_isolation_window() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let _serial = cluster_e2e_serial_lock().lock().await;
@@ -1747,7 +1747,7 @@ async fn cold_mesh_admits_registered_peers_before_default_isolation_window() {
 /// when their periodic enrollment refresh will not run for thirty seconds.
 #[tokio::test(flavor = "multi_thread")]
 async fn surge_node_joins_default_mesh_without_rotating_startup_identity() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let _serial = cluster_e2e_serial_lock().lock().await;
@@ -1834,7 +1834,7 @@ async fn surge_node_joins_default_mesh_without_rotating_startup_identity() {
 /// below complete in single-digit seconds of real time.
 #[tokio::test(flavor = "multi_thread")]
 async fn lone_survivor_and_isolation_fencing() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -2020,7 +2020,7 @@ async fn wait_for_cross_node_registration(
 #[tokio::test]
 async fn cross_node_resume_live_steal_handshake() {
     let _serial = cluster_e2e_serial_lock().lock().await;
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping cross_node_resume_live_steal_handshake: WADDLE_TEST_POSTGRES_URL not set"
         );
@@ -2155,7 +2155,7 @@ async fn cross_node_resume_live_steal_handshake() {
 /// override, not the 120s production default.
 #[tokio::test(flavor = "multi_thread")]
 async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions: \
              WADDLE_TEST_POSTGRES_URL not set"
@@ -2403,7 +2403,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     };
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
-    let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let _guard = cluster_e2e_serial_lock().lock().await;
@@ -2653,7 +2653,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
 /// sequence instead of a local retry error.
 #[tokio::test]
 async fn muc_join_routes_to_foreign_room_owner() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping muc_join_routes_to_foreign_room_owner: \
              WADDLE_TEST_POSTGRES_URL not set"
@@ -2779,7 +2779,7 @@ async fn muc_join_routes_to_foreign_room_owner() {
 /// XEP-0045 §7.4 reflection and receipt every canonical obligation.
 #[tokio::test]
 async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping groupchat fan-out regression: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -3517,7 +3517,7 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
 /// genuinely-nonexistent rooms into retry loops.
 #[tokio::test]
 async fn muji_initiate_routes_to_foreign_room_owner() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping muji_initiate_routes_to_foreign_room_owner: \
              WADDLE_TEST_POSTGRES_URL not set"
@@ -3705,7 +3705,7 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
 /// waited for the owner's 60s reconciliation tick.
 #[tokio::test]
 async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping participant_joined_webhook_reasserts_grants_on_foreign_room_owner: \
              WADDLE_TEST_POSTGRES_URL not set"
@@ -4036,7 +4036,7 @@ fn muji_initiate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
 /// effects on the node that owns the originating resource.
 #[tokio::test]
 async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping subscription_presence_and_probe_route_to_foreign_user_owner: \
              WADDLE_TEST_POSTGRES_URL not set"
@@ -4343,7 +4343,7 @@ async fn subscription_presence_and_probe_route_to_foreign_user_owner() {
 /// seconds total, reported at the end of this test run.
 #[tokio::test(flavor = "multi_thread")]
 async fn whole_node_isolation_fences_then_self_heals_without_operator_intervention() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping whole_node_isolation_fences_then_self_heals_without_operator_intervention: \
              WADDLE_TEST_POSTGRES_URL not set"

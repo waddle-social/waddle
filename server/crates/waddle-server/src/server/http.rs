@@ -2089,7 +2089,7 @@ mod ingress_colocation_tests {
 
     #[tokio::test]
     async fn postgres_requires_the_same_schema_without_clustering() {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping postgres_requires_the_same_schema_without_clustering: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };
@@ -2172,7 +2172,7 @@ mod ingress_colocation_tests {
 
     #[tokio::test]
     async fn postgres_inbox_requires_the_same_schema_without_clustering() {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping postgres_inbox_requires_the_same_schema_without_clustering: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };

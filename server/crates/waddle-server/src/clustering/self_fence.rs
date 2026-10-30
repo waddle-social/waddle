@@ -2615,7 +2615,7 @@ mod tests {
         use waddle_xmpp::ownership::ClaimStore as _;
 
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };
@@ -4772,7 +4772,7 @@ mod tests {
         use waddle_xmpp::ownership::EntityType;
 
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };

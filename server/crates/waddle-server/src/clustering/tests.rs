@@ -31,7 +31,7 @@ async fn isolated_test_control_db(
     name: &str,
     schema: &str,
 ) -> anyhow::Result<Option<(Database, sqlx::PgPool)>> {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return Ok(None);
     };
     let admin = sqlx::PgPool::connect(&url)

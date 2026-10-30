@@ -3,6 +3,8 @@
 //! - `TestServer` spawns the `waddle-server` binary with test env vars and
 //!   waits for it to become ready.
 //! - `WsXmppClient` connects via WebSocket and authenticates with SCRAM-SHA-256.
+//! - `require_test_postgres_url` is the one reader of the Postgres test-database
+//!   environment for every test crate in the workspace.
 //!
 //! This lives in its own crate (rather than a `tests/ws_common/mod.rs`
 //! shared module) so that every integration-test binary links the same
@@ -21,6 +23,12 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite};
+
+mod test_postgres;
+
+pub use test_postgres::{
+    require_test_postgres_url, REQUIRE_TEST_POSTGRES_ENV, TEST_POSTGRES_URL_ENV,
+};
 
 /// Re-exported so suites can match on raw frames from
 /// [`WsXmppClient::recv_raw_timeout`] without a direct dependency.

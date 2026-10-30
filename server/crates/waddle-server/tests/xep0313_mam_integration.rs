@@ -702,7 +702,7 @@ const ARCHIVE: &str = "room@conference.example.com";
 
 #[tokio::test]
 async fn xep_0313_uow_mam_write_is_queryable_through_the_archive_read_path() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (XEP-0313 UoW MAM)");
         return;
     };

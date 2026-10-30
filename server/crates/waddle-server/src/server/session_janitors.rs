@@ -2954,7 +2954,7 @@ mod orphan_reaper_sweep_tests {
     #[tokio::test]
     async fn run_orphan_reaper_sweep_steals_hydrates_and_is_exactly_once_under_concurrency() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };

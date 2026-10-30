@@ -648,7 +648,7 @@ mod tests {
         Database,
         NodeIdentity,
     )> {
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let db = Database::from_config(
             "muc-durable-test",
             &DatabaseConfig::new(DatabaseDriver::Postgres, url)
@@ -715,7 +715,7 @@ mod tests {
     /// Callers hold `clustering_control_plane_table_lock` to avoid racing the
     /// existing Postgres-gated MUC tests that share this opt-in database.
     async fn fresh_muc_schema_database() -> Option<Database> {
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let db = Database::from_config(
             "muc-durable-fresh-schema-test",
             &DatabaseConfig::new(DatabaseDriver::Postgres, url)

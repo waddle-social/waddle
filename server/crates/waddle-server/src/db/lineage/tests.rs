@@ -253,7 +253,7 @@ fn postgres_url_with_database(database_url: &str, database: &str) -> String {
 }
 
 async fn postgres_fixture(prefix: &str) -> Option<PostgresFixture> {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (lineage PostgreSQL test)");
         return None;
     };
@@ -348,7 +348,7 @@ async fn postgres_detects_tampered_identity_fields() {
 
 #[tokio::test]
 async fn postgres_reports_system_identifier_unavailable_without_execute_privilege() {
-    let Ok(base_database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(base_database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (lineage PostgreSQL test)");
         return;
     };
@@ -509,7 +509,7 @@ async fn postgres_search_path_boundaries_have_independent_lineages() {
     let Some(fixture) = postgres_fixture("search_path_first").await else {
         return;
     };
-    let database_url = std::env::var("WADDLE_TEST_POSTGRES_URL")
+    let database_url = waddle_ws_test_support::require_test_postgres_url()
         .expect("postgres URL remains available for gated test");
     let second_schema = format!(
         "waddle_test_lineage_search_path_second_{}",
@@ -550,7 +550,7 @@ async fn clustered_schema_boundaries_report_colocation_mismatch() {
     let Some(fixture) = postgres_fixture("colocation_global").await else {
         return;
     };
-    let database_url = std::env::var("WADDLE_TEST_POSTGRES_URL")
+    let database_url = waddle_ws_test_support::require_test_postgres_url()
         .expect("postgres URL remains available for gated test");
     let mam_schema = format!(
         "waddle_test_lineage_colocation_mam_{}",

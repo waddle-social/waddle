@@ -11151,7 +11151,7 @@ mod fix3_shutdown_race {
     #[tokio::test]
     async fn shutdown_mid_resume_abandons_the_attempt_without_waiting_out_the_budget() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };
@@ -11413,7 +11413,7 @@ mod fix_a_post_cas_shutdown {
     #[tokio::test]
     async fn shutdown_firing_mid_finish_does_not_abandon_an_already_won_steal() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };

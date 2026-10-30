@@ -505,7 +505,7 @@ async fn sqlite_v1014_claim_reset_is_one_time_and_rows_flush_on_first_reconnect(
 
 #[tokio::test]
 async fn postgres_v1014_claim_reset_is_one_time_and_rows_flush_on_first_reconnect() {
-    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1014 pending claim reset)");
         return;
     };
@@ -1060,7 +1060,7 @@ async fn archive_ordered_pending_batches_follow_mam_positions_without_row_id_cur
 
 #[tokio::test]
 async fn postgres_archive_ordered_pending_batches_follow_mam_positions_without_row_id_cursor() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (archive ordered pending)");
         return;
     };
@@ -1184,7 +1184,7 @@ async fn archive_ordered_pending_batches_preserve_mixed_fifo() {
 
 #[tokio::test]
 async fn postgres_archive_ordered_pending_batches_preserve_mixed_fifo() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (mixed pending order)");
         return;
     };
@@ -2233,7 +2233,7 @@ async fn db_storage_quota_returns_quota_exceeded_outcome() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_two_connections_serialize_the_final_quota_slot() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (pending_delivery final-quota race)"
@@ -2314,7 +2314,7 @@ async fn postgres_two_connections_serialize_the_final_quota_slot() {
 async fn postgres_v1014_startup_reset_preserves_and_releases_claimed_rows() {
     use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (pending_delivery V1014 claim reset)"
@@ -3816,7 +3816,7 @@ async fn xep0160_pending_delivery_survives_server_restart() {
 /// in i32.
 #[tokio::test]
 async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed regression for pending_delivery BIGINT)"
@@ -3882,7 +3882,7 @@ async fn db_storage_postgres_handles_i32_overflow_receipt_ms() {
 /// than an in-process mutex.
 #[tokio::test]
 async fn postgres_two_connection_cap_one_race_accepts_exactly_one_insert() {
-    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (pending quota race)");
         return;
     };
@@ -3953,7 +3953,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     };
 
     let _guard = clustering_control_plane_table_lock().lock().await;
-    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let (schema, scoped_url) =
@@ -4444,7 +4444,7 @@ async fn insert_fenced_rejects_same_node_id_new_incarnation_at_the_same_claim_ep
     };
 
     let _guard = clustering_control_plane_table_lock().lock().await;
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let db = Database::from_config(
@@ -4500,7 +4500,7 @@ async fn insert_fenced_prevents_duplicate_promotion_across_claim_states() {
     };
 
     let _guard = clustering_control_plane_table_lock().lock().await;
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (pending_delivery fenced-insert duplicate-promotion regression)"
@@ -5992,7 +5992,7 @@ async fn sqlite_ambiguous_release_preserves_same_stream_claim_across_storage_han
 
 #[tokio::test]
 async fn postgres_ambiguous_release_preserves_same_stream_claim_across_storage_handles() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let (schema, scoped_url) = create_postgres_test_schema(&database_url, "pending_token").await;
@@ -6263,7 +6263,7 @@ async fn sqlite_pending_admission_fences_independent_producers() {
 
 #[tokio::test]
 async fn postgres_pending_admission_fences_independent_producers() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let (schema, scoped_url) =

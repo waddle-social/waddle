@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Shared WebSocket XMPP integration-test harness (test server spawner + SCRAM WebSocket client)"
+description = "Shared integration-test harness (test server spawner, SCRAM WebSocket client, Postgres test-database gate)"
 
 [dependencies]
 base64 = { workspace = true }

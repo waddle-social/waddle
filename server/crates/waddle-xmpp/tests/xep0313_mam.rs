@@ -415,7 +415,7 @@ async fn xep0313_tx_archive_write_rolls_back_with_caller_transaction() {
     use waddle_xmpp_core::types::{Affiliation, Role};
     use waddle_xmpp_core::xep0359::OriginId;
 
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping XEP-0313 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
         return;
     };
@@ -607,7 +607,7 @@ async fn xep0313_in_memory_archive_order_survives_backdated_messages() {
 
 #[tokio::test]
 async fn xep0313_postgres_archive_order_survives_backdated_messages() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping XEP-0313 Postgres archive-order test: WADDLE_TEST_POSTGRES_URL is unset"
         );
