@@ -267,6 +267,46 @@ non-account service identities as account-grant subjects; retain full JIDs for
 routing separately. Pin normalization/codec/schema versions, Unicode behavior
 and limits. Same-localpart foreign identities remain distinct. This is B6.
 
+B6 also blocks validation that begins after typed stanza parsing. An independent
+B6 probe using the pinned `jid` 0.12.2 and Rust 1.98.1 reported these concrete
+results (probe evidence supplied by the reviewer; not rerun for this document):
+
+| Input | Parsed identity / comparison result |
+| --- | --- |
+| `fußball@example.org` | Becomes `fussball@example.org`. |
+| `a@faß.example` | Becomes `a@fass.example`. |
+| `a@example.org.` | Retains the trailing dot; differs from `a@example.org`. |
+| `a@bücher.example` and `a@xn--bcher-kva.example` | Remain different. |
+
+At the current [XML parse boundary](../../crates/waddle-xmpp/src/protocol/frame.rs),
+`parse_stanza` consumes the XML-decoded `Element` into typed IQ/message/presence
+structures. `ParsedFrame` retains the typed stanza and language metadata, not
+the original decoded address attributes. The
+[WebSocket handler](../../crates/waddle-server/src/server/routes/websocket/frame.rs)
+receives that already-parsed result. Rejecting non-ASCII only afterward cannot
+detect an original address that has already collapsed to ASCII; scanning wire
+bytes also misses XML character references that decode to non-ASCII. A proposed
+restricted profile therefore requires validation of XML-decoded identity inputs
+before lossy JID preparation, including corresponding future S2S and
+protocol-payload identity boundaries. Merely checking the resulting typed JID
+or adding a new grant-key codec cannot satisfy B6.
+
+One candidate for an isolated test profile is a precisely bounded ASCII account
+and service namespace, with explicit permitted localpart/domain grammar,
+case/trailing-dot rules, authoritative account bindings and identical checks at
+provisioning, authentication, lookup and every enrolled ingress. The profile
+and enforcement locations still need review; this is neither an approved
+production restriction nor a claim of full XMPP address support. Production
+domains remain undecided; fixtures must use isolated test domains. Full Unicode
+support requires an agreed implementation of
+[RFC 7622 domainpart/localpart rules](https://www.rfc-editor.org/rfc/rfc7622.html#section-3.2)
+and the [UsernameCaseMapped profile](https://www.rfc-editor.org/rfc/rfc8265.html#section-3.3),
+plus versioned reconciliation of existing account/authority stores. Distinct
+source accounts must never be silently merged by parser output. Account-store
+canonical bindings, the raw-boundary implementation and the full PRECIS/IDNA
+migration remain blocking decisions; the candidate ASCII test profile does not
+resolve them.
+
 A fresh namespace requires explicit emptiness/isolation evidence and exact-JID,
 named-community bootstrap with audit/recovery. Existing scopes require reviewed
 inventory/reconciliation from identifiable authoritative sources. Never decode
@@ -342,6 +382,7 @@ Record boundary and backend. These are proposed tests, not results:
 | Initiator revoked while mutation prepared | Target mutation cannot use stale administrator authority. |
 | Negative override/private config/alternate grant | Action policy, especially outcast precedence, not merely positive-path success. |
 | #2052 accepted-child regressions | Frozen target/payload, occupancy and lifecycle remain unchanged. |
+| Raw versus typed JIDs; XML character references; case, sharp-s, trailing-dot and A-label/U-label pairs | Enforce the approved identity profile before lossy parsing; reject unsupported input without aliasing another account. Provisioning/authentication/lookup/ingress agree on audited bindings. |
 
 When code is introduced, run formatting, strict Clippy, relevant native/XEP
 suites and required workspace checks. No S2S transport is needed; do not waive
@@ -358,7 +399,7 @@ actor-restoration and remote-custody gaps individually.
 | B3 | CAS/marker/schema protocol, bounded reconstruction, missing-marker and large-graph rules | Projection integration beyond independently proven bounded operations. |
 | B4 | Actual claim/authority/child lock order, atomic admission and cancellation/lost-commit ownership | First manifest integration. |
 | B5 | PubSub/DirectFrame admission identity; read/join/SM sink contracts | Those sinks and community activation. |
-| B6 | Canonical JID agreement, isolated codec and authoritative reconciliation | External identities and enrolled authority keys. |
+| B6 | XML-decoded pre-parse enforcement, canonical JID/account-binding agreement, isolated codec and authoritative reconciliation; ASCII test profile and full PRECIS/IDNA migration unresolved | External identities and enrolled authority keys. |
 | B7 | Restore incarnation surviving rollback and excluding old deployment/work | Recovery capability and pilot activation. |
 
 The coarse fence's availability cost is a non-blocking tradeoff once bounded
