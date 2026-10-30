@@ -145,43 +145,33 @@ describe("useNotificationOrchestration channel activity", () => {
     h.scope.stop();
   });
 
-  test("uses a discovered custom-service room address for labels and navigation", async () => {
-    const roomJid = "general@rooms.other.example.test";
-    const h = makeHarness({ channels: [{ id: "general", name: "Other General", jid: roomJid }] });
-    h.pendingNotificationActivities.value = [activityEvent({ roomJid })];
-    await nextTick();
-
-    const opts = h.showChannelMessageNotification.mock.calls[0]?.[0] as unknown as {
-      channelName: string;
-      onNavigate?: (roomJid: string) => void;
-    };
-    expect(opts.channelName).toBe("Other General");
-    opts.onNavigate?.(roomJid);
-    expect(h.selectChannelByRoomJid).toHaveBeenCalledWith(roomJid);
-    h.scope.stop();
-  });
-
-  test("unknown foreign rooms cannot borrow a known local room's label or navigation identity", async () => {
-    const roomJid = "general@rooms.other.example.test";
-    const h = makeHarness();
-    h.pendingNotificationActivities.value = [activityEvent({ roomJid })];
-    await nextTick();
-
-    const opts = h.showChannelMessageNotification.mock.calls[0]?.[0] as unknown as {
-      channelName: string;
-      onNavigate?: (roomJid: string) => void;
-    };
-    expect(opts.channelName).toBe("unknown");
-    opts.onNavigate?.(roomJid);
-    expect(h.selectChannelByRoomJid).toHaveBeenCalledWith(roomJid);
-    h.scope.stop();
-  });
-
   test.each([
-    ["general@muc.example.test", "General"],
-    ["general@rooms.other.example.test", "unknown"],
-  ])("ID-only entries resolve labels only within the trusted MUC service: %s", async (roomJid, name) => {
-    const h = makeHarness({ channels: [{ id: "general", name: "General" }] });
+    {
+      scenario: "discovered custom-service room",
+      roomJid: "general@rooms.other.example.test",
+      channels: [{ id: "general", name: "Other General", jid: "general@rooms.other.example.test" }],
+      expectedName: "Other General",
+    },
+    {
+      scenario: "unknown foreign namesake of an explicit local room",
+      roomJid: "general@rooms.other.example.test",
+      channels: [{ id: "general", name: "General", jid: "general@muc.example.test" }],
+      expectedName: "unknown",
+    },
+    {
+      scenario: "ID-only room in the trusted managed service",
+      roomJid: "general@muc.example.test",
+      channels: [{ id: "general", name: "General" }],
+      expectedName: "General",
+    },
+    {
+      scenario: "unknown foreign namesake of an ID-only local room",
+      roomJid: "general@rooms.other.example.test",
+      channels: [{ id: "general", name: "General" }],
+      expectedName: "unknown",
+    },
+  ])("keeps notification room authority: $scenario", async ({ roomJid, channels, expectedName }) => {
+    const h = makeHarness({ channels });
     h.pendingNotificationActivities.value = [activityEvent({ roomJid })];
     await nextTick();
 
@@ -189,27 +179,9 @@ describe("useNotificationOrchestration channel activity", () => {
       channelName: string;
       onNavigate?: (roomJid: string) => void;
     };
-    expect(opts.channelName).toBe(name);
+    expect(opts.channelName).toBe(expectedName);
     opts.onNavigate?.(roomJid);
     expect(h.selectChannelByRoomJid).toHaveBeenCalledWith(roomJid);
-    h.scope.stop();
-  });
-
-  test("trusted ID-only entries cannot bypass persistent client quarantine", async () => {
-    const h = makeHarness({
-      channels: [{ id: "general", name: "General" }],
-      ambiguousRoomIds: ["general"],
-    });
-    h.pendingNotificationActivities.value = [activityEvent()];
-    await nextTick();
-
-    const opts = h.showChannelMessageNotification.mock.calls[0]?.[0] as unknown as {
-      channelName: string;
-      onNavigate?: (roomJid: string) => void;
-    };
-    expect(opts.channelName).toBe("unknown");
-    opts.onNavigate?.("general@muc.example.test");
-    expect(h.selectChannelByRoomJid).not.toHaveBeenCalled();
     h.scope.stop();
   });
 
@@ -226,8 +198,11 @@ describe("useNotificationOrchestration channel activity", () => {
     h.scope.stop();
   });
 
-  test("client quarantine still prevents labeling and navigation after a conflicting catalog entry disappears", async () => {
-    const h = makeHarness({ ambiguousRoomIds: ["general"] });
+  test.each([
+    { scenario: "remaining explicit binding", channel: { id: "general", name: "General", jid: "general@muc.example.test" } },
+    { scenario: "remaining ID-only entry", channel: { id: "general", name: "General" } },
+  ])("persistent quarantine rejects labels and navigation with a $scenario", async ({ channel }) => {
+    const h = makeHarness({ channels: [channel], ambiguousRoomIds: ["general"] });
     h.pendingNotificationActivities.value = [activityEvent()];
     await nextTick();
 
