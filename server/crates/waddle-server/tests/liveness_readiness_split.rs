@@ -7,6 +7,11 @@
 //! 503 inside the kubelet's 2 s probe timeout (no endpoints); when the
 //! database returns, readiness recovers without a restart.
 //!
+//! The server runs without clustering. A clustered node whose outage outlasts
+//! the node-lease TTL self-fences before re-serving, and one that takes a
+//! fatal fence fails liveness (`terminally_fenced`); neither is exercised
+//! here.
+//!
 //! PostgreSQL is optional in local development, so the test skips unless
 //! `WADDLE_TEST_POSTGRES_URL` is configured.
 
@@ -18,8 +23,15 @@ use waddle_ws_test_support::TestServer;
 /// Kubelet probe timeout in the chart (`probes.*.timeoutSeconds`).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
-const OUTAGE_DETECTION_TIMEOUT: Duration = Duration::from_secs(20);
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const OUTAGE_DETECTION_TIMEOUT: Duration = Duration::from_secs(45);
+/// When Postgres returns, the server's in-flight connection attempts and the
+/// serial DB actor's queued readiness checks (each bounded by the main-pool
+/// acquire timeout, 30 s by default) must drain first. Generous so a slow CI
+/// runner is not a false failure.
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Spacing of readiness probes during the outage, close to the kubelet's
+/// 10 s period so the test does not build an artificial DB-actor backlog.
+const OUTAGE_PROBE_SPACING: Duration = Duration::from_secs(5);
 
 /// Where the proxy forwards to: the test URL's TCP address, or the
 /// PostgreSQL Unix socket when the URL names a socket directory in its
@@ -114,17 +126,35 @@ impl PostgresProxy {
 
     fn start(listener: tokio::net::TcpListener, upstream: Upstream) -> Self {
         let upstream = std::sync::Arc::new(upstream);
-        let (down, down_rx) = watch::channel(false);
+        let (down, mut down_rx) = watch::channel(false);
         let task = tokio::spawn(async move {
             let mut black_holed = Vec::new();
-            while let Ok((inbound, _)) = listener.accept().await {
-                if *down_rx.borrow() {
-                    black_holed.push(inbound);
-                    continue;
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((inbound, _)) = accepted else {
+                            return;
+                        };
+                        if *down_rx.borrow() {
+                            black_holed.push(inbound);
+                            continue;
+                        }
+                        let forward_down = down_rx.clone();
+                        let upstream = std::sync::Arc::clone(&upstream);
+                        tokio::spawn(async move { forward(inbound, &upstream, forward_down).await });
+                    }
+                    changed = down_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        if !*down_rx.borrow_and_update() {
+                            // Restored: close the black-holed sockets so the
+                            // server's hung connection attempts fail now
+                            // instead of at their acquire deadline.
+                            black_holed.clear();
+                        }
+                    }
                 }
-                let down_rx = down_rx.clone();
-                let upstream = std::sync::Arc::clone(&upstream);
-                tokio::spawn(async move { forward(inbound, &upstream, down_rx).await });
             }
         });
         Self { down, task }
@@ -247,7 +277,7 @@ async fn postgres_outage_leaves_server_live_and_unready_then_recovers() {
             assert_eq!(status, reqwest::StatusCode::OK, "readiness body: {body}");
         }
         assert_live(&client, &server).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(OUTAGE_PROBE_SPACING).await;
     }
 
     // Postgres returns: the same process becomes ready again, no restart.
