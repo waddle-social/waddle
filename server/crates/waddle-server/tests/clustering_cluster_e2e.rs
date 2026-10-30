@@ -3831,12 +3831,52 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     // Pre-#1594 this was acknowledged with grants unenforced until the
     // owner's reconcile tick; now node B must relay the re-assert to
     // node A synchronously with the delivery.
+    // Capture the provider attributes from credentials authorized for this
+    // exact room seat, rather than inventing a generation in the webhook.
+    let media_sid = format!("grants-media-{}", uuid::Uuid::new_v4());
+    client_b
+        .send(&String::from(&muji_initiate_iq(&room, &media_sid)))
+        .await
+        .expect("client B requests issued Muji credentials");
+    let media_accept = client_b
+        .recv_until(|frame| frame.contains("session-accept") && frame.contains(&media_sid))
+        .await
+        .expect("owner issues Muji credentials to client B");
+    let media_accept: xmpp_parsers::minidom::Element =
+        media_accept.parse().expect("session accept XML");
+    let issued = media_accept
+        .children()
+        .find(|child| child.name() == "jingle")
+        .and_then(|jingle| jingle.children().find(|child| child.name() == "content"))
+        .and_then(|content| content.children().find(|child| child.name() == "transport"))
+        .and_then(|transport| transport.children().find(|child| child.name() == "token"))
+        .expect("issued JWT")
+        .text();
+    #[derive(serde::Deserialize)]
+    struct MediaClaims {
+        attributes: waddle_sfu::ParticipantAttributes,
+    }
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_required_spec_claims::<&str>(&[]);
+    let attributes = jsonwebtoken::decode::<MediaClaims>(
+        &issued,
+        &jsonwebtoken::DecodingKey::from_secret(b"test-secret-with-at-least-32-bytes-of-payload"),
+        &validation,
+    )
+    .expect("verify owner-issued JWT")
+    .claims
+    .attributes;
+    assert!(attributes.media_generation.is_some());
     let identity = format!("{CLUSTER_PEER_USERNAME}@{DOMAIN}/{resource_b}");
     let body = serde_json::to_vec(&serde_json::json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_joined",
-        "room": { "name": room },
-        "participant": { "identity": identity },
+        "room": { "name": room, "sid": "RM_cluster_grants" },
+        "participant": {
+            "identity": identity,
+            "sid": "PA_cluster_grants",
+            "attributes": attributes
+        },
     }))
     .expect("webhook body");
     let response = reqwest::Client::new()

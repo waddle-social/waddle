@@ -79,11 +79,12 @@ pub enum TeardownTarget {
         participant_sid: Option<ParticipantSid>,
     },
     /// Retire one displaced media incarnation while its successor keeps the
-    /// same signaling identity. The live participant SID is the authority;
-    /// ordinary departure/session supersession must not discard this effect.
+    /// same signaling identity. A captured SID or the intent's occupant
+    /// generation identifies the candidate; the current room owner must
+    /// authorize retirement. Departure supersession must not discard it.
     DisplacedParticipant {
         identity: FullJid,
-        participant_sid: ParticipantSid,
+        participant_sid: Option<ParticipantSid>,
     },
     Room,
     MujiPresenceClear {
@@ -153,6 +154,22 @@ pub struct CallTeardownIntent {
 }
 
 impl CallTeardownIntent {
+    pub(super) fn validate_retirement_evidence(&self) -> Result<(), CallTeardownOutboxError> {
+        if matches!(
+            self.target,
+            TeardownTarget::DisplacedParticipant {
+                participant_sid: None,
+                ..
+            }
+        ) && self.occupant.is_none()
+        {
+            return Err(CallTeardownOutboxError::InvalidTargetShape(
+                "retire_displaced_participant".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn room_scope(&self) -> Option<BareJid> {
         match &self.target {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
@@ -196,6 +213,7 @@ pub enum CallTeardownRetryReason {
     LiveKitExecutorUnavailable,
     LiveKitAdmin,
     LiveKitOccupied,
+    RetirementAuthorityUnavailable,
     Unknown,
 }
 
@@ -212,7 +230,10 @@ impl CallTeardownRetryReason {
     pub(crate) const fn is_infrastructure_transient(self) -> bool {
         matches!(
             self,
-            Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin | Self::CallThreadEnd
+            Self::LiveKitExecutorUnavailable
+                | Self::LiveKitAdmin
+                | Self::CallThreadEnd
+                | Self::RetirementAuthorityUnavailable
         )
     }
 
@@ -223,6 +244,7 @@ impl CallTeardownRetryReason {
             Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
             Self::LiveKitAdmin => "livekit_admin_retryable",
             Self::LiveKitOccupied => "livekit_room_occupied",
+            Self::RetirementAuthorityUnavailable => "retirement_authority_unavailable",
             Self::Unknown => "unknown",
         }
     }
@@ -234,6 +256,7 @@ impl CallTeardownRetryReason {
             "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
             "livekit_admin_retryable" => Self::LiveKitAdmin,
             "livekit_room_occupied" => Self::LiveKitOccupied,
+            "retirement_authority_unavailable" => Self::RetirementAuthorityUnavailable,
             _ => Self::Unknown,
         }
     }

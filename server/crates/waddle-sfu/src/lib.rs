@@ -34,18 +34,21 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::{AdminCallObserver, AdminOp, ListedRoom, LiveKitAdmin, RoomOccupancy};
+pub use admin::{
+    AdminCallObserver, AdminOp, ListedRoom, LiveKitAdmin, LiveParticipant, RoomOccupancy,
+};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
-    SidObservationDirection, SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantAttributes, ParticipantSid, RoomSid, SessionBinding,
+    SessionScopedTeardown, SidObservationDirection, SidObservationDisposition, TeardownDisposition,
+    TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
 pub use error::SfuError;
 pub use livekit::{
-    LiveKitSfu, LiveKitTeardownExecutor, TeardownExecution, TeardownFailureSink,
-    RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS,
+    LiveKitSfu, LiveKitTeardownExecutor, OccupancyAuthority, TeardownExecution,
+    TeardownFailureSink, RECONCILE_CONCURRENCY, RECONCILE_GRACE_SECONDS,
 };
 pub use token::{JoinToken, Jti, Jwt, VideoGrant};
 pub use turn::{TurnCredential, TurnHost, TurnPassword, TurnUsername};
@@ -55,6 +58,7 @@ pub use webhook::{
 };
 
 mod service;
+pub use service::LiveMediaObservation;
 pub use service::LiveParticipantsFuture;
 pub use service::ParticipantRegistrationExpectation;
 pub use service::ReconcileFuture;
@@ -62,4 +66,5 @@ pub use service::ReconcilePassSummary;
 pub use service::SfuReconciler;
 pub use service::SfuService;
 pub use service::SidEvidence;
+pub use service::SweptParticipant;
 pub use service::UnboundOccupantPolicy;

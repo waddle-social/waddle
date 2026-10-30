@@ -240,7 +240,9 @@ pub enum TeardownTargetLite {
     /// Retire an observed media incarnation without departing its successor.
     DisplacedParticipant {
         identity: Identity,
-        participant_sid: ParticipantSid,
+        /// A missing SID is resolved from trusted provider generation evidence;
+        /// the enclosing intent must then carry `occupant_session`.
+        participant_sid: Option<ParticipantSid>,
     },
     Participant {
         identity: Identity,
@@ -262,6 +264,8 @@ impl std::fmt::Display for CallGeneration {
 pub struct ObservedCallSids {
     pub room_sid: Option<RoomSid>,
     pub participant_sid: Option<ParticipantSid>,
+    /// Provider-observed media generation, never MUC occupancy authority.
+    pub media_generation: Option<OccupancySessionGeneration>,
     /// The producing webhook envelope's `createdAt`, when known. Orders
     /// redelivered join events against already-learned sids so a
     /// re-executed stale join cannot regress a newer fence (#1612
@@ -275,6 +279,7 @@ impl ObservedCallSids {
         Self {
             room_sid,
             participant_sid,
+            media_generation: None,
             observed_event_at: None,
         }
     }
@@ -283,9 +288,23 @@ impl ObservedCallSids {
         Self {
             room_sid: None,
             participant_sid: None,
+            media_generation: None,
             observed_event_at: None,
         }
     }
+}
+
+/// Signed token attributes echoed by authenticated LiveKit observations.
+/// This evidence names the media credential's generation; it cannot authorize
+/// an XMPP room occupancy or replace the room owner's generation checks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParticipantAttributes {
+    #[serde(
+        default,
+        rename = "waddle.occupancy_generation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub media_generation: Option<OccupancySessionGeneration>,
 }
 
 /// LiveKit participant identity. Always derived from a real

@@ -30,6 +30,7 @@ use std::collections::HashSet;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
+use crate::call::ParticipantAttributes;
 use crate::config::ApiSecret;
 use crate::{ParticipantSid, RoomSid};
 
@@ -252,9 +253,9 @@ pub struct RoomInfo {
     pub sid: Option<RoomSid>,
 }
 
-/// LiveKit `ParticipantInfo` projection. Only the identity field is
-/// load-bearing for Waddle's bridge — it round-trips the stringified
-/// [`jid::FullJid`] we minted into the JWT's `sub` claim.
+/// LiveKit `ParticipantInfo` projection. Identity round-trips the stringified
+/// [`jid::FullJid`] in the JWT's `sub`; signed generation attributes distinguish
+/// old media from a successor after delayed observation or process restart.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParticipantInfo {
     pub identity: String,
@@ -262,6 +263,8 @@ pub struct ParticipantInfo {
     pub sid: Option<ParticipantSid>,
     #[serde(default)]
     pub state: Option<String>,
+    #[serde(default)]
+    pub attributes: ParticipantAttributes,
 }
 
 #[cfg(test)]
@@ -444,6 +447,43 @@ mod tests {
     }
 
     #[test]
+    fn verified_participant_webhook_preserves_typed_generation_attributes() {
+        let secret = fixture_secret();
+        let generation: waddle_xmpp_core::OccupancySessionGeneration =
+            "2ad5f39a-638e-4ba3-87ab-d0a9be491f5b"
+                .parse()
+                .expect("generation");
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_joined", "room": { "name": "general@muc.test" },
+            "participant": { "identity": "alice@waddle.test/desktop", "sid": "PA_joined",
+                "attributes": { "waddle.occupancy_generation": generation.to_string() } }
+        }))
+        .expect("body");
+        let auth = format!("Bearer {}", sign_for_body(&secret, &body));
+        let event = verify_webhook_signature(&secret, Some(&auth), &body).expect("verify");
+        let LiveKitWebhookEvent::ParticipantJoined(envelope) = event else {
+            panic!("expected participant joined");
+        };
+        assert_eq!(
+            envelope.participant.attributes.media_generation,
+            Some(generation)
+        );
+    }
+
+    #[test]
+    fn verified_participant_webhook_rejects_malformed_generation_attributes() {
+        let secret = fixture_secret();
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_joined", "room": { "name": "general@muc.test" },
+            "participant": { "identity": "alice@waddle.test/desktop", "sid": "PA_joined",
+                "attributes": { "waddle.occupancy_generation": "not-a-generation" } }
+        }))
+        .expect("body");
+        let auth = format!("Bearer {}", sign_for_body(&secret, &body));
+        assert!(verify_webhook_signature(&secret, Some(&auth), &body).is_err());
+    }
+
+    #[test]
     fn event_id_round_trips_through_typed_variants() {
         let env = ParticipantEnvelope {
             id: Some("EV_42".into()),
@@ -456,6 +496,7 @@ mod tests {
                 identity: "alice@waddle.test/desktop".into(),
                 sid: None,
                 state: None,
+                attributes: ParticipantAttributes::default(),
             },
         };
         let event = LiveKitWebhookEvent::ParticipantLeft(env);

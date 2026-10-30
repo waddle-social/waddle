@@ -22,6 +22,7 @@
 use crate::call_teardown_outbox::CallTeardownIntent;
 use crate::call_teardown_outbox::CallTeardownOutboxError;
 use crate::call_teardown_outbox::TeardownTarget;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -221,11 +222,32 @@ async fn livekit_webhook_handler(
                     } else {
                         let mut outcome = WebhookEffectOutcome::Completed;
                         for identity in survivors {
+                            let observed = if is_muc_call(call_id.as_str()) {
+                                let Some(observed) =
+                                    sfu.participant_media_evidence(&call_id, &identity)
+                                else {
+                                    continue;
+                                };
+                                if env.room.sid.is_none()
+                                    || observed.room_sid != env.room.sid
+                                    || observed.media_generation.is_none()
+                                    || observed.participant_sid.is_none()
+                                {
+                                    // A cached identity or a new still-connecting
+                                    // registration does not prove that it belonged
+                                    // to the room incarnation that finished.
+                                    continue;
+                                }
+                                observed
+                            } else {
+                                // Raw 1:1 calls have no MUC occupancy generation.
+                                observed_sids_for_room(env)
+                            };
                             let survivor_outcome = process_participant_left_for_identity(
                                 &state,
                                 &env.room.name,
                                 identity.as_jid().to_string().as_str(),
-                                Some(&observed_sids_for_room(env)),
+                                Some(&observed),
                             )
                             .await;
                             if matches!(survivor_outcome, WebhookEffectOutcome::Retryable(_)) {
@@ -392,6 +414,7 @@ fn observed_sids_for_participant(env: &ParticipantEnvelope) -> ObservedCallSids 
     ObservedCallSids {
         room_sid: env.room.sid.clone(),
         participant_sid: env.participant.sid.clone(),
+        media_generation: env.participant.attributes.media_generation,
         // Envelope `createdAt` (unix seconds) orders redelivered joins
         // against already-learned sids (#1612 review round 12).
         observed_event_at: env
@@ -404,6 +427,7 @@ fn observed_sids_for_room(env: &RoomEnvelope) -> ObservedCallSids {
     ObservedCallSids {
         room_sid: env.room.sid.clone(),
         participant_sid: None,
+        media_generation: None,
         observed_event_at: env
             .created_at
             .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)),
@@ -545,20 +569,95 @@ async fn reconcile_once(
             count = summary.swept.len(),
             "SFU reconciliation swept ghost participants; clearing MUC Muji presence"
         );
-        for (call_id, identity) in summary.swept {
-            if is_muc_call(call_id.as_str()) {
-                process_participant_left_for_identity(
+        for departed in summary.swept {
+            if is_muc_call(departed.call_id.as_str()) {
+                let Ok(room_jid) = departed.call_id.as_str().parse::<BareJid>() else {
+                    continue;
+                };
+                clear_muji_presence_for_departure(
                     state,
-                    call_id.as_str(),
-                    identity.as_jid().to_string().as_str(),
+                    &room_jid,
+                    departed.identity.as_jid(),
+                    Some(&departed.observed_sids),
+                    departed.occupant_session,
+                    waddle_sfu::UnboundOccupantPolicy::Keep,
                     None,
                 )
                 .await;
             }
         }
     }
+    enqueue_displaced_live_media(state, summary.live_media).await;
     super::sfu_voice_reconcile::reconcile_voice_grants(state, reconciler, non_occupant_streaks)
         .await;
+}
+
+/// Polling is already an authoritative provider inventory. Filter it against
+/// one fresh owned-room snapshot per room so healthy media does not create
+/// permanent no-op outbox work. Execution revalidates authority again.
+async fn enqueue_displaced_live_media(
+    state: &WebSocketState,
+    inventory: Vec<waddle_sfu::LiveMediaObservation>,
+) {
+    let mut rooms: HashMap<BareJid, Vec<waddle_sfu::LiveMediaObservation>> = HashMap::new();
+    for media in inventory {
+        if !is_muc_call(media.call_id.as_str()) || media.participant.media_generation.is_none() {
+            continue;
+        }
+        let Ok(room_jid) = media.call_id.as_str().parse::<BareJid>() else {
+            continue;
+        };
+        rooms.entry(room_jid).or_default().push(media);
+    }
+    for (room_jid, participants) in rooms {
+        let Some(snapshot) =
+            crate::call_teardown_outbox::canonical_retirement_room_snapshot(state, &room_jid).await
+        else {
+            // Missing ownership/claim evidence is not proof of absence.
+            continue;
+        };
+        for media in participants {
+            let Some(candidate) = media.participant.media_generation else {
+                continue;
+            };
+            let jid = media.participant.identity.as_jid();
+            if snapshot.room.find_occupant_by_real_jid(jid).is_some() {
+                match snapshot.room.session_generation(jid) {
+                    Some(current) if current != candidate => {}
+                    // Both an authorized participant and an unbound seat
+                    // must be preserved; only a known different generation
+                    // proves this provider media is displaced.
+                    Some(_) | None => continue,
+                }
+            }
+            let intent = CallTeardownIntent {
+                call_id: media.call_id,
+                target: TeardownTarget::DisplacedParticipant {
+                    identity: jid.clone(),
+                    participant_sid: media.participant.participant_sid,
+                },
+                generation: None,
+                occupant: Some(candidate),
+                unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
+                room_sid: media.room_sid,
+                session: None,
+            };
+            if let Err(error) = state
+                .deps
+                .protocol
+                .call_teardown_outbox
+                .enqueue(intent.clone())
+                .await
+            {
+                warn!(room = %room_jid, %error, "failed to persist polled displaced-media retirement; retaining retry responsibility");
+                state
+                    .deps
+                    .protocol
+                    .call_teardown_persistence
+                    .retry_batch(vec![intent]);
+            }
+        }
+    }
 }
 
 async fn process_participant_left(
@@ -891,12 +990,195 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn polling_filters_healthy_media_and_recovers_despite_stale_sfu_generation_equality() {
+        let state = create_test_websocket_state_with_calls().await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "polled-generation@muc.example.com".parse().expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let call = CallId::try_new(room_jid.to_string()).expect("call");
+        let identity = Identity::from_jid(alice.clone());
+        let old_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let current_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let sfu = state.deps.protocol.sfu.as_ref().expect("SFU");
+        sfu.register_call_participant_with_session(
+            &call,
+            &identity,
+            &waddle_sfu::SessionBinding::try_new("cached-old-session").expect("session"),
+            old_generation,
+        );
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: current_generation,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: active_muji(),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+        let observation = |generation| waddle_sfu::LiveMediaObservation {
+            call_id: call.clone(),
+            room_sid: Some(RoomSid::try_new("RM_polled").expect("room SID")),
+            participant: waddle_sfu::LiveParticipant {
+                identity: identity.clone(),
+                participant_sid: Some(ParticipantSid::try_new("PA_polled").expect("SID")),
+                media_generation: Some(generation),
+            },
+        };
+        let mut streaks = super::super::sfu_voice_reconcile::NonOccupantStreaks::default();
+        for _ in 0..2 {
+            let healthy = FixedSummaryReconciler {
+                summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                    live_media: vec![observation(current_generation)],
+                    ..waddle_sfu::ReconcilePassSummary::default()
+                })),
+            };
+            reconcile_once(
+                state.as_ref(),
+                &healthy,
+                chrono::Duration::zero(),
+                &mut streaks,
+            )
+            .await;
+            assert_eq!(
+                state
+                    .deps
+                    .protocol
+                    .call_teardown_outbox
+                    .queue_stats()
+                    .await
+                    .expect("stats")
+                    .queued_count,
+                0,
+                "healthy polling must not grow a no-op retirement backlog"
+            );
+        }
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &identity),
+            Some(old_generation)
+        );
+        let displaced = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                live_media: vec![observation(old_generation)],
+                ..waddle_sfu::ReconcilePassSummary::default()
+            })),
+        };
+        reconcile_once(
+            state.as_ref(),
+            &displaced,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("retirement");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].intent.occupant, Some(old_generation));
+        assert_eq!(
+            jobs[0].intent.target,
+            TeardownTarget::DisplacedParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(ParticipantSid::try_new("PA_polled").expect("SID")),
+            }
+        );
+
+        let mut departed_media = ObservedCallSids::new(
+            Some(RoomSid::try_new("RM_polled").expect("room SID")),
+            Some(ParticipantSid::try_new("PA_old_swept").expect("SID")),
+        );
+        departed_media.media_generation = Some(old_generation);
+        let swept = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                swept: vec![waddle_sfu::SweptParticipant {
+                    call_id: call,
+                    identity,
+                    occupant_session: Some(old_generation),
+                    observed_sids: departed_media,
+                }],
+                ..waddle_sfu::ReconcilePassSummary::default()
+            })),
+        };
+        reconcile_once(
+            state.as_ref(),
+            &swept,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+        assert!(snapshot_room(state.as_ref(), &room_jid).await.room.muji_for_session("alice", &alice).is_some(),
+            "swept old-generation proof must not become an Any-generation clear after the SFU removal");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn polling_without_owned_room_or_generation_evidence_cannot_enqueue_retirement() {
+        let state = create_test_websocket_state_with_calls().await;
+        let observation = |generation| waddle_sfu::LiveMediaObservation {
+            call_id: CallId::try_new("unowned-polled@muc.example.com").expect("call"),
+            room_sid: Some(RoomSid::try_new("RM_unowned").expect("room SID")),
+            participant: waddle_sfu::LiveParticipant {
+                identity: Identity::from_jid("alice@example.com/web".parse().expect("JID")),
+                participant_sid: Some(ParticipantSid::try_new("PA_unowned").expect("SID")),
+                media_generation: generation,
+            },
+        };
+        let reconciler = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                live_media: vec![
+                    observation(Some(waddle_xmpp_core::OccupancySessionGeneration::mint())),
+                    observation(None),
+                ],
+                ..waddle_sfu::ReconcilePassSummary::default()
+            })),
+        };
+        let mut streaks = super::super::sfu_voice_reconcile::NonOccupantStreaks::default();
+        reconcile_once(
+            state.as_ref(),
+            &reconciler,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .call_teardown_outbox
+                .queue_stats()
+                .await
+                .expect("stats")
+                .queued_count,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn reconcile_pass_summary_emits_duration_and_room_counters() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state_with_sfu(Arc::new(RecordingSfu::default())).await;
         let reconciler = FixedSummaryReconciler {
             summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
                 swept: Vec::new(),
+                live_media: Vec::new(),
                 rooms_examined: 3,
                 rooms_adopted: 2,
                 rooms_swept: 1,
@@ -1123,6 +1405,17 @@ mod tests {
         let recorder = Arc::new(RecordingSfu::default());
         let survivor_jid: FullJid = "bob@example.com/phone".parse().expect("survivor jid");
         recorder.set_participants(vec![Identity::from_jid(survivor_jid.clone())]);
+        let mut observed = ObservedCallSids::new(
+            Some(RoomSid::try_new("RM_immediate").expect("room SID")),
+            Some(ParticipantSid::try_new("PA_survivor").expect("participant SID")),
+        );
+        observed.media_generation = Some(waddle_xmpp_core::OccupancySessionGeneration::mint());
+        waddle_sfu::SfuService::register_call_participant_observed(
+            recorder.as_ref(),
+            &CallId::try_new("occupied-room@muc.example.com").expect("call"),
+            &Identity::from_jid(survivor_jid.clone()),
+            &observed,
+        );
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let secret = state
             .deps
@@ -1161,6 +1454,7 @@ mod tests {
             notes[0].2.room_sid,
             Some(RoomSid::try_new("RM_immediate").expect("room sid"))
         );
+        assert_eq!(notes[0].2.media_generation, observed.media_generation);
         let queued = state
             .deps
             .protocol
@@ -1240,6 +1534,7 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_participant_left_stays_processing_then_completes_on_retry() {
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let first_recorder = Arc::new(RecordingSfu::default());
         let first_state = create_test_websocket_state_with_sfu(first_recorder).await;
         first_state.deps.protocol.room_registry.kill();
@@ -1256,8 +1551,12 @@ mod tests {
         let body = serde_json::to_vec(&json!({
             "event": "participant_left",
             "id": "EV_retryable_participant_left",
-            "room": { "name": "retryable@muc.example.com" },
-            "participant": { "identity": "alice@example.com/web" }
+            "room": { "name": "retryable@muc.example.com", "sid": "RM_retryable" },
+            "participant": {
+                "identity": "alice@example.com/web",
+                "sid": "PA_retryable",
+                "attributes": { "waddle.occupancy_generation": alice_occupancy_session.to_string() }
+            }
         }))
         .expect("serialize webhook body");
         let first_secret = first_state
@@ -1307,7 +1606,6 @@ mod tests {
         .await;
         let room_jid: BareJid = "retryable@muc.example.com".parse().expect("room JID");
         let alice: FullJid = "alice@example.com/web".parse().expect("full JID");
-        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             retry_state.as_ref(),
             "example.com",
@@ -1364,6 +1662,7 @@ mod tests {
 
     #[tokio::test]
     async fn absent_room_actor_enqueues_muji_clear_and_completes_delivery() {
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
         let store =
@@ -1378,7 +1677,8 @@ mod tests {
             },
             "participant": {
                 "identity": "alice@example.com/web",
-                "sid": "PA_absent_actor"
+                "sid": "PA_absent_actor",
+                "attributes": { "waddle.occupancy_generation": generation.to_string() }
             }
         }))
         .expect("serialize webhook body");
@@ -1641,6 +1941,7 @@ mod tests {
                 identity: "alice@example.com/web".into(),
                 sid: None,
                 state: None,
+                attributes: waddle_sfu::ParticipantAttributes::default(),
             },
         };
         assert_eq!(
@@ -1939,6 +2240,7 @@ mod tests {
         let call_id = "alice@example.com::dm-observed";
         let departed = "bob@example.com/phone";
         let observed_sids = ObservedCallSids {
+            media_generation: None,
             observed_event_at: None,
             room_sid: Some(RoomSid::try_new("RM_observed").expect("room sid")),
             participant_sid: Some(ParticipantSid::try_new("PA_observed").expect("participant sid")),
@@ -1967,6 +2269,7 @@ mod tests {
     async fn participant_joined_reregisters_unknown_participant_with_observed_sids() {
         let recorder = Arc::new(RecordingSfu::default());
         let state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let media_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
         let env = ParticipantEnvelope {
             created_at: None,
             id: Some("EV_joined_observed".to_owned()),
@@ -1978,6 +2281,9 @@ mod tests {
                 identity: "bob@example.com/phone".to_owned(),
                 sid: Some(ParticipantSid::try_new("PA_joined").expect("participant sid")),
                 state: None,
+                attributes: waddle_sfu::ParticipantAttributes {
+                    media_generation: Some(media_generation),
+                },
             },
         };
         let observed_sids = observed_sids_for_participant(&env);
@@ -1995,6 +2301,7 @@ mod tests {
             env.participant.identity
         );
         assert_eq!(observations[0].2, observed_sids);
+        assert_eq!(observations[0].2.media_generation, Some(media_generation));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2079,6 +2386,7 @@ mod tests {
                 identity: "bob@example.com/phone".to_owned(),
                 sid: Some(ParticipantSid::try_new("PA_old").expect("participant sid")),
                 state: None,
+                attributes: waddle_sfu::ParticipantAttributes::default(),
             },
         };
         let observed_sids = observed_sids_for_participant(&env);
@@ -2098,6 +2406,251 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn restored_provider_cache_cannot_authorize_old_untagged_or_session_only_muji_leaves() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let state = create_test_websocket_state_with_calls().await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "restored-tagged-leave@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full JID");
+        let call = CallId::try_new(room_jid.to_string()).expect("call");
+        let identity = Identity::from_jid(alice.clone());
+        let displaced = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let successor = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let sfu = state.deps.protocol.sfu.as_ref().expect("real SFU");
+        let mut old_media = ObservedCallSids::new(
+            Some(RoomSid::try_new("RM_restored").expect("room SID")),
+            Some(ParticipantSid::try_new("PA_restored").expect("participant SID")),
+        );
+        old_media.media_generation = Some(displaced);
+        assert_eq!(
+            sfu.register_call_participant_observed(&call, &identity, &old_media),
+            SidObservationDisposition::Applied
+        );
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &identity),
+            None,
+            "provider restoration must not invent MUC occupancy authority"
+        );
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: successor,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: active_muji(),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+
+        let body = serde_json::to_vec(&json!({
+            "event": "participant_left",
+            "id": "EV_restored_tagged_old_leave",
+            "room": { "name": room_jid.as_str(), "sid": "RM_restored" },
+            "participant": {
+                "identity": alice.as_str(),
+                "sid": "PA_restored",
+                "attributes": { "waddle.occupancy_generation": displaced.to_string() }
+            }
+        }))
+        .expect("webhook body");
+        let secret = sfu.webhook_secret().as_bytes().to_vec();
+        let response = livekit_webhook_handler(
+            Extension(state.clone()),
+            State(test_router_state()),
+            signed_webhook_headers(&secret, &body),
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert!(
+            room.muji_for_session("alice", &alice).is_some(),
+            "the room actor must reject g1's leave even when the SFU only restored g1 media"
+        );
+
+        // A restarted SFU may instead have learned the current successor's
+        // media without recovering logical MUC authority. An old processing
+        // webhook delivery still lacks a generation after token-key rotation.
+        let mut successor_media = ObservedCallSids::new(
+            Some(RoomSid::try_new("RM_restored").expect("room SID")),
+            Some(ParticipantSid::try_new("PA_successor").expect("participant SID")),
+        );
+        successor_media.media_generation = Some(successor);
+        sfu.register_call_participant_observed(&call, &identity, &successor_media);
+        assert_eq!(sfu.participant_occupant_session(&call, &identity), None);
+        for (id, sid) in [
+            ("EV_legacy_sidless_leave", None),
+            ("EV_untagged_sid_leave", Some("PA_successor")),
+        ] {
+            let legacy_body = serde_json::to_vec(&json!({
+                "event": "participant_left",
+                "id": id,
+                "room": { "name": room_jid.as_str(), "sid": "RM_restored" },
+                "participant": { "identity": alice.as_str(), "sid": sid }
+            }))
+            .expect("legacy webhook body");
+            let legacy_response = livekit_webhook_handler(
+                Extension(state.clone()),
+                State(test_router_state()),
+                signed_webhook_headers(&secret, &legacy_body),
+                Bytes::from(legacy_body),
+            )
+            .await
+            .into_response();
+            assert_eq!(legacy_response.status(), StatusCode::OK);
+            let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+            assert!(
+                room.muji_for_session("alice", &alice).is_some(),
+                "generationless provider delivery {id} cannot authorize an Any-generation clear"
+            );
+        }
+        assert_eq!(
+            metrics.counter_sum("waddle.call.teardown.stale_dropped", &[]),
+            Some(3),
+            "the tagged old leave and both early-rejected legacy leaves are accounted once"
+        );
+        let legacy_sid_only = ObservedCallSids::new(
+            Some(RoomSid::try_new("RM_restored").expect("room SID")),
+            Some(ParticipantSid::try_new("PA_successor").expect("participant SID")),
+        );
+        let reused_signaling_sid =
+            waddle_sfu::SessionBinding::try_new("reused-signaling-sid").expect("session");
+        let legacy_outcome = clear_muji_presence_for_departure(
+            state.as_ref(),
+            &room_jid,
+            &alice,
+            Some(&legacy_sid_only),
+            None,
+            waddle_sfu::UnboundOccupantPolicy::TearDown,
+            Some(&reused_signaling_sid),
+        )
+        .await;
+        assert_eq!(
+            legacy_outcome,
+            WebhookEffectOutcome::Stale,
+            "a reused Jingle SID cannot authorize a generationless legacy retry"
+        );
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .muji_for_session("alice", &alice)
+            .is_some());
+        assert!(sfu.has_call_participant(&call, &identity));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tagged_displaced_webhooks_preserve_the_authorized_successors_muji_presence() {
+        let state = create_test_websocket_state_with_calls().await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "tagged-replacement@muc.example.com"
+            .parse()
+            .expect("room JID");
+        let alice: FullJid = "alice@example.com/web".parse().expect("full JID");
+        let call = CallId::try_new(room_jid.to_string()).expect("call");
+        let identity = Identity::from_jid(alice.clone());
+        let displaced = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let successor = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let sfu = state.deps.protocol.sfu.as_ref().expect("real SFU");
+        let publish = |generation, name: &str| {
+            sfu.issue_join_token_with_session(
+                &call,
+                &identity,
+                MediaCapabilities::direct_call_peer(),
+                &waddle_sfu::SessionBinding::try_new(name).expect("session"),
+                generation,
+                sfu.participant_registration_expectation(&call, &identity)
+                    .expect("publication expectation"),
+            )
+            .expect("mint")
+            .expect("publish")
+        };
+        publish(displaced, "old-session");
+        // The old participant's join has not arrived when the new generation
+        // publishes its credentials, so its SID is not known at takeover.
+        let successor_token = publish(successor, "new-session");
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: successor,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: active_muji(),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+
+        let secret = sfu.webhook_secret().as_bytes().to_vec();
+        for (event, id) in [
+            ("participant_joined", "EV_displaced_tagged_join"),
+            ("participant_left", "EV_displaced_tagged_leave"),
+        ] {
+            let body = serde_json::to_vec(&json!({
+                "event": event,
+                "id": id,
+                "room": { "name": room_jid.as_str(), "sid": "RM_tagged" },
+                "participant": {
+                    "identity": alice.as_str(),
+                    "sid": "PA_displaced",
+                    "attributes": { "waddle.occupancy_generation": displaced.to_string() }
+                }
+            }))
+            .expect("webhook body");
+            let response = livekit_webhook_handler(
+                Extension(state.clone()),
+                State(test_router_state()),
+                signed_webhook_headers(&secret, &body),
+                Bytes::from(body),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                sfu.participant_occupant_session(&call, &identity),
+                Some(successor)
+            );
+            assert!(!sfu.is_revoked(&successor_token.jti));
+            let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+            assert!(
+                room.muji_for_session("alice", &alice).is_some(),
+                "an old tagged {event} must not clear the successor's Muji advertisement"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn webhook_old_participant_sid_acknowledges_without_clear_but_current_sid_clears() {
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let state = create_test_websocket_state_with_calls().await;
@@ -2108,16 +2661,18 @@ mod tests {
         let call_id = CallId::try_new(room_name.clone()).expect("call id");
         let identity = Identity::from_jid(alice.clone());
         let shared_room_sid = RoomSid::try_new("RM_rotate").expect("room sid");
-        let old_sids = ObservedCallSids::new(
+        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let mut old_sids = ObservedCallSids::new(
             Some(shared_room_sid.clone()),
             Some(ParticipantSid::try_new("PA_old").expect("participant sid")),
         );
-        let current_sids = ObservedCallSids::new(
+        old_sids.media_generation = Some(alice_occupancy_session);
+        let mut current_sids = ObservedCallSids::new(
             Some(shared_room_sid.clone()),
             Some(ParticipantSid::try_new("PA_current").expect("participant sid")),
         );
 
-        let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        current_sids.media_generation = Some(alice_occupancy_session);
         crate::server::routes::websocket::handlers::presence::handle_muc_join(
             state.as_ref(),
             "example.com",
@@ -2176,7 +2731,8 @@ mod tests {
                     .participant_sid
                     .as_ref()
                     .expect("participant sid")
-                    .as_str()
+                    .as_str(),
+                "attributes": { "waddle.occupancy_generation": alice_occupancy_session.to_string() }
             }
         }))
         .expect("serialize joined webhook body");
@@ -2203,7 +2759,8 @@ mod tests {
                     .participant_sid
                     .as_ref()
                     .expect("participant sid")
-                    .as_str()
+                    .as_str(),
+                "attributes": { "waddle.occupancy_generation": alice_occupancy_session.to_string() }
             }
         }))
         .expect("serialize old leave body");
@@ -2240,7 +2797,8 @@ mod tests {
                     .participant_sid
                     .as_ref()
                     .expect("participant sid")
-                    .as_str()
+                    .as_str(),
+                "attributes": { "waddle.occupancy_generation": alice_occupancy_session.to_string() }
             }
         }))
         .expect("serialize current leave body");
@@ -2291,6 +2849,7 @@ mod tests {
         )
         .await;
         let observed_sids = ObservedCallSids {
+            media_generation: Some(alice_occupancy_session),
             observed_event_at: None,
             room_sid: Some(RoomSid::try_new("RM_stale").expect("room sid")),
             participant_sid: Some(ParticipantSid::try_new("PA_stale").expect("participant sid")),

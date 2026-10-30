@@ -30,8 +30,11 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
-use crate::call::{CallId, Identity, MediaCapabilities, ParticipantSid, RoomSid};
+use crate::call::{
+    CallId, Identity, MediaCapabilities, ParticipantAttributes, ParticipantSid, RoomSid,
+};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::JWT_CLOCK_SKEW;
@@ -84,9 +87,18 @@ pub struct RoomOccupancy {
     /// LiveKit participant SID when the listing supplied one. Reconciliation
     /// carries that SID into restored registry entries so SID-fenced teardown
     /// remains decidable after a process restart.
-    pub waddle: Vec<(Identity, Option<ParticipantSid>)>,
+    pub waddle: Vec<LiveParticipant>,
     /// Connected participants whose identity is not one of ours.
     pub foreign: usize,
+}
+
+/// One authenticated provider observation. Generation is media evidence only;
+/// it does not establish logical MUC occupancy after restoration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveParticipant {
+    pub identity: Identity,
+    pub participant_sid: Option<ParticipantSid>,
+    pub media_generation: Option<OccupancySessionGeneration>,
 }
 
 /// A LiveKit room name classified once at the admin boundary (#1612
@@ -138,7 +150,7 @@ impl RoomOccupancy {
             && self
                 .waddle
                 .iter()
-                .all(|(identity, _participant_sid)| identity == departing)
+                .all(|participant| &participant.identity == departing)
     }
 }
 
@@ -493,9 +505,11 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
                 let mut occupancy = RoomOccupancy::default();
                 for participant in resp.participants {
                     match participant.identity.parse::<jid::FullJid>() {
-                        Ok(jid) => occupancy
-                            .waddle
-                            .push((Identity::from_jid(jid), participant.sid)),
+                        Ok(jid) => occupancy.waddle.push(LiveParticipant {
+                            identity: Identity::from_jid(jid),
+                            participant_sid: participant.sid,
+                            media_generation: participant.attributes.media_generation,
+                        }),
                         Err(_) => occupancy.foreign += 1,
                     }
                 }
@@ -660,6 +674,8 @@ struct ParticipantPermission {
     can_publish: bool,
     #[serde(rename = "canPublishData")]
     can_publish_data: bool,
+    #[serde(rename = "canUpdateMetadata")]
+    can_update_metadata: bool,
 }
 
 impl ParticipantPermission {
@@ -668,6 +684,7 @@ impl ParticipantPermission {
             can_subscribe: capabilities.can_subscribe,
             can_publish: capabilities.can_publish,
             can_publish_data: capabilities.can_publish_data,
+            can_update_metadata: false,
         }
     }
 }
@@ -680,7 +697,8 @@ struct ListParticipantsRequest {
 
 /// Twirp response for `livekit.RoomService/ListParticipants`. LiveKit
 /// returns a `participants` array of `ParticipantInfo`; only the
-/// `identity` and `sid` are load-bearing for ghost reconciliation. Other
+/// `identity`, `sid` and generation attributes are load-bearing for media
+/// reconciliation. Other
 /// fields (`state`, `tracks`, …) are ignored via serde's default unknown-field
 /// handling.
 #[derive(Deserialize)]
@@ -695,6 +713,8 @@ struct ListedParticipant {
     identity: String,
     #[serde(default)]
     sid: Option<ParticipantSid>,
+    #[serde(default)]
+    attributes: ParticipantAttributes,
 }
 
 /// Twirp error envelope: a JSON object with `code` and `msg` fields
@@ -940,6 +960,37 @@ mod tests {
     }
 
     #[test]
+    fn participant_listing_parses_generation_attributes_without_inventing_absent_authority() {
+        let generation: waddle_xmpp_core::OccupancySessionGeneration =
+            "2ad5f39a-638e-4ba3-87ab-d0a9be491f5b"
+                .parse()
+                .expect("generation");
+        let parsed: ListParticipantsResponse = serde_json::from_value(serde_json::json!({
+            "participants": [
+                {"identity": "alice@waddle.social/desktop", "sid": "PA_tagged", "attributes": {
+                    "waddle.occupancy_generation": generation.to_string(), "display": "ignored"
+                }},
+                {"identity": "bob@waddle.social/mobile", "sid": "PA_untagged"}
+            ]
+        }))
+        .expect("listing");
+        assert_eq!(
+            parsed.participants[0].attributes.media_generation,
+            Some(generation)
+        );
+        assert_eq!(parsed.participants[1].attributes.media_generation, None);
+        let malformed = serde_json::from_value::<ListParticipantsResponse>(serde_json::json!({
+            "participants": [{"identity": "alice@waddle.social/desktop", "attributes": {
+                "waddle.occupancy_generation": "not-a-generation"
+            }}]
+        }));
+        assert!(
+            malformed.is_err(),
+            "malformed authority must not become an untagged participant"
+        );
+    }
+
+    #[test]
     fn list_participants_response_parses_livekit_wire_shape() {
         // Lock the LiveKit `ListParticipantsResponse` wire shape: a
         // `participants` array whose elements carry typed `identity` and
@@ -1037,6 +1088,7 @@ mod tests {
                     "canSubscribe": true,
                     "canPublish": false,
                     "canPublishData": false,
+                    "canUpdateMetadata": false,
                 }
             })
         );

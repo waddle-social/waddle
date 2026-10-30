@@ -440,6 +440,44 @@ pub trait SfuService: Send + Sync + 'static {
         direction: SidObservationDirection,
     ) -> SidObservationDisposition;
 
+    /// One atomic provider observation; this is not logical MUC ownership.
+    fn participant_media_evidence(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Option<ObservedCallSids> {
+        None
+    }
+
+    /// Non-destructive departure preflight with caller-held occupancy/session
+    /// evidence. Provider attributes remain observations, not MUC authority.
+    fn observe_call_participant_departure(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        occupant: Option<OccupancySessionGeneration>,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
+    ) -> SidObservationDisposition {
+        if let Some(presented) = occupant {
+            match self.participant_occupant_session(call_id, identity) {
+                Some(current) if current == presented => {}
+                None if unbound == UnboundOccupantPolicy::TearDown => {}
+                _ => return SidObservationDisposition::StaleSid,
+            }
+        }
+        if !sid.accepts(self.participant_session_binding(call_id, identity).as_ref()) {
+            return SidObservationDisposition::StaleSid;
+        }
+        self.observe_call_participant_sids(
+            call_id,
+            identity,
+            observed_sids,
+            SidObservationDirection::Leave,
+        )
+    }
+
     /// Push replacement media grants to a live participant after an
     /// XEP-0045 voice change, without disconnecting them: losing voice
     /// becomes listen-only immediately (the SFU force-unpublishes
@@ -513,11 +551,27 @@ pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary>
 /// `waddle-server` translates these values into process metrics.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcilePassSummary {
-    pub swept: Vec<(CallId, Identity)>,
+    pub swept: Vec<SweptParticipant>,
+    pub live_media: Vec<LiveMediaObservation>,
     pub rooms_examined: u64,
     pub rooms_adopted: u64,
     pub rooms_swept: u64,
     pub occupancy_failures: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweptParticipant {
+    pub call_id: CallId,
+    pub identity: Identity,
+    pub occupant_session: Option<OccupancySessionGeneration>,
+    pub observed_sids: ObservedCallSids,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveMediaObservation {
+    pub call_id: CallId,
+    pub room_sid: Option<crate::RoomSid>,
+    pub participant: crate::LiveParticipant,
 }
 
 /// Periodic reconciliation against the SFU's ground truth.

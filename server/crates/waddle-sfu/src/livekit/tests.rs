@@ -69,6 +69,14 @@ fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> Obser
     )
 }
 
+fn swept_identities(summary: &crate::ReconcilePassSummary) -> Vec<(CallId, Identity)> {
+    summary
+        .swept
+        .iter()
+        .map(|participant| (participant.call_id.clone(), participant.identity.clone()))
+        .collect()
+}
+
 fn fixture_occupancy_session() -> OccupancySessionGeneration {
     OccupancySessionGeneration::mint()
 }
@@ -940,7 +948,7 @@ use std::sync::Mutex;
 
 use crate::admin::LiveKitAdmin;
 
-type ListedParticipants = Vec<(Identity, Option<ParticipantSid>)>;
+type ListedParticipants = Vec<crate::LiveParticipant>;
 
 #[derive(Default)]
 struct RecordingAdmin {
@@ -1033,7 +1041,11 @@ impl RecordingAdmin {
             call.clone(),
             identities
                 .into_iter()
-                .map(|identity| (identity, None))
+                .map(|identity| crate::LiveParticipant {
+                    identity,
+                    participant_sid: None,
+                    media_generation: None,
+                })
                 .collect(),
         );
     }
@@ -1043,10 +1055,17 @@ impl RecordingAdmin {
         call: &CallId,
         participants: Vec<(Identity, Option<ParticipantSid>)>,
     ) {
-        self.live
-            .lock()
-            .expect("recording lock")
-            .insert(call.clone(), participants);
+        self.live.lock().expect("recording lock").insert(
+            call.clone(),
+            participants
+                .into_iter()
+                .map(|(identity, participant_sid)| crate::LiveParticipant {
+                    identity,
+                    participant_sid,
+                    media_generation: None,
+                })
+                .collect(),
+        );
     }
 
     fn set_foreign_live(&self, call: &CallId, count: usize) {
@@ -2565,7 +2584,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
 
     let swept = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
 
-    assert_eq!(swept.swept, vec![(call.clone(), bob.clone())]);
+    assert_eq!(swept_identities(&swept), vec![(call.clone(), bob.clone())]);
     assert!(sfu.has_call_participant(&call, &alice), "Alice must remain");
     assert!(
         !sfu.has_call_participant(&call, &bob),
@@ -2817,7 +2836,7 @@ async fn reconcile_failed_pass_resets_absence_streak() {
     assert_eq!(sfu.participant_count(&call), 1);
     // Second CONSECUTIVE absent pass → swept.
     let fourth = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(fourth.swept, vec![(call.clone(), alice)]);
+    assert_eq!(swept_identities(&fourth), vec![(call.clone(), alice)]);
     assert_eq!(sfu.participant_count(&call), 0);
 }
 
@@ -2884,7 +2903,10 @@ async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_
 
     let second_absent = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
     assert_eq!(second_absent.rooms_swept, 1);
-    assert_eq!(second_absent.swept, vec![(call.clone(), alice.clone())]);
+    assert_eq!(
+        swept_identities(&second_absent),
+        vec![(call.clone(), alice.clone())]
+    );
     assert!(!sfu.has_call_participant(&call, &alice));
 }
 
@@ -2907,7 +2929,10 @@ async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
     assert_eq!(first.rooms_adopted, 0);
     assert!(first.swept.is_empty());
     let second = sfu.reconcile_active_calls(ChronoDuration::zero()).await;
-    assert_eq!(second.swept, vec![(call.clone(), alice.clone())]);
+    assert_eq!(
+        swept_identities(&second),
+        vec![(call.clone(), alice.clone())]
+    );
     assert_eq!(admin.occupancy_calls.load(Ordering::SeqCst), 2);
     assert_eq!(admin.delete_snapshot().len(), 0);
     assert!(!sfu.has_call_participant(&call, &alice));
@@ -2965,7 +2990,11 @@ fn restored_participant_skips_the_first_empty_bucket_eject_after_adoption() {
     assert!(sfu.adopt_discovered_call(
         &call,
         Some(fixture_room_sid("RM_adopted")),
-        &[(alice.clone(), None)],
+        &[crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: None,
+            media_generation: None
+        }],
         Utc::now()
     ));
     let first_minted = sfu
@@ -3243,7 +3272,11 @@ fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(stale_listed_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(stale_listed_sid),
+                media_generation: None
+            }],
             Utc::now(),
             probe_started_at,
         ),
@@ -3357,7 +3390,11 @@ fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(twin_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(twin_sid),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -3421,7 +3458,11 @@ fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(first_sid.clone()))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(first_sid.clone()),
+                media_generation: None
+            }],
             Utc::now(),
             pre_contest_probe_boundary,
         ),
@@ -3438,7 +3479,11 @@ fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(first_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(first_sid),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -3483,7 +3528,11 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(fixture_participant_sid("PA_rearm")))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(fixture_participant_sid("PA_rearm")),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -4347,9 +4396,11 @@ fn displaced_participant_webhooks_cannot_clear_the_connecting_successor() {
         .expect("mint")
         .expect("publish")
     };
-    mint(fixture_occupancy_session());
+    let first = fixture_occupancy_session();
+    mint(first);
     let mut old = observed_sids(Some("RM_live"), Some("PA_old"));
     old.observed_event_at = Some(Utc::now());
+    old.media_generation = Some(first);
     sfu.register_call_participant_observed(&call, &alice, &old);
     let successor = fixture_occupancy_session();
     let token = mint(successor);
@@ -4370,6 +4421,7 @@ fn displaced_participant_webhooks_cannot_clear_the_connecting_successor() {
     assert!(!sfu.is_revoked(&token.jti));
 
     let mut new = observed_sids(Some("RM_live"), Some("PA_new"));
+    new.media_generation = Some(successor);
     new.observed_event_at = old.observed_event_at.map(|at| at + Duration::seconds(1));
     assert_eq!(
         sfu.register_call_participant_observed(&call, &alice, &new),
@@ -4413,11 +4465,11 @@ fn occupancy_replacement_reports_the_displaced_participant_for_retry() {
     };
     let displaced = fixture_occupancy_session();
     mint(displaced);
-    sfu.register_call_participant_observed(
-        &call,
-        &alice,
-        &observed_sids(Some("RM_live"), Some("PA_old")),
-    );
+    let mut observed = observed_sids(Some("RM_live"), Some("PA_old"));
+    observed.media_generation = Some(displaced);
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    // The initial tagged join separately requests canonical validation.
+    pending.lock().expect("reported intents").clear();
     mint(fixture_occupancy_session());
     let pending = pending.lock().expect("reported intents");
     assert_eq!(
@@ -4429,7 +4481,7 @@ fn occupancy_replacement_reports_the_displaced_participant_for_retry() {
         pending[0].target,
         TeardownTargetLite::DisplacedParticipant {
             identity: alice,
-            participant_sid: fixture_participant_sid("PA_old"),
+            participant_sid: Some(fixture_participant_sid("PA_old")),
         }
     );
     assert_eq!(pending[0].occupant_session, Some(displaced));
@@ -4472,11 +4524,9 @@ async fn assert_initiate_rollback_fences_its_publication(after: RegistrationAfte
     match after {
         RegistrationAfterPublication::Unchanged => {}
         RegistrationAfterPublication::WebhookReplacement => {
-            sfu.register_call_participant_observed(
-                &call,
-                &alice,
-                &observed_sids(Some("RM_live"), Some("PA_replacement")),
-            );
+            let mut observed = observed_sids(Some("RM_live"), Some("PA_replacement"));
+            observed.media_generation = Some(occupant);
+            sfu.register_call_participant_observed(&call, &alice, &observed);
         }
         RegistrationAfterPublication::NewSignalingPublication => {
             let replacement = captured_registration(&sfu, &call, &alice);
@@ -4708,11 +4758,12 @@ fn captured_unbound_participant_accepts_unchanged_duplicate_observation() {
     let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
     let call = CallId::try_new("unchanged-unbound").expect("call");
     let alice = fixture_identity("alice");
-    let observed = observed_sids(Some("RM_live"), Some("PA_live"));
+    let occupant = fixture_occupancy_session();
+    let mut observed = observed_sids(Some("RM_live"), Some("PA_live"));
+    observed.media_generation = Some(occupant);
     sfu.register_call_participant_observed(&call, &alice, &observed);
     let expected = captured_registration(&sfu, &call, &alice);
     sfu.register_call_participant_observed(&call, &alice, &observed);
-    let occupant = fixture_occupancy_session();
     let session = SessionBinding::try_new("authorized").expect("session");
     assert!(sfu
         .issue_join_token_with_session(

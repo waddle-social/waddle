@@ -5,6 +5,7 @@
 //! focus path to decide when a call has ended.
 
 use crate::config::ApiSecret;
+use crate::LiveParticipant;
 use crate::LiveParticipantsFuture;
 use crate::ParticipantRegistrationExpectation;
 use crate::ReconcileFuture;
@@ -101,9 +102,8 @@ struct ParticipantState {
     /// Occupancy alone cannot distinguish absence from an unbound restoration.
     registration_revision: uuid::Uuid,
     participant_sid: Option<ParticipantSid>,
-    /// Last displaced incarnation, retained while its successor is connecting.
-    /// Its join/leave echoes cannot acquire the successor's registration.
-    retired_participant_sid: Option<ParticipantSid>,
+    /// Provider-observed generation of the connected media, never MUC authority.
+    media_generation: Option<OccupancySessionGeneration>,
     /// When `participant_sid` was last written from a live observation
     /// (join webhook or occupancy probe). Lets the reconcile probe
     /// advance a stale sid without ever rolling back a newer webhook
@@ -142,7 +142,7 @@ impl ParticipantState {
         Self {
             registration_revision: uuid::Uuid::new_v4(),
             participant_sid: None,
-            retired_participant_sid: None,
+            media_generation: None,
             participant_sid_observed_at: None,
             participant_sid_event_at: None,
             participant_sid_contested_at: None,
@@ -156,6 +156,7 @@ impl ParticipantState {
     fn restored(
         first_registered_at: DateTime<Utc>,
         participant_sid: Option<ParticipantSid>,
+        media_generation: Option<OccupancySessionGeneration>,
     ) -> Self {
         Self {
             registration_revision: uuid::Uuid::new_v4(),
@@ -163,7 +164,7 @@ impl ParticipantState {
             participant_sid_event_at: None,
             participant_sid_contested_at: None,
             participant_sid,
-            retired_participant_sid: None,
+            media_generation,
             first_registered_at,
             registered_without_mint: true,
             session: None,
@@ -184,7 +185,11 @@ impl ParticipantState {
                 .is_some()
                 .then_some(observed_sids.observed_event_at)
                 .flatten(),
-            ..Self::restored(first_registered_at, observed_sids.participant_sid.clone())
+            ..Self::restored(
+                first_registered_at,
+                observed_sids.participant_sid.clone(),
+                observed_sids.media_generation,
+            )
         }
     }
 
@@ -255,6 +260,30 @@ type CallRegistry = Arc<DashMap<CallId, CallEntry>>;
 /// Key identifying one participant within one call across the
 /// per-participant side tables.
 type ParticipantKey = (CallId, Identity);
+
+fn retirement_intent(
+    call_id: &CallId,
+    identity: &Identity,
+    room_sid: Option<RoomSid>,
+    participant_sid: Option<ParticipantSid>,
+    media_generation: Option<OccupancySessionGeneration>,
+) -> Option<CallTeardownIntentLite> {
+    if participant_sid.is_none() && media_generation.is_none() {
+        return None;
+    }
+    Some(CallTeardownIntentLite {
+        call_id: call_id.clone(),
+        target: TeardownTargetLite::DisplacedParticipant {
+            identity: identity.clone(),
+            participant_sid,
+        },
+        generation: None,
+        room_sid,
+        occupant_session: media_generation,
+        unbound_occupant: UnboundOccupantPolicy::Keep,
+        session: None,
+    })
+}
 
 /// Per-participant serialization for grant pushes. Shared with the
 /// spawned admin tasks so only one `UpdateParticipant` per participant
@@ -361,6 +390,31 @@ enum SessionGate<'a> {
     },
 }
 
+impl SessionGate<'_> {
+    fn accepts(self, participant: Option<&ParticipantState>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Registration(expected) => {
+                participant.is_some_and(|state| state.registration_revision == expected)
+            }
+            Self::Presented(presented) => participant
+                .and_then(|state| state.session.as_ref())
+                .is_none_or(|bound| presented == Some(bound)),
+            Self::Occupant {
+                presented,
+                unbound,
+                sid,
+            } => {
+                let matches = match participant.and_then(|state| state.occupant_session) {
+                    Some(current) => current == presented,
+                    None => unbound == UnboundOccupantPolicy::TearDown,
+                };
+                matches && sid.accepts(participant.and_then(|state| state.session.as_ref()))
+            }
+        }
+    }
+}
+
 pub type TeardownFailureSink =
     Arc<dyn Fn(CallTeardownIntentLite) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -432,6 +486,15 @@ pub enum TeardownExecution {
     Executed,
     StaleGeneration,
     Occupied,
+    AuthorityUnavailable,
+}
+
+/// Canonical room ownership, revalidated by the caller around remote probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccupancyAuthority {
+    Current(OccupancySessionGeneration),
+    Absent,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,18 +557,25 @@ impl LiveKitTeardownExecutor {
                 match occupancy
                     .waddle
                     .iter()
-                    .find(|(occupant, _)| occupant == identity)
+                    .find(|participant| &participant.identity == identity)
                 {
                     // Already gone: the removal this intent wanted has
                     // happened; success without touching the room.
                     None => return Ok(TeardownExecution::Executed),
-                    Some((_, Some(live))) if live != fence => {
-                        return Ok(TeardownExecution::StaleGeneration)
-                    }
-                    Some((_, Some(_))) => {}
+                    Some(LiveParticipant {
+                        participant_sid: Some(live),
+                        ..
+                    }) if live != fence => return Ok(TeardownExecution::StaleGeneration),
+                    Some(LiveParticipant {
+                        participant_sid: Some(_),
+                        ..
+                    }) => {}
                     // A live identity without its SID cannot prove the
                     // captured fence still names this incarnation.
-                    Some((_, None)) => return Ok(TeardownExecution::Occupied),
+                    Some(LiveParticipant {
+                        participant_sid: None,
+                        ..
+                    }) => return Ok(TeardownExecution::Occupied),
                 }
             }
         } else if entry_missing {
@@ -580,60 +650,127 @@ impl LiveKitTeardownExecutor {
         Ok(TeardownExecution::Executed)
     }
 
-    /// A replacement owns the signaling registration already, so departure
-    /// session/generation comparisons do not apply. Only the captured media
-    /// incarnation can authorize this removal.
-    async fn retire_displaced_participant(
+    /// Retirement requires the room owner's canonical current occupancy, not
+    /// this process's potentially stale SFU registration.
+    async fn retire_displaced_participant<F, Fut>(
         &self,
         intent: &CallTeardownIntentLite,
         identity: &Identity,
-        participant_sid: &ParticipantSid,
-    ) -> Result<TeardownExecution, SfuError> {
-        let guard = || {
-            if self.calls.get(&intent.call_id).is_some_and(|entry| {
-                entry
-                    .participants
-                    .get(identity)
-                    .is_some_and(|state| state.participant_sid_contested_at.is_some())
-            }) {
-                return TeardownGuard::Unresolved;
-            }
-            self.guard(
-                &intent.call_id,
-                intent.generation,
-                intent.room_sid.as_ref(),
-                Some((identity, Some(participant_sid))),
-                false,
-            )
+        participant_sid: Option<&ParticipantSid>,
+        mut authority: F,
+    ) -> Result<TeardownExecution, SfuError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = OccupancyAuthority>,
+    {
+        let current_occupant = match authority().await {
+            OccupancyAuthority::Current(current) => Some(current),
+            OccupancyAuthority::Absent => None,
+            OccupancyAuthority::Unavailable => return Ok(TeardownExecution::AuthorityUnavailable),
         };
+        if participant_sid.is_none() && intent.occupant_session.is_none() {
+            return Ok(TeardownExecution::Occupied);
+        }
+        if current_occupant.is_some() && current_occupant == intent.occupant_session {
+            return Ok(TeardownExecution::StaleGeneration);
+        }
+        // Local call counters are process-local; only global provider room/SID
+        // and media generation evidence can travel to another room owner.
+        let guard = || self.guard(&intent.call_id, None, intent.room_sid.as_ref(), None, false);
         match guard() {
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
             TeardownGuard::Proceed => {}
         }
-        // Always consult LiveKit, including when the local SID still names
-        // the displaced participant: the successor's join webhook can lag.
         let occupancy = self.admin.room_occupancy(&intent.call_id).await?;
-        match occupancy.waddle.iter().find(|(live, _)| live == identity) {
-            None => return Ok(TeardownExecution::Executed),
-            Some((_, Some(live))) if live != participant_sid => {
-                return Ok(TeardownExecution::StaleGeneration);
-            }
-            Some((_, None)) => return Ok(TeardownExecution::Occupied),
-            Some((_, Some(_))) => {}
+        let Some(live) = occupancy
+            .waddle
+            .iter()
+            .find(|participant| &participant.identity == identity)
+        else {
+            return Ok(TeardownExecution::Executed);
+        };
+        if current_occupant.is_some() && current_occupant == live.media_generation {
+            return Ok(TeardownExecution::StaleGeneration);
         }
-        // Recheck after the probe await. LiveKit has no SID-conditional
-        // removal API: a connection replacing this SID during the subsequent
-        // identity-keyed HTTP request remains a provider-side race.
+        if let Some(expected) = intent.occupant_session {
+            match live.media_generation {
+                Some(observed) if observed != expected => {
+                    return Ok(TeardownExecution::StaleGeneration)
+                }
+                None => return Ok(TeardownExecution::Occupied),
+                Some(_) => {}
+            }
+        }
+        let Some(live_sid) = live.participant_sid.as_ref() else {
+            return Ok(TeardownExecution::Occupied);
+        };
+        if participant_sid.is_some_and(|expected| expected != live_sid) {
+            return Ok(TeardownExecution::StaleGeneration);
+        }
         match guard() {
             TeardownGuard::Stale => return Ok(TeardownExecution::StaleGeneration),
             TeardownGuard::Unresolved => return Ok(TeardownExecution::Occupied),
             TeardownGuard::Proceed => {}
         }
+        let current_occupant = match authority().await {
+            OccupancyAuthority::Current(current) => Some(current),
+            OccupancyAuthority::Absent => None,
+            OccupancyAuthority::Unavailable => return Ok(TeardownExecution::AuthorityUnavailable),
+        };
+        if current_occupant.is_some()
+            && (current_occupant == intent.occupant_session
+                || current_occupant == live.media_generation)
+        {
+            return Ok(TeardownExecution::StaleGeneration);
+        }
+        if self.calls.get(&intent.call_id).is_some_and(|entry| {
+            entry.participants.get(identity).is_some_and(|state| {
+                current_occupant.is_some()
+                    && state.media_generation == current_occupant
+                    && state
+                        .participant_sid
+                        .as_ref()
+                        .is_some_and(|sid| sid != live_sid)
+            })
+        }) {
+            return Ok(TeardownExecution::StaleGeneration);
+        }
+        // LiveKit's identity-keyed API cannot atomically compare the SID.
+        // A new connection during this final remote request is a provider race.
         self.admin
             .remove_participant(&intent.call_id, identity)
             .await?;
         Ok(TeardownExecution::Executed)
+    }
+
+    /// Revalidate canonical ownership before probing and before removal.
+    /// `Absent` means proven absence; unavailable or unbound authority must
+    /// return `Unavailable`, never authorize a destructive provider operation.
+    pub async fn execute_with_occupancy_authority<F, Fut>(
+        &self,
+        intent: &CallTeardownIntentLite,
+        authority: F,
+    ) -> Result<TeardownExecution, SfuError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = OccupancyAuthority>,
+    {
+        match &intent.target {
+            TeardownTargetLite::DisplacedParticipant {
+                identity,
+                participant_sid,
+            } => {
+                self.retire_displaced_participant(
+                    intent,
+                    identity,
+                    participant_sid.as_ref(),
+                    authority,
+                )
+                .await
+            }
+            _ => self.execute(intent).await,
+        }
     }
 
     /// LiveKit's current sid for this room name, if the room exists.
@@ -698,13 +835,7 @@ impl LiveKitTeardownExecutor {
         intent: &CallTeardownIntentLite,
     ) -> Result<TeardownExecution, SfuError> {
         match &intent.target {
-            TeardownTargetLite::DisplacedParticipant {
-                identity,
-                participant_sid,
-            } => {
-                self.retire_displaced_participant(intent, identity, participant_sid)
-                    .await
-            }
+            TeardownTargetLite::DisplacedParticipant { .. } => Ok(TeardownExecution::Occupied),
             TeardownTargetLite::Participant {
                 identity,
                 participant_sid,
@@ -991,7 +1122,7 @@ impl LiveKitSfu {
         &self,
         call_id: &CallId,
         room_sid: Option<RoomSid>,
-        participants: &[(Identity, Option<ParticipantSid>)],
+        participants: &[LiveParticipant],
         now: DateTime<Utc>,
     ) -> bool {
         if participants.is_empty() {
@@ -1004,8 +1135,15 @@ impl LiveKitSfu {
         let participant_states: HashMap<Identity, ParticipantState> = participants
             .iter()
             .cloned()
-            .map(|(identity, participant_sid)| {
-                (identity, ParticipantState::restored(now, participant_sid))
+            .map(|participant| {
+                (
+                    participant.identity,
+                    ParticipantState::restored(
+                        now,
+                        participant.participant_sid,
+                        participant.media_generation,
+                    ),
+                )
             })
             .collect();
         entry.insert(CallEntry {
@@ -1015,7 +1153,8 @@ impl LiveKitSfu {
             room_sid,
             participants: participant_states,
         });
-        for (identity, _participant_sid) in participants {
+        for participant in participants {
+            let identity = &participant.identity;
             self.registered_at
                 .insert((call_id.clone(), identity.clone()), now);
             self.absent_streak
@@ -1037,7 +1176,7 @@ impl LiveKitSfu {
     fn merge_live_identities(
         &self,
         call_id: &CallId,
-        live: &[(Identity, Option<ParticipantSid>)],
+        live: &[LiveParticipant],
         now: DateTime<Utc>,
         probe_freshness_boundary: DateTime<Utc>,
     ) -> usize {
@@ -1046,23 +1185,16 @@ impl LiveKitSfu {
             let Some(mut entry) = self.calls.get_mut(call_id) else {
                 return 0;
             };
-            for (identity, participant_sid) in live {
+            for live_participant in live {
+                let identity = &live_participant.identity;
+                let participant_sid = &live_participant.participant_sid;
                 if let Some(participant) = entry.participants.get_mut(identity) {
-                    if participant_sid.is_some()
-                        && participant_sid == &participant.retired_participant_sid
+                    if participant.occupant_session.is_some()
+                        && participant.occupant_session != live_participant.media_generation
                     {
-                        // This is still the displaced media incarnation. A
-                        // fresh authoritative probe resolves an unordered
-                        // webhook contest without adopting it as the successor.
-                        if participant
-                            .participant_sid_contested_at
-                            .is_some_and(|at| at < probe_freshness_boundary)
-                        {
-                            participant.participant_sid_contested_at = None;
-                            participant.advance_registration_revision();
-                        }
                         continue;
                     }
+                    participant.media_generation = live_participant.media_generation;
                     if participant_sid.is_some()
                         && participant.participant_sid.is_none()
                         // First-SID learning is freshness-gated too
@@ -1126,7 +1258,11 @@ impl LiveKitSfu {
                 } else {
                     entry.participants.insert(
                         identity.clone(),
-                        ParticipantState::restored(now, participant_sid.clone()),
+                        ParticipantState::restored(
+                            now,
+                            participant_sid.clone(),
+                            live_participant.media_generation,
+                        ),
                     );
                     merged += 1;
                 }
@@ -1139,7 +1275,8 @@ impl LiveKitSfu {
         // fills or advances the ALREADY-TRACKED identity's sid — the
         // merged-count gate would skip the eject backstop and leave
         // the revoked holder connected.
-        for (identity, _participant_sid) in live {
+        for participant in live {
+            let identity = &participant.identity;
             let key = (call_id.clone(), identity.clone());
             self.registered_at.entry(key.clone()).or_insert(now);
             self.absent_streak.remove(&key);
@@ -1362,13 +1499,23 @@ impl LiveKitSfu {
         };
         let identity_is_tracked = entry.participants.contains_key(identity);
         let mut participant_rejoined = false;
+        if entry.participants.get(identity).is_some_and(|state| {
+            state
+                .occupant_session
+                .is_some_and(|current| match observed_sids.media_generation {
+                    Some(observed) => current != observed,
+                    None => matches!(session_gate, SessionGate::Any),
+                })
+        }) {
+            return SidGuardDisposition::StaleSid;
+        }
         if matches!(direction, SidObservationDirection::Leave)
             && matches!(session_gate, SessionGate::Any)
             && observed_sids.participant_sid.is_none()
             && entry
                 .participants
                 .get(identity)
-                .is_some_and(|state| state.retired_participant_sid.is_some())
+                .is_some_and(|state| state.occupant_session.is_some())
         {
             // A SID-less webhook cannot distinguish old media from the live
             // successor. Explicit departure gates are validated under this
@@ -1411,28 +1558,10 @@ impl LiveKitSfu {
 
         if let Some(participant_sid) = observed_sids.participant_sid.as_ref() {
             if let Some(state) = entry.participants.get_mut(identity) {
-                if state.retired_participant_sid.as_ref() == Some(participant_sid) {
-                    return SidGuardDisposition::StaleSid;
-                }
                 if let Some(stored_participant_sid) = state.participant_sid.as_ref() {
                     if stored_participant_sid != participant_sid {
                         match direction {
                             SidObservationDirection::Join => {
-                                // Keep retired-SID history bounded to the last
-                                // displacement. An unordered join might name an
-                                // older, forgotten incarnation; only an event
-                                // ordered after the current SID, or a fresh
-                                // authoritative occupancy probe, may advance it.
-                                if state.retired_participant_sid.is_some()
-                                    && (observed_sids.observed_event_at.is_none()
-                                        || state.participant_sid_event_at.is_none())
-                                {
-                                    state.participant_sid_contested_at = Some(observed_at);
-                                    state.advance_registration_revision();
-                                    return SidGuardDisposition::Applied {
-                                        participant_rejoined: false,
-                                    };
-                                }
                                 // A join may only ADVANCE the sid when its
                                 // event time postdates the stored sid's
                                 // event lineage: the delivery ledger
@@ -1538,6 +1667,14 @@ impl LiveKitSfu {
             }
         }
 
+        if matches!(direction, SidObservationDirection::Join) {
+            if let (Some(state), Some(generation)) = (
+                entry.participants.get_mut(identity),
+                observed_sids.media_generation,
+            ) {
+                state.media_generation = Some(generation);
+            }
+        }
         // First-SID learning is restricted to Join-direction
         // observations (a `participant_joined` webhook or the
         // authoritative occupancy listing). A Leave-direction event can
@@ -1610,7 +1747,8 @@ impl LiveKitSfu {
             .map(|(_, expected)| expected.publication_revision)
             .unwrap_or_else(uuid::Uuid::new_v4);
         // Preserve the established issued -> calls lock order used by minting.
-        // Keep a vacant issued entry vacant on a failed comparison.
+        // Reserving the entry does not allocate a token bucket. Failed CAS
+        // and successful registration without a token keep a vacant bucket vacant.
         let issued_entry = (publication.is_some() || occupant_session.is_some())
             .then(|| self.issued.entry((call_id.clone(), identity.clone())));
         let call_entry = self.calls.entry(call_id.clone());
@@ -1650,28 +1788,30 @@ impl LiveKitSfu {
                     .participants
                     .entry(identity.clone())
                     .and_modify(|participant| {
-                        if let (Some(previous), Some(next)) =
-                            (participant.occupant_session, occupant_session)
-                        {
-                            if previous != next {
-                                displaced_generation = Some(previous);
-                                if let Some(sid) = participant.participant_sid.as_ref() {
-                                    if participant.retired_participant_sid.as_ref() != Some(sid) {
-                                        retirement = Some(CallTeardownIntentLite {
-                                            call_id: call_id.clone(),
-                                            target: TeardownTargetLite::DisplacedParticipant {
-                                                identity: identity.clone(),
-                                                participant_sid: sid.clone(),
-                                            },
-                                            generation: Some(entry.generation),
-                                            room_sid: entry.room_sid.clone(),
-                                            occupant_session: Some(previous),
-                                            unbound_occupant: UnboundOccupantPolicy::Keep,
-                                            session: participant.session.clone(),
-                                        });
-                                        participant.retired_participant_sid = Some(sid.clone());
-                                    }
+                        if let Some(next) = occupant_session {
+                            let previous = participant
+                                .occupant_session
+                                .or(participant.media_generation);
+                            let replaced = previous.is_some_and(|previous| previous != next)
+                                || (previous.is_none() && participant.participant_sid.is_some());
+                            if replaced {
+                                displaced_generation = participant.occupant_session;
+                                retirement = retirement_intent(
+                                    call_id,
+                                    identity,
+                                    entry.room_sid.clone(),
+                                    participant.participant_sid.clone(),
+                                    previous,
+                                );
+                                if let Some(intent) = retirement.as_mut() {
+                                    intent.session = participant.session.clone();
                                 }
+                                participant.participant_sid = None;
+                                participant.media_generation = None;
+                                participant.participant_sid_observed_at = None;
+                                participant.participant_sid_event_at = None;
+                                participant.participant_sid_contested_at = None;
+                                participant.first_registered_at = now;
                             }
                         }
                         participant.registration_revision = registration_revision;
@@ -1714,8 +1854,11 @@ impl LiveKitSfu {
                 })
             }
         };
-        if let Some(issued_entry) = issued_entry {
-            let mut issued = issued_entry.or_default();
+        let issued = issued_entry.and_then(|entry| match entry {
+            dashmap::Entry::Occupied(entry) => Some(entry.into_ref()),
+            dashmap::Entry::Vacant(entry) => publication.map(|_| entry.insert(Vec::new())),
+        });
+        if let Some(mut issued) = issued {
             if let Some(displaced) = displaced_generation {
                 issued.retain(|credential| {
                     if credential.occupant_session == Some(displaced) {
@@ -1920,6 +2063,11 @@ impl LiveKitSfu {
             }
             None => return ClearDisposition::NoCall,
         };
+        // Gate and observation share this entry guard; a stale caller cannot
+        // mutate observation state or clear a rebound registration.
+        if !session_gate.accepts(entry.participants.get(identity)) {
+            return ClearDisposition::SessionMismatch;
+        }
         if matches!(
             Self::guard_and_learn_observed_sids(
                 call_id,
@@ -1934,50 +2082,6 @@ impl LiveKitSfu {
         ) {
             return ClearDisposition::StaleSid;
         }
-        // #1608: the session gate and the removal below share this
-        // call-entry guard, so a concurrent initiate rebinding the
-        // registration either lands before this check (and rejects the
-        // stale clear) or after the whole clear — never in between.
-        match session_gate {
-            SessionGate::Any => {}
-            SessionGate::Registration(revision) => {
-                if entry
-                    .participants
-                    .get(identity)
-                    .map(|state| state.registration_revision)
-                    != Some(revision)
-                {
-                    return ClearDisposition::SessionMismatch;
-                }
-            }
-            SessionGate::Presented(presented) => {
-                if let Some(bound) = entry
-                    .participants
-                    .get(identity)
-                    .and_then(|participant| participant.session.as_ref())
-                {
-                    if presented != Some(bound) {
-                        return ClearDisposition::SessionMismatch;
-                    }
-                }
-            }
-            SessionGate::Occupant {
-                presented,
-                unbound,
-                sid,
-            } => {
-                let participant = entry.participants.get(identity);
-                match participant.and_then(|participant| participant.occupant_session) {
-                    Some(bound) if bound == presented => {}
-                    None if unbound == UnboundOccupantPolicy::TearDown => {}
-                    _ => return ClearDisposition::SessionMismatch,
-                }
-                if !sid.accepts(participant.and_then(|participant| participant.session.as_ref())) {
-                    return ClearDisposition::SessionMismatch;
-                }
-            }
-        }
-
         let participant_sid = entry
             .participants
             .get(identity)
@@ -2231,22 +2335,60 @@ impl LiveKitSfu {
         });
     }
 
+    fn observe_participant_sids_gated(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        direction: SidObservationDirection,
+        session_gate: SessionGate<'_>,
+    ) -> SidObservationDisposition {
+        let Some(mut entry) = self.calls.get_mut(call_id) else {
+            return SidObservationDisposition::Applied;
+        };
+        if !entry.participants.contains_key(identity) {
+            return SidObservationDisposition::Applied;
+        }
+        if !session_gate.accepts(entry.participants.get(identity)) {
+            return SidObservationDisposition::StaleSid;
+        }
+        let now = Utc::now();
+        let disposition = match Self::guard_and_learn_observed_sids(
+            call_id,
+            identity,
+            entry.value_mut(),
+            observed_sids,
+            direction,
+            now,
+            session_gate,
+        ) {
+            SidGuardDisposition::Applied {
+                participant_rejoined,
+            } => {
+                if participant_rejoined {
+                    self.registered_at
+                        .insert((call_id.clone(), identity.clone()), now);
+                    self.absent_streak
+                        .remove(&(call_id.clone(), identity.clone()));
+                }
+                SidObservationDisposition::Applied
+            }
+            SidGuardDisposition::RoomRotationPending => {
+                SidObservationDisposition::RoomRotationPending
+            }
+            SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
+        };
+        drop(entry);
+        if matches!(disposition, SidObservationDisposition::Applied) {
+            self.schedule_pending_revocation_eject_if_needed(call_id, identity);
+        }
+        disposition
+    }
+
     fn schedule_displaced_retirement(&self, intent: CallTeardownIntentLite) {
-        // The successor remains registered: retirement never clears MUC
-        // presence and never schedules room deletion.
-        self.teardown_reporter
-            .report(std::iter::once(intent.clone()));
-        let Some(runtime) = self.runtime.as_ref() else {
-            return;
-        };
-        let Ok(permit) = Arc::clone(&self.admin_permits).try_acquire_owned() else {
-            return;
-        };
-        let executor = self.inline_teardown_executor();
-        runtime.spawn(async move {
-            let _permit = permit;
-            let _ = executor.execute(&intent).await;
-        });
+        // Only the durable room-owner drainer has canonical MUC authority.
+        // Never perform retirement inline against this node's cached registration.
+        self.teardown_reporter.report(std::iter::once(intent));
     }
 
     /// Move every outstanding JTI for `(call_id, identity)` into the
@@ -2514,6 +2656,7 @@ impl LiveKitSfu {
         .await;
 
         let mut swept = Vec::new();
+        let mut live_media = Vec::new();
         let mut rooms_adopted = 0_u64;
         let mut occupancy_failures = 0_u64;
         let mut swept_rooms = HashSet::new();
@@ -2540,6 +2683,13 @@ impl LiveKitSfu {
                     continue;
                 }
             };
+            live_media.extend(live.iter().cloned().map(|participant| {
+                crate::LiveMediaObservation {
+                    call_id: call_id.clone(),
+                    room_sid: listed_room_sid.clone(),
+                    participant,
+                }
+            }));
             // Sid rotation for registered rooms is handled once per
             // pass by `rotate_room_incarnation_from_listing` (called
             // on the listing before per-room probes), so by this
@@ -2596,12 +2746,12 @@ impl LiveKitSfu {
                     );
                 }
                 live.iter()
-                    .map(|(identity, _participant_sid)| identity.clone())
+                    .map(|participant| participant.identity.clone())
                     .collect()
             };
             let live_set: HashSet<Identity> = live
                 .iter()
-                .map(|(identity, _participant_sid)| identity.clone())
+                .map(|participant| participant.identity.clone())
                 .collect();
 
             for identity in registered {
@@ -2648,7 +2798,32 @@ impl LiveKitSfu {
                     );
                     continue;
                 }
-                let outcome = self.clear_local_state(&call_id, &identity, None, SessionGate::Any);
+                let Some((revision, departure)) = self.calls.get(&call_id).and_then(|entry| {
+                    entry.participants.get(&identity).map(|participant| {
+                        (
+                            participant.registration_revision,
+                            crate::SweptParticipant {
+                                call_id: call_id.clone(),
+                                identity: identity.clone(),
+                                occupant_session: participant.occupant_session,
+                                observed_sids: ObservedCallSids {
+                                    room_sid: entry.room_sid.clone(),
+                                    participant_sid: participant.participant_sid.clone(),
+                                    observed_event_at: participant.participant_sid_event_at,
+                                    media_generation: participant.media_generation,
+                                },
+                            },
+                        )
+                    })
+                }) else {
+                    continue;
+                };
+                let outcome = self.clear_local_state(
+                    &call_id,
+                    &identity,
+                    None,
+                    SessionGate::Registration(revision),
+                );
                 if let ClearDisposition::Cleared(ClearOutcome {
                     was_present: true, ..
                 }) = outcome
@@ -2659,19 +2834,23 @@ impl LiveKitSfu {
                         "SFU reconcile: swept ghost participant LiveKit no longer reports"
                     );
                     swept_rooms.insert(call_id.clone());
-                    swept.push((call_id.clone(), identity));
+                    swept.push(departure);
                 }
             }
         }
-        swept.sort_by(|(left_call, left_identity), (right_call, right_identity)| {
-            left_call.as_str().cmp(right_call.as_str()).then_with(|| {
-                left_identity
-                    .as_livekit_identity()
-                    .cmp(&right_identity.as_livekit_identity())
-            })
+        swept.sort_by(|left, right| {
+            left.call_id
+                .as_str()
+                .cmp(right.call_id.as_str())
+                .then_with(|| {
+                    left.identity
+                        .as_livekit_identity()
+                        .cmp(&right.identity.as_livekit_identity())
+                })
         });
         let summary = ReconcilePassSummary {
             swept,
+            live_media,
             rooms_examined,
             rooms_adopted,
             rooms_swept: swept_rooms.len() as u64,
@@ -2697,7 +2876,7 @@ impl crate::SfuReconciler for LiveKitSfu {
                     occupancy
                         .waddle
                         .into_iter()
-                        .map(|(identity, _participant_sid)| identity)
+                        .map(|participant| participant.identity)
                         .collect(),
                 ),
                 Err(error) => {
@@ -2739,6 +2918,7 @@ impl SfuService for LiveKitSfu {
             identity,
             capabilities,
             ttl: self.config.token_ttl,
+            occupant_session: None,
         })?;
         // Track the (jti, exp) pair against `(call, identity)` so a
         // subsequent unregister revokes every JWT this participant
@@ -2811,6 +2991,7 @@ impl SfuService for LiveKitSfu {
             identity,
             capabilities,
             ttl: self.config.token_ttl,
+            occupant_session: Some(occupant),
         })?;
         let registered = self.register_participant_with_binding(
             call_id,
@@ -2871,6 +3052,15 @@ impl SfuService for LiveKitSfu {
         observed_sids: &ObservedCallSids,
     ) -> SidObservationDisposition {
         let now = Utc::now();
+        let retirement = observed_sids.media_generation.and_then(|generation| {
+            retirement_intent(
+                call_id,
+                identity,
+                observed_sids.room_sid.clone(),
+                observed_sids.participant_sid.clone(),
+                Some(generation),
+            )
+        });
         match self.calls.entry(call_id.clone()) {
             dashmap::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -2888,6 +3078,10 @@ impl SfuService for LiveKitSfu {
                         return SidObservationDisposition::RoomRotationPending;
                     }
                     SidGuardDisposition::StaleSid => {
+                        drop(occupied);
+                        if let Some(intent) = retirement {
+                            self.schedule_displaced_retirement(intent);
+                        }
                         return SidObservationDisposition::StaleSid;
                     }
                 }
@@ -2936,6 +3130,9 @@ impl SfuService for LiveKitSfu {
         self.absent_streak
             .remove(&(call_id.clone(), identity.clone()));
         self.schedule_pending_revocation_eject_if_needed(call_id, identity);
+        if let Some(intent) = retirement {
+            self.schedule_displaced_retirement(intent);
+        }
         SidObservationDisposition::Applied
     }
 
@@ -3150,6 +3347,21 @@ impl SfuService for LiveKitSfu {
         )
     }
 
+    fn participant_media_evidence(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> Option<ObservedCallSids> {
+        let entry = self.calls.get(call_id)?;
+        let participant = entry.participants.get(identity)?;
+        Some(ObservedCallSids {
+            room_sid: entry.room_sid.clone(),
+            participant_sid: participant.participant_sid.clone(),
+            observed_event_at: participant.participant_sid_event_at,
+            media_generation: participant.media_generation,
+        })
+    }
+
     fn observe_call_participant_sids(
         &self,
         call_id: &CallId,
@@ -3157,43 +3369,40 @@ impl SfuService for LiveKitSfu {
         observed_sids: Option<&ObservedCallSids>,
         direction: SidObservationDirection,
     ) -> SidObservationDisposition {
-        let Some(mut entry) = self.calls.get_mut(call_id) else {
-            return SidObservationDisposition::Applied;
-        };
-        if !entry.participants.contains_key(identity) {
-            return SidObservationDisposition::Applied;
-        }
-        let now = Utc::now();
-        let disposition = match Self::guard_and_learn_observed_sids(
+        self.observe_participant_sids_gated(
             call_id,
             identity,
-            entry.value_mut(),
             observed_sids,
             direction,
-            now,
             SessionGate::Any,
-        ) {
-            SidGuardDisposition::Applied {
-                participant_rejoined,
-            } => {
-                if participant_rejoined {
-                    self.registered_at
-                        .insert((call_id.clone(), identity.clone()), now);
-                    self.absent_streak
-                        .remove(&(call_id.clone(), identity.clone()));
-                }
-                SidObservationDisposition::Applied
-            }
-            SidGuardDisposition::RoomRotationPending => {
-                SidObservationDisposition::RoomRotationPending
-            }
-            SidGuardDisposition::StaleSid => SidObservationDisposition::StaleSid,
+        )
+    }
+
+    fn observe_call_participant_departure(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        observed_sids: Option<&ObservedCallSids>,
+        occupant: Option<OccupancySessionGeneration>,
+        unbound: UnboundOccupantPolicy,
+        sid: SidEvidence<'_>,
+    ) -> SidObservationDisposition {
+        let gate = match (occupant, sid) {
+            (Some(presented), sid) => SessionGate::Occupant {
+                presented,
+                unbound,
+                sid,
+            },
+            (None, SidEvidence::Presented(presented)) => SessionGate::Presented(presented),
+            (None, SidEvidence::NotSignaling) => SessionGate::Any,
         };
-        drop(entry);
-        if matches!(disposition, SidObservationDisposition::Applied) {
-            self.schedule_pending_revocation_eject_if_needed(call_id, identity);
-        }
-        disposition
+        self.observe_participant_sids_gated(
+            call_id,
+            identity,
+            observed_sids,
+            SidObservationDirection::Leave,
+            gate,
+        )
     }
 
     fn update_participant_capabilities(

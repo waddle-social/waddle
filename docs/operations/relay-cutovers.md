@@ -2,26 +2,53 @@
 
 ## Displaced media retirement cutover (#1732)
 
-This release adds `retire_displaced_participant` to the durable call teardown
-outbox. Previous binaries reject that action during row decoding. The schema
-upgrade preserves existing jobs, but the new rows require a coordinated fleet:
-stop all old readers before any new writer starts. The committed production
-HelmRelease uses `Recreate` for this boundary.
+This release adds generation-attributed media and generation-only retirement to
+`call_teardown_outbox`. Old binaries cannot drain the new action/shape. Waddle
+uses `Recreate`, but its restart does not terminate LiveKit media or invalidate
+already-issued JWTs. Activation therefore requires a coordinated media-authority
+cutover in an explicitly authorized maintenance window.
 
-1. Deploy the digest-pinned new server with `Recreate`; retain the deployment UUID.
-2. Verify every replica runs the new image and is ready. Check outbox decoding
-   errors, retry progression, and a same-FullJID replacement whose new media
-   connection is deliberately delayed. The old participant should be removed
-   without clearing the successor's MUC occupancy or credentials.
-3. Repeat with the successor already connected: the old SID retirement must be
-   skipped. LiveKit's identity-keyed API cannot make the final SID probe and
-   removal atomic; do not represent this check as proving that remote race closed.
-4. Restore `RollingUpdate` only in a separate change after fleet verification,
-   through the cutover revision guard below. Before reverting to old binaries,
-   stop writers and explicitly disposition new-action rows; an old binary cannot
-   safely drain a backlog containing them.
+1. Merge the independent startup filesystem prerequisite (PR #2058) before this
+   cutover. Prepare the digest-pinned media-retirement image and a replacement
+   LiveKit API key/secret through the existing secret-management paths. Do not
+   expose secrets in logs, Git, or verification evidence.
+2. Close new XMPP/WebSocket and SFU admission for the window and stop old Waddle
+   writers/drainers. Expect a full connection interruption and dropped active
+   calls. Drain every existing LiveKit participant or restart the SFU while
+   admission is closed. Token expiry alone does not end connected media.
+3. Remove every legacy token-signing API key from LiveKit and install the new
+   credentials consistently in LiveKit and Waddle (`LIVEKIT_API_KEY` /
+   `LIVEKIT_API_SECRET`). Align LiveKit's webhook signing key and Waddle's
+   `LIVEKIT_WEBHOOK_SECRET` as configured. Confirm a token signed by a retired
+   key is rejected; do not retain old keys as a compatibility path.
+4. Start the new Waddle fleet with `Recreate`, keeping the deployment UUID. Verify
+   every replica is ready on the pinned image, old writers are gone, the outbox
+   schema accepts generation-only retirement, and fresh Muji media has the
+   signed `waddle.occupancy_generation` attribute with client metadata updates
+   denied. Reopen admission only after these checks pass.
+5. Test g1 connected while g2 re-initiates but delays its media connection. Delay
+   the old SID observation as well: the persisted generation-only action must
+   recover it from the provider and remove g1 without clearing g2's MUC occupancy
+   or credentials. Repeat across a Waddle restart, and preserve a genuine
+   same-generation resume.
+6. Repeat with g2 already connected: the canonical owner's generation must reject
+   retirement of g2. Check stale-owner and old-webhook retries, outbox decoding
+   errors, and retry progression. LiveKit's identity-keyed API cannot atomically
+   combine the final SID probe with removal; these checks do not prove that
+   provider-side race closed.
+7. Freeze unrelated server changes (including documentation) until fleet
+   verification and the separate `RollingUpdate` restoration PR are complete.
+   The cutover guard must use the actual publisher-triggering revision that
+   reached every replica. A necessary roll-forward change requires repeating
+   fleet verification against its new revision before restoring rolling updates.
+8. Prefer roll-forward recovery. Old binaries cannot read new outbox rows, and
+   restoring retired signing keys would reauthorize legacy JWTs. Binary rollback
+   requires closed admission, stopped writers, explicit disposition of new-format
+   work, and a compatible credential/media plan; it is not a clean two-way door.
 
-This documents the required rollout; no live deployment result is asserted.
+Record image revisions, credential-rotation identifiers (never secrets), fresh
+claim/attribute evidence and the pass/fail results above separately from merge
+CI. No live deployment or credential rotation is asserted by this document.
 
 ## Extension effect authority cutover (#1660)
 

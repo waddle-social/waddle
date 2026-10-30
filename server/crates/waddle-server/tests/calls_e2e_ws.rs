@@ -624,12 +624,26 @@ fn livekit_webhook_auth(body: &[u8]) -> String {
     format!("Bearer {token}")
 }
 
-async fn post_participant_left_webhook(server: &TestServer, room: &str, identity: &str) {
+struct IssuedMujiMedia {
+    attributes: waddle_sfu::ParticipantAttributes,
+    participant_sid: waddle_sfu::ParticipantSid,
+}
+
+async fn post_participant_left_webhook(
+    server: &TestServer,
+    room: &str,
+    identity: &str,
+    media: &IssuedMujiMedia,
+) {
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_left",
         "room": { "name": room },
-        "participant": { "identity": identity },
+        "participant": {
+            "identity": identity,
+            "sid": media.participant_sid.as_str(),
+            "attributes": &media.attributes
+        },
     }))
     .expect("webhook body");
     let response = reqwest::Client::new()
@@ -667,7 +681,11 @@ async fn send_muji_session_initiate_request(client: &mut WsXmppClient, room: &st
         .expect("send Muji session-initiate");
 }
 
-async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) {
+async fn send_muji_session_initiate(
+    client: &mut WsXmppClient,
+    room: &str,
+    sid: &str,
+) -> IssuedMujiMedia {
     send_muji_session_initiate_request(client, room, sid).await;
     client
         .recv_matching(|frame| {
@@ -677,7 +695,7 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         })
         .await
         .expect("Muji session-initiate ack");
-    client
+    let accept = client
         .recv_matching(|frame| {
             frame.contains("session-accept")
                 && (frame.contains(&format!("sid='{sid}'"))
@@ -685,6 +703,18 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         })
         .await
         .expect("Muji session-accept");
+    let claims = decode_issued_claims(&accept);
+    assert!(claims.attributes.media_generation.is_some());
+    IssuedMujiMedia {
+        attributes: claims.attributes,
+        // The fixture simulates the provider's connection for this issued
+        // credential. Preserve its SID across repeated leave deliveries.
+        participant_sid: waddle_sfu::ParticipantSid::try_new(format!(
+            "PA_fixture_{}",
+            uuid::Uuid::new_v4()
+        ))
+        .expect("provider fixture SID"),
+    }
 }
 
 async fn send_muji_session_initiate_expect_forbidden(
@@ -1092,10 +1122,10 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
     );
 
     send_muji_session_initiate_expect_forbidden(&mut bob, &room, "bob-forbidden").await;
-    send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
+    let admin_media = send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
 
     let admin_web_full_jid = admin_web.full_jid.clone().expect("admin/web has full jid");
-    post_participant_left_webhook(&server, &room, &admin_web_full_jid).await;
+    post_participant_left_webhook(&server, &room, &admin_web_full_jid, &admin_media).await;
     admin_mobile
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
         .await
@@ -1194,11 +1224,12 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
         "non-member must not be able to enter members-only group-DM room: {carol_join}"
     );
     send_muji_session_initiate_expect_forbidden(&mut carol, &room, "carol-forbidden").await;
-    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
-    send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
+    let admin_media =
+        send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
+    let bob_media = send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
 
     let admin_full_jid = admin_web.full_jid.clone().expect("admin full jid");
-    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    post_participant_left_webhook(&server, &room, &admin_full_jid, &admin_media).await;
     recv_muji_leave_reflection(&mut bob, &room, "admin").await;
     assert_no_call_thread_ended(
         &mut bob,
@@ -1206,10 +1237,11 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
     )
     .await;
 
-    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
+    let rejoined_admin_media =
+        send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
 
     let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
-    post_participant_left_webhook(&server, &room, &bob_full_jid).await;
+    post_participant_left_webhook(&server, &room, &bob_full_jid, &bob_media).await;
     recv_muji_leave_reflection(&mut admin_web, &room, "bob").await;
     assert_no_call_thread_ended(
         &mut admin_web,
@@ -1217,7 +1249,7 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
     )
     .await;
 
-    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    post_participant_left_webhook(&server, &room, &admin_full_jid, &rejoined_admin_media).await;
     admin_web
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
         .await
@@ -1307,11 +1339,11 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     })
     .await
     .expect("web receives mobile active muji reflection");
-    send_muji_session_initiate(&mut web, &room, "web-ended").await;
-    send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
+    let web_media = send_muji_session_initiate(&mut web, &room, "web-ended").await;
+    let mobile_media = send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
 
     let web_full_jid = web.full_jid.clone().expect("web has full jid");
-    post_participant_left_webhook(&server, &room, &web_full_jid).await;
+    post_participant_left_webhook(&server, &room, &web_full_jid, &web_media).await;
     let no_early_ended = tokio::time::timeout(std::time::Duration::from_millis(750), async {
         mobile
             .recv_matching(|frame| {
@@ -1326,7 +1358,7 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     );
 
     let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
-    post_participant_left_webhook(&server, &room, &mobile_full_jid).await;
+    post_participant_left_webhook(&server, &room, &mobile_full_jid, &mobile_media).await;
 
     let ended_frame = web
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
@@ -1390,11 +1422,16 @@ struct E2eVideoGrant {
 #[derive(serde::Deserialize)]
 struct E2eClaims {
     video: E2eVideoGrant,
+    attributes: waddle_sfu::ParticipantAttributes,
 }
 
 /// Pull the `<token/>` out of an issued Waddle LiveKit transport and
 /// decode its grants.
 fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
+    decode_issued_claims(frame).video
+}
+
+fn decode_issued_claims(frame: &str) -> E2eClaims {
     let elem: Element = frame.parse().expect("frame parses as XML");
     let jingle = elem
         .children()
@@ -1423,7 +1460,6 @@ fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
     jsonwebtoken::decode::<E2eClaims>(&token, &key, &validation)
         .expect("issued token decodes with the deployment signing secret")
         .claims
-        .video
 }
 
 /// `muc#owner` config-submit IQ carrying the given form fields.
