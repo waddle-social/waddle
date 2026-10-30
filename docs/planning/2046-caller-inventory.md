@@ -59,12 +59,15 @@ Two independent passes were cross-checked.
    ```sh
    # from the repository root, on a clean checkout of db6e5338
    python3 patch_deprecate.py                       # Appendix B.2; inserts 255 marker lines
+   rm -rf /tmp/w19-patched && mkdir -p /tmp/w19-patched/server \
+     && cp -r server/crates /tmp/w19-patched/server/  # snapshot the marker-bearing tree
    cd server && PROTOC=$(command -v protoc) \
      cargo check -p waddle-server --features clustering --locked --message-format=json > ../check.json
    cd .. && git checkout -- server/crates           # remove the markers
-   python3 parse_check.py check.json <patched-tree> . > uses.tsv   # Appendix B.3
+   # PATCHED_ROOT = marker-bearing snapshot, ORIG_ROOT = this (unmodified) checkout
+   python3 parse_check.py check.json /tmp/w19-patched . > uses.tsv   # Appendix B.3
    ```
-   Result at `db6e5338`: 1,502 distinct use sites. By tag: `CR::` 259, `CRF` 199, `CE::` 125, `CEF` 191, `WS.` 430, `DUAL::` 15, `BRIDGE::` 179, `MUCKIND::` 63, `CLAIM::` 41.
+   `parse_check.py` maps each compiled line back to the original by subtracting the marker lines above it in `PATCHED_ROOT`. If it is given the reverted tree as `PATCHED_ROOT`, sites in the 35 marker-bearing files come out up to 40 lines too low, with no warning. The committed tables used the correct two trees. Re-parsing the same `check.json` against a saved snapshot of the patched files reproduces `uses.tsv` byte for byte; parsing against the unpatched tree would change 583 rows. Result at `db6e5338`: 1,502 distinct use sites. By tag: `CR::` 259, `CRF` 199, `CE::` 125, `CEF` 191, `WS.` 430, `DUAL::` 15, `BRIDGE::` 179, `MUCKIND::` 63, `CLAIM::` 41.
 
 2. **Textual pass (production/test split for counts the compiler cannot give, and a regression check).** `rg` lists hits. A filter (Appendix B.1) tags each hit as follows:
    - **test**: under a `tests/`, `benches/` or `examples/` directory; named `tests.rs`, `*_tests.rs`, `test_*.rs` or `tests_*.rs`; declared behind `#[cfg(test)]`; or inside an item gated by `#[cfg(test)]` / `#[cfg(all(test, …))]`.
@@ -89,7 +92,7 @@ Two independent passes were cross-checked.
 | Item | Type-resolved | Textual prod (lines / files) | Textual test (lines / files) |
 |---|---|---|---|
 | `ConnectionRegistry` methods (72 `pub`/`pub(super)`, incl. `new`) | **228 call sites in 63 files** outside `registry/connection_registry*`. 71 files call a method or name the type. 17 methods have no caller outside the module; 12 of those have no production caller at all. | 411 / 105 (`ConnectionRegistry\|connection_registry`, incl. comments and pass-through fields) | 1,043 / 165 |
-| `ConnectionEntry` (17 fields) | 191 field uses and 125 accessor calls. 16 of 17 fields are touched outside the owning connection task; **1 (`pending_subscribes_flushed`) is not** | 92 / 29 | 218 / 43 (+1 test-support) |
+| `ConnectionEntry` (17 fields) | 136 field uses (plus 55 type-name references) and 125 accessor calls. 16 of 17 fields are touched outside the owning connection task; **1 (`pending_subscribes_flushed`) is not** | 92 / 29 | 218 / 43 (+1 test-support) |
 | `WsConnState` (40 fields + 2 `cfg(test)` hooks) | 430 direct accesses, all in `server/routes/websocket/` (9 files), plus writes through destructured borrows (§3) | 76 / 13 | 343 / 31 |
 | `dual_registration` | **15 call sites in 6 files** | 15 / 6 | 12 / 11 |
 | User-resource mirrors | `remote_hosted` 1 site; `apply_remote_resource_state` 1 caller; 3 direct atomic writes in `owner_update.rs`; 2 snapshot builders (§5) | 2 / 2 and 2 / 2 | 9 / 5 |
@@ -104,15 +107,23 @@ Two independent passes were cross-checked.
 | Plan statement (final.md) | Finding at `db6e5338` | Effect |
 |---|---|---|
 | `ConnectionRegistry`: "~120 non-test files" (§3 W1.9; grounding: 120 files / 552 matches) | The textual count included inline `mod tests`, comments and pass-through struct fields. Textual production count: 105 files / 411 lines. Type-resolved callers: **63 files / 228 sites**; 71 files touch the type at all. | B2/D2/E2 scoping uses §1.3, not 120. |
-| `dual_registration`: "14 prod call sites" | **15 in 6 files**. The grounding list omitted `ws/registration.rs:847` (`register_remote_clustered_resource`, `NotRemote` fallback); its own line list has 15 entries. | ACT-DEF deletion list is §4. |
-| "~37 direct `OrderedRelayDeliveryBridge` calls in 18 handler/interpret files + ~12 inline `current_claim` branches in ~10 files (~50 points, ~28 files)" | Grounding's table lists 38 calls, not 37. Type-resolved: **41 decision-bearing bridge calls in 23 files**. The extra three are `recipient_inventory_remote`, `extension_room_handle` and `muc_admin_query_handle`. There are **9** inline `current_claim` branches in waddle-server outside `clustering/`, **7** helper-caller branches (`remote_owner`, `extension_room_owner`, `require_local_room`), and **2** direct `RelayHandle` asks (`demote`, `confirm_reply_receipt`). Total **59 in 31 files**. | Rule 1 freeze baseline is §8. B2e also owns the `muc_durable` demote ask and B2b the ingress reply-receipt ask (or both are listed as surviving relay asks for C7). |
+| `dual_registration`: "14 prod call sites" | **15 in 6 files**. The grounding count (14) is wrong: its own line list has 15 entries, including `ws/registration.rs:847` (`register_remote_clustered_resource`, the `NotRemote` fallback). | ACT-DEF deletion list is §4. |
+| "~37 direct `OrderedRelayDeliveryBridge` calls in 18 handler/interpret files + ~12 inline `current_claim` branches in ~10 files (~50 points, ~28 files)" | Grounding's table lists 38 calls, not 37. Type-resolved: **41 decision-bearing bridge calls in 23 files**. The extra three are `recipient_inventory_remote`, `extension_room_handle` and `muc_admin_query_handle`. There are **9** inline `current_claim` branches in waddle-server outside `clustering/`, **7** helper-caller branches (`remote_owner`, `extension_room_owner`, `require_local_room`), and **2** direct `RelayHandle` asks (`demote`, `confirm_reply_receipt`). Total **59 in 31 files**. | Rule 1 freeze baseline is §8. The `muc_durable` demote ask and the ingress reply-receipt ask are not B2 moves: they are a surviving ask (DEC-2 lists `demote`) and a relay-internal receipt that C7 deletes (§8.4). |
 | "33 production callers in 18 files" of `send_to`/`send_to_with_write_acceptance` (DEC-3) | Confirmed: **33 in 18 files**. Four more `send_to` calls in `waddle-xmpp/src/routing.rs` are dead: `StanzaRouter` is re-exported (`lib.rs:69`) but never constructed outside its tests. **Five more awaiting producers** exist: `send_to_if_owner` ×2, `send_pending_flush`, `send_pending_flush_if_owner`, `reserve_pending_flush` (all `.await` channel capacity, `sending.rs:30-53,230-345`). | D2p owns 11 of the 38 live sites (§10). The cycle-class claim ("no producer awaits a connection channel") requires all 38. |
-| D3s "expected small or empty" | **Non-empty: one field.** `ConnectionEntry.pending_subscribes_flushed` is read and written only by its own connection: presence handler `regular.rs:134`, detach snapshot `cleanup.rs:987`, resume republish `registration.rs:665`. Every other duplicated field has a reader outside the connection (§2.1). | D3s = move the live CAS onto `WsConnState.pending_subscribes_flushed` and delete the entry field and its accessor. |
-| DEFprep reader list cites `session_janitors/ingress_custody.rs:77,103`, `implementation.rs:1613,4145`, `archive_dispatch.rs:30,50` | These read through **registry methods**, not the entry field: `active_sm_stream_ids` (`ingress_custody.rs:77,103`, `implementation.rs:4145`) and `unregister_if_sm_stream_id` (`implementation.rs:1613`). `archive_dispatch.rs:30,50` is `waddle-xmpp/src/registry/connection_registry/archive_dispatch.rs` inside `ConnectionEntry::try_send_archive_ordered`, called from `UserActor::try_deliver` (`user_actor/delivery.rs:56`). **More direct field readers exist outside the actors**: `clustering/local_claims.rs:171`, `resume_bridge.rs:60,164`, `route_bridge/delivery/remote_socket.rs:498`, `pending_delivery/recovery.rs:184`, `interpret/route_to_connection/implementation.rs:1489`, `ws/cleanup.rs:1934`. | DEFprep's replacement-query list is §2.2 (`sm_stream_id`, `occupancy_session` rows) plus the registry methods in §1.2 marked DEFprep. |
-| Grounding: carbons, interest, presence and `pending_subscribes_flushed` are "duplicated mutable state" in `WsConnState` and `ConnectionEntry` | The **live** copy differs per field. For presence (`presence_available`/`show`/`status`/`priority`/`payloads`) and `pending_subscribes_flushed`, the `WsConnState` fields are **resume carriers only**: written at resume restore (`stream_management/implementation.rs:1343-1348`), reset at `stream_management/registration.rs:347-352`, and read to republish after resume (`registration.rs:399-416,646`) and for the terminal-recovery snapshot (`cleanup.rs:2284-2289`). The presence handler never receives them; the live values are the entry atomics and `ConnectionRegistry.presence_states`, written by `regular.rs:70,97` (`update_presence_if_owner`, `update_presence_state_if_owner`) and read by the detach snapshot (`cleanup.rs:930-988`). Only carbons, roster and blocklist interest are written live on both copies: `sans_io.rs:171`, `roster/implementation.rs:112` and `blocking.rs:67` via `IqConnState`, plus the registry/entry setters. | ADR-0020's owner table: socket-local truth for presence is today on the entry, not the socket task. D2a must move the presence writes into the actor, not just wrap `WsConnState`. |
+| D3s "expected small or empty" | **Non-empty: one field.** `ConnectionEntry.pending_subscribes_flushed` is read and written only by its own connection: presence handler `regular.rs:134`, detach snapshot `cleanup.rs:987`, resume republish `registration.rs:665`. Every other duplicated field has a reader outside the connection (§2.1). | D3s = move the live CAS onto `WsConnState.pending_subscribes_flushed` and delete the entry field and its accessor. The move must keep an owner or generation check: today both CAS sites go through `entry_if_owner`, so a superseded socket neither consumes the claim nor delivers the RFC 6121 queue. |
+| DEFprep reader list cites `session_janitors/ingress_custody.rs:77,103`, `implementation.rs:1613,4145`, `archive_dispatch.rs:30,50` | These read through **registry methods**, not the entry field: `active_sm_stream_ids` (`ingress_custody.rs:77,103`, `implementation.rs:4145`) and `unregister_if_sm_stream_id` (`implementation.rs:1613`). The methods still read the entry's SM id outside the owner, so **all of these sites stay on DEFprep's list**. That includes the second `unregister_if_sm_stream_id` caller, `ws/cleanup.rs:3865` (`cleanup_invalidated_detached_session`), which runs from *another* connection's bind or resume path (`registration.rs:173`, `stream_management/registration.rs:228`, `cleanup.rs:1120,1396`). `archive_dispatch.rs:30,50` is `waddle-xmpp/src/registry/connection_registry/archive_dispatch.rs` inside `ConnectionEntry::try_send_archive_ordered`, called from `UserActor::try_deliver` (`user_actor/delivery.rs:56`). **More direct field readers exist outside the actors**: `clustering/local_claims.rs:171`, `resume_bridge.rs:60,164`, `route_bridge/delivery/remote_socket.rs:498`, `pending_delivery/recovery.rs:184`, `interpret/route_to_connection/implementation.rs:1489`, `ws/cleanup.rs:1934`. | DEFprep's replacement-query list is §2.2 (`sm_stream_id`, `occupancy_session` rows) plus every registry method in §1.2 marked DEFprep, including `unregister_if_sm_stream_id` (`DEFprep / D2r`) and its two callers. D2r's own retirement protocol does not cover a janitor or another connection removing a detached entry by SM id. |
+| Grounding: carbons, interest, presence and `pending_subscribes_flushed` are "duplicated mutable state" in `WsConnState` and `ConnectionEntry` | The **live** copy differs per field. For presence (`presence_available`/`show`/`status`/`priority`/`payloads`) and `pending_subscribes_flushed`, the `WsConnState` fields are **resume carriers only**: written at resume restore (`stream_management/implementation.rs:1343-1348`), reset at `stream_management/registration.rs:347-352`, and read to republish after resume (`registration.rs:399-416,646`) and for the terminal-recovery snapshot (`cleanup.rs:2284-2289`). That snapshot (`terminal_recovery_snapshot`, `cleanup.rs:2269-2291`) therefore carries the presence restored at resume (or the reset defaults), not the presence the client sent since. The ordinary detach snapshot does use live values. The presence handler never receives them; the live values are the entry atomics and `ConnectionRegistry.presence_states`, written by `regular.rs:70,97` (`update_presence_if_owner`, `update_presence_state_if_owner`) and read by the detach snapshot (`cleanup.rs:930-988`). Only carbons, roster and blocklist interest are written live on both copies: `sans_io.rs:171`, `roster/implementation.rs:112` and `blocking.rs:67` via `IqConnState`, plus the registry/entry setters. | ADR-0020's owner table: socket-local truth for presence is today on the entry, not the socket task. D2a must move the presence writes into the actor, not just wrap `WsConnState`. D2a/D2r should make the terminal-recovery snapshot read the live values. |
 | C6a-pre: "variants with no production producer — `PrivateMessage`, `BareRoomIq`, `OccupantIq`, `FanoutChunk`, to be confirmed by W1.9" | **Confirmed**, and the owner has no consumer for them either (`ParseFailure`, `reserved.rs:73`). Deleting them changes `RemoteStanzaEnvelope`, so it needs a `deliver_ordered.vN` bump (`server/AGENTS.md:23`). | §9. |
 | B2c: "carbons/roster/blocklist side effects + `roster_fanout`" | The **presence mirror** `regular.rs:202` (`update_remote_user_resource_if_owner`) is the same remote-resource-update path but is not named in any B2 cluster. | Assigned to B2c here. |
 | E2: "presence, priority, carbons, interest" | Two more account-scoped, memory-only authorities live on `ConnectionRegistry`: XEP-0012 last activity (`record_last_activity`/`last_activity`/`clear_last_activity`) and the RFC 6121 pending-subscribe queue (`queue_pending_subscription_stanza` and 3 siblings; `UserActor.pending_subscriptions` duplicates the latter). | Name both in E2, or record them as staying on the registry. |
+
+### 0.4 Limits
+
+- **R/W labels are heuristic.** In §1.3, §2.2 and §3.2 they come from the source text: assignment, `.store`/CAS, `&mut` borrow, or a method name that implies mutation. A method call on a field such as `sm_state` is labelled by its name, so a few may be misclassified. Each row's location is exact.
+- **Test counts are textual.** They come from `rg` plus the `cfg(test)` region filter, not from the compiler. The type-resolved pass compiled only the production feature set.
+- **One feature set only.** `#[cfg(not(feature = "clustering"))]` code (the default-feature binary) and `test-support` code are excluded. Production builds with `clustering` (`flake.nix:367`).
+- **Assignments are proposals.** The B2 cluster column in §8, the "Proposed slice" column in §10 and the D3s verdict in §2.1 are this inventory's proposals against final.md §3. The slices that implement them confirm or amend them.
+
 
 ## 1. `ConnectionRegistry` (`waddle-xmpp/src/registry/connection_registry.rs:41-61`, methods in 10 submodules)
 
@@ -162,7 +173,7 @@ All 7 fields are private. All 99 type-resolved field accesses are inside `regist
 | `unregister` | `xmpp/registry/connection_registry/connections.rs:123` | 0 (0) | 1 | W | I | D2r | unconditional removal |
 | `is_owned_by` | `xmpp/registry/connection_registry/connections.rs:142` | 5 (4) | 0 | R | I | W1.3 | `Arc::ptr_eq` on the carbons flag |
 | `unregister_if_owner` | `xmpp/registry/connection_registry/connections.rs:151` | 18 (7) | 0 | W | I | W1.3 (token) / D2r |  |
-| `unregister_if_sm_stream_id` | `xmpp/registry/connection_registry/connections.rs:184` | 2 (2) | 0 | W | I | D2r |  |
+| `unregister_if_sm_stream_id` | `xmpp/registry/connection_registry/connections.rs:184` | 2 (2) | 0 | W | I | DEFprep / D2r (SM-id read outside the owner) | reads `entry.sm_stream_id()` in `remove_if`; callers are the SM-expiry janitor and another connection's bind/resume path |
 | `entry_if_owner` | `xmpp/registry/connection_registry/connections.rs:207` | 29 (11) | 0 | R | I | W1.3 | `Arc::ptr_eq` on the carbons flag |
 | `is_connected` | `xmpp/registry/connection_registry/connections.rs:226` | 0 (0) | 0 | R | I | ACT-DEF (derived socket index) |  |
 | `is_locally_hosted` | `xmpp/registry/connection_registry/connections.rs:232` | 4 (2) | 0 | R | I | ACT-DEF (derived socket index) | local vs remote-hosted mirror |
@@ -193,7 +204,7 @@ All 7 fields are private. All 99 type-resolved field accesses are inside `regist
 | `clear_last_activity` | `xmpp/registry/connection_registry/presence.rs:169` | 1 (1) | 0 | W | A | E2 (not named in E2 row) |  |
 | `server_uptime_seconds` | `xmpp/registry/connection_registry/presence.rs:174` | 2 (1) | 0 | R | T | keep (node fact, no plan slice) | process start time stored on the registry |
 | `available_resources_for_user` | `xmpp/registry/connection_registry/presence.rs:179` | 11 (7) | 0 | R | A | E2 / ACT-DEF | selection read (available + priority) |
-| `cleanup_stale` | `xmpp/registry/connection_registry/presence.rs:193` | 0 (0) | 0 | W | I | ACT-DEF | closed-sender sweep |
+| `cleanup_stale` | `xmpp/registry/connection_registry/presence.rs:193` | 0 (0) | 0 | W | I | delete (no prod caller) | closed-sender sweep |
 | `reserve_pending_flush` | `xmpp/registry/connection_registry/sending.rs:30` | 1 (1) | 0 | W | T | D2p | awaits capacity |
 | `try_reserve_pending_flush` | `xmpp/registry/connection_registry/sending.rs:60` | 1 (1) | 0 | W | T | keep (already non-blocking) |  |
 | `send_reserved_pending_flush` | `xmpp/registry/connection_registry/sending.rs:92` | 1 (1) | 0 | W | T | keep (already non-blocking) |  |
@@ -265,7 +276,7 @@ Grouped by file. The class and slice come from the method (§1.2) unless the row
 | `interpret/bot.rs` | 755 | `route_join_presences` | `entry` | R | I | ACT-DEF (derived socket index) |
 | `interpret/carbons.rs` | 77 | `send_carbons` | `other_carbon_resources_for_user` | R | A | E2 / ACT-DEF |
 | `interpret/carbons.rs` | 278 | `send_carbons_to_registry_with_capture` | `other_carbon_resources_for_user` | R | A | E2 / ACT-DEF |
-| `interpret/carbons.rs` | 420 | `send_carbons_to_registry_with_capture` | `send_to` | W | T | B2c |
+| `interpret/carbons.rs` | 420 | `send_carbons_to_registry_with_capture` | `send_to` | W | T | D2c |
 | `interpret/effects/delivery_immediate.rs` | 56 | `execute_with_received_at` | `entry` | R | I | ACT-DEF (derived socket index) |
 | `interpret/effects/delivery_immediate.rs` | 58 | `execute_with_received_at` | `try_send_outbound_if_owner` | W | T | W1.3 (token) |
 | `interpret/effects/invite.rs` | 55 | `execute` | `send_to` | W | T | D2b |
@@ -279,7 +290,7 @@ Grouped by file. The class and slice come from the method (§1.2) unless the row
 | `server/http.rs` | 691 | `create_websocket_state` | `new` | W | I | keep |
 | `server/routes/muc_muji_clear.rs` | 367 | `broadcast_muji_clear` | `try_send_to` | W | T | keep (already non-blocking) |
 | `server/session_janitors/implementation.rs` | 476 | `run_local_muc_departure_sweep` | `entry` | R | I | ACT-DEF (derived socket index) |
-| `server/session_janitors/implementation.rs` | 1613 | `run_sm_expiry_sweep_with_custody_cursor` | `unregister_if_sm_stream_id` | W | I | D2r |
+| `server/session_janitors/implementation.rs` | 1613 | `run_sm_expiry_sweep_with_custody_cursor` | `unregister_if_sm_stream_id` | W | I | DEFprep / D2r (SM-id read outside the owner) |
 | `server/session_janitors/implementation.rs` | 4145 | `run_pending_delivery_claim_sweep` | `active_sm_stream_ids` | R | I | DEFprep |
 | `server/session_janitors/implementation.rs` | 6272 | `collect_remote_muc_reconcile_candidates` | `occupancy_session_of` | R | I | DEFprep |
 | `server/session_janitors/implementation.rs` | 6375 | `run_remote_muc_membership_sweep` | `occupancy_session_of` | R | I | DEFprep |
@@ -343,7 +354,7 @@ Grouped by file. The class and slice come from the method (§1.2) unless the row
 | `ws/cleanup.rs` | 2737 | `refuse_detach_without_principal` | `entry` | R | I | ACT-DEF (derived socket index) |
 | `ws/cleanup.rs` | 2824 | `broadcast_unavailable_if_no_replacement` | `entry` | R | I | ACT-DEF (derived socket index) |
 | `ws/cleanup.rs` | 3847 | `cleanup_invalidated_detached_session` | `entry_if_owner` | R | I | W1.3 |
-| `ws/cleanup.rs` | 3865 | `cleanup_invalidated_detached_session` | `unregister_if_sm_stream_id` | W | I | D2r |
+| `ws/cleanup.rs` | 3865 | `cleanup_invalidated_detached_session` | `unregister_if_sm_stream_id` | W | I | DEFprep / D2r (SM-id read outside the owner) |
 | `ws/cleanup.rs` | 3890 | `cleanup_invalidated_detached_session` | `entry` | R | I | ACT-DEF (derived socket index) |
 | `ws/connection.rs` | 828 | `finish_connection` | `entry_if_owner` | R | I | W1.3 |
 | `ws/connection.rs` | 1570 | `handle_inbound_text` | `entry_if_owner` | R | I | W1.3 |
@@ -351,7 +362,7 @@ Grouped by file. The class and slice come from the method (§1.2) unless the row
 | `ws/frame.rs` | 1139 | `dispatch_authoritative_message` | `is_owned_by` | R | I | W1.3 |
 | `ws/handlers/iq/blocking.rs` | 63 | `handle_blocking_iq` | `mark_blocklist_interested` | W | A | E2 / ACT-DEF |
 | `ws/handlers/iq/blocking.rs` | 383 | `send_blocking_pushes` | `blocklist_interested_resources_for_user` | R | A | E2 / ACT-DEF |
-| `ws/handlers/iq/blocking.rs` | 407 | `send_blocking_pushes` | `send_to` | W | T | B2c |
+| `ws/handlers/iq/blocking.rs` | 407 | `send_blocking_pushes` | `send_to` | W | T | D2c |
 | `ws/handlers/iq/full_jid_forward.rs` | 101 | `route_full_jid_iq` | `send_to` | W | T | D2d |
 | `ws/handlers/iq/last_activity.rs` | 32 | `handle_last_activity_iq` | `server_uptime_seconds` | R | T | keep (node fact, no plan slice) |
 | `ws/handlers/iq/last_activity.rs` | 45 | `handle_last_activity_iq` | `server_uptime_seconds` | R | T | keep (node fact, no plan slice) |
@@ -504,7 +515,7 @@ The flag is written by `ws/handlers/iq/sans_io.rs:176` (`set_carbons_enabled`), 
 | `presence_available` / `presence_priority` | UserActor (`user_actor/implementation.rs:242-243,282-283,325-328`, `delivery.rs:105-106`), `pending_delivery/flush.rs:197,808`, `recovery.rs:35-36,176-177`, `sm_promotion/live.rs:30,33`, mirror | no (ACT-DEF) |
 | `sm_stream_id` | `local_claims.rs:171`, `resume_bridge.rs:60,164`, `remote_socket.rs:498`, `pending_delivery/recovery.rs:184`, `route_to_connection/implementation.rs:1489`, UserActor via `try_send_archive_ordered` | no (DEFprep → ACT-DEF) |
 | `occupancy_session` | `socket.rs:1239,1311,1327`, `types.rs:151`, mirror `side_effects.rs:454`, `occupancy_session_of` callers | no (DEFprep → ACT-DEF) |
-| `pending_subscribes_flushed` | **none**: `regular.rs:134` (own presence handler, owner-gated CAS), `cleanup.rs:987` (own detach snapshot), `registration.rs:665` (own resume republish) | **yes: the only D3s field** |
+| `pending_subscribes_flushed` | **none**: `regular.rs:134` (own presence handler, owner-gated CAS), `cleanup.rs:987` (own detach snapshot), `registration.rs:665` (own resume republish) | **yes: the only D3s field.** The move must keep an owner or generation check: both CAS sites are owner-gated today through `entry_if_owner` |
 
 The non-duplicated shared fields are not D3s material:
 
@@ -527,15 +538,15 @@ Type-resolved production uses of each field, either directly or through its acce
 | `blocklist_interested` | A | E2 / ACT-DEF | `clustering/route_bridge/registration/owner_update.rs:132` (update_remote_user_resource_on_owner)<br>`clustering/route_bridge/registration/side_effects.rs:463` (apply_remote_resource_state)<br>`ws/registration.rs:596` (register_bound_connection_after_frame_with_admission) | `clustering/route_bridge/registration/socket.rs:1151` (build_full_resync_updates)<br>`clustering/route_bridge/types.rs:154` (from_entry) + 5 registry-internal | yes |
 | `offline_flushed` | A | E2 (P1 presentation receipts) / ACT-DEF | `srv/pending_delivery/flush.rs:198` (resume_flush_for_resource_with_retry)<br>`ws/cleanup.rs:2121` (redrive_terminal_pending_rows_to_live_resource_with_cancel)<br>`ws/cleanup.rs:2199` (spawn_terminal_pending_ordering_retry)<br>`ws/handlers/presence/regular.rs:283` (plan_offline_flush) W(CAS)<br>`ws/handlers/presence/regular.rs:390` (spawn_session_recovery_delivery) | — + 3 registry-internal | yes |
 | `pending_subscribes_flushed` | A | E2 / ACT-DEF | `ws/handlers/presence/regular.rs:134` (handle_regular_presence_update) W(CAS)<br>`ws/registration.rs:665` (register_bound_connection_after_frame_with_admission) W(CAS) | `ws/cleanup.rs:987` (cleanup_connection_shutdown_inner) + 2 registry-internal | **no** |
-| `sm_stream_id` | I | DEFprep / ACT-DEF | — | `clustering/local_claims.rs:171` (demote_stream)<br>`clustering/resume_bridge.rs:60` (request_validated_local_resume)<br>`clustering/resume_bridge.rs:164` (request_local_forced_detach)<br>`clustering/route_bridge/delivery/remote_socket.rs:498` (deliver_remote_resource_frame_on_socket)<br>`srv/pending_delivery/recovery.rs:184` (tick)<br>`interpret/route_to_connection/implementation.rs:1489` (deliver_ordered_local_copy)<br>`ws/cleanup.rs:1934` (preferred_live_pending_flush_target)<br>`ws/cleanup.rs:3893` (cleanup_invalidated_detached_session)<br>`ws/handlers/presence/regular.rs:287` (plan_offline_flush)<br>`ws/registration.rs:588` (register_bound_connection_after_frame_with_admission) R(handle)<br>`xmpp/registry/user_actor/delivery.rs:56` (try_deliver) + 17 registry-internal | yes |
-| `occupancy_session` | I | DEFprep / ACT-DEF | — | `clustering/route_bridge/registration/side_effects.rs:454` (apply_remote_resource_state) R/W(lock)<br>`clustering/route_bridge/registration/socket.rs:1239` (force_detach_remote_user_resource_on_socket)<br>`clustering/route_bridge/registration/socket.rs:1311` (complete_fresh_remote_retirement)<br>`clustering/route_bridge/registration/socket.rs:1327` (complete_fresh_remote_retirement)<br>`clustering/route_bridge/types.rs:151` (from_entry) + 4 registry-internal | yes |
+| `sm_stream_id` | I | DEFprep / ACT-DEF | registry-internal only: `set_sm_stream_id_if_owner` (`connection_registry.rs:153`) and `set_sm_stream_id` (`:101`); production callers in §1.3 (`ws/registration.rs:368`, `ws/stream_management/implementation.rs:113`) | `clustering/local_claims.rs:171` (demote_stream)<br>`clustering/resume_bridge.rs:60` (request_validated_local_resume)<br>`clustering/resume_bridge.rs:164` (request_local_forced_detach)<br>`clustering/route_bridge/delivery/remote_socket.rs:498` (deliver_remote_resource_frame_on_socket)<br>`srv/pending_delivery/recovery.rs:184` (tick)<br>`interpret/route_to_connection/implementation.rs:1489` (deliver_ordered_local_copy)<br>`ws/cleanup.rs:1934` (preferred_live_pending_flush_target)<br>`ws/cleanup.rs:3893` (cleanup_invalidated_detached_session)<br>`ws/handlers/presence/regular.rs:287` (plan_offline_flush)<br>`ws/registration.rs:588` (register_bound_connection_after_frame_with_admission) R(handle)<br>`xmpp/registry/user_actor/delivery.rs:56` (try_deliver) + 17 registry-internal | yes |
+| `occupancy_session` | I | DEFprep / ACT-DEF | `clustering/route_bridge/registration/side_effects.rs:454` (apply_remote_resource_state) W(lock) | `clustering/route_bridge/registration/socket.rs:1239` (force_detach_remote_user_resource_on_socket)<br>`clustering/route_bridge/registration/socket.rs:1311` (complete_fresh_remote_retirement)<br>`clustering/route_bridge/registration/socket.rs:1327` (complete_fresh_remote_retirement)<br>`clustering/route_bridge/types.rs:151` (from_entry) + 4 registry-internal | yes |
 | `force_detach_tx` | T | D2a (control channel) / D2r | `clustering/resume_bridge.rs:182` (request_local_forced_detach)<br>`clustering/route_bridge/registration/owner_retire.rs:64` (schedule_local_incumbent_retirement)<br>`clustering/route_bridge/registration/socket.rs:1254` (force_detach_remote_user_resource_on_socket)<br>`ws/registration.rs:95` (prepare_socket_bind) | `clustering/local_claims.rs:198` (demote_stream)<br>`clustering/local_claims.rs:813` (force_detach_entries)<br>`clustering/route_bridge/registration/owner_retire.rs:62` (schedule_local_incumbent_retirement)<br>`clustering/route_bridge/registration/socket.rs:1256` (force_detach_remote_user_resource_on_socket)<br>`ws/registration.rs:93` (prepare_socket_bind)<br>`ws/registration.rs:588` (register_bound_connection_after_frame_with_admission) R(handle)<br>`ws/stream_management/implementation.rs:228` (terminate_if_demoted_during_publication)<br>`xmpp/registry/user_registry.rs:762` (issue_stale_retirement_force_detach) + 4 registry-internal | yes |
 | `force_detach_rx` | T | D2a (control channel) / D2r | `clustering/route_bridge/registration/owner.rs:368` (register_remote_user_resource_on_owner_locked)<br>`ws/connection.rs:1572` (handle_inbound_text) | — + 2 registry-internal | yes |
 | `write_interruption` | T | D1 | `clustering/resume_bridge.rs:182` (request_local_forced_detach) W(cancel)<br>`clustering/route_bridge/registration/owner_retire.rs:64` (schedule_local_incumbent_retirement) W(cancel)<br>`clustering/route_bridge/registration/socket.rs:1254` (force_detach_remote_user_resource_on_socket) W(cancel)<br>`ws/registration.rs:95` (prepare_socket_bind) W(cancel)<br>`ws/registration.rs:587` (register_bound_connection_after_frame_with_admission) | — + 2 registry-internal | yes |
 | `resume_control` | T | DEFprep / D2a (control channel) | `ws/registration.rs:588` (register_bound_connection_after_frame_with_admission) | `clustering/resume_bridge.rs:66` (request_validated_local_resume) + 3 registry-internal | yes |
 | `hosting` | O | ACT-DEF (remote-hosted mirrors deleted) | `clustering/route_bridge/registration/owner.rs:365` (register_remote_user_resource_on_owner_locked) | `clustering/resume_bridge.rs:60` (request_validated_local_resume)<br>`clustering/resume_bridge.rs:164` (request_local_forced_detach)<br>`clustering/route_bridge/registration/socket.rs:1325` (complete_fresh_remote_retirement)<br>`srv/ingress/execute_relay_copy.rs:34` (attempt_before_readiness)<br>`srv/ingress/execute_relay_copy.rs:145` (append_sealed_legacy)<br>`srv/pending_delivery/flush.rs:194` (resume_flush_for_resource_with_retry)<br>`srv/pending_delivery/flush.rs:807` (flush_recovery_pass)<br>`srv/pending_delivery/recovery.rs:34` (is_current)<br>`srv/pending_delivery/recovery.rs:175` (tick)<br>`interpret/bot.rs:756` (route_join_presences)<br>`interpret/route_to_connection/implementation.rs:1469` (deliver_ordered_local_copy)<br>`ws/cleanup.rs:1925` (preferred_live_pending_flush_target)<br>`ws/cleanup.rs:2020` (redrive_terminal_pending_rows_to_live_resource_with_cancel)<br>`ws/cleanup.rs:2194` (spawn_terminal_pending_ordering_retry)<br>`ws/handlers/roster_fanout.rs:135` (try_live_resource)<br>`ws/handlers/roster_fanout.rs:258` (send_roster_push_to_resources) + 7 registry-internal | yes |
 | `archive_dispatch` | A | ACT-DEF (moves with archive-ordered delivery into account/connection actor) | `xmpp/registry/user_actor/delivery.rs:56` (try_deliver) | — + 4 registry-internal | yes |
-| `terminal_ordering_retry` | T | D2r | `ws/cleanup.rs:2056` (redrive_terminal_pending_rows_to_live_resource_with_cancel)<br>`ws/cleanup.rs:2215` (spawn_terminal_pending_ordering_retry) | — + 3 registry-internal | yes |
+| `terminal_ordering_retry` | T | D2r: the terminal-cleanup redrive that acquires it is replaced by the retirement protocol; it is a shared atomic, so if D2r keeps the redrive it moves to ACT-DEF with the other shared atomics | `ws/cleanup.rs:2056` (redrive_terminal_pending_rows_to_live_resource_with_cancel)<br>`ws/cleanup.rs:2215` (spawn_terminal_pending_ordering_retry) | — + 3 registry-internal | yes |
 
 
 ## 3. `WsConnState` (`waddle-server/src/server/routes/websocket/state.rs:1720-1880`)
@@ -558,7 +569,7 @@ Type-resolved production uses of each field, either directly or through its acce
   - `write_interruption` is cloned into the entry (`registration.rs:587`).
   - `live_resume_control` is bound into the entry (`registration.rs:588`).
   - `sm_state` hands a `SmResumeCheckpointHandle` to `LiveResumeControl` (`state.rs:1888-1891`).
-- **Resume carriers.** `presence_*` and `pending_subscribes_flushed` are not live state (§0.3). They are restored at resume and republished to the registry. Their live counterparts are on `ConnectionEntry` and `ConnectionRegistry.presence_states`.
+- **Resume carriers.** `presence_*` and `pending_subscribes_flushed` are not live state (§0.3). They are restored at resume and republished to the registry. Their live counterparts are on `ConnectionEntry` and `ConnectionRegistry.presence_states`. As a result, `terminal_recovery_snapshot` (`cleanup.rs:2269-2291`) carries presence that can be stale: what was restored at resume, or the reset defaults. The detach snapshot (`cleanup.rs:930-988`) reads the live values.
 - **Test-only fields** (not counted): `pre_final_principal_recheck_test_hook` (:1785) and `post_sm_finalization_test_hook` (:1788).
 
 ### 3.2 Direct accesses per field
@@ -631,7 +642,7 @@ There are **15 production call sites in 6 files**. Every one is class **O**: it 
 | 14 | `clustering/route_bridge/registration/socket.rs:968` | `run_remote_state_resync_attempt` | `mirror_register_outcome` | remote resync falls back to local registration |
 | 15 | `clustering/route_bridge/delivery/remote.rs:545` | `refresh_remote_resource_origin` | `mirror_register_outcome` | survivor takeover (#1985) |
 
-B2f moves sites 1–12 behind B1 without deleting them. Sites 13–15 are janitor and bridge internals.
+Sites 1–12 are in files that B2f edits, but they are not decision points (they are `UserRegistryActor` asks, not bridge or `current_claim` branches; see §8). B2f does not move them. They keep their call shape until ACT-DEF deletes `dual_registration.rs`; W1.3 changes their token argument before then. Sites 13–15 are janitor and bridge internals with the same fate.
 
 ## 5. User-resource mirrors (cross-node copies of a socket's state on the account-owner node)
 
@@ -667,7 +678,7 @@ Every row is class **O** and is deleted at **ACT-DEF**: remote-hosted `Connectio
 
 ## 7. Room dispatch (`interpret/room_dispatch.rs`)
 
-`dispatch_to_room` (`:89`) is called from `interpret/implementation.rs:309` and `interpret/relay_plan.rs:28`. All four branches move to B1 in **B2a**.
+`dispatch_to_room` (`:89`) is called from `interpret/implementation.rs:309` and `interpret/relay_plan.rs:28`. The two routing branches (plan and execute) move to B1 in **B2a**. The local path and the fenced-fanout backstop stay in place and follow the slices in the table.
 
 | Branch | Lines | Decision | Class | Slice |
 |---|---|---|---|---|
@@ -680,6 +691,13 @@ Every row is class **O** and is deleted at **ACT-DEF**: remote-hosted `Connectio
 ## 8. Local-versus-remote routing decision points outside `clustering/`
 
 This is the baseline for program rule 1 (bypass freeze). A PR that adds a row here before B1 exists must list it as an exception against this table.
+
+**Not counted here: `hosting`-based local-versus-mirror branches.** These are:
+
+- the readers of `ConnectionEntry::is_locally_hosted` in the §2.2 `hosting` row, e.g. `route_to_connection/implementation.rs:1469`, `bot.rs:756`, `execute_relay_copy.rs:34,145`, `pending_delivery/flush.rs:194,807`;
+- the four `ConnectionRegistry::is_locally_hosted` calls in §1.3: `recovery_reachability.rs:67,89` and `route_bridge/presence.rs:49,67`.
+
+They distinguish a local socket from a remote-hosted mirror entry, not a local owner from a remote one. They are class O, are deleted with the mirrors at ACT-DEF, and are not rule-1 decision points or exceptions.
 
 ### 8.1 Direct `OrderedRelayDeliveryBridge` calls (type-resolved)
 
@@ -764,7 +782,7 @@ The 16 further `current_claim` calls inside waddle-xmpp are claim-protocol inter
 | `server/extension_host_adapter/remote_room.rs:94` (`send_room_routed`, called from `host_tools.rs:304`) | `extension_room_owner` → `extension_room_send.v1` | B2e |
 | `ws/handlers/iq/muc_admin_relay.rs:135` (`ask_current_owner`) | `extension_room_owner` → `muc_admin_query.v1` | B2e |
 
-These count as 7 decision points: `bot.rs:376` and `bot.rs:828` both branch.
+These count as 7 decision-point sites. `bot.rs:376` and `bot.rs:828` are **one decision at two sites**: `:376` calls `require_local_room`, which branches at `:828`. Counting decisions instead of sites gives 58, not 59.
 
 Wrapper helpers that *contain* bridge calls (rows in §8.1) and are reused elsewhere (B2b):
 
@@ -851,13 +869,13 @@ No production code awaits `ConnectionEntry.sender` directly: the only out-of-reg
 Slice rules applied:
 
 - Handler-inline producers go to their family: D2b MUC/room; D2c roster/presence/subscription including presence probes and caps queries; D2d IQ forwards/PEP/pubsub including `admin/channels.rs`; D2e storage-heavy.
-- Carbons and blocklist pushes go to B2c. That slice moves the same side-effect cluster into B1. The alternative is D2c for the blocklist push.
+- Carbons copies and blocklist pushes go to **D2c**. final.md rule text also permits B2c. But B2c's row is "prod delta: none" and precedes D2a, whose row keeps producer semantics unchanged, so converting producers there would contradict both rows. B2c moves only their routing.
 - Background and durable producers go to D2p.
 - `StanzaRouter` (`waddle-xmpp/src/routing.rs`) is exported (`lib.rs:69`) but never constructed in production. Delete it instead of converting it.
 
 | # | File:line | Enclosing fn | Method | Context | Proposed slice |
 |---|---|---|---|---|---|
-| 1 | `interpret/carbons.rs:420` | `send_carbons_to_registry_with_capture` | `send_to` | carbons copy (side-effect cluster) | B2c |
+| 1 | `interpret/carbons.rs:420` | `send_carbons_to_registry_with_capture` | `send_to` | carbons copy (B2c moves its routing but is prod-delta none) | D2c |
 | 2 | `interpret/effects/invite.rs:55` | `execute` | `send_to` | MUC mediated invite | D2b |
 | 3 | `interpret/groupchat_archive.rs:1080` | `push_inbox_update_to` | `send_to` | inbox update push (storage path) | D2e |
 | 4 | `interpret/offline_delivery.rs:203` | `bounce_offline_quota` | `send_to` | offline-quota bounce (storage path) | D2e |
@@ -874,7 +892,7 @@ Slice rules applied:
 | 15 | `srv/sm_promotion/pending.rs:204` | `return_quota_bounce` | `send_to` | SM promotion redelivery (background) | D2p |
 | 16 | `srv/sm_promotion/stanza.rs:43` | `promote_iq` | `send_to` | SM promotion redelivery (background) | D2p |
 | 17 | `srv/sm_promotion/stanza.rs:66` | `promote_presence` | `send_to` | SM promotion redelivery (background) | D2p |
-| 18 | `ws/handlers/iq/blocking.rs:407` | `send_blocking_pushes` | `send_to` | blocklist push (side-effect cluster; or D2c) | B2c |
+| 18 | `ws/handlers/iq/blocking.rs:407` | `send_blocking_pushes` | `send_to` | blocklist push (roster/presence family; B2c is prod-delta none) | D2c |
 | 19 | `ws/handlers/iq/full_jid_forward.rs:101` | `route_full_jid_iq` | `send_to` | IQ full-JID forward | D2d |
 | 20 | `ws/handlers/iq/muc_admin.rs:1846` | `handle_muc_admin_iq` | `send_to` | MUC admin IQ notifications | D2b |
 | 21 | `ws/handlers/iq/muc_admin.rs:1870` | `handle_muc_admin_iq` | `send_to` | MUC admin IQ notifications | D2b |
@@ -902,9 +920,8 @@ Slice rules applied:
 
 | Proposed slice | Sites |
 |---|---|
-| B2c | 2 |
 | D2b | 3 |
-| D2c | 16 |
+| D2c | 18 |
 | D2d | 4 |
 | D2e | 2 |
 | D2p | 11 |
@@ -934,7 +951,11 @@ To regenerate the PR diffs: `git diff origin/main...pr/<n> -- server/crates ':!*
 ## Appendix A. Regenerating
 
 1. Check out `db6e5338` and copy the three scripts below into a scratch directory.
-2. Run the §0.1 commands.
+2. Run the §0.1 commands. `parse_check.py` needs **two trees**:
+   - `PATCHED_ROOT`: the marker-bearing snapshot taken after `patch_deprecate.py` and before the revert;
+   - `ORIG_ROOT`: the unmodified `db6e5338` checkout.
+
+   Passing the reverted tree as `PATCHED_ROOT` silently shifts every site in the 35 marker-bearing files by the number of markers above it.
 3. Classes and slices per method or field are in the tables themselves. Rows that need judgement name the call site:
    - the slice for each awaiting producer (§10);
    - the B2 cluster for each decision point (§8);
