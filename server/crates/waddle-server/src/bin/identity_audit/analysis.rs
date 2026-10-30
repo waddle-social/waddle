@@ -74,22 +74,8 @@ pub fn accounts(rows: Vec<AccountRow>) -> (Vec<AccountObservation>, Vec<Collisio
                 findings.push(Finding::SourceJidDisagrees);
             }
         }
-        match &row.stored_key {
-            None => findings.push(Finding::MissingPreparedKey),
-            Some(key) => {
-                let expected = prepared.as_ref().map(|jid| match row.source {
-                    AccountSource::Oidc => jid.node().map_or("", |node| node.as_str()),
-                    AccountSource::Native => jid.as_str(),
-                });
-                if expected != Some(key.as_str()) {
-                    findings.push(Finding::IncompatiblePreparedKey);
-                }
-                let binding = match row.source {
-                    AccountSource::Oidc => format!("{}@{}", key.as_str(), domain),
-                    AccountSource::Native => key.as_str().to_owned(),
-                };
-                stored_groups.entry(binding).or_default().push(index);
-            }
+        if let Some(binding) = recorded_binding(&row, prepared.as_ref(), &mut findings) {
+            stored_groups.entry(binding).or_default().push(index);
         }
         observations.push(AccountObservation {
             original: row,
@@ -127,6 +113,28 @@ pub fn accounts(rows: Vec<AccountRow>) -> (Vec<AccountObservation>, Vec<Collisio
         });
     }
     (observations, collisions)
+}
+
+fn recorded_binding(
+    row: &AccountRow,
+    prepared: Option<&BareJid>,
+    findings: &mut Vec<Finding>,
+) -> Option<String> {
+    let Some(key) = &row.stored_key else {
+        findings.push(Finding::MissingPreparedKey);
+        return None;
+    };
+    let expected = prepared.map(|jid| match row.source {
+        AccountSource::Oidc => jid.node().map_or("", |node| node.as_str()),
+        AccountSource::Native => jid.as_str(),
+    });
+    if expected != Some(key.as_str()) {
+        findings.push(Finding::IncompatiblePreparedKey);
+    }
+    Some(match row.source {
+        AccountSource::Oidc => format!("{}@{}", key.as_str(), row.domain.as_str()),
+        AccountSource::Native => key.as_str().to_owned(),
+    })
 }
 
 #[derive(Serialize)]

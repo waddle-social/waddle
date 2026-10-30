@@ -1,10 +1,12 @@
+use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::Connection;
 use tempfile::TempDir;
+use tokio::process::Command;
 
 async fn fixture() -> (TempDir, String) {
     let directory = tempfile::tempdir().expect("fixture directory");
@@ -26,8 +28,18 @@ async fn fixture() -> (TempDir, String) {
     (directory, format!("sqlite://{}", path.display()))
 }
 
-fn audit(url: &str, report: &Path, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_waddle-identity-audit"))
+fn audit_executable() -> OsString {
+    // Runtime paths are remapped when nextest extracts an archive. Cargo 1.94+
+    // also supplies its binary path at runtime for ordinary cargo test runs.
+    std::env::var_os("NEXTEST_BIN_EXE_waddle_identity_audit")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_waddle-identity-audit"))
+        .expect("test runner must provide the runtime identity-audit executable path")
+}
+
+fn audit_command(url: &str, report: &Path, extra: &[&str]) -> Command {
+    let mut command = Command::new(audit_executable());
+    command
+        .kill_on_drop(true)
         .env("WADDLE_IDENTITY_AUDIT_DATABASE_URL", url)
         .args([
             "--driver",
@@ -37,8 +49,14 @@ fn audit(url: &str, report: &Path, extra: &[&str]) -> Output {
             "--report",
         ])
         .arg(report)
-        .args(extra)
+        .args(extra);
+    command
+}
+
+async fn audit(url: &str, report: &Path, extra: &[&str]) -> Output {
+    audit_command(url, report, extra)
         .output()
+        .await
         .expect("run audit executable")
 }
 
@@ -68,7 +86,7 @@ async fn complete_findings_keep_identifiers_in_private_artifact_only() {
     )
     .expect("corpus");
     let report = directory.path().join("report.json");
-    let output = audit(&url, &report, &["--frames", corpus.to_str().expect("path")]);
+    let output = audit(&url, &report, &["--frames", corpus.to_str().expect("path")]).await;
     assert_eq!(output.status.code(), Some(1), "{}", public_output(&output));
     let public = public_output(&output);
     for private in [
@@ -107,7 +125,7 @@ async fn complete_findings_keep_identifiers_in_private_artifact_only() {
 async fn complete_empty_inventory_reports_two_present_sources() {
     let (directory, url) = fixture().await;
     let report = directory.path().join("report.json");
-    let output = audit(&url, &report, &[]);
+    let output = audit(&url, &report, &[]).await;
     assert_eq!(output.status.code(), Some(0), "{}", public_output(&output));
     let artifact: Value =
         serde_json::from_slice(&std::fs::read(report).expect("report")).expect("JSON");
@@ -142,13 +160,16 @@ async fn incomplete_source_or_frame_corpus_never_publishes_a_report() {
         database.close().await.expect("close fixture");
         let report = directory.path().join("report.json");
         let output = match failure {
-            "limit" => audit(&url, &report, &["--max-rows", "1"]),
-            "frames" => audit(
-                &url,
-                &report,
-                &["--frames", "/nonexistent-private-frame-corpus"],
-            ),
-            _ => audit(&url, &report, &[]),
+            "limit" => audit(&url, &report, &["--max-rows", "1"]).await,
+            "frames" => {
+                audit(
+                    &url,
+                    &report,
+                    &["--frames", "/nonexistent-private-frame-corpus"],
+                )
+                .await
+            }
+            _ => audit(&url, &report, &[]).await,
         };
         assert_eq!(output.status.code(), Some(2), "{}", public_output(&output));
         assert!(public_output(&output).contains("incomplete"));
@@ -168,7 +189,7 @@ async fn locked_database_deadline_is_incomplete_without_a_partial_report() {
         .await
         .expect("owned fixture lock");
     let report = directory.path().join("report.json");
-    let output = audit(&url, &report, &["--timeout-seconds", "1"]);
+    let output = audit(&url, &report, &["--timeout-seconds", "1"]).await;
     sqlx::query("ROLLBACK")
         .execute(&mut database)
         .await
@@ -178,8 +199,8 @@ async fn locked_database_deadline_is_incomplete_without_a_partial_report() {
     assert!(!report.exists());
 }
 
-#[test]
-fn connection_and_argument_failures_do_not_echo_sensitive_values() {
+#[tokio::test]
+async fn connection_and_argument_failures_do_not_echo_sensitive_values() {
     let directory = tempfile::tempdir().expect("directory");
     let report = directory.path().join("report.json");
     for extra in [&[][..], &["--max-rows", "private-account@example.test"][..]] {
@@ -187,7 +208,8 @@ fn connection_and_argument_failures_do_not_echo_sensitive_values() {
             "sqlite://private-secret@example.test/absent",
             &report,
             extra,
-        );
+        )
+        .await;
         assert_eq!(output.status.code(), Some(2));
         let public = public_output(&output);
         assert!(!public.contains("private-"));
@@ -243,7 +265,7 @@ async fn encoded_file_uri_cannot_hide_live_wal_accounts_behind_a_decoy() {
     immutable.close().await.expect("close control");
 
     let report = directory.path().join("normal.json");
-    let normal = audit(&url, &report, &[]);
+    let normal = audit(&url, &report, &[]).await;
     assert_eq!(normal.status.code(), Some(1), "{}", public_output(&normal));
     let artifact: Value =
         serde_json::from_slice(&std::fs::read(report).expect("normal report")).expect("JSON");
@@ -269,18 +291,10 @@ async fn encoded_file_uri_cannot_hide_live_wal_accounts_behind_a_decoy() {
     .enumerate()
     {
         let report = directory.path().join(format!("rejected-{index}.json"));
-        let output = Command::new(env!("CARGO_BIN_EXE_waddle-identity-audit"))
+        let output = audit_command(&malicious, &report, &[])
             .current_dir(directory.path())
-            .env("WADDLE_IDENTITY_AUDIT_DATABASE_URL", malicious)
-            .args([
-                "--driver",
-                "sqlite",
-                "--oidc-home-domain",
-                "home.example.test",
-                "--report",
-            ])
-            .arg(&report)
             .output()
+            .await
             .expect("audit encoded URI");
         assert_eq!(output.status.code(), Some(2), "{}", public_output(&output));
         assert!(!report.exists());
