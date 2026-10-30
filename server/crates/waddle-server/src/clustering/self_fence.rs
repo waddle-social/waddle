@@ -1070,6 +1070,7 @@ where
         if registered_identity != prior_identity {
             self.retire_if_drained(registered_identity).await;
         }
+        self.readiness.mark_terminal_fence_finished();
     }
 }
 
@@ -3437,6 +3438,7 @@ mod tests {
         ));
 
         tokio::task::yield_now().await;
+        assert!(!readiness.is_terminally_fenced());
         fatal_fence.cancel();
         task.await.expect("node lease exits after terminal fence");
 
@@ -3459,6 +3461,10 @@ mod tests {
         assert!(
             stop_token.is_cancelled(),
             "sibling clustering tasks stop only after local authority is demoted"
+        );
+        assert!(
+            readiness.is_terminally_fenced(),
+            "a finished fatal fence must be visible to liveness so the pod restarts"
         );
     }
 

@@ -162,6 +162,10 @@ pub enum StartupServingTransition {
 pub struct NodeLifecycle {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     pub(in crate::clustering) fatal_fence: CancellationToken,
+    /// Cancelled once the clustering terminal fence (`TerminalFenceContext::
+    /// finish`) has completed its bounded local demotion. Read-only signal for
+    /// liveness; it changes no fencing or shutdown behaviour.
+    pub(in crate::clustering) terminal_fence_finished: CancellationToken,
 }
 
 impl NodeLifecycle {
@@ -185,6 +189,7 @@ impl NodeLifecycle {
                 startup_blocked: false,
             })),
             fatal_fence: CancellationToken::new(),
+            terminal_fence_finished: CancellationToken::new(),
         }
     }
 
@@ -330,6 +335,21 @@ impl NodeLifecycle {
 
     pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
         self.fatal_fence.clone()
+    }
+
+    /// Record that the clustering terminal fence finished its bounded local
+    /// demotion. Called last in `TerminalFenceContext::finish`, which also
+    /// runs on an ordinary clustering stop; [`Self::is_terminally_fenced`]
+    /// therefore also requires the fatal fence.
+    pub fn mark_terminal_fence_finished(&self) {
+        self.terminal_fence_finished.cancel();
+    }
+
+    /// The node took a fatal fence and finished fencing: it can never serve
+    /// again in this process (`FencedRecovering` with no re-registration
+    /// loop left), so only a restart recovers it. Liveness reports this.
+    pub fn is_terminally_fenced(&self) -> bool {
+        self.fatal_fence.is_cancelled() && self.terminal_fence_finished.is_cancelled()
     }
 }
 
