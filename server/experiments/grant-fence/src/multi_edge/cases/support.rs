@@ -62,6 +62,34 @@ impl World {
         }
         Ok(world)
     }
+    /// Prepare the same unmasked starting policy for revocation and ABA cases.
+    /// Schedules and current-policy/final-ledger assertions remain in each case.
+    pub(super) async fn with_exclusive_access(
+        fixture: &Fixture,
+        binary: &Path,
+        branch: Branch,
+    ) -> Result<Self> {
+        let mut world = Self::new(fixture).await?;
+        if branch == Branch::Direct {
+            world.direct = change(
+                fixture,
+                binary,
+                &world.direct,
+                Payload::Direct(true),
+                world.user,
+            )
+            .await?;
+            world.ancestor = change(
+                fixture,
+                binary,
+                &world.ancestor,
+                Payload::Ancestor(false),
+                world.user,
+            )
+            .await?;
+        }
+        Ok(world)
+    }
     pub(super) fn effect(&self, branch: Branch) -> Effect {
         let guards = match branch {
             Branch::Inherited => vec![

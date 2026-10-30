@@ -34,30 +34,12 @@ pub(super) async fn stale_vectors(
         ),
     ] {
         for unsafe_control in [false, true] {
-            let mut world = World::new(fixture).await?;
             let branch = if kind == Kind::Direct {
-                world.direct = change(
-                    fixture,
-                    binary,
-                    &world.direct,
-                    Payload::Direct(true),
-                    world.user,
-                )
-                .await?;
                 Branch::Direct
             } else {
                 Branch::Inherited
             };
-            if branch == Branch::Direct {
-                world.ancestor = change(
-                    fixture,
-                    binary,
-                    &world.ancestor,
-                    Payload::Ancestor(false),
-                    world.user,
-                )
-                .await?;
-            }
+            let mut world = World::with_exclusive_access(fixture, binary, branch).await?;
             let effect = world.effect(branch);
             let mut reader = admit(
                 fixture,
@@ -192,30 +174,12 @@ pub(super) async fn aba(fixture: &Fixture, binary: &Path, cases: &mut Vec<Case>)
         ),
     ] {
         for unsafe_control in [false, true] {
-            let mut world = World::new(fixture).await?;
             let branch = if kind == Kind::Direct {
-                world.direct = change(
-                    fixture,
-                    binary,
-                    &world.direct,
-                    Payload::Direct(true),
-                    world.user,
-                )
-                .await?;
                 Branch::Direct
             } else {
                 Branch::Inherited
             };
-            if branch == Branch::Direct {
-                world.ancestor = change(
-                    fixture,
-                    binary,
-                    &world.ancestor,
-                    Payload::Ancestor(false),
-                    world.user,
-                )
-                .await?;
-            }
+            let mut world = World::with_exclusive_access(fixture, binary, branch).await?;
             let effect = world.effect(branch);
             let mut reader = if unsafe_control {
                 admit_version_control(fixture, binary, &effect, kind)?
