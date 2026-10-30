@@ -1129,9 +1129,7 @@ mod tests {
     }
 
     async fn single_connection_authority_database() -> Option<crate::db::Database> {
-        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
-            return None;
-        };
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let mut config = crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url);
         config.pool_size = 1;
         let db = crate::db::Database::from_config("registration-authority-race", &config)
