@@ -224,7 +224,9 @@ async fn native_postgres_namespace_replacement_cannot_hide_rows() {
         2
     );
 
-    for populated_replacement in [false, true] {
+    for (populated_replacement, alias_columns) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
         // The executable opens a fresh connection for each audit. Reusing the
         // earlier control query's prepared statement can correctly retain the
         // original relation OIDs, which does not exercise namespace rebinding.
@@ -242,9 +244,44 @@ async fn native_postgres_namespace_replacement_cannot_hide_rows() {
             "CREATE TABLE public.users(jid TEXT PRIMARY KEY, xmpp_localpart TEXT, localpart_key TEXT)",
             "CREATE TABLE public.native_users(id BIGINT PRIMARY KEY, username TEXT, domain TEXT, jid_key TEXT)",
         ] { sqlx::query(statement).execute(&mut writer).await.expect("namespace swap bypasses relation locks"); }
+        if alias_columns {
+            // A bare pg_typeof(u)/pg_typeof(n) resolves these columns instead
+            // of the table aliases, spoofing the original row types even when
+            // the replacements contain no rows.
+            for statement in [
+                "ALTER TABLE public.users ADD COLUMN u snapshot_public.users",
+                "ALTER TABLE public.native_users ADD COLUMN n snapshot_public.native_users",
+            ] {
+                sqlx::query(statement)
+                    .execute(&mut writer)
+                    .await
+                    .expect("spoofed row-type columns on both replacement tables");
+            }
+        }
         if populated_replacement {
             sqlx::query("INSERT INTO public.users VALUES('replacement@home.example.test','replacement','replacement')")
                 .execute(&mut writer).await.expect("replacement account");
+        }
+        if alias_columns && !populated_replacement {
+            let ambiguous = crate::source::PG_ROWS
+                .replace("pg_typeof(u.*)", "pg_typeof(u)")
+                .replace("pg_typeof(n.*)", "pg_typeof(n)");
+            let rows = sqlx::query_as::<_, crate::source::PgStoredRow>(&ambiguous)
+                .bind(13i64)
+                .fetch_all(&mut *snapshot)
+                .await
+                .expect("exact vulnerable-query control");
+            assert_eq!(rows.len(), 2, "empty replacement sentinel from each source");
+            let mut seen = [false; 2];
+            for row in rows {
+                assert!(crate::source::bind_postgres_row(row, &bindings, &mut seen)
+                    .expect("ambiguous form falsely accepts the original composite type")
+                    .is_none());
+            }
+            assert_eq!(
+                seen, [true; 2],
+                "vulnerable control would report both sources empty"
+            );
         }
         let observed =
             crate::source::scan_postgres(&mut snapshot, &bindings, "home.example.test", 10).await;

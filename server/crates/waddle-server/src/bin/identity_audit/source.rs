@@ -26,7 +26,7 @@ pub enum Driver {
 // The retained-byte checks reject oversized fields and incomplete UTF-8.
 const PG_ROWS: &str = r#"
 SELECT 'oidc' AS source,
-       pg_typeof(u)::oid::BIGINT AS relation_type_oid,
+       pg_typeof(u.*)::oid::BIGINT AS relation_type_oid,
        u.tableoid::oid::BIGINT AS relation_oid,
        TRUE AS valid_types, NULL::BIGINT AS native_id,
        substr(u.jid,1,4097) AS raw_jid,
@@ -35,7 +35,7 @@ SELECT 'oidc' AS source,
 FROM ONLY public.users AS u
 RIGHT JOIN (VALUES (true)) AS sentinel(present) ON true
 UNION ALL
-SELECT 'native', pg_typeof(n)::oid::BIGINT, n.tableoid::oid::BIGINT,
+SELECT 'native', pg_typeof(n.*)::oid::BIGINT, n.tableoid::oid::BIGINT,
        TRUE, n.id::BIGINT, NULL, substr(n.username,1,4097),
        substr(n.domain,1,4097), substr(n.jid_key,1,4097)
 FROM ONLY public.native_users AS n
@@ -300,7 +300,8 @@ fn bind_postgres_row(
         .iter()
         .find(|binding| binding.source == source)
         .ok_or(AuditError::Schema)?;
-    // pg_typeof(base_alias) derives its type from the same resolved FROM item.
+    // Explicit alias.* selects the whole row; a bare alias can bind a same-named
+    // column instead. The type must come from the resolved FROM item.
     // The outer-join sentinel preserves that type even when the table is empty.
     if value.relation_type_oid != binding.relation_type_oid {
         return Err(AuditError::Schema);

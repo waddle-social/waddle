@@ -74,8 +74,9 @@ Before catalog validation, bounded `ACCESS SHARE` locks pin both account
 relations. These locks do **not** freeze the `public` namespace name. Validation
 records each relation OID and composite row-type OID, verifies this backend holds
 the relation lock, and checks columns by that OID. Each scan then returns the
-actual base alias's `pg_typeof` OID, including a typed outer-join sentinel for an
-empty source. Data rows must also have the expected `tableoid`, before retention.
+actual base alias's `pg_typeof(u.*)` / `pg_typeof(n.*)` OID, including a typed
+outer-join sentinel for an empty source. Explicit whole-row syntax prevents
+columns named `u` or `n` from spoofing the validated original row types. Data rows must also have the expected `tableoid`, before retention.
 A renamed namespace with empty or populated replacement tables therefore fails
 incomplete instead of becoming a clean inventory. Reads use `ONLY` to exclude
 inheritance descendants. Search path is restricted to `pg_catalog`.
@@ -199,7 +200,8 @@ nix develop --command cargo test --locked -p waddle-server \
 
 It creates its own cluster and socket inside a TempDir, disables TCP listening,
 and never reads an external database URL. The native tests prove stable snapshot visibility, read-only write rejection,
-namespace replacement rejection for empty and populated substitutes, source
+namespace replacement rejection for empty and populated substitutes (including
+spoofed composite-type columns shadowing both aliases), source
 locking/timeouts, and failure under a non-bypass RLS role whose normal
 SELECT would silently hide account rows. Cleanup targets only the spawned
 process and its owned directory. A skipped native test is not a passing RLS
