@@ -8,85 +8,45 @@ use std::time::Duration;
 use jid::{FullJid, Jid};
 use minidom::Element;
 use tokio::sync::mpsc;
+use waddle_xmpp::ns::SESSION;
 use waddle_xmpp::protocol::{ConnectionPhase, StanzaDispatcher};
-use waddle_xmpp::registry::OutboundStanza;
-use waddle_xmpp::{ns::SESSION, Stanza};
-use xmpp_parsers::iq::Iq;
+use waddle_xmpp::Stanza;
+use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::super::frame::handle_xmpp_frame;
 use super::super::state::WsConnState;
 use super::super::WebSocketState;
+use super::iq_destination_support::{
+    assert_reply_addressing, bound_connection as connection, dispatch, origin, DOMAIN, ORIGIN,
+};
 use super::{
     create_test_server_owner_session, create_test_websocket_state, register_test_connection,
-    stanza_to_xml,
 };
 
-const DOMAIN: &str = "example.com";
-const ORIGIN: &str = "alice@example.com/web";
-
-fn origin() -> FullJid {
-    ORIGIN.parse().expect("bound origin")
-}
-
-async fn connection(state: &WebSocketState) -> (WsConnState, mpsc::Receiver<OutboundStanza>) {
-    let (tx, rx) = mpsc::channel(8);
-    let owner = register_test_connection(state, &origin(), tx).await;
-    let mut conn = WsConnState::new();
-    conn.phase = ConnectionPhase::ready(origin(), false);
-    conn.registry_owner = Some(owner);
-    (conn, rx)
-}
-
 fn request(target: Option<&str>, set: bool, from: Option<&str>) -> Iq {
-    let from = from.map(|value| value.parse().expect("request sender"));
-    let to = target.map(|value| value.parse().expect("request destination"));
-    let id = "session<&-correlation".into();
     let payload = Element::builder("session", SESSION).build();
-    if set {
-        Iq::Set {
-            from,
-            to,
-            id,
-            payload,
-        }
+    let payload = if set {
+        IqPayload::Set(payload)
     } else {
-        Iq::Get {
-            from,
-            to,
-            id,
-            payload,
-        }
-    }
-}
-
-async fn dispatch(state: &WebSocketState, conn: &mut WsConnState, iq: Iq) -> Vec<Iq> {
-    handle_xmpp_frame(
-        &stanza_to_xml(&Stanza::Iq(Box::new(iq))),
-        DOMAIN,
-        state,
-        conn,
-    )
-    .await
-    .into_iter()
-    .map(|frame| Iq::try_from(frame.parse::<Element>().expect("response XML")).expect("IQ"))
-    .collect()
+        IqPayload::Get(payload)
+    };
+    super::iq_destination_support::request(payload, target, from, "session<&-correlation")
 }
 
 fn assert_remote_error(reply: &Iq, request: &Iq) {
-    assert_eq!(reply.id(), request.id());
-    assert_eq!(reply.from(), request.to());
-    assert_eq!(reply.to(), Some(&Jid::from(origin())), "bound origin");
+    assert_reply_addressing(reply, request);
     let Iq::Error { error, payload, .. } = reply else {
         panic!("foreign Session must not receive local success: {reply:?}")
     };
-    assert_eq!(error.type_, ErrorType::Cancel);
-    assert_eq!(error.defined_condition, DefinedCondition::NotAllowed);
-    assert_eq!(error.by, Some(DOMAIN.parse().expect("home domain")));
-    assert!(error
-        .texts
-        .values()
-        .any(|text| text == "Remote Session routing is not allowed by this server."));
+    let mut expected = StanzaError::new(
+        ErrorType::Cancel,
+        DefinedCondition::NotAllowed,
+        "en",
+        "Remote Session routing is not allowed by this server.",
+    );
+    expected.by = Some(DOMAIN.parse().expect("home domain"));
+    // Compare every error field, including the exact diagnostic language/text.
+    assert_eq!(error, &expected);
     let original = match request {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => payload,
         _ => panic!("request IQ"),

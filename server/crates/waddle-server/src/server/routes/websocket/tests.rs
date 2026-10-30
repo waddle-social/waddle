@@ -60,6 +60,7 @@ mod dispatch;
 mod frame_parsing;
 mod ingress_authority;
 mod iq;
+mod iq_destination_support;
 mod keyed_detach_drain;
 mod messages;
 mod misc;
