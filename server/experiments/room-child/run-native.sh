@@ -43,8 +43,30 @@ room_child_start_attempted=1
 timeout --kill-after=5 30 "$ROOM_CHILD_POSTGRES_BIN/createdb" "$PGDATABASE"
 export WADDLE_TEST_POSTGRES_URL="postgresql://$PGUSER@localhost/$PGDATABASE?host=$PGHOST&port=$PGPORT"
 # Compiling and test execution have independent bounded deadlines.
-timeout --kill-after=10 1800 cargo test -p waddle-server --lib --features test-support --locked \
-  --no-run --message-format=json-render-diagnostics > "$room_child_root/build.json"
+if timeout --kill-after=10 1800 cargo test -p waddle-server --lib --features test-support --locked \
+  --no-run --message-format=json-render-diagnostics > "$room_child_root/build.json"; then
+  :
+else
+  build_status=$?
+  python3 - "$room_child_root/build.json" <<'PYDIAGNOSTICS'
+import json
+import sys
+
+with open(sys.argv[1]) as source:
+    for line in source:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            # A terminated Cargo process may leave a partial JSON record.
+            print(line, end="", file=sys.stderr)
+            continue
+        if event.get("reason") == "compiler-message":
+            rendered = event.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, end="", file=sys.stderr)
+PYDIAGNOSTICS
+  exit "$build_status"
+fi
 room_child_binary=$(python3 - "$room_child_root/build.json" <<'PY'
 import json
 import sys
