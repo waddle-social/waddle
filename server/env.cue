@@ -204,6 +204,26 @@ schema.#Project & {
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
+		// Test-only native experiment: do not add these inputs to the image
+		// publishing pipeline or its deployment-revision authority.
+		federationGrantFence: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
 		namespaceRustChecks: {
 			mode:        "expanded"
 			derivePaths: true
@@ -274,6 +294,21 @@ schema.#Project & {
 	}
 
 	tasks: {
+		federationGrantFenceProof: schema.#Task & {
+			// This native experiment needs a live checkout, Nix, /proc and
+			// isolated local PostgreSQL and SpiceDB processes; it cannot run
+			// inside the Nix build sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/grant-fence/run-native.sh"]
+			inputs: [
+				"experiments/grant-fence/**",
+				"../flake.lock",
+				"../flake.nix",
+				"rust-toolchain.toml",
+			]
+		}
+
 		checkCiDrift: schema.#Task & {
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
