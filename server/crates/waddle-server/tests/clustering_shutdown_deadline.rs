@@ -368,3 +368,180 @@ async fn sigterm_with_a_held_publication_guard_does_not_retire() {
     assert!(live_identity.current().is_active());
     drop(publication);
 }
+
+/// A heartbeat CAS that affects zero rows fences the node at once; the
+/// re-registration that follows blocks until `release` is notified.
+struct Reregistration {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+fn fencing_lease(probe: RetirementProbe) -> (RecordingLease, Reregistration) {
+    let mut lease = RecordingLease::new(false, probe);
+    let gate = Reregistration {
+        entered: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    lease.registration_entered = Some(Arc::clone(&gate.entered));
+    lease.registration_release = Some(Arc::clone(&gate.release));
+    (lease, gate)
+}
+
+/// Drive the node-lease loop into its post-fence re-registration.
+async fn reach_reregistration(interval: Duration, gate: &Reregistration) {
+    tokio::task::yield_now().await;
+    tokio::time::advance(interval + Duration::from_millis(20)).await;
+    gate.entered.notified().await;
+}
+
+/// #1985 follow-up: SIGTERM while the node re-registers after a self-fence
+/// retires both the fenced and the freshly registered identity, each only
+/// after the publication barrier closed and its actors were demoted.
+#[tokio::test(start_paused = true)]
+async fn sigterm_during_reregistration_retires_both_identities() {
+    let initial = identity();
+    let live_identity = SharedNodeIdentity::new(initial.clone());
+    let demoted_owners = Arc::new(Mutex::new(Vec::new()));
+    let probe_identity = live_identity.clone();
+    let probe_demoted = Arc::clone(&demoted_owners);
+    let (lease, gate) = fencing_lease(Box::new(move |retired| {
+        !probe_identity.current().is_active()
+            && probe_demoted.lock().expect("lock").contains(retired)
+    }));
+    let retirements = Arc::clone(&lease.retirements);
+    let stop = CancellationToken::new();
+    let interval = Duration::from_millis(50);
+    let task = tokio::spawn(run_node_lease(
+        lease,
+        initial.clone(),
+        stop.clone(),
+        run_config(
+            interval,
+            Arc::new(StallingLocalClaims {
+                stall: false,
+                demoted_owners: Arc::clone(&demoted_owners),
+            }),
+            NodeLifecycle::new(),
+            live_identity.clone(),
+            None,
+        ),
+    ));
+
+    reach_reregistration(interval, &gate).await;
+    stop.cancel();
+    gate.release.notify_one();
+    task.await.expect("node-lease task");
+
+    assert!(!live_identity.current().is_active());
+    let retired = retirements.lock().expect("lock").clone();
+    assert_eq!(retired.len(), 2, "both identities retire: {retired:?}");
+    assert!(retired.iter().any(|(owner, _)| owner == &initial));
+    assert!(
+        retired.iter().all(|(_, after_barrier)| *after_barrier),
+        "each identity retires only after disable() and its exact demotion"
+    );
+}
+
+/// The production shape of the same path: the process itself is stopping
+/// and its Q6 drain never settles. Both identities are still retired after
+/// the barrier, inside the retirement stage of the enclosing deadline.
+#[tokio::test(start_paused = true)]
+async fn process_sigterm_during_reregistration_retires_inside_the_deadline() {
+    let initial = identity();
+    let live_identity = SharedNodeIdentity::new(initial.clone());
+    let deadline = ten_second_deadline();
+    let demoted_owners = Arc::new(Mutex::new(Vec::new()));
+    let probe_identity = live_identity.clone();
+    let probe_demoted = Arc::clone(&demoted_owners);
+    let probe_deadline = deadline.clone();
+    let (lease, gate) = fencing_lease(Box::new(move |retired| {
+        !probe_identity.current().is_active()
+            && probe_demoted.lock().expect("lock").contains(retired)
+            && probe_deadline.started().is_some_and(|shutdown| {
+                tokio::time::Instant::now()
+                    <= shutdown.deadline_before(SHUTDOWN_TERMINAL_SWEEP_BUDGET)
+            })
+    }));
+    let retirements = Arc::clone(&lease.retirements);
+    let process_stop = CancellationToken::new();
+    let interval = Duration::from_millis(50);
+    let task = tokio::spawn(run_node_lease(
+        lease,
+        initial.clone(),
+        process_stop.child_token(),
+        run_config(
+            interval,
+            Arc::new(StallingLocalClaims {
+                stall: false,
+                demoted_owners: Arc::clone(&demoted_owners),
+            }),
+            NodeLifecycle::new(),
+            live_identity.clone(),
+            Some(stalled_q6(&process_stop, &deadline)),
+        ),
+    ));
+
+    reach_reregistration(interval, &gate).await;
+    process_stop.cancel();
+    let shutdown = deadline.start();
+    gate.release.notify_one();
+    tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+        .await
+        .expect("shutdown during re-registration must end inside the deadline")
+        .expect("node-lease task");
+
+    let retired = retirements.lock().expect("lock").clone();
+    assert_eq!(retired.len(), 2, "both identities retire: {retired:?}");
+    assert!(
+        retired.iter().all(|(_, in_stage)| *in_stage),
+        "each retirement follows disable() and demotion, inside its stage"
+    );
+}
+
+/// If the barrier cannot close during a re-registration shutdown, neither
+/// identity is retired.
+#[tokio::test(start_paused = true)]
+async fn process_sigterm_during_reregistration_with_a_held_guard_does_not_retire() {
+    let initial = identity();
+    let live_identity = SharedNodeIdentity::new(initial.clone());
+    let deadline = ten_second_deadline();
+    let (lease, gate) = fencing_lease(Box::new(|_| true));
+    let retirements = Arc::clone(&lease.retirements);
+    let process_stop = CancellationToken::new();
+    let interval = Duration::from_millis(50);
+    let task = tokio::spawn(run_node_lease(
+        lease,
+        initial.clone(),
+        process_stop.child_token(),
+        run_config(
+            interval,
+            Arc::new(StallingLocalClaims {
+                stall: false,
+                demoted_owners: Arc::new(Mutex::new(Vec::new())),
+            }),
+            NodeLifecycle::new(),
+            live_identity.clone(),
+            Some(stalled_q6(&process_stop, &deadline)),
+        ),
+    ));
+    tokio::task::yield_now().await;
+    let publication = live_identity
+        .guard_if_current(&initial)
+        .await
+        .expect("identity is current before the fence");
+
+    reach_reregistration(interval, &gate).await;
+    process_stop.cancel();
+    let shutdown = deadline.start();
+    gate.release.notify_one();
+    tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+        .await
+        .expect("shutdown during re-registration must end inside the deadline")
+        .expect("node-lease task");
+
+    assert!(
+        retirements.lock().expect("lock").is_empty(),
+        "an identity whose barrier did not close is never retired"
+    );
+    drop(publication);
+}

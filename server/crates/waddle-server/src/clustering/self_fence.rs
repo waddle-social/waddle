@@ -910,6 +910,24 @@ struct TerminalFenceContext<'a, L> {
 
 const SM_DRAIN_WAIT_MARGIN: Duration = Duration::from_millis(100);
 
+/// Why a terminal path runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalCause {
+    /// The clustering stop token fired while the node was re-registering or
+    /// recovering after a fence (#1985 follow-up). That token is the
+    /// clustering scope, so this covers SIGTERM/SIGQUIT and also the
+    /// swarm's own scope cancellation on keypair-slot fencing loss
+    /// (`swarm.rs` slot-lease deadline / zero-row renewal), exactly as the
+    /// main loop's `shutdown()` already treats any scope stop. After the
+    /// `disable()` barrier and exact-owner demotion, both identities are
+    /// retired as an ordinary shutdown retires its own (#1295), so their
+    /// claims do not wait for the orphan reaper.
+    Shutdown,
+    /// A fatal fence, or lease loss detected during shutdown: the reaper,
+    /// not this node, decides when the identities' claims become stealable.
+    Fatal,
+}
+
 async fn sleep_until_or_pending(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -1014,7 +1032,7 @@ where
         });
         self.readiness.begin_fenced_recovery();
         if self.fatal_fence.is_cancelled() {
-            self.finish(identity, identity).await;
+            self.finish(identity, identity, TerminalCause::Fatal).await;
             return;
         }
         // The room drain keeps its configured budget, clamped to its own
@@ -1056,7 +1074,7 @@ where
         let outcome = tokio::select! {
             biased;
             _ = self.fatal_fence.cancelled() => {
-                self.finish(identity, identity).await;
+                self.finish(identity, identity, TerminalCause::Fatal).await;
                 return;
             }
             outcome = drain => outcome,
@@ -1078,7 +1096,7 @@ where
             // identity publication barrier. Its armed guards preserve the
             // durable rows for successor recovery when that task is dropped.
             self.fatal_fence.cancel();
-            self.finish(identity, identity).await;
+            self.finish(identity, identity, TerminalCause::Fatal).await;
             return;
         }
 
@@ -1133,7 +1151,12 @@ where
         self.retire_if_drained(identity).await;
     }
 
-    async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
+    async fn finish(
+        &self,
+        prior_identity: &NodeIdentity,
+        registered_identity: &NodeIdentity,
+        cause: TerminalCause,
+    ) {
         self.readiness.begin_fenced_recovery();
         self.stop_token.cancel();
         let identities: &[&NodeIdentity] = if registered_identity == prior_identity {
@@ -1170,6 +1193,7 @@ where
                 tracing::warn!("clustering: Q6 did not settle after the terminal fence; demoting local claims with incomplete drain accounting");
             }
         }
+        let mut demoted = true;
         for identity in identities {
             if self
                 .within_deadline(
@@ -1179,20 +1203,47 @@ where
                 .await
                 .is_none()
             {
+                demoted = false;
                 tracing::warn!(
                     node_id = %identity.node_id,
                     "clustering: exact-owner demotion did not finish before the shutdown deadline"
                 );
             }
         }
-        self.terminal_sweep().await;
-        for identity in identities {
-            mark_draining_bounded(
-                self.lease,
-                identity,
-                self.control_plane_budget_keeping(Duration::ZERO),
-            )
-            .await;
+        // #1985 follow-up: an ordinary stop during re-registration or
+        // recovery retires both identities once the barrier has closed and
+        // their actors are demoted, before the local sweep, exactly like
+        // `shutdown`. A fatal fence never self-retires.
+        let retire = cause == TerminalCause::Shutdown
+            && disabled
+            && demoted
+            && !self.fatal_fence.is_cancelled();
+        if retire {
+            for identity in identities {
+                mark_draining_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+                )
+                .await;
+                retire_after_shutdown_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+                )
+                .await;
+            }
+            self.terminal_sweep().await;
+        } else {
+            self.terminal_sweep().await;
+            for identity in identities {
+                mark_draining_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(Duration::ZERO),
+                )
+                .await;
+            }
         }
         if disabled {
             for identity in identities {
@@ -1660,11 +1711,11 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                     return;
                 }
                 _ = tokio::time::sleep(backoff.next_delay()) => {}
@@ -1697,11 +1748,11 @@ pub async fn run_node_lease<L>(
             let registration_result = tokio::select! {
                 biased;
                 _ = fatal_fence.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                     return;
                 }
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                     return;
                 }
                 joined = &mut registration => match joined {
@@ -1714,7 +1765,9 @@ pub async fn run_node_lease<L>(
             match registration_result {
                 Ok(()) => {
                     if fatal_fence.is_cancelled() {
-                        terminal_fence_context.finish(&identity, &fresh).await;
+                        terminal_fence_context
+                            .finish(&identity, &fresh, TerminalCause::Fatal)
+                            .await;
                         return;
                     }
                     let count_identity = fresh.clone();
@@ -1724,17 +1777,19 @@ pub async fn run_node_lease<L>(
                     let other_live = tokio::select! {
                         biased;
                         _ = fatal_fence.cancelled() => {
-                            terminal_fence_context.finish(&identity, &fresh).await;
+                            terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                             return;
                         }
                         _ = stop_token.cancelled() => {
-                            terminal_fence_context.finish(&identity, &fresh).await;
+                            terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                             return;
                         }
                         result = count_future => result.unwrap_or(usize::MAX),
                     };
                     if fatal_fence.is_cancelled() {
-                        terminal_fence_context.finish(&identity, &fresh).await;
+                        terminal_fence_context
+                            .finish(&identity, &fresh, TerminalCause::Fatal)
+                            .await;
                         return;
                     }
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
@@ -1768,11 +1823,11 @@ pub async fn run_node_lease<L>(
                         let swept = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => {
-                                terminal_fence_context.finish(&identity, &fresh).await;
+                                terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
-                                terminal_fence_context.finish(&identity, &fresh).await;
+                                terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                                 return;
                             }
                             swept = swept_future => swept,
@@ -1802,14 +1857,14 @@ pub async fn run_node_lease<L>(
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                 return;
                             }
                             _ = exact_demote => {}
@@ -1840,14 +1895,14 @@ pub async fn run_node_lease<L>(
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                 return;
                             }
                             _ = expire_future => {}
@@ -1883,14 +1938,14 @@ pub async fn run_node_lease<L>(
                                     recovery_heartbeat_cancel.cancel();
                                     recovery_heartbeat.abort();
                                     let _ = (&mut recovery_heartbeat).await;
-                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                     return;
                                 }
                                 _ = stop_token.cancelled() => {
                                     recovery_heartbeat_cancel.cancel();
                                     recovery_heartbeat.abort();
                                     let _ = (&mut recovery_heartbeat).await;
-                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                     return;
                                 }
                                 result = reclaim => result.is_err(),
@@ -1910,7 +1965,7 @@ pub async fn run_node_lease<L>(
 
                         if fatal_fence.is_cancelled() {
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -1927,14 +1982,21 @@ pub async fn run_node_lease<L>(
                         let heartbeat_is_fresh = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => false,
-                            _ = stop_token.cancelled() => false,
+                            _ = stop_token.cancelled() => {
+                                // #1985 follow-up: an ordinary stop during
+                                // recovery retires, it is not a fatal fence.
+                                terminal_fence_context
+                                    .finish(&superseded_identity, &identity, TerminalCause::Shutdown)
+                                    .await;
+                                return;
+                            }
                             result = final_heartbeat => matches!(result, Ok(Ok(true))),
                         };
                         if !heartbeat_is_fresh {
                             readiness.begin_fenced_recovery();
                             fatal_fence.cancel();
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -1956,7 +2018,7 @@ pub async fn run_node_lease<L>(
                         if fatal_fence.is_cancelled() {
                             readiness.begin_fenced_recovery();
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -3615,6 +3677,7 @@ mod tests {
         let registration_release = Arc::new(tokio::sync::Notify::new());
         lease.registration_entered = Some(Arc::clone(&registration_entered));
         lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = lease.retirements.clone();
 
         let initial_identity = identity();
         let live_identity =
@@ -3682,6 +3745,10 @@ mod tests {
             exact.iter().all(|owner| owner != &published),
             "the live identity must be terminally disabled, not either retired owner"
         );
+        assert!(
+            retirements.lock().expect("lock").is_empty(),
+            "a fatal fence never self-retires either identity"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3692,10 +3759,13 @@ mod tests {
         let registration_release = Arc::new(tokio::sync::Notify::new());
         lease.registration_entered = Some(Arc::clone(&registration_entered));
         lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = lease.retirements.clone();
 
         let initial_identity = identity();
         let live_identity =
             waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let probe_identity = live_identity.clone();
+        lease.retire_probe = Some(Box::new(move || !probe_identity.current().is_active()));
         let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
         let local_claims = Arc::new(FakeLocalClaims {
             owned: Vec::new(),
@@ -3752,6 +3822,16 @@ mod tests {
             2,
             "both pre-fence and potentially registered owners retire"
         );
+        // #1985 follow-up: SIGTERM during re-registration is an ordinary
+        // shutdown, not a fatal fence. Both identities are retired, each
+        // only after the publication barrier closed, so their claims do
+        // not wait for the orphan reaper.
+        let retired = retirements.lock().expect("lock");
+        assert_eq!(retired.len(), 2, "both identities retire: {retired:?}");
+        for (retired_owner, disabled) in retired.iter() {
+            assert!(exact.contains(retired_owner));
+            assert_eq!(*disabled, Some(true), "retired only after disable()");
+        }
     }
 
     #[tokio::test]
