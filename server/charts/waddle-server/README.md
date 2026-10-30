@@ -357,7 +357,13 @@ a ConfigMap. The full procedure is in
 
 - `config.drainTimeoutSeconds` sets `WADDLE_DRAIN_TIMEOUT_SECS`.
 - `terminationGracePeriodSeconds` controls Kubernetes pod termination grace period.
-- The chart validates `terminationGracePeriodSeconds >= config.drainTimeoutSeconds`.
+- The server bounds its whole shutdown by one deadline started at `SIGTERM`:
+  `config.drainTimeoutSeconds` (connection and SM drain) +
+  `clustering.claimReleaseBudgetSeconds` (room drain) + 5 s identity
+  retirement + 2 s terminal sweep.
+- The chart validates that `terminationGracePeriodSeconds` is at least
+  `preStopSleepSeconds` plus that deadline plus a 5 s kill margin (52 s with
+  the defaults).
 
 ## Probes
 

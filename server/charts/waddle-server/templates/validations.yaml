@@ -48,10 +48,31 @@
   still go heartbeat-stale mid-drain even with this fix landed.
 */ -}}
 {{- $claimReleaseBudget := int .Values.clustering.claimReleaseBudgetSeconds -}}
+{{- /*
+  #2046 W1.10: one enclosing shutdown deadline. The server starts it at
+  SIGTERM and derives every stage's budget from it
+  (`waddle_server::shutdown_deadline`): connection drain (at most half of
+  drainTimeoutSeconds) and Q6 SM drain inside drainTimeoutSeconds, the room
+  drain inside claimReleaseBudgetSeconds, then identity retirement (the
+  disable() barrier, exact-owner demotion and retire_after_shutdown) inside
+  $retireBudget, then the local terminal sweep and terminal departure write
+  inside $terminalSweepBudget. The server's deadline is exactly
+  drainTimeoutSeconds + claimReleaseBudgetSeconds + $retireBudget +
+  $terminalSweepBudget, so this floor is preStop + that deadline + the kill
+  margin. The kill margin is not free slack: it covers the post-deadline
+  exit tail (the pre-exit metrics flush, bounded at 5 s, then telemetry
+  shutdown). Every claim is handed off before the deadline; a stalled OTLP
+  exporter can still be SIGKILLed inside the margin, losing only telemetry. $retireBudget and $terminalSweepBudget
+  mirror SHUTDOWN_RETIRE_BUDGET and SHUTDOWN_TERMINAL_SWEEP_BUDGET in
+  crates/waddle-server/src/shutdown_deadline.rs;
+  scripts/test_chart_shutdown_budget.py checks they agree.
+*/ -}}
+{{- $retireBudget := 5 -}}
+{{- $terminalSweepBudget := 2 -}}
 {{- $terminationGrace := int .Values.terminationGracePeriodSeconds -}}
-{{- $shutdownFloor := add $preStopSleep $drainTimeout $claimReleaseBudget $killMargin -}}
+{{- $shutdownFloor := add $preStopSleep $drainTimeout $claimReleaseBudget $retireBudget $terminalSweepBudget $killMargin -}}
 {{- if lt $terminationGrace $shutdownFloor -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + clustering.claimReleaseBudgetSeconds (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $claimReleaseBudget $killMargin $shutdownFloor) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%d) must be >= preStopSleepSeconds (%d) + config.drainTimeoutSeconds (%d) + clustering.claimReleaseBudgetSeconds (%d) + identity retirement (%d) + terminal sweep (%d) + kill margin (%d) = %d" $terminationGrace $preStopSleep $drainTimeout $claimReleaseBudget $retireBudget $terminalSweepBudget $killMargin $shutdownFloor) -}}
 {{- end -}}
 
 {{- if and (ne $rawDeploymentUuid "") (not (regexMatch $uuidPattern $rawDeploymentUuid)) -}}
