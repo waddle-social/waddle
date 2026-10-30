@@ -1,0 +1,1 @@
+This update must be rejected by the canary freeze.
