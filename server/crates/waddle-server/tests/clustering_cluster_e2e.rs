@@ -3839,7 +3839,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         .await
         .expect("client B requests issued Muji credentials");
     let media_accept = client_b
-        .recv_until(|frame| frame.contains("session-accept") && frame.contains(&media_sid))
+        .recv_matching(|frame| frame.contains("session-accept") && frame.contains(&media_sid))
         .await
         .expect("owner issues Muji credentials to client B");
     let media_accept: xmpp_parsers::minidom::Element =
