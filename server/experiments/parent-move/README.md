@@ -26,7 +26,12 @@ No canonical authority choice is established by either outcome.
 
 Run `bash server/experiments/parent-move/run-native.sh`. Its pinned pure Nix
 shell requires Linux, `/proc`, native PostgreSQL 17.11 and SpiceDB 1.56.1. It
-executes exactly two ignored native cases and the shared fixture unit suite;
+also supplies Go 1.26.7 and CA certificates from the same `flake.lock` for the
+cuengine dev dependency's cgo bridge on a cold Cargo target. Automatic Go
+toolchain downloads are disabled (`GOTOOLCHAIN=local`); no host Go is required.
+The runner records `go version` before compilation. Initial dependency downloads
+require network/cache access. It executes exactly two ignored native cases and
+the shared fixture unit suite;
 missing prerequisites fail. Each case writes secret-scanned private evidence
 under `/tmp/waddle-fence-evidence-*`, including exact HEAD/status digest,
 binary versions, outcome and verified cleanup. The runner requires a clean

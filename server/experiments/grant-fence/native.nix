@@ -14,17 +14,25 @@ let
 in
 assert pkgs.postgresql_17.version == "17.11";
 assert pkgs.spicedb.version == "1.56.1";
+assert pkgs.go.version == "1.26.7";
 pkgs.mkShell {
   packages = [
     rust
     pkgs.bash
+    pkgs.cacert
     pkgs.git
+    pkgs.go
     pkgs.pkg-config
     pkgs.protobuf
     pkgs.postgresql_17
     pkgs.spicedb
   ];
   buildInputs = [ pkgs.openssl ];
+  # waddle-server's cuengine dev dependency builds its cgo bridge on a cold
+  # Cargo target. Keep both its compiler and download trust repository-pinned.
+  GOTOOLCHAIN = "local";
+  SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+  NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   FENCE_POSTGRES_BIN = "${pkgs.postgresql_17}/bin";
   FENCE_SPICEDB_BIN = "${pkgs.spicedb}/bin/spicedb";
   FENCE_TEST_SHELL = "${pkgs.bash}/bin/bash";

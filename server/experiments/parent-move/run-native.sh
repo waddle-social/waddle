@@ -21,6 +21,7 @@ source_digest() {
 }
 head_before="$(git rev-parse HEAD)"
 digest_before="$(source_digest)"
+go version
 cargo fmt --manifest-path server/Cargo.toml --all --check
 inventory="$(cargo test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --list)"
 test "$(printf '%s\n' "$inventory" | grep -c '^permissions::parent_move_native_tests::production_parent_move_.*: test$')" = 2
