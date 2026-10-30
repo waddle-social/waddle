@@ -162,9 +162,12 @@ pub enum StartupServingTransition {
 pub struct NodeLifecycle {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     pub(in crate::clustering) fatal_fence: CancellationToken,
-    /// Cancelled once the clustering terminal fence (`TerminalFenceContext::
-    /// finish`) has completed its bounded local demotion. Read-only signal for
-    /// liveness; it changes no fencing or shutdown behaviour.
+    /// Cancelled once a clustering terminal exit has finished its local
+    /// demotion: the end of `TerminalFenceContext::finish`, or the inline
+    /// fatal-fence exit of `run_node_lease`'s registered loop. Read-only
+    /// signal for liveness; it changes no fencing or shutdown behaviour.
+    /// The demotion awaits the identity publication barrier and actor asks
+    /// with no deadline, so a wedged guard or actor delays this signal.
     pub(in crate::clustering) terminal_fence_finished: CancellationToken,
 }
 
@@ -337,17 +340,18 @@ impl NodeLifecycle {
         self.fatal_fence.clone()
     }
 
-    /// Record that the clustering terminal fence finished its bounded local
-    /// demotion. Called last in `TerminalFenceContext::finish`, which also
-    /// runs on an ordinary clustering stop; [`Self::is_terminally_fenced`]
-    /// therefore also requires the fatal fence.
+    /// Record that a clustering terminal exit finished its local demotion.
+    /// Called last in `TerminalFenceContext::finish` and on `run_node_lease`'s
+    /// inline fatal-fence exit. `finish` also runs on an ordinary clustering
+    /// stop, so [`Self::is_terminally_fenced`] also requires the fatal fence.
     pub fn mark_terminal_fence_finished(&self) {
         self.terminal_fence_finished.cancel();
     }
 
-    /// The node took a fatal fence and finished fencing: it can never serve
-    /// again in this process (`FencedRecovering` with no re-registration
-    /// loop left), so only a restart recovers it. Liveness reports this.
+    /// The node took a fatal fence and its node-lease loop finished the
+    /// terminal demotion and returned: it can never serve again in this
+    /// process (`FencedRecovering` with no re-registration loop left), so
+    /// only a restart recovers it. Liveness reports this.
     pub fn is_terminally_fenced(&self) -> bool {
         self.fatal_fence.is_cancelled() && self.terminal_fence_finished.is_cancelled()
     }

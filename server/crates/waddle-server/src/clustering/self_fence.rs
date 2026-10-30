@@ -1515,6 +1515,11 @@ pub async fn run_node_lease<L>(
         mark_draining_bounded(lease.as_ref(), &identity, config.heartbeat_interval).await;
 
         if terminal_fence {
+            // The inline block above is this path's terminal demotion (the
+            // serving-node counterpart of `TerminalFenceContext::finish`,
+            // which must not run a second time). Mark it finished so
+            // liveness can restart the pod: nothing re-serves after this.
+            readiness.mark_terminal_fence_finished();
             return;
         }
 
@@ -3469,6 +3474,54 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn ordinary_node_lease_stop_is_not_terminally_fenced() {
+        let interval = Duration::from_millis(50);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let readiness = NodeLifecycle::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        stop_token.cancel();
+        task.await.expect("node lease exits after an ordinary stop");
+
+        assert!(!readiness.is_ready());
+        assert!(
+            !readiness.fatal_fence_token().is_cancelled(),
+            "an ordinary stop with the lease available takes no fatal fence"
+        );
+        assert!(
+            !readiness.is_terminally_fenced(),
+            "an ordinary clustering stop must not fail liveness"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn fatal_fence_latched_during_reregistration_cannot_restore_readiness() {
         let interval = Duration::from_millis(50);
         let mut lease = FakeLease::new(Box::new(|| Ok(false)));
@@ -3529,6 +3582,10 @@ mod tests {
             .expect("terminal latch exits after registration returns");
 
         assert!(!readiness.is_ready());
+        assert!(
+            readiness.is_terminally_fenced(),
+            "a fatal fence finished from the re-registration loop must be visible to liveness"
+        );
         assert!(stop_token.is_cancelled());
         let published = live_identity.current();
         assert_ne!(published, initial_identity);
@@ -3605,6 +3662,10 @@ mod tests {
             .expect("shutdown exits after terminally disabling publication");
 
         assert!(!readiness.is_ready());
+        assert!(
+            !readiness.is_terminally_fenced(),
+            "a stop that runs finish without a fatal fence is not terminal"
+        );
         assert!(!live_identity.current().is_active());
         let exact = exact_demoted_owners.lock().expect("lock");
         assert!(exact.contains(&initial_identity));

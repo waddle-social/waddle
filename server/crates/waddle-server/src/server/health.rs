@@ -119,9 +119,10 @@ impl From<PoolHealth> for DatabaseHealthStatus {
 /// liveness on it would restart every replica at once and reconnect every
 /// client. It fails only for states a restart is the remedy for:
 /// - the runtime-progress heartbeat (`crate::server::liveness`) has stalled;
-/// - the node took a clustering fatal fence and finished fencing
-///   ([`NodeLifecycle::is_terminally_fenced`]): it stays `FencedRecovering`
-///   with no re-registration loop left, so only a new incarnation can serve.
+/// - the node took a clustering fatal fence and its node-lease loop finished
+///   the terminal demotion ([`NodeLifecycle::is_terminally_fenced`]): it
+///   stays `FencedRecovering` with no re-registration loop left, so only a
+///   new incarnation can serve.
 pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     liveness_response(&state.runtime_progress, &state.node_lifecycle)
 }
@@ -1053,7 +1054,10 @@ mod readiness_generation_tests {
     async fn liveness_stays_up_after_an_ordinary_clustering_stop() {
         // `TerminalFenceContext::finish` also runs when clustering stops
         // without a fatal fence (process shutdown): that must not read as
-        // terminally fenced.
+        // terminally fenced. Exception, harmless: a shutdown that finds the
+        // lease unavailable cancels the fatal fence before `finish`
+        // (`TerminalFenceContext::shutdown`), so `/health` returns 503 while
+        // the pod is already terminating.
         let progress = RuntimeProgress::new();
         let lifecycle = crate::clustering::NodeLifecycle::new();
         lifecycle.begin_fenced_recovery();
