@@ -18,6 +18,11 @@ issue #1324):
 - **Every PR** touching `rules/**` runs `mimirtool rules lint` and
   `lokitool rules lint` (the `pullRequest` pipeline in `../env.cue`).
   A broken rule file fails the PR, not the pager.
+- **Loki rules are lint-only.** `lokitool rules lint` checks syntax;
+  nothing evaluates LogQL against synthetic logs (promtool cannot), so a
+  Loki rule whose expression never matches passes CI. Only the Mimir rules
+  have the behavioural tests described under "Ingress alert regression
+  tests".
 - **Every main push** syncs the trees to the Grafana Cloud rulers via
   `mimirtool rules sync` / `lokitool rules sync` (the `rulesSync` task
   in the `default` pipeline). Sync is authoritative: rules deleted

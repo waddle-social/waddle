@@ -740,6 +740,11 @@
               '';
             }
           );
+          # Local entry point (`nix build .#checks.<system>.waddle-server-test`):
+          # the whole all-features Postgres suite in one derivation. No CI
+          # workflow builds it; CI runs the same suite as four sandboxed
+          # shards (mkServerTestShard), which inherit this derivation's
+          # preCheck, fixtures and environment, so keep it.
           waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {

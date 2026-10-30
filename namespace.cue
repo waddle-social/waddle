@@ -45,6 +45,10 @@ schema.#Project & {
 	runtime: {type: "nix", flake: "."}
 
 	tasks: {
+		// The no-Postgres, default-feature lane: no database is provisioned,
+		// so Postgres-backed tests return early, and `clustering` tests are
+		// not compiled. Postgres and all-features coverage is the shard lane
+		// (server `nixTestLocal`), which also gates publish.
 		test: schema.#Task & {
 			command: "cargo"
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]

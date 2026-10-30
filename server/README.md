@@ -49,12 +49,23 @@ cargo run --bin waddle-server
 # Run the CLI client
 cargo run --bin waddle
 
-# Run tests
+# Run tests (default features; Postgres-backed tests skip without
+# WADDLE_TEST_POSTGRES_URL, and `clustering` tests are not compiled)
 cargo nextest run
 
 # Run doctests (nextest cannot run them)
 cargo test --doc
 ```
+
+CI runs two test lanes. The namespace `test` task (`namespace.cue`, PR and
+`main`) is the **no-Postgres, default-feature lane**: it runs
+`cargo nextest run --workspace --all-targets --profile ci` without a database,
+so every Postgres-backed test returns early there and no `clustering` test is
+built. The Postgres + all-features shard lane (`nixTestLocal`,
+`scripts/run-nextest-shards.sh`) runs everything with `--all-features`
+against a real Postgres, with `WADDLE_TEST_REQUIRE_POSTGRES=1` so a missing
+database fails instead of skipping, and must pass, including every test in
+`.config/required-cluster-tests.txt`, before an image is published.
 
 ### Local Development
 
