@@ -26,7 +26,14 @@ An unrecognized surface selects every lane. Planner or generator changes also
 select every lane. The aggregate requires planner success, every applicable job
 success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
-reuse of prior PR results. A dispatch uses the selected workflow ref as its exact
+reuse of prior PR results. Thin `cuenv ci` steps explicitly use the local provider
+and the validated base SHA with full Git history: cuenv 0.57.3 otherwise ignores
+`--from` under GitHub provider detection and falls back to the last commit on
+merge groups. Their Git diff disables rename collapsing. The outer planner
+rejects encoded/non-ASCII filenames when a thin cuenv lane is selected because
+that pinned local provider parses newline-delimited Git paths; it fails visibly
+rather than silently omitting affected tasks. Other lanes retain NUL-safe paths.
+A dispatch uses the selected workflow ref as its exact
 candidate and requires an explicit ancestor `base_sha`; it does not certify a
 later merge queue candidate.
 

@@ -28,6 +28,7 @@ jobs:
       contents: read
     outputs:
       expected: "${{ steps.plan.outputs.expected }}"
+      base: "${{ steps.plan.outputs.base }}"
       waddle_android_devicetests: "${{ steps.plan.outputs.waddle_android_devicetests }}"
       waddle_android_pullrequest: "${{ steps.plan.outputs.waddle_android_pullrequest }}"
       waddle_apple_pullrequest: "${{ steps.plan.outputs.waddle_apple_pullrequest }}"
@@ -68,7 +69,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Cache Android SDK and Gradle on Namespace volume
@@ -90,11 +91,12 @@ jobs:
       - name: Setup cuenv (release)
         run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
       - name: "Run pipeline: deviceTests"
-        run: cuenv ci --pipeline deviceTests --path apps/android
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline deviceTests --path apps/android --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
       - name: Upload Android test failure reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -115,7 +117,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Cache Android SDK and Gradle on Namespace volume
@@ -137,11 +139,12 @@ jobs:
       - name: Setup cuenv (release)
         run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path apps/android
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path apps/android --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
       - name: Upload Android test failure reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -162,6 +165,7 @@ jobs:
         with:
           ref: "${{ github.sha }}"
           persist-credentials: false
+          fetch-depth: 0
       - name: Install pinned Rust toolchain
         working-directory: server
         run: rustup toolchain install
@@ -194,7 +198,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -214,11 +218,12 @@ jobs:
       - name: Install Bun dependencies
         run: cuenv exec -- bun install --frozen-lockfile
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path chat
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path chat --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_chat_pullrequest == 'true' }}"
@@ -231,7 +236,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -247,11 +252,12 @@ jobs:
       - name: Setup cuenv (release)
         run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path infrastructure/waddle.cloud
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path infrastructure/waddle.cloud --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_cloud_pullrequest == 'true' }}"
@@ -264,7 +270,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -284,11 +290,12 @@ jobs:
       - name: Install Bun dependencies
         run: cuenv exec -- bun install --frozen-lockfile
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path colony
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path colony --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_colony_pullrequest == 'true' }}"
@@ -301,7 +308,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -317,11 +324,12 @@ jobs:
       - name: Setup cuenv (release)
         run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path apps/linux
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path apps/linux --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_linux_pullrequest == 'true' }}"
@@ -334,7 +342,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -368,7 +376,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -402,7 +410,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -436,7 +444,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -470,7 +478,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -504,7 +512,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -538,7 +546,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -572,7 +580,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -604,7 +612,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -636,7 +644,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -668,7 +676,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -700,7 +708,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -732,7 +740,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -764,7 +772,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -798,7 +806,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -891,7 +899,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -923,7 +931,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -955,7 +963,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -987,7 +995,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: "${{ github.sha }}"
           persist-credentials: false
       - name: Install Determinate Nix
@@ -1007,11 +1015,12 @@ jobs:
       - name: Install Bun dependencies
         run: cuenv exec -- bun install --frozen-lockfile
       - name: "Run pipeline: pullRequest"
-        run: cuenv ci --pipeline pullRequest --path website
+        run: "env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path website --from \"$WADDLE_CI_BASE_SHA\""
         env:
           GITHUB_ACTOR: "${{ github.actor }}"
           GITHUB_REF_TYPE: "${{ github.ref_type }}"
           GITHUB_REF_NAME: "${{ github.ref_name }}"
+          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_website_pullrequest == 'true' }}"

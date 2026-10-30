@@ -85,7 +85,7 @@ describe("graph parity", () => {
         expect(generated.permissions).toEqual(source.steps.some((step: any) => step.uses?.startsWith("actions/checkout@")) ? { contents: "read" } : {});
         expect(JSON.stringify(generated)).not.toContain("secrets.");
         expect(generated.steps.some((step: any) => step.uses?.startsWith("DeterminateSystems/flakehub-cache-action@"))).toBe(false);
-        expect(generated.steps.filter((step: any) => step.run).map((step: any) => step.run)).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
+        expect(generated.steps.filter((step: any) => step.run).map((step: any) => step.run.replace(/^env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false /, "").replace(/ --from "\$WADDLE_CI_BASE_SHA"$/, ""))).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
       }
     }
   });
@@ -126,6 +126,12 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
     expect(readFileSync(outputPath, "utf8")).toContain('expected=["example__build","example__verify"]');
     const report = JSON.parse(result.stdout.toString());
     expect(report.changedFiles).toEqual(["new/a\nfile.rs", "old/a\nfile.rs"]);
+    const thin = lane(["old/**"]);
+    thin.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
+    writeFileSync(join(directory, ".github/workflows/example.yml"), Bun.YAML.stringify(thin.workflow));
+    const encodedPath = run([process.execPath, script, "plan"], env);
+    expect(encodedPath.exitCode).not.toBe(0);
+    expect(encodedPath.stderr.toString()).toContain("Changed filename cannot be safely parsed");
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: "f".repeat(40) } }));
     expect(run([process.execPath, script, "plan"], env).exitCode).not.toBe(0);
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: sha } }));
@@ -160,4 +166,16 @@ test("new unreviewed secret use fails generation", () => {
   const source = lane();
   source.workflow.jobs.build.steps.push({ run: "verify", env: { PRIVATE_TOKEN: "${{ secrets.PRIVATE_TOKEN }}" } });
   expect(() => generate([source])).toThrow("Unreviewed secret");
+});
+
+test("thin pipelines use the exact complete base and local provider rather than last-commit fallback", () => {
+  const source = lane(["chat/**"]);
+  source.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
+  const workflow = Bun.YAML.parse(generate([source])) as any;
+  const job = workflow.jobs.example__build;
+  expect(job.steps[0].with["fetch-depth"]).toBe(0);
+  const step = job.steps[2];
+  expect(step.run).toBe('env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path chat --from "$WADDLE_CI_BASE_SHA"');
+  expect(step.env.WADDLE_CI_BASE_SHA).toBe("${{ needs.plan.outputs.base }}");
+  expect(workflow.jobs.plan.outputs.base).toBe("${{ steps.plan.outputs.base }}");
 });

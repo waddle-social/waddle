@@ -65,7 +65,7 @@ export function generate(lanes: Lane[]): string {
     plan: {
       name: "Plan exact candidate verification", "runs-on": "ubuntu-24.04", "timeout-minutes": 5,
       permissions: { contents: "read" },
-      outputs: Object.fromEntries(["expected", ...lanes.map(lane => lane.id)].map(key => [key, `\${{ steps.plan.outputs.${key} }}`])),
+      outputs: Object.fromEntries(["expected", "base", ...lanes.map(lane => lane.id)].map(key => [key, `\${{ steps.plan.outputs.${key} }}`])),
       steps: [...utilitySteps(),
         { name: "Check graph parity and planner contracts", run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts" },
         { id: "plan", name: "Select every applicable lane", run: "bun scripts/integration-ci.ts plan" },
@@ -89,10 +89,17 @@ export function generate(lanes: Lane[]): string {
       if (lane.workflow.defaults) job.defaults = { ...lane.workflow.defaults, ...job.defaults };
       let checkouts = 0;
       for (const step of job.steps ?? []) {
+        if (step.run?.includes("cuenv ci")) {
+          if (!step.run.startsWith("cuenv ci ")) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
+          // cuenv 0.57 ignores --from under GitHub auto-detection and its
+          // merge-group fallback only sees HEAD^; force the local provider.
+          step.run = `env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false ${step.run} --from "$WADDLE_CI_BASE_SHA"`;
+          step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}" };
+        }
         if (step.uses?.startsWith("actions/checkout@")) {
           checkouts++;
           if (step.with?.repository || step.with?.ref) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
-          step.with = { ...step.with, ref: "${{ github.sha }}", "persist-credentials": false };
+          step.with = { ...step.with, ref: "${{ github.sha }}", "persist-credentials": false, "fetch-depth": 0 };
         }
         if (/^actions\/(upload|download)-artifact@/.test(step.uses ?? "")) {
           if (!step.with?.name || step.with.pattern) throw new Error(`Unsupported artifact in ${lane.file}/${id}`);
@@ -179,7 +186,10 @@ if (import.meta.main) {
     const matches = lanes.filter(lane => applicable(lane, files));
     // An unrecognized surface must not silently become a zero-job success.
     const selected = files.some(file => !lanes.some(lane => applicable(lane, [file]))) ? lanes : matches;
-    appendFileSync(process.env.GITHUB_OUTPUT!, selected.map(lane => `${lane.id}=true\n`).join("") + `expected=${JSON.stringify(selected.flatMap(jobIds))}\n`);
+    // cuenv 0.57 parses newline-delimited git output internally. Refuse any
+    // encoded path that its affected-task parser could silently misinterpret.
+    if (selected.some(lane => JSON.stringify(lane.workflow.jobs).includes("cuenv ci")) && files.some(file => /[\x00-\x1f\x7f"\\]|[^\x00-\x7f]/.test(file))) throw new Error("Changed filename cannot be safely parsed by pinned cuenv");
+    appendFileSync(process.env.GITHUB_OUTPUT!, `base=${base}\n` + selected.map(lane => `${lane.id}=true\n`).join("") + `expected=${JSON.stringify(selected.flatMap(jobIds))}\n`);
     console.log(JSON.stringify({ candidate: sha, base, changedFiles: files, workflows: selected.map(lane => lane.file) }, null, 2));
   } else if (mode === "gate") {
     verifyGate(JSON.parse(process.env.JOB_RESULTS!), JSON.parse(process.env.EXPECTED_JOBS!), lanes.flatMap(jobIds));
