@@ -93,8 +93,15 @@ export function generate(lanes: Lane[]): string {
           if (!step.run.startsWith("cuenv ci ")) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
           // cuenv 0.57 ignores --from under GitHub auto-detection and its
           // merge-group fallback only sees HEAD^; force the local provider.
-          step.run = `env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false ${step.run} --from "$WADDLE_CI_BASE_SHA"`;
-          step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}" };
+          step.run = [
+            "set -euo pipefail",
+            'test "$(git rev-parse HEAD)" = "$WADDLE_CI_HEAD_SHA"',
+            'git cat-file -e "${WADDLE_CI_BASE_SHA}^{commit}"',
+            'git merge-base --is-ancestor "$WADDLE_CI_BASE_SHA" "$WADDLE_CI_HEAD_SHA"',
+            'git -c diff.renames=false diff --no-renames --name-only -z "$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA" > /dev/null',
+            `env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false ${step.run} --from "$WADDLE_CI_BASE_SHA"`,
+          ].join("\n");
+          step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}", WADDLE_CI_HEAD_SHA: "${{ github.sha }}" };
         }
         if (step.uses?.startsWith("actions/checkout@")) {
           checkouts++;

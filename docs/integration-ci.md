@@ -22,14 +22,19 @@ and addition so both old and new paths participate; filenames stay NUL separated
 
 The planner compares the event's full base SHA with the exact candidate SHA.
 Missing objects, invalid event identity, non-ancestor bases, and empty diffs fail.
-An unrecognized surface selects every lane. Planner or generator changes also
+An unrecognized surface selects every lane. Thin pipelines retain their existing
+affected-task semantics from the complete base diff: selecting all lanes does
+not unconditionally execute every task in each lane. Planner or generator changes also
 select every lane. The aggregate requires planner success, every applicable job
 success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
 reuse of prior PR results. Thin `cuenv ci` steps explicitly use the local provider
 and the validated base SHA with full Git history: cuenv 0.57.3 otherwise ignores
 `--from` under GitHub provider detection and falls back to the last commit on
-merge groups. Their Git diff disables rename collapsing. The outer planner
+merge groups. Each thin step rechecks its own checkout HEAD, base commit availability,
+base ancestry, and successful full diff before invoking cuenv: the pinned local
+provider otherwise silently accepts Git diff failures as zero affected tasks.
+Their Git diff disables rename collapsing. The outer planner
 rejects encoded/non-ASCII filenames when a thin cuenv lane is selected because
 that pinned local provider parses newline-delimited Git paths; it fails visibly
 rather than silently omitting affected tasks. Other lanes retain NUL-safe paths.

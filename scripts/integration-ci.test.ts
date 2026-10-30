@@ -85,7 +85,7 @@ describe("graph parity", () => {
         expect(generated.permissions).toEqual(source.steps.some((step: any) => step.uses?.startsWith("actions/checkout@")) ? { contents: "read" } : {});
         expect(JSON.stringify(generated)).not.toContain("secrets.");
         expect(generated.steps.some((step: any) => step.uses?.startsWith("DeterminateSystems/flakehub-cache-action@"))).toBe(false);
-        expect(generated.steps.filter((step: any) => step.run).map((step: any) => step.run.replace(/^env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false /, "").replace(/ --from "\$WADDLE_CI_BASE_SHA"$/, ""))).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
+        expect(generated.steps.filter((step: any) => step.run).map((step: any) => (step.env?.WADDLE_CI_BASE_SHA ? step.run.split("\n").at(-1) : step.run).replace(/^env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false /, "").replace(/ --from "\$WADDLE_CI_BASE_SHA"$/, ""))).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
       }
     }
   });
@@ -175,7 +175,47 @@ test("thin pipelines use the exact complete base and local provider rather than 
   const job = workflow.jobs.example__build;
   expect(job.steps[0].with["fetch-depth"]).toBe(0);
   const step = job.steps[2];
-  expect(step.run).toBe('env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path chat --from "$WADDLE_CI_BASE_SHA"');
+  expect(step.run.split("\n").at(-1)).toBe('env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path chat --from "$WADDLE_CI_BASE_SHA"');
   expect(step.env.WADDLE_CI_BASE_SHA).toBe("${{ needs.plan.outputs.base }}");
+  expect(step.env.WADDLE_CI_HEAD_SHA).toBe("${{ github.sha }}");
   expect(workflow.jobs.plan.outputs.base).toBe("${{ steps.plan.outputs.base }}");
+});
+
+test("each thin runner fails before cuenv on a missing base, changed HEAD or failed diff", () => {
+  const directory = mkdtempSync(join(tmpdir(), "waddle-thin-preflight-"));
+  const source = lane(["chat/**"]);
+  source.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
+  const workflow = Bun.YAML.parse(generate([source])) as any;
+  const command = workflow.jobs.example__build.steps[2].run;
+  const run = (args: string[], env = {}) => Bun.spawnSync(args, { cwd: directory, env: { ...process.env, ...env } });
+  const git = (...args: string[]) => {
+    const result = run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args]);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+  try {
+    git("init", "-q"); git("config", "user.name", "Integration contracts"); git("config", "user.email", "integration@example.test");
+    writeFileSync(join(directory, "file"), "base"); git("add", "."); git("commit", "-qm", "base");
+    const base = git("rev-parse", "HEAD");
+    const baseTree = git("rev-parse", "HEAD^{tree}");
+    writeFileSync(join(directory, "file"), "head"); git("add", "."); git("commit", "-qm", "head");
+    const head = git("rev-parse", "HEAD");
+    const marker = join(directory, "cuenv-called");
+    const testCommand = command.replace(/env -u GITHUB_ACTIONS[^\n]+$/, `printf called > '${marker}'`);
+    const env = { WADDLE_CI_BASE_SHA: base, WADDLE_CI_HEAD_SHA: head };
+    expect(run(["bash", "-c", testCommand], env).exitCode).toBe(0);
+    expect(readFileSync(marker, "utf8")).toBe("called");
+    rmSync(marker);
+    expect(run(["bash", "-c", testCommand], { ...env, WADDLE_CI_BASE_SHA: "f".repeat(40) }).exitCode).not.toBe(0);
+    expect(run(["bash", "-c", testCommand], { ...env, WADDLE_CI_HEAD_SHA: base }).exitCode).not.toBe(0);
+    const outside = mkdtempSync(join(tmpdir(), "waddle-no-repository-"));
+    try {
+      expect(Bun.spawnSync(["bash", "-c", testCommand], { cwd: outside, env: { ...process.env, ...env } }).exitCode).not.toBe(0);
+    } finally { rmSync(outside, { recursive: true, force: true }); }
+    // Corrupt the base tree: commit availability and ancestry still pass, but
+    // the real complete diff fails. cuenv must never see that as zero tasks.
+    rmSync(join(directory, ".git/objects", baseTree.slice(0, 2), baseTree.slice(2)));
+    expect(run(["bash", "-c", testCommand], env).exitCode).not.toBe(0);
+    expect(() => readFileSync(marker, "utf8")).toThrow();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
