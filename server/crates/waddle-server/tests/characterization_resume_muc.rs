@@ -7,8 +7,9 @@
 //!   subject; no discussion history) is written before a live room message,
 //!   including one queued while the burst is still unwritten.
 //! - XEP-0198 §5: a resume after transport loss reports the inbound `h`,
-//!   replays exactly the unacknowledged tail with a XEP-0203 delay, and keeps
-//!   both counters running.
+//!   re-sends exactly the unacknowledged tail, and keeps both counters
+//!   running. The replayed copies carry a XEP-0203 `<delay/>` with their
+//!   original receipt time: Waddle policy (#1178), not a §5 requirement.
 //! - XEP-0198 §5 with a peer delivering throughout the resume: every replayed
 //!   frame precedes every live frame, in send order, exactly once.
 //! - A canonical-read outage at detach: the unacknowledged ingress frame is
@@ -16,8 +17,9 @@
 //!
 //! Tests in the `seams` module need the `test-support` feature: they arm the
 //! deterministic seams in `server/routes/websocket/characterization_seams.rs`
-//! through the spawned server's environment. Everything else runs on default
-//! features.
+//! through the spawned server's environment, and the hold tests assert from
+//! the seam's events file that the hold actually engaged. Everything else
+//! runs on default features.
 
 use std::time::Duration;
 
@@ -227,6 +229,13 @@ async fn authenticate_without_bind(server: &TestServer, account: (&str, &str)) -
 /// Polls durable storage for the detached snapshot. Transport loss has no
 /// wire-visible completion, so the stored row is the barrier; the timeout
 /// only detects a detach that never happens.
+///
+/// Sound only while the detach store is the sole writer of an `sm_sessions`
+/// row and writes the snapshot and its keyed `sm_ingress_appends` in one
+/// transaction (`store_session_atomic_with_principal_and_ingress_appends`).
+/// F1b adds an enable-time `EnablingLive` row and live checkpoints; it must
+/// change this barrier to wait for the detached lifecycle state, or the
+/// append assertions below could read before the detach commits.
 async fn wait_for_detached(
     storage: &DatabaseSmPersistence,
     stream: &SmSessionId,
@@ -573,25 +582,67 @@ mod seams {
 
     const HOLD_BATCH_KIND_ENV: &str = "WADDLE_TEST_SEAM_HOLD_BATCH_KIND";
     const HOLD_BATCH_ACCOUNT_ENV: &str = "WADDLE_TEST_SEAM_HOLD_BATCH_ACCOUNT";
+    const EVENTS_FILE_ENV: &str = "WADDLE_TEST_SEAM_EVENTS_FILE";
     const DETACH_CANONICAL_READ_ENV: &str = "WADDLE_TEST_SEAM_DETACH_CANONICAL_READ";
     const BOB_BARE: &str = "bob@localhost";
+    const BOB_PHONE: &str = "bob@localhost/phone";
     /// Failure detector for the concurrent peer; it stops long before this.
     const PEER_MESSAGE_LIMIT: u32 = 2_000;
+
+    /// The hold seam's events file, in a directory the caller keeps alive.
+    fn events_file(directory: &tempfile::TempDir) -> std::path::PathBuf {
+        directory.path().join("seam-events")
+    }
+
+    /// The hold seam engaged exactly once, for bob's stream and `kind`, and
+    /// was released by a stanza queued on that connection. A hold that never
+    /// engages (missing entry, unbound stream, moved call site) records
+    /// `not-held` or nothing, and fails here instead of passing as the
+    /// seam-free interleaving.
+    fn assert_held_once_then_released(events: &std::path::Path, kind: &str) {
+        let recorded = std::fs::read_to_string(events).unwrap_or_default();
+        let bob: FullJid = BOB_PHONE.parse().expect("bob's full JID");
+        let parsed: Vec<(&str, &str, Option<FullJid>)> = recorded
+            .lines()
+            .map(|line| {
+                let mut fields = line.split(' ');
+                let event = fields.next().expect("event field");
+                let batch = fields.next().expect("kind field");
+                let jid = fields.next().expect("jid field").parse().ok();
+                assert_eq!(fields.next(), None, "three fields: {line:?}");
+                (event, batch, jid)
+            })
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                ("held", kind, Some(bob.clone())),
+                ("released", kind, Some(bob)),
+            ],
+            "seam events: {recorded:?}"
+        );
+    }
 
     /// The live room message is queued on bob's connection while the seam
     /// holds bob's written-inline join burst; bob still sees the full burst
     /// first. Today's ordering comes from the inline handler write
     /// (`connection.rs` inbound arm) preceding the next outbound drain.
+    /// `join_burst_then_live` admits no frame between the subject and the
+    /// live message, so the stanza that released the hold was that message.
     #[tokio::test]
     async fn muc_live_message_queued_during_join_burst_is_written_after_subject() {
+        let directory = tempfile::tempdir().expect("seam events directory");
+        let events = events_file(&directory);
         let server = TestServer::start_with_extra_envs(
             ACCOUNTS,
             &[
                 (HOLD_BATCH_KIND_ENV, "muc-join"),
                 (HOLD_BATCH_ACCOUNT_ENV, BOB_BARE),
+                (EVENTS_FILE_ENV, events.to_str().expect("UTF-8 temp path")),
             ],
         );
         join_burst_then_live(&server).await;
+        assert_held_once_then_released(&events, "muc-join");
     }
 
     fn peer_message_id(sequence: u32) -> String {
@@ -604,21 +655,25 @@ mod seams {
     /// m1–m3 are written live and left unacknowledged; the transport drops;
     /// the peer then sends continuously (each message paced by a ping round
     /// trip) while bob resumes with h=0. The seam holds `<resumed/>` and its
-    /// replay — already registered — until a peer message is queued live on
-    /// the resumed connection. Observed: every message arrives exactly once in
-    /// send order; the delay-stamped replay (live-written m1–m3 plus whatever
-    /// the peer sent while detached) is a contiguous prefix, and the live
-    /// frames, of which there is at least one, all follow it.
+    /// replay — already registered — until a stanza is queued on the resumed
+    /// connection, and the events file proves that hold engaged once. Observed:
+    /// every message arrives exactly once in send order; the delay-stamped
+    /// replay (live-written m1–m3 plus whatever the peer sent while detached)
+    /// is a contiguous prefix, and the live frames all follow it. Only peer
+    /// messages may follow `<resumed/>`, so the releasing stanza was a live
+    /// peer message.
     #[tokio::test]
     async fn sm_replay_precedes_live_with_concurrently_delivering_peer() {
         let directory = tempfile::tempdir().expect("database directory");
         let database_url = persistent_database_url(&directory);
+        let events = events_file(&directory);
         let server = TestServer::start_persistent_with_extra_envs(
             &database_url,
             ACCOUNTS,
             &[
                 (HOLD_BATCH_KIND_ENV, "sm-resumed"),
                 (HOLD_BATCH_ACCOUNT_ENV, BOB_BARE),
+                (EVENTS_FILE_ENV, events.to_str().expect("UTF-8 temp path")),
             ],
         );
         let storage = DatabaseSmPersistence::open(Some(&database_url))
@@ -691,26 +746,34 @@ mod seams {
         let first_live = received
             .iter()
             .position(|(_, replayed)| !replayed)
-            .expect("the seam released on a live message");
+            .expect("a live frame follows the replay (the peer sends until <resumed/> arrives)");
         assert!(first_live >= 3, "m1–m3 are replayed: {received:?}");
         assert!(
             received[first_live..].iter().all(|(_, replayed)| !replayed),
             "no replayed frame after the first live one: {received:?}"
         );
+        assert_held_once_then_released(&events, "sm-resumed");
         resumed.close().await.expect("resumed stream closes");
         alice.close().await.expect("alice closes");
     }
 
-    /// Characterizes current behaviour; changes with C2h (#2046 contract 4).
+    /// Characterizes current behaviour; changes with C7 (#2046), and with
+    /// ACT-LANES / C6c for mailbox-carried obligations (C2h form ii);
+    /// unchanged under Option B.
     ///
-    /// Every canonical read during the detach fails (`CanonicalReadFailed`,
-    /// as a database error). `DrainAuthority` degrades the obligation to an
-    /// unkeyed entry (decision on #1789: refusing it would turn the outage
-    /// into loss): the frame is still persisted and replayed, but no
-    /// `sm_ingress_appends` proof is stored for it, so the dedupe key is lost
-    /// and only the delivery receipt guards against re-execution. C2h appends
-    /// keyed-but-unverified entries at detach with no detach-time canonical
-    /// read, so this test then expects the keyed row despite the outage.
+    /// The frame is a local DM written live, so its obligation is the
+    /// relay-carried `SmRelayedAppendObligation` that detach authorizes in
+    /// `reserve_live_recorded` → `DrainAuthority::authorize`. Every canonical
+    /// read there fails (`CanonicalReadFailed`, as a database error), and
+    /// `DrainAuthority` degrades the obligation to an unkeyed entry (decision
+    /// on #1789: refusing it would turn the outage into loss): the frame is
+    /// still persisted and replayed, but no `sm_ingress_appends` proof is
+    /// stored for it, so the dedupe key is lost and only the delivery receipt
+    /// guards against re-execution. C2h keeps this relay-carried path until
+    /// its lane flips: once ACT-LANES moves DMs onto the C6c mailbox lane the
+    /// obligation is mailbox-carried and gets a keyed-but-unverified detach
+    /// append without a canonical read, and C7 deletes the unkeyed
+    /// degradation; either way this test then expects the keyed row.
     #[tokio::test]
     async fn sm_detach_canonical_read_outage_replays_unacked_ingress_frame_unkeyed() {
         let directory = tempfile::tempdir().expect("database directory");

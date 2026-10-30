@@ -1840,7 +1840,8 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         #[cfg(feature = "test-support")]
         crate::server::routes::websocket::characterization_seams::hold_until_live_stanza_queued(
             state,
-            sender_jid,
+            Some(sender_jid),
+            registry_owner,
             crate::server::routes::websocket::characterization_seams::HeldBatch::MucJoin,
         )
         .await;
