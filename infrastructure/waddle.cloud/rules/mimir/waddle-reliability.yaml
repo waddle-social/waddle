@@ -124,17 +124,6 @@ groups:
           annotations:
             runbook: Both counters are 0 in healthy history; the threshold allows small connection-churn noise. Sustained drops mean a delivery-path regression.
             summary: Messages are being dropped after retry exhaustion or terminal delivery errors.
-    - name: waddle-muc
-      rules:
-        - alert: MucFanoutFenceUnavailable
-          expr: sum(increase(xmpp_muc_fanout_fence_unavailable_total[5m])) > 0
-          for: 10m
-          labels:
-            severity: critical
-            team: waddle
-          annotations:
-            runbook: 'Groupchat dispatch could not verify the room ownership fence against Postgres after its bounded retry (3 attempts inside 2s), so it bounced the sender with a retryable wait/resource-constraint error instead of fanning out unfenced (#2046 W1.4). The room actor is deliberately NOT demoted, so the room serves again as soon as the database answers. Zero by construction on a healthy pod (the counter is zero-registered at startup). A CNPG switchover produces a short burst that the 5m window plus 10m hold ignores; firing means bounces recurred for over ten minutes. Check CNPG primary health and failover state, main-pool saturation, and the "fenced ownership check" WARN lines on the affected pods. Partial of https://github.com/waddle-social/waddle/issues/1283'
-            summary: Groupchat messages are bouncing because room ownership cannot be verified against the database.
     - name: waddle-stream-management
       rules:
         - alert: SmPauseTimeouts

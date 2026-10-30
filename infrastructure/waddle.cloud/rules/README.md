@@ -107,9 +107,7 @@ age threshold and hold/reset/resolution, primary failover, missing age telemetry
 and independent per-kind backlog growth. Run it when changing ingress alerts;
 the existing PR pipeline lints rule syntax but does not run these behavioral tests.
 
-The runner also evaluates `tests/muc.test.yaml` (the groupchat fenced fan-out
-bounce alert: quiet when healthy, quiet through a short database switchover,
-firing on sustained bounces) and `tests/push.test.yaml`. To verify the Rust-exported
+The runner also evaluates `tests/push.test.yaml`. To verify the Rust-exported
 push gauge units through a real OTLP receiver and the same recording rules,
 run with Python 3 and an existing Prometheus 3.x binary:
 
