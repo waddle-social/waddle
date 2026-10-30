@@ -585,6 +585,7 @@ jobs:
   nixTestLocal:
     permissions:
       contents: read
+      packages: write
       id-token: write
     name: nixTestLocal
     runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
