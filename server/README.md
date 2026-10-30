@@ -57,8 +57,10 @@ cargo nextest run
 cargo test --doc
 ```
 
-CI runs two test lanes. The namespace `test` task (`namespace.cue`, PR and
-`main`) is the **no-Postgres, default-feature lane**: it runs
+CI runs two workspace-wide test lanes, plus the Nix XMPP lanes
+(`xmppCompliance`, `xmppServerCompliance`) and the same shard lane on PRs
+(`waddle-server-rustTests`). The namespace `test` task (`namespace.cue`, PR
+and `main`) is the **no-Postgres, default-feature lane**: it runs
 `cargo nextest run --workspace --all-targets --profile ci` without a database,
 so every Postgres-backed test returns early there and no `clustering` test is
 built. The Postgres + all-features shard lane (`nixTestLocal`,
