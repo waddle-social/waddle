@@ -106,10 +106,12 @@ retries = 0
 # A hung test fails by name instead of consuming the 55-minute shard lane
 # (`nixTestLocal`) or the 60-minute PR job. Ordinary tests, including the
 # serialized `postgres` group (time counts from each test's own start, not
-# from queueing behind the group), finish in seconds; the longest single
-# real-time budgets outside the cluster binaries are 120 s (the spawned
-# test server's startup, SERVER_STARTUP_TIMEOUT in waddle-ws-test-support;
-# a route-bridge retry join). Ten minutes is 5x that.
+# from queueing behind the group), finish in seconds: the longest test
+# observed across 10,645 was about 61 s (docs/ci-performance.md), and the
+# longest single real-time budgets outside the cluster binaries are 120 s
+# (the spawned test server's startup, SERVER_STARTUP_TIMEOUT in
+# waddle-ws-test-support; a route-bridge retry join). Ten minutes is about
+# 10x the observed maximum and 5x the largest budget.
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 # The Postgres shard lane reads executed test names from this report and
