@@ -98,7 +98,7 @@ pub(crate) use registration::retry_remote_resource_register_test;
 pub(crate) use registration::RemoteCarbonFanout;
 use registration::{
     apply_remote_resource_presence_to_registry, apply_remote_resource_state,
-    owner_remote_entry_if_current,
+    owner_remote_entry_if_current, RemoteResourceUpdateOrder,
 };
 use types::{
     caller_delivery_outcome, log_remote_resource_route_outcome, route_outcome_log,
@@ -251,6 +251,9 @@ pub struct OrderedRelayDeliveryBridge {
     /// failure landing after the final convergence recheck is therefore
     /// never dropped.
     remote_state_resyncs_in_flight: Mutex<HashMap<(jid::FullJid, usize), bool>>,
+    /// Owner side (#1685 interim): arrival-order fence for
+    /// `remote_resource_update` handlers, per exact registration.
+    remote_resource_update_order: RemoteResourceUpdateOrder,
     #[cfg(test)]
     remote_owner_retirement_test_gate: OnceLock<Arc<RemoteOwnerRetirementTestGate>>,
     stop_token: CancellationToken,
@@ -273,6 +276,7 @@ impl OrderedRelayDeliveryBridge {
             pending_remote_owner_retirements: Mutex::new(HashMap::new()),
             remote_owner_registration_locks: Mutex::new(HashMap::new()),
             remote_state_resyncs_in_flight: Mutex::new(HashMap::new()),
+            remote_resource_update_order: RemoteResourceUpdateOrder::default(),
             #[cfg(test)]
             remote_owner_retirement_test_gate: OnceLock::new(),
             stop_token,
