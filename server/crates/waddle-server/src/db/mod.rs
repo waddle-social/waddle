@@ -21,7 +21,9 @@ use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
-use backend::{connect_backend, DatabaseBackend, PoolRole};
+use backend::CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT;
+pub use backend::MAIN_POOL_ACQUIRE_TIMEOUT;
+use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use migrations::{
     migration_checksum, MigrationLedgerError, MigrationNamespace, MigrationRunner,

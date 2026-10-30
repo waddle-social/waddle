@@ -85,6 +85,12 @@ Primary database wiring is DSN/driver based for sqlx:
   — dedicated control-plane pool size for node/claim liveness statements
   (ADR-0017 element 4/12); only opened when `clustering.enabled` is true on a
   Postgres deployment.
+- `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (no chart value; set through
+  `containerExtraEnv`, default: `30`, accepted `1`–`300`) — how long a
+  main-pool caller waits for a connection before failing with a pool timeout.
+  Lowering it turns a stalled acquisition into a client-visible timeout (a
+  stream error for sessions without stream management); measure first. The
+  control-plane pool keeps a fixed 30 s.
 
 Set DSNs with either:
 

@@ -9,9 +9,11 @@ use super::Path;
 use super::PgPool;
 use super::SqliteConnectOptions;
 use super::SqlitePool;
-use super::{connect_backend, DatabaseBackend, PoolRole};
+use super::{connect_backend, DatabaseBackend};
 use super::{debug, info, instrument};
 use super::{ConnectionGuard, DatabaseDriver, Transaction};
+use super::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
+use std::time::Duration;
 
 /// Database-specific errors.
 #[derive(Error, Debug)]
@@ -68,8 +70,8 @@ pub enum DatabaseError {
     /// `DatabaseConfig::pool_size` or `ControlPlanePoolConfig::size` was 0.
     /// A zero-sized pool can never serve a connection: left unchecked, the
     /// first query against it would instead hang for the pool's acquire
-    /// timeout (`PoolRole::acquire_timeout`) before failing — this rejects
-    /// the config at construction time instead.
+    /// timeout before failing — this rejects the config at construction
+    /// time instead.
     #[error("{which} pool size must be at least 1 (got 0)")]
     PoolSizeZero { which: &'static str },
 }
@@ -114,6 +116,10 @@ pub struct DatabaseConfig {
     /// driver is Postgres AND clustering is enabled (see `main.rs`); no code
     /// path issues control-plane statements otherwise.
     pub control_plane_pool: Option<ControlPlanePoolConfig>,
+    /// Main-pool acquire timeout. Default [`MAIN_POOL_ACQUIRE_TIMEOUT`]
+    /// (sqlx's 30 s); production sets it from `WADDLE_DB_ACQUIRE_TIMEOUT_SECS`.
+    /// The control-plane pool keeps its own fixed bound.
+    pub acquire_timeout: Duration,
 }
 
 impl Default for DatabaseConfig {
@@ -123,6 +129,7 @@ impl Default for DatabaseConfig {
             database_url: "sqlite::memory:".to_string(),
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool: None,
+            acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
         }
     }
 }
@@ -134,6 +141,7 @@ impl DatabaseConfig {
             database_url: database_url.into(),
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool: None,
+            acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
         }
     }
 
@@ -281,7 +289,7 @@ impl Database {
             config.driver,
             &config.database_url,
             config.pool_size,
-            PoolRole::Main,
+            config.acquire_timeout,
         )
         .await?;
 
@@ -291,7 +299,7 @@ impl Database {
                     config.driver,
                     &config.database_url,
                     size,
-                    PoolRole::ControlPlane,
+                    CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
                 )
                 .await?,
             ),
