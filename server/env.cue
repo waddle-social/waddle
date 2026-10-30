@@ -156,6 +156,7 @@ schema.#Project & {
 			tasks: [
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
+				_t.checkAlertRules,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -198,7 +199,7 @@ schema.#Project & {
 				"pull-requests": "none"
 			}
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram,
+				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.checkAlertRules,
 				_t.nixFmt, _t.nixClippy,
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
@@ -430,6 +431,38 @@ schema.#Project & {
 				"../cuenv.lock",
 				"../xeps/xep-*.xml",
 				"env.cue",
+			]
+		}
+
+		// Alert evidence (#2046 W1.12): promtool checks and unit tests for
+		// every Mimir rule file, then the OTLP contract that pushes the
+		// Rust-pinned instrument names and units (the two fixtures below)
+		// through Prometheus's real OTLP translator and requires the
+		// Prometheus names the alert rules read. It lives here, not only in
+		// the cloud project, because a fixture, unit or Prometheus (flake)
+		// change ships with this image: these expanded pipelines run every
+		// listed task as its own job whenever the derived trigger paths
+		// match, so ../ inputs select it. Non-expanded `cuenv ci` matches
+		// changed files against inputs without resolving ../ and would skip
+		// it. Reads the rules from the live checkout, so not hermetic.
+		checkAlertRules: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					prometheus_bin="$(command -v prometheus)"
+					PROMETHEUS_BIN="${prometheus_bin}" sh ../infrastructure/waddle.cloud/rules/tests/run.sh
+					echo "Alert rule tests and OTLP name contract pass."
+				"""#]
+			inputs: [
+				// Rule files and the runner/contract only, so README, Loki
+				// or routing-policy edits do not trigger the server lanes.
+				"../infrastructure/waddle.cloud/rules/mimir/*.yaml",
+				"../infrastructure/waddle.cloud/rules/tests/**",
+				"crates/waddle-server/src/clustering/alert_metric_contract.json",
+				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
+				"../flake.nix",
+				"../flake.lock",
 			]
 		}
 
@@ -1230,6 +1263,7 @@ schema.#Project & {
 			dependsOn: [
 				tasks.checkCiDrift,
 				tasks.checkSwitchableAlternativeProgram,
+				tasks.checkAlertRules,
 				tasks.fmt,
 				tasks.clippy,
 				tasks.test,
