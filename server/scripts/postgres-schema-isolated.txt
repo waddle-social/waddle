@@ -1,0 +1,27 @@
+# Postgres-backed tests that may run outside nextest's `postgres` test group.
+#
+# Every test listed here connects to WADDLE_TEST_POSTGRES_URL only to create
+# its own uniquely named (UUID-suffixed) schema, runs against that schema via
+# search_path, and never resets or alters the shared `public` schema, so it
+# cannot observe or disturb the table-resetting tests serialized in the group.
+# scripts/check_postgres_test_group.py requires every other Postgres-backed
+# test to match the group filter in .config/nextest.toml, and fails on entries
+# here that no longer need listing.
+#
+# Format: one path per line, relative to server/, of the file that declares
+# the tests. `#` starts a comment.
+
+# Library unit tests (fixture builds `<prefix>_<uuid>` schemas).
+crates/waddle-server/src/permissions/actor/tests.rs  # affiliation_swap_<uuid>
+crates/waddle-server/src/server/health.rs  # readiness colocation: per-test schemas
+crates/waddle-server/src/server/http.rs  # ingress_colocation_/mam_/inbox_colocation_<uuid>
+crates/waddle-server/src/server/routes/interpret/effects/delivery_immediate_offline_tests.rs  # immediate_offline_<uuid>
+crates/waddle-server/src/server/routes/websocket/muc_invites/tests.rs  # muc_invites_<uuid>
+crates/waddle-server/src/sm_promotion/tests.rs  # quota_bounce_<uuid>
+
+# Integration binaries.
+crates/waddle-server/tests/db_lineage_multiprocess.rs  # SchemaFixture: one UUID schema per test
+crates/waddle-server/tests/xep0313_mam_integration.rs  # waddle_test_xep0313_uow_<uuid>
+crates/waddle-server/tests/xep0045_ghost_occupants.rs  # IngressFixture::postgres: waddle_test_ingress_<name>_<uuid>
+crates/waddle-server/tests/xep0045_invitation_decline_recovery.rs  # IngressFixture::postgres
+crates/waddle-server/tests/xep0357_outbox_acceptance.rs  # IngressFixture::postgres (sqlite_* siblings share its helper)

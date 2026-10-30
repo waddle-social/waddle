@@ -21,6 +21,11 @@ for contract in \
   test_check_required_tests \
   test_check_test_postgres_env \
   test_check_rust_structure \
-  test_check_libp2p_rollout; do
+  test_check_libp2p_rollout \
+  test_check_postgres_test_group; do
   python3 "scripts/${contract}.py"
 done
+
+# Every Postgres-backed test must run in nextest's serialized `postgres`
+# group unless it is listed as schema-isolated.
+python3 scripts/check_postgres_test_group.py
