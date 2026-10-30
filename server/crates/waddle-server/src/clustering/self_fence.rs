@@ -919,9 +919,11 @@ enum TerminalCause {
     /// swarm's own scope cancellation on keypair-slot fencing loss
     /// (`swarm.rs` slot-lease deadline / zero-row renewal), exactly as the
     /// main loop's `shutdown()` already treats any scope stop. After the
-    /// `disable()` barrier and exact-owner demotion, both identities are
-    /// retired as an ordinary shutdown retires its own (#1295), so their
-    /// claims do not wait for the orphan reaper.
+    /// `disable()` barrier and exact-owner demotion, the fenced identity is
+    /// retired as an ordinary shutdown retires its own (#1295), and so is
+    /// the fresh one if its registration has committed (otherwise the
+    /// retire CAS finds no row; the detached registration task marks the
+    /// late row draining, it holds no claims and ages out, as before).
     Shutdown,
     /// A fatal fence, or lease loss detected during shutdown: the reaper,
     /// not this node, decides when the identities' claims become stealable.
@@ -1233,9 +1235,12 @@ where
             }
         }
         // #1985 follow-up: an ordinary stop during re-registration or
-        // recovery retires both identities once the barrier has closed and
-        // their actors are demoted, before the local sweep, exactly like
-        // `shutdown`. A fatal fence never self-retires.
+        // recovery retires the fenced identity, and the fresh one if its
+        // registration has committed, once the barrier has closed and their
+        // actors are demoted, before the local sweep, exactly like
+        // `shutdown`. A fresh row registered after this point is marked
+        // draining by its registration task, holds no claims and ages out.
+        // A fatal fence never self-retires.
         let retire = cause == TerminalCause::Shutdown
             && disabled
             && demoted
