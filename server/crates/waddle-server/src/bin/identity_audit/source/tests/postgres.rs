@@ -197,3 +197,106 @@ async fn native_postgres_snapshot_read_only_and_non_bypass_rls() {
     reader.close().await.expect("close reader");
     writer.close().await.expect("close writer");
 }
+
+#[tokio::test]
+#[ignore = "requires native initdb/postgres on PATH; select explicitly with --ignored"]
+async fn native_postgres_namespace_replacement_cannot_hide_rows() {
+    let mut fixture = OwnedPostgres::start();
+    let mut reader = fixture.connect().await;
+    let mut writer = fixture.connect().await;
+    for statement in [
+        "CREATE TABLE public.users(jid TEXT PRIMARY KEY, xmpp_localpart TEXT, localpart_key TEXT)",
+        "CREATE TABLE public.native_users(id BIGINT PRIMARY KEY, username TEXT, domain TEXT, jid_key TEXT)",
+    ] { sqlx::query(statement).execute(&mut writer).await.expect("owned schema"); }
+    assert!(read_postgres(&mut reader, "home.example.test", 10)
+        .await
+        .expect("normal empty sources with typed sentinels")
+        .is_empty());
+    for statement in [
+        "INSERT INTO public.users VALUES('alice@home.example.test','alice','alice')",
+        "INSERT INTO public.native_users VALUES(1,'alice','home.example.test','alice@home.example.test')",
+    ] { sqlx::query(statement).execute(&mut writer).await.expect("original account rows"); }
+    assert_eq!(
+        read_postgres(&mut reader, "home.example.test", 10)
+            .await
+            .expect("normal populated sources")
+            .len(),
+        2
+    );
+
+    for populated_replacement in [false, true] {
+        // The executable opens a fresh connection for each audit. Reusing the
+        // earlier control query's prepared statement can correctly retain the
+        // original relation OIDs, which does not exercise namespace rebinding.
+        reader.close().await.expect("close control connection");
+        reader = fixture.connect().await;
+        let mut snapshot = postgres_snapshot(&mut reader)
+            .await
+            .expect("actual snapshot setup");
+        let bindings = crate::source::validate_postgres(&mut snapshot)
+            .await
+            .expect("validate and bind original locked objects");
+        for statement in [
+            "ALTER SCHEMA public RENAME TO snapshot_public",
+            "CREATE SCHEMA public",
+            "CREATE TABLE public.users(jid TEXT PRIMARY KEY, xmpp_localpart TEXT, localpart_key TEXT)",
+            "CREATE TABLE public.native_users(id BIGINT PRIMARY KEY, username TEXT, domain TEXT, jid_key TEXT)",
+        ] { sqlx::query(statement).execute(&mut writer).await.expect("namespace swap bypasses relation locks"); }
+        if populated_replacement {
+            sqlx::query("INSERT INTO public.users VALUES('replacement@home.example.test','replacement','replacement')")
+                .execute(&mut writer).await.expect("replacement account");
+        }
+        let observed =
+            crate::source::scan_postgres(&mut snapshot, &bindings, "home.example.test", 10).await;
+        assert!(
+            matches!(observed, Err(AuditError::Schema)),
+            "actual scan result: {:?}",
+            observed.as_ref().map(Vec::len)
+        );
+        snapshot
+            .rollback()
+            .await
+            .expect("discard incomplete snapshot");
+        for statement in [
+            "DROP SCHEMA public CASCADE",
+            "ALTER SCHEMA snapshot_public RENAME TO public",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut writer)
+                .await
+                .expect("restore owned fixture namespace");
+        }
+    }
+
+    // A missing own relation lock cannot be replaced by a matching catalog name.
+    let mut unbound = reader.begin().await.expect("unbound transaction");
+    assert!(matches!(
+        crate::source::validate_postgres(&mut unbound).await,
+        Err(AuditError::Schema)
+    ));
+    unbound.rollback().await.expect("unbound rollback");
+
+    sqlx::query("BEGIN")
+        .execute(&mut writer)
+        .await
+        .expect("writer transaction");
+    sqlx::query("LOCK TABLE public.users IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut writer)
+        .await
+        .expect("owned fixture lock");
+    let timed_out = tokio::time::timeout(
+        Duration::from_millis(100),
+        read_postgres(&mut reader, "home.example.test", 10),
+    )
+    .await;
+    assert!(
+        timed_out.is_err(),
+        "blocked object acquisition obeys the outer deadline"
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut writer)
+        .await
+        .expect("release fixture lock");
+    reader.close().await.expect("close reader");
+    writer.close().await.expect("close writer");
+}

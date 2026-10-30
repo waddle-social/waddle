@@ -71,16 +71,35 @@ bypass. Missing SELECT permissions or RLS filtering are incomplete results.
 Partitioned tables and tables with inheritance parents or children are rejected;
 otherwise a foreign descendant could escape the database snapshot.
 Before catalog validation, bounded `ACCESS SHARE` locks pin both account
-relations against rename/replacement. Reads use `ONLY` to exclude inheritance
-descendants added after validation. Search path is restricted to `pg_catalog`;
-queries qualify account tables. A lock or schema race is incomplete.
+relations. These locks do **not** freeze the `public` namespace name. Validation
+records each relation OID and composite row-type OID, verifies this backend holds
+the relation lock, and checks columns by that OID. Each scan then returns the
+actual base alias's `pg_typeof` OID, including a typed outer-join sentinel for an
+empty source. Data rows must also have the expected `tableoid`, before retention.
+A renamed namespace with empty or populated replacement tables therefore fails
+incomplete instead of becoming a clean inventory. Reads use `ONLY` to exclude
+inheritance descendants. Search path is restricted to `pg_catalog`.
 
 SQLite uses the fixed `main` schema, requires both supported base tables and
 column types, checks actual value types, and opens an existing file with
 read-only/create-disabled/query-only options. A single read transaction covers
-schema and both account sources. URI query options are rejected: immutable
-mode or a non-locking VFS could invalidate snapshot claims. It does not change
-journal mode. Existing WAL/shared-memory coordination may still involve
+schema and both account sources. The accepted input is exactly a `sqlite:///absolute/plain/path` envelope;
+relative paths, alternate URI forms, percent escapes, query/fragment delimiters
+and NUL are rejected, including in the resolved target. The path is canonicalized
+and passed directly to `SqliteConnectOptions::filename`, never through SQLx URL
+decoding. This prevents encoded `file:` URI options from selecting another
+object or ignoring live WAL through immutable mode. Unix device/inode identity
+is compared before and after opening and after the read; detected replacement
+is incomplete. It does not change
+journal mode.
+
+**Prerequisite:** the operator controls a stable source pathname and trusts local
+filesystem and database administration. The device/inode checks detect ordinary
+replacement; they do not pin SQLite's descriptor or defeat an adversary who swaps
+objects and swaps them back between observations. Such filesystem interference
+is outside this diagnostic's supported operating conditions.
+
+Existing WAL/shared-memory coordination may still involve
 filesystem metadata; this is account/schema read-only access, not a claim of
 zero filesystem activity. Embedded NUL bytes remain visible in the original
 evidence instead of being truncated by SQLite text slicing.
@@ -174,13 +193,14 @@ shell:
 
 ```sh
 nix develop --command cargo test --locked -p waddle-server \
-  --bin waddle-identity-audit native_postgres_snapshot_read_only_and_non_bypass_rls \
+  --bin waddle-identity-audit native_postgres \
   -- --ignored
 ```
 
 It creates its own cluster and socket inside a TempDir, disables TCP listening,
-and never reads an external database URL. It proves stable snapshot visibility,
-read-only write rejection, and failure under a non-bypass RLS role whose normal
+and never reads an external database URL. The native tests prove stable snapshot visibility, read-only write rejection,
+namespace replacement rejection for empty and populated substitutes, source
+locking/timeouts, and failure under a non-bypass RLS role whose normal
 SELECT would silently hide account rows. Cleanup targets only the spawned
 process and its owned directory. A skipped native test is not a passing RLS
 verification.

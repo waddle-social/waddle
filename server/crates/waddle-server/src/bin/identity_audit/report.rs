@@ -28,7 +28,7 @@ pub struct Report {
     pub users_snapshot_complete: bool,
     pub native_users_snapshot_complete: bool,
     pub frame_corpus_requested: bool,
-    pub limitations: [&'static str; 4],
+    pub limitations: [&'static str; 5],
     pub accounts: Vec<AccountObservation>,
     pub collisions: Vec<Collision>,
     pub frames: Vec<FrameObservation>,
@@ -55,7 +55,7 @@ impl Report {
             status: if findings { Status::CompleteWithFindings } else { Status::CompleteNoFindings },
             driver, asserted_oidc_home_domain: OriginalValue::new(domain), asserted_domain_findings,
             users_snapshot_complete: true, native_users_snapshot_complete: true, frame_corpus_requested: frames_requested,
-            limitations: ["Snapshot only; concurrent or future writers are not excluded", "OIDC home domain is an operator assertion, not authenticated ownership", "Top-level frame addresses only; no SASL, nested identity, resume, relay or S2S coverage", "Diagnostic candidate only; no enrollment, authority, migration or full PRECIS/IDNA conformance"],
+            limitations: ["Snapshot only; concurrent or future writers are not excluded", "OIDC home domain is an operator assertion, not authenticated ownership", "Top-level frame addresses only; no SASL, nested identity, resume, relay or S2S coverage", "Diagnostic candidate only; no enrollment, authority, migration or full PRECIS/IDNA conformance", "Trusted database administration and stable operator-controlled SQLite paths required; inode checks do not defeat hostile swap-back"],
             accounts, collisions, frames,
         }
     }

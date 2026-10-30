@@ -100,11 +100,11 @@ async fn stream_error_discards_partial_snapshot() {
         valid_types: true,
         native_id: None,
         raw_jid: Some("a@home.example.test".to_owned()),
-        localpart: "a".to_owned(),
+        localpart: Some("a".to_owned()),
         domain: None,
         stored_key: Some("a".to_owned()),
     };
-    let rows = stream::iter([Ok(first), Err(sqlx::Error::RowNotFound)]);
+    let rows = stream::iter([Ok(first), Err(AuditError::Read)]);
     assert!(matches!(
         collect_rows(rows, "home.example.test", 10).await,
         Err(AuditError::Read)
@@ -157,7 +157,7 @@ async fn retained_byte_limit_rejects_a_partial_inventory() {
             valid_types: true,
             native_id: None,
             raw_jid: Some("a".repeat(4096)),
-            localpart: "a".to_owned(),
+            localpart: Some("a".to_owned()),
             domain: None,
             stored_key: Some("a".to_owned()),
         })
@@ -201,4 +201,30 @@ async fn sqlite_invalid_text_bytes_fail_closed() {
         read(Driver::Sqlite, &url, "home.example.test", 10).await,
         Err(AuditError::Read)
     ));
+}
+
+#[tokio::test]
+async fn sqlite_plain_path_selection_rejects_replacement_and_decoded_forms() {
+    let (directory, url) = fixture().await;
+    let selected = super::SqliteSource::inspect(&url).expect("plain existing path");
+    let original = directory.path().join("accounts.sqlite");
+    let moved = directory.path().join("moved.sqlite");
+    std::fs::rename(&original, &moved).expect("replace owned fixture path");
+    std::fs::copy(&moved, &original).expect("new inode at same path");
+    assert!(matches!(
+        selected.connect().await,
+        Err(AuditError::Connection)
+    ));
+    for invalid in [
+        "sqlite://file:accounts.sqlite%3Fimmutable=true",
+        "sqlite://%66ile:accounts.sqlite%3fimmutable=true",
+        "sqlite://file:accounts.sqlite%253Fimmutable=true",
+        "sqlite://relative.sqlite",
+        "file:/absolute/accounts.sqlite",
+    ] {
+        assert!(matches!(
+            super::SqliteSource::inspect(invalid),
+            Err(AuditError::Configuration)
+        ));
+    }
 }
