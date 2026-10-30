@@ -146,3 +146,80 @@ availability or merge enforcement.
 GitHub documents the separate merge-group trigger and skipped-job behavior in
 [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group)
 and [troubleshooting required checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+
+## Bootstrap without an unenforced interval
+
+This is a proposed sequence requiring separate owner review; nothing here has
+been applied. The current ruleset has no required status context, so an
+operator's promise to wait is not an enforced freeze.
+
+1. Create a separate active main-only bootstrap ruleset with no bypass actors
+   and an `update` restriction. Proposed shape:
+
+   ```json
+   {
+     "name": "integration-ci-bootstrap-freeze",
+     "target": "branch",
+     "enforcement": "active",
+     "bypass_actors": [],
+     "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
+     "rules": [{"type": "update"}]
+   }
+   ```
+
+   First validate that restriction and ordinary-actor denial on a controlled
+   canary branch/repository, including merge-queue updates. Read back the actual
+   main rule after activation, preserve the existing rules, and stop federation
+   queue admissions. Do not claim a freeze until its effective enforcement and
+   bypass configuration are verified. Repository administrators can still edit
+   rules; coordinate a single reviewed settings operator during bootstrap.
+
+2. Repair capacity, complete exact-head PR CI and independent source review, and
+   resolve the original workflow write-token/OIDC and definition-review policy.
+   Keep main frozen. The required `integration` context must have a real recent
+   successful run in this repository from Actions app 15368. GitHub documents a
+   successful-check lookback of seven days, not a requirement that the workflow
+   already be on main. Do not seed eligibility with a fabricated status or an
+   unrelated dispatch check.
+
+3. In a controlled repository with the same queue/rules capabilities, test both
+   platform assumptions before depending on them here: add the required context
+   while its new workflow exists only in a PR, then queue that candidate. Prove
+   an intentionally failing applicable job produces a failing check on the
+   exact `merge_group.head_sha` and blocks the queue even when its PR check was
+   green. Then prove a clean candidate containing the newly introduced workflow
+   runs and can pass. Record the event, workflow revision, SHA, app identity,
+   effective rules and unchanged base on the failing case.
+
+   The official merge-group event reference specifies the group SHA and
+   separate trigger. Unlike several other events, its section does not state
+   a default-branch-file requirement. That omission does not prove whether a
+   workflow introduced only by the queued candidate will execute. Requiring a
+   context before that workflow reaches main and candidate-only workflow
+   discovery are both unproven for this repository until controlled live tests
+   and API readback establish them. A rejected rule update is a blocker, not
+   permission to omit the requirement.
+
+4. With the freeze still active, add the reviewed required-status rule, confirm
+   its effective configuration and the credential/review protections, and
+   admit only the reviewed bootstrap PR. Remove the temporary update freeze
+   only after the required gate is active and the controlled negative test has
+   passed; never remove the required gate to get the bootstrap PR through.
+   Observe its real merge-group run at the actual combined candidate SHA.
+   Missing workflow discovery must leave the check pending and block the queue.
+   Complete a controlled negative/positive test on the actual main policy before
+   reopening normal admissions; hold federation PRs until that proof is recorded.
+
+5. If candidate-only workflow discovery or pre-main context enforcement cannot
+   be proved, retain the freeze. Use a separately protected organization
+   required workflow or independently trusted CI integration that can verify
+   the bootstrap candidate under an enforced rule, subject to account feature
+   availability and separate review. Do not assume that capability exists, and
+   do not substitute a one-off bypass, unchecked merge, or removed requirement.
+
+The temporary freeze proposal is intentionally separate from the additive
+required-status JSON so preserving or removing one cannot accidentally remove
+the other. Relevant platform references are GitHub's
+[merge-group event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group),
+[required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks),
+and [update restrictions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#restrict-updates).
