@@ -79,8 +79,11 @@ async fn no_writer_success(worker: &Contender) -> Result<()> {
     Ok(())
 }
 
-pub async fn run(fixture: &Fixture, binary: &Path) -> Result<Vec<LostResponseCase>> {
-    let mut cases = Vec::new();
+pub async fn run(
+    fixture: &Fixture,
+    binary: &Path,
+    cases: &mut Vec<LostResponseCase>,
+) -> Result<()> {
     for candidate in [Candidate::Postgres, Candidate::SpiceDb] {
         for polarity in [Polarity::Grant, Polarity::Revoke] {
             for fault in [Fault::DropSuccess, Fault::NeverForward] {
@@ -101,7 +104,7 @@ pub async fn run(fixture: &Fixture, binary: &Path) -> Result<Vec<LostResponseCas
     }
     cases.push(inverted_order(fixture, binary).await?);
     ensure!(cases.len() == 13, "lost-response scenario inventory");
-    Ok(cases)
+    Ok(())
 }
 
 async fn exercise(

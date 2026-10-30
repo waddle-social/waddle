@@ -237,8 +237,12 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             &mut report.recovery_cases,
         )
         .await?;
-        report.lost_response_cases =
-            crate::recovery::run_lost_responses(&fixture, Path::new(worker_binary)).await?;
+        crate::recovery::run_lost_responses(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.lost_response_cases,
+        )
+        .await?;
         Ok(())
     }
     .await;
