@@ -16,11 +16,16 @@ let _rustInputs = [
 	"crates/**",
 	"extensions/**",
 	"vendor/**",
-	"experiments/native-fixture/**",
-	"experiments/grant-fence/Cargo.toml",
 	"scripts/**",
 	"wit/**",
 ]
+
+// Local Cargo consumers need the excluded dev dependency's source closure.
+// Keep this separate from inputs that derive production publisher triggers.
+let _cargoResolutionInputs = list.Concat([_rustInputs, [
+	"experiments/native-fixture/**",
+	"experiments/grant-fence/Cargo.toml",
+]])
 
 // The Namespace Rust tasks delegate from this server project to the root
 // namespace package, which stages repository-level fixtures into its sandbox
@@ -43,6 +48,9 @@ let _namespaceRustTaskInputs = list.Concat([_rustInputs, [
 	"../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml",
 ]])
 
+// These inputs preserve publisher trigger policy. Nix delegator tasks run
+// uncached in the live checkout: the three flake filesets supply the complete
+// dev-dependency closure to Nix's own sandbox and derivation cache.
 let _nixInputs = [
 	"../flake.nix",
 	"../flake.lock",
@@ -67,7 +75,7 @@ let _nixInputs = [
 let _nextestTask = schema.#Task & {
 	command: "cargo"
 	dir: from: "caller"
-	inputs: _rustInputs
+	inputs: _cargoResolutionInputs
 }
 
 let _chartInputs = ["charts/waddle-server/**"]
@@ -301,7 +309,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.parentMoveNativeProof]
+			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
 		}
 		parentMoveNativePullRequest: {
 			mode: "expanded"
@@ -314,7 +322,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.parentMoveNativeProof]
+			tasks: [_t.parentMoveNativeProof, _t.parentMoveNativeBuildClosure]
 		}
 		// Native SQL subscriber-capture characterization; no publishing task.
 		spaceFanoutContract: {
@@ -447,6 +455,13 @@ schema.#Project & {
 				"../flake.nix",
 				"rust-toolchain.toml",
 			]
+		}
+
+		parentMoveNativeBuildClosure: schema.#Task & {
+			hermetic: false
+			command:  "nix"
+			args: ["build", "--no-link", "../#waddle-server", "../#checks.x86_64-linux.waddle-server-clippy"]
+			inputs: list.Concat([_nixInputs, _cargoResolutionInputs, ["../namespace.cue", "experiments/parent-move/**"]])
 		}
 
 		checkAuthzIdCodec: schema.#Task & {
@@ -702,13 +717,15 @@ schema.#Project & {
 		}
 
 		nixFmt: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-fmt"]
 			inputs: _nixInputs
 		}
 
 		nixClippy: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-clippy"]
 			inputs: _nixInputs
 		}
@@ -794,13 +811,15 @@ schema.#Project & {
 		}
 
 		nixDoctest: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-doctest"]
 			inputs: _nixInputs
 		}
 
 		nixBuildCi: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-ci-build"]
 			inputs: _nixInputs
 		}
@@ -812,13 +831,15 @@ schema.#Project & {
 		// packaging path are first exercised by the main-only
 		// `publishContainerImage` (#1764).
 		nixBuildImageStream: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#waddle-server-image-stream"]
 			inputs: _nixInputs
 		}
 
 		nixBuildExtensionModules: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			// The runtime check depends on the exact six-module WASM bundle.
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-extension-runtime"]
 			inputs: _nixInputs
@@ -869,20 +890,21 @@ schema.#Project & {
 
 		buildCi: xRust.#Build & {
 			args: ["build", "--profile", "ci", "--locked", "--package", "waddle-server"]
-			inputs: _rustInputs
+			inputs: _cargoResolutionInputs
 			outputs: ["target/ci/waddle-server"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
 		}
 
 		buildRelease: xRust.#Build & {
 			args: ["build", "--release", "--locked", "--package", "waddle-server"]
-			inputs: _rustInputs
+			inputs: _cargoResolutionInputs
 			outputs: ["target/release/waddle-server"]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
 		}
 
 		buildExtensionModules: schema.#Task & {
-			command: "bash"
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					nix_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
@@ -1294,7 +1316,8 @@ schema.#Project & {
 		}
 
 		buildContainerImage: schema.#Task & {
-			command: "bash"
+			hermetic: false
+			command:  "bash"
 			args: ["-c", #"""
 					set -euo pipefail
 					if [ "$(uname -s)" != "Linux" ]; then
@@ -1553,7 +1576,7 @@ schema.#Project & {
 		build: schema.#Task & {
 			command: "cargo"
 			args: ["build", "--bin", "waddle-server"]
-			inputs: _rustInputs
+			inputs: _cargoResolutionInputs
 		}
 
 		dev: schema.#Task & {
@@ -1578,20 +1601,23 @@ schema.#Project & {
 
 		// XMPP compliance tasks — run as the xmppCompliance pipeline
 		nixXmppUnitTests: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-unit-tests"]
 			// Preserve the former combined compliance workflow's triggers.
 			inputs: list.Concat([_nixInputs, _chartInputs])
 		}
 
 		nixXmppServerTests: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-server-tests"]
 			inputs: list.Concat([_nixInputs, _chartInputs])
 		}
 
 		nixXmppXepIntegration: schema.#Task & {
-			command: "nix"
+			hermetic: false
+			command:  "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-xmpp-xep-integration"]
 			inputs: list.Concat([_nixInputs, _chartInputs])
 		}

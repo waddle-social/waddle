@@ -45,5 +45,12 @@ no host-crash guarantees, still apply.
 The Linux-only dev dependency is excluded from the server workspace. All three
 Nix source closures include the fixture plus its owning workspace manifest so
 Cargo can resolve it. Release targets have no normal dependency edge to it.
-Dedicated PR and main/manual pipelines run this nonpublishing proof; normal
-release/check jobs retain their existing behavior and resolve the dev edge.
+Dedicated PR and main/manual pipelines run this nonpublishing proof and a
+release/all-feature Nix build check. Existing publisher workflow bytes and
+cutover input policy remain unchanged. A separate Cargo-resolution input list
+stages the fixture for local build and nextest tasks; Namespace's hermetic
+inputs include it too. Eleven local Nix delegators explicitly use the caller's
+checkout and environment, with cuenv result caching disabled. Nix retains its
+own source filesets, build sandboxing and derivation cache. This live delegation
+is a local execution tradeoff; generated CI already executes those Nix commands
+in its checkout.
