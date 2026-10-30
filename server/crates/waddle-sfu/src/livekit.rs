@@ -1194,7 +1194,6 @@ impl LiveKitSfu {
                     {
                         continue;
                     }
-                    participant.media_generation = live_participant.media_generation;
                     if participant_sid.is_some()
                         && participant.participant_sid.is_none()
                         // First-SID learning is freshness-gated too
@@ -1207,6 +1206,7 @@ impl LiveKitSfu {
                         && participant.first_registered_at <= probe_freshness_boundary
                     {
                         participant.participant_sid.clone_from(participant_sid);
+                        participant.media_generation = live_participant.media_generation;
                         participant.advance_registration_revision();
                         participant.participant_sid_observed_at = Some(now);
                         participant.participant_sid_contested_at = None;
@@ -1236,6 +1236,7 @@ impl LiveKitSfu {
                             "SFU reconcile: advancing a stale participant sid from authoritative occupancy"
                         );
                         participant.participant_sid.clone_from(participant_sid);
+                        participant.media_generation = live_participant.media_generation;
                         participant.advance_registration_revision();
                         participant.participant_sid_observed_at = Some(now);
                         participant.participant_sid_contested_at = None;
@@ -1253,6 +1254,21 @@ impl LiveKitSfu {
                         // which same-second twin survived (#1612
                         // review round 14).
                         participant.participant_sid_contested_at = None;
+                        participant.advance_registration_revision();
+                    }
+                    // A generation describes its SID, not the identity alone.
+                    // Fill missing evidence only for that same SID and a probe
+                    // no older than the retained observation. A stale probe
+                    // rejected above cannot overwrite a newer generation.
+                    if participant_sid.is_some()
+                        && participant.participant_sid.as_ref() == participant_sid.as_ref()
+                        && participant.media_generation.is_none()
+                        && live_participant.media_generation.is_some()
+                        && participant
+                            .participant_sid_observed_at
+                            .is_none_or(|at| at <= probe_freshness_boundary)
+                    {
+                        participant.media_generation = live_participant.media_generation;
                         participant.advance_registration_revision();
                     }
                 } else {

@@ -9,6 +9,104 @@ use super::{
 use crate::JoinToken;
 use crate::SfuReconciler;
 
+#[tokio::test]
+async fn older_poll_cannot_pair_a_newer_sid_with_a_displaced_generation() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = Arc::new(LiveKitSfu::with_admin(
+        fixture_config(),
+        admin.clone() as Arc<_>,
+    ));
+    let call = CallId::try_new("stale-generation-poll@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let mut old = observed_sids(Some("RM_live"), Some("PA_old"));
+    old.media_generation = Some(first);
+    sfu.register_call_participant_observed(&call, &alice, &old);
+    admin.live.lock().expect("provider state").insert(
+        call.clone(),
+        vec![crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: old.participant_sid,
+            media_generation: Some(first),
+        }],
+    );
+    admin.hold_list();
+    let polling = Arc::clone(&sfu);
+    let poll = tokio::spawn(async move {
+        polling
+            .reconcile_active_calls(chrono::Duration::zero())
+            .await
+    });
+    admin.await_list_in_flight(StdDuration::from_secs(2)).await;
+    let mut current = observed_sids(Some("RM_live"), Some("PA_current"));
+    current.media_generation = Some(second);
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &current),
+        super::SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        None,
+        "this is provider-restored media, not logical MUC ownership"
+    );
+    admin.release_list();
+    poll.await.expect("older poll finishes");
+
+    let retained = sfu
+        .participant_media_evidence(&call, &alice)
+        .expect("observation");
+    assert_eq!(retained.participant_sid, current.participant_sid);
+    assert_eq!(
+        retained.media_generation,
+        Some(second),
+        "the SID and generation must remain one freshness-fenced observation"
+    );
+
+    // Lose the current leave webhook. A later ghost sweep must carry g2 to
+    // the room actor, rather than leaving its Muji state stranded with g1.
+    admin.list_gate.lock().expect("probe gate").take();
+    admin.set_live(&call, Vec::new());
+    assert!(sfu
+        .reconcile_active_calls(chrono::Duration::zero())
+        .await
+        .swept
+        .is_empty());
+    let swept = sfu.reconcile_active_calls(chrono::Duration::zero()).await;
+    assert_eq!(swept.swept.len(), 1);
+    assert_eq!(
+        swept.swept[0].observed_sids.participant_sid,
+        current.participant_sid
+    );
+    assert_eq!(swept.swept[0].observed_sids.media_generation, Some(second));
+}
+
+#[tokio::test]
+async fn fresh_poll_can_fill_missing_generation_for_the_same_sid_without_granting_occupancy() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
+    let call = CallId::try_new("fill-media-evidence@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let generation = fixture_occupancy_session();
+    let observation = observed_sids(Some("RM_live"), Some("PA_same"));
+    sfu.register_call_participant_observed(&call, &alice, &observation);
+    admin.live.lock().expect("provider state").insert(
+        call.clone(),
+        vec![crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: observation.participant_sid.clone(),
+            media_generation: Some(generation),
+        }],
+    );
+    sfu.reconcile_active_calls(chrono::Duration::zero()).await;
+    let retained = sfu
+        .participant_media_evidence(&call, &alice)
+        .expect("evidence");
+    assert_eq!(retained.participant_sid, observation.participant_sid);
+    assert_eq!(retained.media_generation, Some(generation));
+    assert_eq!(sfu.participant_occupant_session(&call, &alice), None);
+}
+
 #[test]
 fn takeover_persists_retirement_before_the_displaced_sid_is_known() {
     let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
