@@ -165,6 +165,7 @@ async fn issued_media_attributes(
 
 async fn post_participant_joined(
     server: &TestServer,
+    provider: &wiremock::MockServer,
     room: &str,
     identity: &str,
     attributes: Option<&waddle_sfu::ParticipantAttributes>,
@@ -174,6 +175,22 @@ async fn post_participant_joined(
     if let Some(attributes) = attributes {
         participant["attributes"] = serde_json::to_value(attributes).expect("provider attributes");
     }
+    // The webhook describes a live participant. The authoritative SID probe
+    // must see that same incarnation, rather than the catch-all empty response.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(
+            "/twirp/livekit.RoomService/ListParticipants",
+        ))
+        .and(wiremock::matchers::body_partial_json(
+            json!({ "room": room }),
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "participants": [participant.clone()] })),
+        )
+        .with_priority(1)
+        .mount(provider)
+        .await;
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_joined",
@@ -244,7 +261,7 @@ async fn occupant_join_webhook_pushes_voice_derived_grants() {
 
     let identity = format!("{ALICE}@{DOMAIN}/ax");
     let attributes = issued_media_attributes(&mut alice, &room).await;
-    post_participant_joined(&server, &room, &identity, Some(&attributes)).await;
+    post_participant_joined(&server, &mock, &room, &identity, Some(&attributes)).await;
 
     await_admin_call(
         &mock,
@@ -280,7 +297,7 @@ async fn non_occupant_join_webhook_evicts_from_the_call() {
     // A full JID that is NOT an occupant of the room: the local actor
     // answers authoritatively, so this join must end in eviction.
     let ghost = format!("{ALICE}@{DOMAIN}/never-joined");
-    post_participant_joined(&server, &room, &ghost, None).await;
+    post_participant_joined(&server, &mock, &room, &ghost, None).await;
 
     await_admin_call(
         &mock,
