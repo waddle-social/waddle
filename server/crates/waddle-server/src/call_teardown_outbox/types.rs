@@ -79,9 +79,9 @@ pub enum TeardownTarget {
         participant_sid: Option<ParticipantSid>,
     },
     /// Retire one displaced media incarnation while its successor keeps the
-    /// same signaling identity. A captured SID or the intent's occupant
-    /// generation identifies the candidate; the current room owner must
-    /// authorize retirement. Departure supersession must not discard it.
+    /// same signaling identity. Successful authorized publication owns this
+    /// retirement. A captured SID or the intent's occupant generation fences
+    /// provider execution; later ownership changes do not discard it.
     DisplacedParticipant {
         identity: FullJid,
         participant_sid: Option<ParticipantSid>,
@@ -213,7 +213,6 @@ pub enum CallTeardownRetryReason {
     LiveKitExecutorUnavailable,
     LiveKitAdmin,
     LiveKitOccupied,
-    RetirementAuthorityUnavailable,
     Unknown,
 }
 
@@ -230,10 +229,7 @@ impl CallTeardownRetryReason {
     pub(crate) const fn is_infrastructure_transient(self) -> bool {
         matches!(
             self,
-            Self::LiveKitExecutorUnavailable
-                | Self::LiveKitAdmin
-                | Self::CallThreadEnd
-                | Self::RetirementAuthorityUnavailable
+            Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin | Self::CallThreadEnd
         )
     }
 
@@ -244,7 +240,6 @@ impl CallTeardownRetryReason {
             Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
             Self::LiveKitAdmin => "livekit_admin_retryable",
             Self::LiveKitOccupied => "livekit_room_occupied",
-            Self::RetirementAuthorityUnavailable => "retirement_authority_unavailable",
             Self::Unknown => "unknown",
         }
     }
@@ -256,7 +251,6 @@ impl CallTeardownRetryReason {
             "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
             "livekit_admin_retryable" => Self::LiveKitAdmin,
             "livekit_room_occupied" => Self::LiveKitOccupied,
-            "retirement_authority_unavailable" => Self::RetirementAuthorityUnavailable,
             _ => Self::Unknown,
         }
     }

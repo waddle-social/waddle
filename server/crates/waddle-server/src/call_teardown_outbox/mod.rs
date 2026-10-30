@@ -14,7 +14,7 @@ mod store_jobs;
 mod store_rows;
 mod types;
 
-pub(crate) use drain::{canonical_retirement_room_snapshot, drain_due};
+pub(crate) use drain::drain_due;
 pub(crate) use producer::CallTeardownPersistenceSupervisor;
 
 pub use store::{

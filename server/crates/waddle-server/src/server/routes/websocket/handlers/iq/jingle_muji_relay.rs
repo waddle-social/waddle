@@ -47,6 +47,16 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let response_to = jid::Jid::from(sender.clone()).to_string();
 
     let is_terminate = jingle_muji_gate::muji_session_terminate_room(iq).is_some();
+    let participant_registration = if !is_terminate {
+        if let Some(room) = relayed_muji_room(iq) {
+            jingle_muji_gate::participant_registration_expectation(state, &room, &sender).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let media_capabilities = match jingle_muji_gate::verify_muji_jingle_request(
         state,
         &sender,
@@ -108,9 +118,6 @@ pub(crate) async fn handle_relayed_muji_initiate(
         }
     };
 
-    let participant_registration = relayed_muji_room(iq).and_then(|room| {
-        jingle_muji_gate::participant_registration_expectation(state, &room, &sender)
-    });
     if !is_terminate {
         let room = relayed_muji_room(iq)?;
         match relayed_muji_generation_is_current(state, &room, &sender, occupancy_session).await {

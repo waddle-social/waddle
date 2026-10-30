@@ -113,9 +113,6 @@ struct RecordingAdmin {
     remove_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     fail_remove: bool,
     occupancy: Mutex<RoomOccupancy>,
-    occupancy_calls: std::sync::atomic::AtomicUsize,
-    occupancy_entered: Option<Arc<tokio::sync::Notify>>,
-    occupancy_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl LiveKitAdmin for RecordingAdmin {
@@ -177,17 +174,7 @@ impl LiveKitAdmin for RecordingAdmin {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<RoomOccupancy, SfuError>> + Send + 'a>,
     > {
-        Box::pin(async {
-            self.occupancy_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if let Some(entered) = &self.occupancy_entered {
-                entered.notify_one();
-            }
-            if let Some(gate) = &self.occupancy_gate {
-                let _permit = gate.acquire().await.expect("occupancy gate remains open");
-            }
-            Ok(self.occupancy.lock().expect("recording lock").clone())
-        })
+        Box::pin(async { Ok(self.occupancy.lock().expect("recording lock").clone()) })
     }
 }
 
@@ -226,6 +213,5 @@ mod displaced;
 mod drain_basics;
 mod muji;
 mod retention_fences;
-mod retirement_authority;
 mod session_fence;
 mod store_queue;

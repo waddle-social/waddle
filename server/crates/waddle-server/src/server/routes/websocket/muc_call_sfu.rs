@@ -479,36 +479,28 @@ pub(crate) fn note_participant_left_for_occupant(
         observed_sids,
         occupant,
         unbound,
-        session.map_or(waddle_sfu::SidEvidence::NotSignaling, |session| {
-            waddle_sfu::SidEvidence::Presented(Some(session))
-        }),
+        waddle_sfu::SidEvidence::Presented(session),
     ))
 }
 
-/// Non-destructively validate departure evidence before an async MUC actor
-/// cleanup. Internal owner-scoped retries retain their generation/session
-/// fences without inventing provider attributes; webhook callers present
-/// neither and keep the provider observation checks. Membership stays intact
-/// until the actor step succeeds so a transient failure remains retryable.
-pub(crate) fn observe_participant_departure(
+/// Non-destructively validate and learn webhook SIDs before an async
+/// MUC actor cleanup. Keeping membership intact until the actor step
+/// succeeds preserves `room_finished`'s survivor recovery path when a
+/// transient actor failure asks LiveKit to retry.
+pub(crate) fn observe_participant_sids_from_webhook(
     state: &WebSocketState,
     room_jid: &BareJid,
     jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
-    occupant: Option<OccupancySessionGeneration>,
-    unbound: waddle_sfu::UnboundOccupantPolicy,
-    sid: waddle_sfu::SidEvidence<'_>,
 ) -> Option<SidObservationDisposition> {
     let call_id = CallId::try_new(room_jid.to_string()).ok()?;
     let sfu = state.deps.protocol.sfu.as_ref()?;
     let identity = Identity::from_jid(jid.clone());
-    Some(sfu.observe_call_participant_departure(
+    Some(sfu.observe_call_participant_sids(
         &call_id,
         &identity,
         observed_sids,
-        occupant,
-        unbound,
-        sid,
+        waddle_sfu::SidObservationDirection::Leave,
     ))
 }
 

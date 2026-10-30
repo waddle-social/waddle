@@ -54,17 +54,25 @@ async fn older_poll_cannot_pair_a_newer_sid_with_a_displaced_generation() {
     poll.await.expect("older poll finishes");
 
     let retained = sfu
-        .participant_media_evidence(&call, &alice)
-        .expect("observation");
-    assert_eq!(retained.participant_sid, current.participant_sid);
+        .calls
+        .get(&call)
+        .and_then(|entry| {
+            entry.participants.get(&alice).map(|participant| {
+                (
+                    participant.participant_sid.clone(),
+                    participant.media_generation,
+                )
+            })
+        })
+        .expect("retained media observation");
     assert_eq!(
-        retained.media_generation,
-        Some(second),
+        retained,
+        (current.participant_sid.clone(), Some(second)),
         "the SID and generation must remain one freshness-fenced observation"
     );
 
-    // Lose the current leave webhook. A later ghost sweep must carry g2 to
-    // the room actor, rather than leaving its Muji state stranded with g1.
+    // A later confirmed absence still sweeps this participant after a lost
+    // leave webhook. Pair coherence is checked before the local cleanup.
     admin.list_gate.lock().expect("probe gate").take();
     admin.set_live(&call, Vec::new());
     assert!(sfu
@@ -73,12 +81,7 @@ async fn older_poll_cannot_pair_a_newer_sid_with_a_displaced_generation() {
         .swept
         .is_empty());
     let swept = sfu.reconcile_active_calls(chrono::Duration::zero()).await;
-    assert_eq!(swept.swept.len(), 1);
-    assert_eq!(
-        swept.swept[0].observed_sids.participant_sid,
-        current.participant_sid
-    );
-    assert_eq!(swept.swept[0].observed_sids.media_generation, Some(second));
+    assert_eq!(swept.swept, vec![(call.clone(), alice.clone())]);
 }
 
 #[tokio::test]
@@ -100,10 +103,18 @@ async fn fresh_poll_can_fill_missing_generation_for_the_same_sid_without_grantin
     );
     sfu.reconcile_active_calls(chrono::Duration::zero()).await;
     let retained = sfu
-        .participant_media_evidence(&call, &alice)
-        .expect("evidence");
-    assert_eq!(retained.participant_sid, observation.participant_sid);
-    assert_eq!(retained.media_generation, Some(generation));
+        .calls
+        .get(&call)
+        .and_then(|entry| {
+            entry.participants.get(&alice).map(|participant| {
+                (
+                    participant.participant_sid.clone(),
+                    participant.media_generation,
+                )
+            })
+        })
+        .expect("retained media observation");
+    assert_eq!(retained, (observation.participant_sid, Some(generation)));
     assert_eq!(sfu.participant_occupant_session(&call, &alice), None);
 }
 
@@ -153,7 +164,7 @@ fn takeover_persists_retirement_before_the_displaced_sid_is_known() {
 }
 
 #[test]
-fn tagged_join_requests_canonical_validation_even_without_a_cached_occupancy() {
+fn cached_token_resume_after_restart_does_not_create_retirement() {
     let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = Arc::clone(&reported);
     let sfu = LiveKitSfu::try_new(fixture_config())
@@ -170,12 +181,10 @@ fn tagged_join_requests_canonical_validation_even_without_a_cached_occupancy() {
     sfu.register_call_participant_observed(&call, &alice, &observation);
     assert_eq!(sfu.participant_occupant_session(&call, &alice), None);
     let intents = reported.lock().expect("intents");
-    assert_eq!(
-        intents.len(),
-        1,
-        "only canonical room ownership can classify a restored join"
+    assert!(
+        intents.is_empty(),
+        "cached-token resume is not an authorized Jingle takeover, even after cache loss"
     );
-    assert_eq!(intents[0].occupant_session, Some(generation));
 }
 
 #[test]
@@ -477,6 +486,11 @@ impl RetirementFixture {
                 }),
             }],
         );
+        admin.set_rooms(vec![crate::ListedRoom {
+            name: crate::admin::ListedRoomName::Waddle(call.clone()),
+            sid: old.room_sid.clone(),
+            num_participants: Some(1),
+        }]);
         let intent = CallTeardownIntentLite {
             call_id: call.clone(),
             target: TeardownTargetLite::DisplacedParticipant {
@@ -514,9 +528,7 @@ async fn retirement_removes_the_old_media_when_the_successor_never_connects() {
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("execute"),
         TeardownExecution::Executed
@@ -535,9 +547,7 @@ async fn retirement_skips_the_connected_successor_even_before_its_webhook() {
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("execute"),
         TeardownExecution::StaleGeneration
@@ -553,9 +563,7 @@ async fn retirement_defers_when_live_participant_sid_is_unknown() {
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("execute"),
         TeardownExecution::Occupied
@@ -571,9 +579,7 @@ async fn retirement_retries_a_failed_occupancy_probe_without_removing_by_identit
     assert!(fixture
         .sfu
         .teardown_executor()
-        .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-            crate::OccupancyAuthority::Current(fixture.successor_generation)
-        ))
+        .execute(&fixture.intent)
         .await
         .is_err());
     assert!(fixture.admin.remove_snapshot().is_empty());
@@ -582,9 +588,7 @@ async fn retirement_retries_a_failed_occupancy_probe_without_removing_by_identit
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("retry"),
         TeardownExecution::Executed
@@ -600,9 +604,7 @@ async fn retirement_completes_without_removal_when_the_old_participant_is_alread
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("execute"),
         TeardownExecution::Executed
@@ -617,14 +619,7 @@ async fn retirement_rechecks_a_matching_generation_successor_observation_during_
     fixture.admin.hold_list();
     let executor = fixture.sfu.teardown_executor();
     let intent = fixture.intent.clone();
-    let current = fixture.successor_generation;
-    let execution = tokio::spawn(async move {
-        executor
-            .execute_with_occupancy_authority(&intent, || {
-                std::future::ready(crate::OccupancyAuthority::Current(current))
-            })
-            .await
-    });
+    let execution = tokio::spawn(async move { executor.execute(&intent).await });
     fixture
         .admin
         .await_list_in_flight(StdDuration::from_secs(2))
@@ -660,9 +655,7 @@ async fn reconciliation_does_not_adopt_displaced_media_after_an_unattributed_joi
         fixture
             .sfu
             .teardown_executor()
-            .execute_with_occupancy_authority(&fixture.intent, || std::future::ready(
-                crate::OccupancyAuthority::Current(fixture.successor_generation)
-            ))
+            .execute(&fixture.intent)
             .await
             .expect("execute"),
         TeardownExecution::Executed
@@ -672,9 +665,10 @@ async fn reconciliation_does_not_adopt_displaced_media_after_an_unattributed_joi
 }
 
 #[tokio::test]
-async fn sidless_old_webhook_cannot_clear_the_successor_but_its_own_departure_can() {
+async fn sidless_old_generation_webhook_cannot_clear_the_successor_but_its_own_departure_can() {
     let fixture = RetirementFixture::new(Some("PA_old"));
-    let no_participant_sid = observed_sids(Some("RM_live"), None);
+    let mut no_participant_sid = observed_sids(Some("RM_live"), None);
+    no_participant_sid.media_generation = fixture.intent.occupant_session;
     assert_eq!(
         fixture.sfu.observe_call_participant_sids(
             &fixture.call,
@@ -695,11 +689,13 @@ async fn sidless_old_webhook_cannot_clear_the_successor_but_its_own_departure_ca
         .sfu
         .participant_occupant_session(&fixture.call, &fixture.alice)
         .expect("occupant");
+    let mut current = no_participant_sid;
+    current.media_generation = Some(successor);
     assert!(matches!(
         fixture.sfu.note_participant_left_if_occupant_matches(
             &fixture.call,
             &fixture.alice,
-            Some(&no_participant_sid),
+            Some(&current),
             successor,
             UnboundOccupantPolicy::Keep,
             crate::SidEvidence::NotSignaling,
@@ -708,4 +704,338 @@ async fn sidless_old_webhook_cannot_clear_the_successor_but_its_own_departure_ca
             super::CallState::Ended
         ))
     ));
+}
+
+#[tokio::test]
+async fn tagged_cached_media_join_and_poll_do_not_create_retirement() {
+    let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reported);
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>)
+        .with_teardown_failure_sink(Arc::new(move |intent| {
+            sink.lock().expect("sink").push(intent);
+            Box::pin(async {})
+        }));
+    let call = CallId::try_new("cached-media@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let media_generation = fixture_occupancy_session();
+    let mut observation = observed_sids(Some("RM_cached"), Some("PA_cached"));
+    observation.media_generation = Some(media_generation);
+    sfu.register_call_participant_observed(&call, &alice, &observation);
+    admin.live.lock().expect("provider state").insert(
+        call.clone(),
+        vec![crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: observation.participant_sid.clone(),
+            media_generation: Some(media_generation),
+        }],
+    );
+    let summary = sfu.reconcile_active_calls(chrono::Duration::zero()).await;
+    assert!(summary.swept.is_empty());
+    assert_eq!(sfu.participant_occupant_session(&call, &alice), None);
+    assert!(
+        reported.lock().expect("intents").is_empty(),
+        "provider restoration and cached-token reconnect never authorize a takeover"
+    );
+    assert!(admin.remove_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn old_retirement_preserves_cached_successor_media_after_registry_restart() {
+    let fixture = RetirementFixture::new(Some("PA_successor"));
+    let restarted = LiveKitSfu::with_admin(fixture_config(), fixture.admin.clone() as Arc<_>);
+    let mut observation = observed_sids(Some("RM_live"), Some("PA_successor"));
+    observation.media_generation = Some(fixture.successor_generation);
+    restarted.register_call_participant_observed(&fixture.call, &fixture.alice, &observation);
+    // A new XMPP occupancy may own the room after failed stream resume, but
+    // the cached media token still names g2. No fresh Jingle has replaced it.
+    assert_eq!(
+        restarted.participant_occupant_session(&fixture.call, &fixture.alice),
+        None
+    );
+    assert_eq!(
+        restarted
+            .teardown_executor()
+            .execute(&fixture.intent)
+            .await
+            .expect("execute"),
+        TeardownExecution::StaleGeneration
+    );
+    assert!(fixture.admin.remove_snapshot().is_empty());
+    assert!(!restarted.is_revoked(&fixture.successor_token.jti));
+    assert!(restarted.has_call_participant(&fixture.call, &fixture.alice));
+}
+
+#[tokio::test]
+async fn generation_fenced_retirement_leaves_untagged_legacy_media_alone() {
+    let fixture = RetirementFixture::new(Some("PA_old"));
+    fixture
+        .admin
+        .live
+        .lock()
+        .expect("provider state")
+        .get_mut(&fixture.call)
+        .expect("live participant")[0]
+        .media_generation = None;
+    assert_eq!(
+        fixture
+            .sfu
+            .teardown_executor()
+            .execute(&fixture.intent)
+            .await
+            .expect("execute"),
+        TeardownExecution::StaleGeneration,
+        "missing attribution cannot prove this is the displaced media"
+    );
+    assert!(fixture.admin.remove_snapshot().is_empty());
+    fixture.assert_successor_survives();
+}
+
+#[test]
+fn takeover_revokes_displaced_tokens_beyond_the_active_history_cap() {
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("capped-tokens@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let publish = |generation| {
+        sfu.issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &SessionBinding::try_new("session").expect("session"),
+            generation,
+            captured_registration(&sfu, &call, &alice),
+        )
+        .expect("mint")
+        .expect("publish")
+    };
+    let displaced: Vec<_> = (0..(super::MAX_ISSUED_PER_PARTICIPANT + 5))
+        .map(|_| publish(first))
+        .collect();
+    let successors: Vec<_> = (0..3).map(|_| publish(second)).collect();
+    assert!(
+        displaced.iter().all(|token| sfu.is_revoked(&token.jti)),
+        "eviction from the active history must not forget an unexpired credential"
+    );
+    assert!(
+        successors.iter().all(|token| !sfu.is_revoked(&token.jti)),
+        "retiring g1 must preserve every g2 credential"
+    );
+    assert!(sfu.issued_count(&call, &alice) <= super::MAX_ISSUED_PER_PARTICIPANT);
+}
+
+#[tokio::test]
+async fn retirement_does_not_trust_a_different_sid_observed_before_its_provider_probe() {
+    let fixture = RetirementFixture::new(Some("PA_old"));
+    let mut prior = observed_sids(Some("RM_live"), Some("PA_prior"));
+    prior.media_generation = Some(fixture.successor_generation);
+    assert_eq!(
+        fixture
+            .sfu
+            .register_call_participant_observed(&fixture.call, &fixture.alice, &prior),
+        super::SidObservationDisposition::Applied
+    );
+    // The authoritative probe still sees the explicitly displaced g1. An
+    // older local observation must not permanently discharge that obligation.
+    assert_eq!(
+        fixture
+            .sfu
+            .teardown_executor()
+            .execute(&fixture.intent)
+            .await
+            .expect("execute"),
+        TeardownExecution::Executed
+    );
+    assert_eq!(
+        fixture.admin.remove_snapshot(),
+        vec![(fixture.call.clone(), fixture.alice.clone())]
+    );
+    fixture.assert_successor_survives();
+}
+
+#[test]
+fn minting_after_history_overflow_sweeps_expired_revocations() {
+    for bound_generation in [false, true] {
+        let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+        let call = CallId::try_new("token-history@muc.waddle.social").expect("call");
+        let alice = fixture_identity("alice");
+        let generation = fixture_occupancy_session();
+        let mint = || {
+            if bound_generation {
+                sfu.issue_join_token_with_session(
+                    &call,
+                    &alice,
+                    MediaCapabilities::direct_call_peer(),
+                    &SessionBinding::try_new("same-session").expect("session"),
+                    generation,
+                    captured_registration(&sfu, &call, &alice),
+                )
+                .expect("mint")
+                .expect("publish")
+            } else {
+                sfu.issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
+                    .expect("direct mint")
+            }
+        };
+        let tokens: Vec<_> = (0..(super::MAX_ISSUED_PER_PARTICIPANT + 3))
+            .map(|_| mint())
+            .collect();
+        assert_eq!(sfu.revoked_count(), 3);
+        // Age the actual FIFO evictions without waiting for JWT TTL or
+        // reading is_revoked, whose lazy cleanup would mask a missing sweep.
+        for token in &tokens[..2] {
+            sfu.revoked.insert(
+                token.jti.clone(),
+                super::Utc::now() - chrono::Duration::seconds(1),
+            );
+        }
+        let fresh = mint();
+        assert_eq!(
+            sfu.revoked_count(),
+            2,
+            "same-generation and direct minting must collect expired FIFO revocations"
+        );
+        assert!(tokens[..2]
+            .iter()
+            .all(|token| !sfu.revoked.contains_key(&token.jti)));
+        assert!(sfu.is_revoked(&tokens[2].jti));
+        assert!(sfu.is_revoked(&tokens[3].jti));
+        assert!(!sfu.is_revoked(&fresh.jti));
+    }
+}
+
+#[tokio::test]
+async fn bound_registration_accepts_an_untagged_reconnect_from_a_fresh_poll() {
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
+    let call = CallId::try_new("legacy-poll-reconnect@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let generation = fixture_occupancy_session();
+    sfu.register_call_participant_with_session(
+        &call,
+        &alice,
+        &SessionBinding::try_new("legacy-session").expect("session"),
+        generation,
+    );
+    let old = observed_sids(Some("RM_live"), Some("PA_old"));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &old),
+        super::SidObservationDisposition::Applied
+    );
+    admin.live.lock().expect("provider state").insert(
+        call.clone(),
+        vec![crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: Some(fixture_participant_sid("PA_new")),
+            media_generation: None,
+        }],
+    );
+
+    // The reconnect's join webhook was lost. Missing legacy attribution
+    // cannot prevent a newer authoritative poll from advancing its SID.
+    let summary = sfu.reconcile_active_calls(chrono::Duration::zero()).await;
+    assert!(summary.swept.is_empty());
+    let retained_sid = sfu
+        .calls
+        .get(&call)
+        .and_then(|entry| {
+            entry
+                .participants
+                .get(&alice)
+                .map(|participant| participant.participant_sid.clone())
+        })
+        .expect("retained registration");
+    assert_eq!(retained_sid, Some(fixture_participant_sid("PA_new")));
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&old)),
+        super::TeardownDisposition::StaleSid,
+        "the delayed leave of PA_old must not clear the untagged reconnect"
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(generation)
+    );
+}
+
+#[tokio::test]
+async fn room_only_departure_preserves_connecting_successor_but_its_own_departure_clears_it() {
+    for occupant_scoped in [false, true] {
+        let fixture = RetirementFixture::new(Some("PA_old"));
+        let room_only = observed_sids(Some("RM_live"), None);
+        assert!(fixture.sfu.calls.get(&fixture.call).is_some_and(|entry| {
+            entry
+                .participants
+                .get(&fixture.alice)
+                .is_some_and(|participant| participant.participant_sid.is_none())
+        }));
+        assert_eq!(
+            fixture
+                .sfu
+                .note_participant_left(&fixture.call, &fixture.alice, Some(&room_only)),
+            super::TeardownDisposition::StaleSid,
+            "room completion alone cannot prove a connecting successor departed"
+        );
+        fixture.assert_successor_survives();
+
+        let session = fixture
+            .sfu
+            .participant_session_binding(&fixture.call, &fixture.alice)
+            .expect("successor session");
+        let own_departure = if occupant_scoped {
+            fixture.sfu.note_participant_left_if_occupant_matches(
+                &fixture.call,
+                &fixture.alice,
+                Some(&room_only),
+                fixture.successor_generation,
+                UnboundOccupantPolicy::Keep,
+                crate::SidEvidence::Presented(Some(&session)),
+            )
+        } else {
+            fixture.sfu.note_participant_left_if_session_matches(
+                &fixture.call,
+                &fixture.alice,
+                Some(&room_only),
+                Some(&session),
+            )
+        };
+        assert_eq!(
+            own_departure,
+            super::SessionScopedTeardown::Applied(super::TeardownDisposition::Applied(
+                super::CallState::Ended
+            ))
+        );
+        assert!(!fixture
+            .sfu
+            .has_call_participant(&fixture.call, &fixture.alice));
+        assert!(fixture.sfu.is_revoked(&fixture.successor_token.jti));
+    }
+}
+
+#[tokio::test]
+async fn confirmed_ghost_sweeps_a_connecting_bound_registration_without_sid_evidence() {
+    let fixture = RetirementFixture::new(Some("PA_old"));
+    fixture.admin.set_live(&fixture.call, Vec::new());
+    assert!(fixture
+        .sfu
+        .reconcile_active_calls(chrono::Duration::zero())
+        .await
+        .swept
+        .is_empty());
+    fixture.assert_successor_survives();
+
+    let confirmed = fixture
+        .sfu
+        .reconcile_active_calls(chrono::Duration::zero())
+        .await;
+    assert_eq!(
+        confirmed.swept,
+        vec![(fixture.call.clone(), fixture.alice.clone())]
+    );
+    assert!(!fixture
+        .sfu
+        .has_call_participant(&fixture.call, &fixture.alice));
+    assert!(fixture.sfu.is_revoked(&fixture.successor_token.jti));
+    assert!(fixture.admin.remove_snapshot().is_empty());
 }

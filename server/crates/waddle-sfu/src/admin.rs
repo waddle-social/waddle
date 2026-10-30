@@ -983,10 +983,11 @@ mod tests {
             "participants": [{"identity": "alice@waddle.social/desktop", "attributes": {
                 "waddle.occupancy_generation": "not-a-generation"
             }}]
-        }));
-        assert!(
-            malformed.is_err(),
-            "malformed authority must not become an untagged participant"
+        }))
+        .expect("malformed optional evidence does not invalidate the listing");
+        assert_eq!(
+            malformed.participants[0].attributes.media_generation, None,
+            "malformed attributes provide no generation evidence"
         );
     }
 

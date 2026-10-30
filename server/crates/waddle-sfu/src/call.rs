@@ -302,9 +302,23 @@ pub struct ParticipantAttributes {
     #[serde(
         default,
         rename = "waddle.occupancy_generation",
+        deserialize_with = "deserialize_media_generation",
         skip_serializing_if = "Option::is_none"
     )]
     pub media_generation: Option<OccupancySessionGeneration>,
+}
+
+fn deserialize_media_generation<'de, D>(
+    deserializer: D,
+) -> Result<Option<OccupancySessionGeneration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // An unknown attribute is missing evidence, not an invalid departure.
+    // Consume its whole value so malformed metadata cannot discard a verified
+    // event or manufacture an occupancy generation.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(|value| value.parse().ok()))
 }
 
 /// LiveKit participant identity. Always derived from a real

@@ -471,16 +471,54 @@ mod tests {
     }
 
     #[test]
-    fn verified_participant_webhook_rejects_malformed_generation_attributes() {
+    fn verified_leave_preserves_departure_when_generation_attribute_is_unrecognized() {
         let secret = fixture_secret();
-        let body = serde_json::to_vec(&json!({
-            "event": "participant_joined", "room": { "name": "general@muc.test" },
-            "participant": { "identity": "alice@waddle.test/desktop", "sid": "PA_joined",
-                "attributes": { "waddle.occupancy_generation": "not-a-generation" } }
-        }))
-        .expect("body");
-        let auth = format!("Bearer {}", sign_for_body(&secret, &body));
-        assert!(verify_webhook_signature(&secret, Some(&auth), &body).is_err());
+        for generation in [
+            json!("not-a-generation"),
+            json!("v2:unknown-generation"),
+            json!(""),
+            json!(42),
+            json!({ "version": 2 }),
+            json!(["unexpected"]),
+            json!(null),
+        ] {
+            let body = serde_json::to_vec(&json!({
+                "event": "participant_left",
+                "id": "EV_leave",
+                "createdAt": 123,
+                "room": { "name": "general@muc.test", "sid": "RM_live" },
+                "participant": {
+                    "identity": "alice@waddle.test/desktop",
+                    "sid": "PA_left",
+                    "state": "DISCONNECTED",
+                    "attributes": { "waddle.occupancy_generation": generation }
+                }
+            }))
+            .expect("body");
+            let auth = format!("Bearer {}", sign_for_body(&secret, &body));
+            let event = verify_webhook_signature(&secret, Some(&auth), &body)
+                .expect("invalid optional evidence must not lose a verified departure");
+            assert_eq!(event.event_id(), Some("EV_leave"));
+            let LiveKitWebhookEvent::ParticipantLeft(envelope) = event else {
+                panic!("expected participant left");
+            };
+            assert_eq!(envelope.created_at, Some(123));
+            assert_eq!(envelope.room.name, "general@muc.test");
+            assert_eq!(
+                envelope.room.sid,
+                Some(RoomSid::try_new("RM_live").expect("room SID"))
+            );
+            assert_eq!(envelope.participant.identity, "alice@waddle.test/desktop");
+            assert_eq!(
+                envelope.participant.sid,
+                Some(ParticipantSid::try_new("PA_left").expect("participant SID"))
+            );
+            assert_eq!(envelope.participant.state.as_deref(), Some("DISCONNECTED"));
+            assert_eq!(
+                envelope.participant.attributes.media_generation, None,
+                "unrecognized attributes provide no generation evidence"
+            );
+        }
     }
 
     #[test]
