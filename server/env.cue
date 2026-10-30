@@ -16,6 +16,8 @@ let _rustInputs = [
 	"crates/**",
 	"extensions/**",
 	"vendor/**",
+	"experiments/native-fixture/**",
+	"experiments/grant-fence/Cargo.toml",
 	"scripts/**",
 	"wit/**",
 ]
@@ -284,6 +286,36 @@ schema.#Project & {
 			}
 			tasks: [_t.federationGrantFenceProof]
 		}
+		parentMoveNative: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.parentMoveNativeProof]
+		}
+		parentMoveNativePullRequest: {
+			mode: "expanded"
+			when: pullRequest: true
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.parentMoveNativeProof]
+		}
 		// Native SQL subscriber-capture characterization; no publishing task.
 		spaceFanoutContract: {
 			mode: "expanded"
@@ -387,6 +419,29 @@ schema.#Project & {
 			args: ["experiments/grant-fence/run-native.sh"]
 			inputs: [
 				"experiments/grant-fence/**",
+				"experiments/native-fixture/**",
+				"../flake.lock",
+				"../flake.nix",
+				"rust-toolchain.toml",
+			]
+		}
+
+		parentMoveNativeProof: schema.#Task & {
+			// This native experiment needs a live checkout, Nix, /proc and
+			// isolated local PostgreSQL and SpiceDB processes; it cannot run
+			// inside the Nix build sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/parent-move/run-native.sh"]
+			inputs: [
+				"crates/**",
+				"Cargo.toml",
+				"Cargo.lock",
+				"vendor/**",
+				"experiments/parent-move/**",
+				"experiments/grant-fence/Cargo.toml",
+				"experiments/grant-fence/native.nix",
+				"experiments/grant-fence/Cargo.lock",
 				"experiments/native-fixture/**",
 				"../flake.lock",
 				"../flake.nix",

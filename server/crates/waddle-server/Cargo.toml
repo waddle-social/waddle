@@ -186,3 +186,7 @@ required-features = ["clustering"]
 
 [lints]
 workspace = true
+
+# Disposable Linux native service fixture; never linked into release targets.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+waddle-native-fixture = { path = "../../experiments/native-fixture" }

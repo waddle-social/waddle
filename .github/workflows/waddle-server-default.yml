@@ -97,6 +97,9 @@ on:
     - server/deployment.cue/**
     - server/env.cue
     - server/env.cue/**
+    - server/experiments/grant-fence/Cargo.toml
+    - server/experiments/grant-fence/Cargo.toml/**
+    - server/experiments/native-fixture/**
     - server/extensions/**
     - server/observer-release.json
     - server/observer-release.json/**

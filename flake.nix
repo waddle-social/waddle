@@ -360,6 +360,8 @@
                 (lib.fileset.difference ./server/crates testFiles)
                 ./server/extensions
                 ./server/vendor
+                ./server/experiments/native-fixture
+                ./server/experiments/grant-fence/Cargo.toml
                 ./server/wit
               ];
           };
@@ -373,6 +375,8 @@
               ./server/crates
               ./server/extensions
               ./server/vendor
+              ./server/experiments/native-fixture
+              ./server/experiments/grant-fence/Cargo.toml
               ./server/wit
             ];
           };
@@ -554,6 +558,8 @@
               ./server/crates
               ./server/extensions
               ./server/vendor
+              ./server/experiments/native-fixture
+              ./server/experiments/grant-fence/Cargo.toml
               ./server/wit
             ];
           };

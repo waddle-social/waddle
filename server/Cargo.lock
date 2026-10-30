@@ -7719,6 +7719,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "waddle-native-fixture"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "prescience",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "waddle-server"
 version = "0.1.0"
 dependencies = [
@@ -7788,6 +7806,7 @@ dependencies = [
  "uuid",
  "waddle-ecdysis",
  "waddle-extensions",
+ "waddle-native-fixture",
  "waddle-sfu",
  "waddle-ws-test-support",
  "waddle-xmpp",
