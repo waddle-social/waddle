@@ -9,8 +9,9 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
-use crate::call::{CallId, Identity, MediaCapabilities};
+use crate::call::{CallId, Identity, MediaCapabilities, ParticipantAttributes};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 
@@ -150,6 +151,10 @@ pub struct VideoGrant {
     pub can_subscribe: bool,
     #[serde(rename = "canPublishData")]
     pub can_publish_data: bool,
+    /// Generation attribution is minted by Waddle and cannot be rewritten by
+    /// a participant via LiveKit's metadata/attributes update APIs.
+    #[serde(default, rename = "canUpdateOwnMetadata")]
+    pub can_update_own_metadata: bool,
 }
 
 impl VideoGrant {
@@ -160,6 +165,7 @@ impl VideoGrant {
             can_publish: caps.can_publish,
             can_subscribe: caps.can_subscribe,
             can_publish_data: caps.can_publish_data,
+            can_update_own_metadata: false,
         }
     }
 }
@@ -176,6 +182,8 @@ struct Claims {
     /// the opaque JWT string.
     jti: String,
     video: VideoGrant,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attributes: Option<ParticipantAttributes>,
 }
 
 /// Inputs to [`mint_join_token`] kept as one struct to keep the
@@ -188,6 +196,7 @@ pub(crate) struct MintInputs<'a> {
     pub identity: &'a Identity,
     pub capabilities: MediaCapabilities,
     pub ttl: Duration,
+    pub occupant_session: Option<OccupancySessionGeneration>,
 }
 
 pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuError> {
@@ -207,6 +216,11 @@ pub(crate) fn mint_join_token(inputs: MintInputs<'_>) -> Result<JoinToken, SfuEr
         exp: expires_at.timestamp(),
         jti: jti.as_str().to_string(),
         video: VideoGrant::from_capabilities(inputs.call_id, inputs.capabilities),
+        attributes: inputs
+            .occupant_session
+            .map(|generation| ParticipantAttributes {
+                media_generation: Some(generation),
+            }),
     };
 
     let key = EncodingKey::from_secret(inputs.api_secret.as_bytes());
@@ -249,6 +263,7 @@ mod tests {
             identity,
             capabilities: MediaCapabilities::direct_call_peer(),
             ttl: Duration::seconds(3600),
+            occupant_session: None,
         }
     }
 
@@ -261,6 +276,75 @@ mod tests {
         exp: i64,
         jti: String,
         video: VideoGrant,
+        #[serde(default)]
+        attributes: Option<ParticipantAttributes>,
+    }
+
+    #[test]
+    fn muji_token_binds_media_generation_and_denies_client_attribute_changes() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        let ws_url = WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("URL"))
+            .expect("websocket URL");
+        let call_id = CallId::try_new("general@muc.waddle.social").expect("call");
+        let identity = fixture_identity();
+        let generation = OccupancySessionGeneration::mint();
+        let mut inputs = fixture_inputs(&api_key, &secret, &ws_url, &call_id, &identity);
+        inputs.occupant_session = Some(generation);
+        let token = mint_join_token(inputs).expect("mint");
+        let key = DecodingKey::from_secret(secret.as_bytes());
+        let decoded = decode::<DecodedClaims>(
+            token.jwt.as_str(),
+            &key,
+            &Validation::new(jsonwebtoken::Algorithm::HS256),
+        )
+        .expect("verify token");
+        assert_eq!(
+            decoded
+                .claims
+                .attributes
+                .expect("media attributes")
+                .media_generation,
+            Some(generation)
+        );
+        assert!(!decoded.claims.video.can_update_own_metadata);
+
+        let wire = decode::<serde_json::Value>(
+            token.jwt.as_str(),
+            &key,
+            &Validation::new(jsonwebtoken::Algorithm::HS256),
+        )
+        .expect("verify wire claims")
+        .claims;
+        assert_eq!(
+            wire["attributes"]["waddle.occupancy_generation"],
+            generation.to_string()
+        );
+        assert_eq!(wire["video"]["canUpdateOwnMetadata"], false);
+    }
+
+    #[test]
+    fn direct_call_token_has_no_muc_generation_attribute() {
+        let api_key = ApiKey::new("APIxxxxxxxx");
+        let secret = ApiSecret::from_text("super-secret-secret-32-bytes-min")
+            .expect("test secret meets min length");
+        let ws_url = WebsocketUrl::try_new("wss://livekit.waddle.social".parse().expect("URL"))
+            .expect("websocket URL");
+        let call_id = CallId::try_new("direct-call").expect("call");
+        let identity = fixture_identity();
+        let token = mint_join_token(fixture_inputs(
+            &api_key, &secret, &ws_url, &call_id, &identity,
+        ))
+        .expect("mint");
+        let wire = decode::<serde_json::Value>(
+            token.jwt.as_str(),
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &Validation::new(jsonwebtoken::Algorithm::HS256),
+        )
+        .expect("verify token")
+        .claims;
+        assert!(wire.get("attributes").is_none());
     }
 
     #[test]
@@ -421,6 +505,7 @@ mod tests {
                 can_publish_data: false,
             },
             ttl: Duration::seconds(60),
+            occupant_session: None,
         })
         .expect("mint should succeed");
 

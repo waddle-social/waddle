@@ -104,7 +104,7 @@ async fn sqlite_column_present(
 const ACTION_CHECK: &str = "action IN ('remove_participant','retire_displaced_participant','delete_room','muji_presence_clear','muji_room_sweep','call_thread_end_retry')";
 const TARGET_CHECK: &str = "\
     (action = 'remove_participant' AND identity IS NOT NULL AND room_jid IS NULL) \
-    OR (action = 'retire_displaced_participant' AND identity IS NOT NULL AND room_jid IS NULL AND participant_sid IS NOT NULL AND participant_sid <> '') \
+    OR (action = 'retire_displaced_participant' AND identity IS NOT NULL AND room_jid IS NULL AND (participant_sid IS NULL OR participant_sid <> '') AND (participant_sid IS NOT NULL OR occupant IS NOT NULL)) \
     OR (action = 'delete_room' AND identity IS NULL AND room_jid IS NULL AND participant_sid IS NULL) \
     OR (action = 'muji_presence_clear' AND identity IS NOT NULL AND room_jid IS NOT NULL) \
     OR (action = 'muji_room_sweep' AND identity IS NULL AND room_jid IS NOT NULL AND room_sid IS NOT NULL AND participant_sid IS NULL) \
@@ -159,7 +159,7 @@ async fn upgrade_retirement_action(db: &Database) -> Result<(), CallTeardownOutb
             };
             let current: String = row.get(0)?;
             drop(rows);
-            if !current.contains("'retire_displaced_participant'") {
+            if !current.contains("participant_sid IS NOT NULL OR occupant IS NOT NULL") {
                 let mut rows = transaction
                     .query(
                         "SELECT sql FROM sqlite_master WHERE tbl_name = 'call_teardown_outbox' \
@@ -220,7 +220,10 @@ async fn upgrade_retirement_action(db: &Database) -> Result<(), CallTeardownOutb
                 let name: String = row.get(0)?;
                 let definition: String = row.get(1)?;
                 if definition.contains("'remove_participant'") {
-                    if definition.contains("'retire_displaced_participant'") {
+                    if definition.contains("'retire_displaced_participant'")
+                        && (!definition.contains("identity")
+                            || definition.contains("occupant IS NOT NULL"))
+                    {
                         current_constraints += 1;
                     }
                     constraints.push(name);

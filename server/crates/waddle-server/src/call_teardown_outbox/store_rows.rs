@@ -34,7 +34,7 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
             Ok(CallGeneration::try_from(value)?)
         })
         .transpose()?;
-    Ok(CallTeardownJob {
+    let job = CallTeardownJob {
         intent_id: CallTeardownIntentId::from_stored(row.get(0)?),
         intent: CallTeardownIntent {
             call_id: CallId::try_new(row.get::<String>(1)?)?,
@@ -77,7 +77,9 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
         next_attempt_at_ms: row.get(12)?,
         claim_token: row.get::<Option<String>>(13)?.map(ClaimToken::from_stored),
         created_at_ms: row.get(14)?,
-    })
+    };
+    job.intent.validate_retirement_evidence()?;
+    Ok(job)
 }
 
 /// The `call_thread_end_retry` payload columns, grouped so the row
@@ -98,11 +100,11 @@ fn decode_target(
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
         "retire_displaced_participant" => match (identity, room_jid, participant_sid) {
-            (Some(identity), None, Some(participant_sid)) if !identity.is_empty() => {
+            (Some(identity), None, participant_sid) if !identity.is_empty() => {
                 Ok(TeardownTarget::DisplacedParticipant {
                     identity: FullJid::from_str(&identity)
                         .map_err(|_| CallTeardownOutboxError::InvalidFullJid(identity))?,
-                    participant_sid: ParticipantSid::try_new(participant_sid)?,
+                    participant_sid: participant_sid.map(ParticipantSid::try_new).transpose()?,
                 })
             }
             _ => Err(CallTeardownOutboxError::InvalidTargetShape(

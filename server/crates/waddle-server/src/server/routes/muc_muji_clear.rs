@@ -22,8 +22,8 @@ use waddle_xmpp::xep::xep0421::OccupantIdentity;
 use waddle_xmpp_core::Stanza;
 
 use super::websocket::{
-    get_room_actor_result, note_participant_left_from_webhook,
-    observe_participant_sids_from_webhook, WebSocketState,
+    get_room_actor_result, note_participant_left_from_webhook, observe_participant_departure,
+    WebSocketState,
 };
 
 /// The disposition of a webhook-driven side effect.  A retryable result keeps
@@ -50,6 +50,22 @@ pub(crate) async fn clear_muji_presence_for_departure(
     unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> WebhookEffectOutcome {
+    let observed_generation = observed_sids.and_then(|sids| sids.media_generation);
+    if occupant.is_none() && observed_generation.is_none() {
+        // Replayed legacy provider events can outlive a media/token cutover.
+        // Neither an unbound SFU cache nor a SID-less observation authorizes
+        // clearing whichever occupancy the room actor currently owns. A
+        // signaling SID may be reused across generations and cannot replace
+        // the generation fence, even for a durable internal retry.
+        return WebhookEffectOutcome::Stale;
+    }
+    let clear_occupant = match (occupant, observed_generation) {
+        (Some(expected), Some(observed)) if expected != observed => {
+            return WebhookEffectOutcome::Stale;
+        }
+        (Some(expected), _) => Some(expected),
+        (None, observed) => observed,
+    };
     debug!(
         room = %room_jid,
         identity = %full_jid,
@@ -57,7 +73,17 @@ pub(crate) async fn clear_muji_presence_for_departure(
     );
 
     if matches!(
-        observe_participant_sids_from_webhook(state, room_jid, full_jid, observed_sids),
+        observe_participant_departure(
+            state,
+            room_jid,
+            full_jid,
+            observed_sids,
+            occupant,
+            unbound,
+            session.map_or(waddle_sfu::SidEvidence::NotSignaling, |session| {
+                waddle_sfu::SidEvidence::Presented(Some(session))
+            }),
+        ),
         Some(waddle_sfu::SidObservationDisposition::StaleSid)
     ) {
         return WebhookEffectOutcome::Stale;
@@ -90,7 +116,7 @@ pub(crate) async fn clear_muji_presence_for_departure(
                 room_jid,
                 full_jid,
                 observed_sids,
-                occupant,
+                clear_occupant,
                 unbound,
                 session,
             )
@@ -133,7 +159,11 @@ pub(crate) async fn clear_muji_presence_for_departure(
     let outcome = match actor
         .ask(ClearMujiPresence {
             sender_jid: full_jid.clone(),
-            occupant,
+            // Provider generation is a candidate departure fence, not MUC
+            // authority. The actor compares it with the current occupancy in
+            // the same operation that clears the advertisement; a restored
+            // SFU cache cannot authorize clearing a live successor by itself.
+            occupant: clear_occupant,
         })
         .await
     {
@@ -379,10 +409,117 @@ mod tests {
     };
     use crate::server::routes::websocket::handlers::presence::handle_muc_join;
     use crate::server::routes::websocket::tests::{
-        create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+        create_test_server_owner_session, create_test_websocket_state_with_calls,
+        create_test_websocket_state_with_sfu, snapshot_room, RecordingSfu,
     };
     use crate::server::routes::websocket::ActiveCallThread;
     use jid::{BareJid, FullJid};
+
+    #[tokio::test]
+    async fn scoped_sid_only_departure_preserves_sid_fencing_and_clears_matching_media() {
+        let state = create_test_websocket_state_with_calls().await;
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "scoped-sid-only@muc.example.com".parse().expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: generation,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        crate::server::routes::websocket::get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("room actor")
+            .ask(waddle_xmpp::muc::room_actor::UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: waddle_xmpp::xep::xep0272::Muji::with_contents(vec![
+                    waddle_xmpp::xep::xep0272::MujiContent::new(
+                        "audio",
+                        waddle_xmpp::xep::xep0272::Creator::Initiator,
+                        waddle_xmpp::xep::xep0167::MediaKind::Audio,
+                    ),
+                ]),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+        let sfu = state.deps.protocol.sfu.as_ref().expect("real SFU");
+        let call = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        let binding = waddle_sfu::SessionBinding::try_new("matching-session").expect("session");
+        let token = sfu
+            .issue_join_token_with_session(
+                &call,
+                &identity,
+                waddle_sfu::MediaCapabilities::direct_call_peer(),
+                &binding,
+                generation,
+                sfu.participant_registration_expectation(&call, &identity)
+                    .expect("publication expectation"),
+            )
+            .expect("mint")
+            .expect("publish");
+        let room_sid = waddle_sfu::RoomSid::try_new("RM_scoped").expect("room SID");
+        let mut current_media = waddle_sfu::ObservedCallSids::new(
+            Some(room_sid.clone()),
+            Some(waddle_sfu::ParticipantSid::try_new("PA_current").expect("participant SID")),
+        );
+        current_media.media_generation = Some(generation);
+        sfu.register_call_participant_observed(&call, &identity, &current_media);
+
+        let old_sid_only = waddle_sfu::ObservedCallSids::new(
+            Some(room_sid.clone()),
+            Some(waddle_sfu::ParticipantSid::try_new("PA_old").expect("participant SID")),
+        );
+        let stale = clear_muji_presence_for_departure(
+            state.as_ref(),
+            &room_jid,
+            &alice,
+            Some(&old_sid_only),
+            Some(generation),
+            waddle_sfu::UnboundOccupantPolicy::Keep,
+            Some(&binding),
+        )
+        .await;
+        assert_eq!(stale, WebhookEffectOutcome::Stale);
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .muji_for_session("alice", &alice)
+            .is_some());
+        assert!(!sfu.is_revoked(&token.jti));
+
+        let current_sid_only =
+            waddle_sfu::ObservedCallSids::new(Some(room_sid), current_media.participant_sid);
+        let applied = clear_muji_presence_for_departure(
+            state.as_ref(),
+            &room_jid,
+            &alice,
+            Some(&current_sid_only),
+            Some(generation),
+            waddle_sfu::UnboundOccupantPolicy::Keep,
+            None,
+        )
+        .await;
+        assert_eq!(applied, WebhookEffectOutcome::Completed);
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .muji_for_session("alice", &alice)
+            .is_none());
+        assert!(sfu.is_revoked(&token.jti));
+    }
+
     fn active_call_thread(initiator: BareJid) -> ActiveCallThread {
         ActiveCallThread {
             anchor_origin_id: "anchor-origin-id".to_owned(),
@@ -443,13 +580,14 @@ mod tests {
 
         let room_jid: BareJid = "enqueue-failure@muc.example.com".parse().expect("room jid");
         let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
+        let occupant = waddle_xmpp_core::OccupancySessionGeneration::mint();
 
         let outcome = clear_muji_presence_for_departure(
             state.as_ref(),
             &room_jid,
             &full_jid,
             None,
-            None,
+            Some(occupant),
             waddle_sfu::UnboundOccupantPolicy::TearDown,
             None,
         )

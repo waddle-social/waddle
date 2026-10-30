@@ -659,6 +659,22 @@ impl waddle_sfu::SfuService for RecordingSfu {
             .flatten()
     }
 
+    fn participant_media_evidence(
+        &self,
+        call_id: &waddle_sfu::CallId,
+        identity: &waddle_sfu::Identity,
+    ) -> Option<waddle_sfu::ObservedCallSids> {
+        self.registered_calls
+            .lock()
+            .expect("recording lock")
+            .iter()
+            .rev()
+            .find(|(registered_call, registered_identity, _)| {
+                registered_call == call_id && registered_identity == identity
+            })
+            .map(|(_, _, evidence)| evidence.clone())
+    }
+
     fn unregister_call_participant_if_occupant_matches(
         &self,
         call_id: &waddle_sfu::CallId,
