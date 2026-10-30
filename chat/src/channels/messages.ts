@@ -164,6 +164,7 @@ export function useChannelMessages(
   } = useRoomAccessRequirements(xmppClient, currentRoomJid);
 
   function roomJidForChannel(channelId: string): string | null {
+    if (xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return null;
     const currentSession = session.value;
     if (!currentSession) return null;
     const channel = currentChannel.value?.id === channelId ? currentChannel.value : null;
@@ -695,6 +696,22 @@ export function useChannelMessages(
     );
     return true;
   }
+
+  watch(xmppClient, (client, previous, onCleanup) => {
+    if (previous && previous !== client) {
+      roomJidOverrides.value = {};
+      clearMessages();
+    }
+    const unsubscribe = client?.onRoomIdAmbiguous?.((channelId) => {
+      const { [channelId]: _discard, ...remaining } = roomJidOverrides.value;
+      roomJidOverrides.value = remaining;
+      if (!activeChannelId.value || activeChannelId.value === channelId) {
+        activeChannelId.value = null;
+        clearMessages();
+      }
+    });
+    if (unsubscribe) onCleanup(unsubscribe);
+  }, { immediate: true, flush: "sync" });
 
   function clearChannelActivity(roomJid: string) {
     const bareRoomJid = barePeerJid(roomJid);

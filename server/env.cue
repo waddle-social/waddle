@@ -223,6 +223,26 @@ schema.#Project & {
 			}
 			tasks: [_t.roomChildContractPostgres]
 		}
+		// Test-only native experiment: do not add these inputs to the image
+		// publishing pipeline or its deployment-revision authority.
+		federationGrantFence: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
 		namespaceRustChecks: {
 			mode:        "expanded"
 			derivePaths: true
@@ -300,6 +320,20 @@ schema.#Project & {
 			command:  "bash"
 			args: ["experiments/room-child/run-native.sh"]
 			inputs: list.Concat([_nixInputs, ["experiments/room-child/**"]])
+		}
+		federationGrantFenceProof: schema.#Task & {
+			// This native experiment needs a live checkout, Nix, /proc and
+			// isolated local PostgreSQL and SpiceDB processes; it cannot run
+			// inside the Nix build sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/grant-fence/run-native.sh"]
+			inputs: [
+				"experiments/grant-fence/**",
+				"../flake.lock",
+				"../flake.nix",
+				"rust-toolchain.toml",
+			]
 		}
 
 		checkCiDrift: schema.#Task & {

@@ -1,11 +1,12 @@
+import { hasConflictingRoomAddresses } from "@/lib/xmpp/room-id-bindings";
 import type { ChannelSummary } from "@/lib/chat-types";
 
-// Channel lookup is by globally-unique id (the same id Astro receives via
-// `[room]`), not by display name — different spaces can have channels
-// with the same human name.
+// Legacy routes carry a local ID, not a room authority. Reject an ambiguous
+// snapshot rather than choosing its first room. Display names are not IDs.
 export function resolveChannelBySlug(
   slug: string,
   channels: ChannelSummary[],
 ): ChannelSummary | undefined {
+  if (hasConflictingRoomAddresses(slug, channels)) return undefined;
   return channels.find((c) => c.id === slug);
 }
