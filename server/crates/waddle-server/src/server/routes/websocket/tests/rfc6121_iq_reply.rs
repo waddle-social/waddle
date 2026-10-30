@@ -6,6 +6,7 @@ use jid::{FullJid, Jid};
 use minidom::Element;
 use tokio::sync::mpsc;
 use waddle_xmpp::disco::{build_disco_info_response, Feature, Identity};
+use waddle_xmpp::protocol::handlers::errors::NS_BLOCKING_ERRORS;
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::xep::xep0115::{compute_caps_hash, Caps, CapsCacheKey};
@@ -172,6 +173,88 @@ async fn blocked_replies_are_silent_and_do_not_reach_the_recipient() {
     assert_request_error(&state, &mut conn, DefinedCondition::ServiceUnavailable).await;
     assert!(rx.try_recv().is_err(), "blocked reply not delivered");
     assert!(origin_rx.try_recv().is_err(), "blocked reply not bounced");
+}
+
+#[tokio::test]
+async fn outgoing_blocks_match_bare_full_and_domain_targets_before_routing() {
+    for (blocked, denied) in [
+        ("bob@example.com", true),
+        (PEER, true),
+        (DOMAIN, true),
+        ("bob@example.com/other-resource", false),
+    ] {
+        let state = create_test_websocket_state().await;
+        let (mut conn, mut origin_rx) = bound_connection(&state).await;
+        let (tx, mut rx) = mpsc::channel(8);
+        register_test_connection(&state, &PEER.parse().expect("peer"), tx).await;
+        let storage = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+        storage
+            .add_blocks(
+                &origin().to_bare(),
+                &[blocked.parse().expect("blocked target")],
+            )
+            .await
+            .expect("sender blocklist");
+        conn.sm_state
+            .enable("outgoing-block-sm".into(), false, None);
+        let mut count = 0;
+        for mut reply in replies(Some(PEER), Some("forged@remote.test/resource")) {
+            assert!(dispatch(&state, &mut conn, reply.clone()).await.is_empty());
+            if !denied {
+                *reply.from_mut() = Some(Jid::from(origin()));
+                assert_eq!(receive(&mut rx).await, reply);
+            }
+            count += 1;
+        }
+        for constructor in [IqPayload::Get, IqPayload::Set] {
+            let payload = Element::builder("ping", NS_PING).build();
+            let mut iq = request(
+                constructor(payload.clone()),
+                Some(PEER),
+                Some("forged@remote.test/resource"),
+                "outgoing-blocked-request",
+            );
+            let frames = dispatch(&state, &mut conn, iq.clone()).await;
+            if denied {
+                let [Iq::Error {
+                    from,
+                    to,
+                    id,
+                    payload: echo,
+                    error,
+                }] = frames.as_slice()
+                else {
+                    panic!("blocked outgoing request needs a bounded error: {frames:?}")
+                };
+                assert_eq!(from.as_ref(), iq.to());
+                assert_eq!(to.as_ref(), Some(&Jid::from(origin())));
+                assert_eq!(id, iq.id());
+                assert_eq!(echo.as_ref(), Some(&payload));
+                let mut expected = StanzaError::new(
+                    ErrorType::Cancel,
+                    DefinedCondition::NotAcceptable,
+                    "en",
+                    "Recipient is on your blocklist.",
+                );
+                expected.other = Some(Element::builder("blocked", NS_BLOCKING_ERRORS).build());
+                expected.by = Some(DOMAIN.parse().expect("home domain"));
+                assert_eq!(error, &expected);
+            } else {
+                assert!(frames.is_empty());
+                *iq.from_mut() = Some(Jid::from(origin()));
+                assert_eq!(receive(&mut rx).await, iq);
+            }
+            count += 1;
+        }
+        assert_eq!(conn.sm_state.inbound_count(), count);
+        assert_eq!(conn.sm_inbound_completion.pending_count(), 0);
+        assert!(!conn.sm_inbound_completion.has_unhandled_hole());
+        assert!(
+            rx.try_recv().is_err(),
+            "blocked stanza must not reach the peer"
+        );
+        assert!(origin_rx.try_recv().is_err(), "no routed error loops");
+    }
 }
 
 #[tokio::test]
