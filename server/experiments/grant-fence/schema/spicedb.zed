@@ -13,3 +13,20 @@ definition recovery_operation {
     relation tombstone: recovery_subject
     permission read = reader
 }
+
+// Fixed experimental policy. No MUC behavior or production schema is represented.
+definition multi_user {}
+definition multi_stamp {}
+definition multi_marker {
+    relation version: multi_stamp
+}
+definition multi_parent {
+    relation member: multi_user
+    permission inherited = member
+}
+definition multi_channel {
+    relation parent: multi_parent
+    relation direct: multi_user
+    permission inherited = parent->inherited
+    permission direct_access = direct
+}

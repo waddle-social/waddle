@@ -14,6 +14,7 @@ pub async fn run_worker() -> Result<()> {
     let request: WorkerRequest = serde_json::from_slice(&bytes)?;
     let work = match request {
         WorkerRequest::Guard(work) => work,
+        WorkerRequest::MultiEdge(work) => return crate::multi_edge::execute(&work).await,
         WorkerRequest::Recovery(work) => return crate::recovery::execute(&work).await,
         WorkerRequest::WriteProxy(work) => return crate::recovery::execute_proxy(&work).await,
     };
