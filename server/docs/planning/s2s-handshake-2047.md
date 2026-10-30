@@ -190,19 +190,59 @@ must not become authenticated queued work. B3 requires an executable boundary
 proof for segmented/coalesced TCP reads and namespace inheritance.
 
 Advertise only EXTERNAL after acceptable certificate identity and pair checks.
-The initiator sends its exact source domain as the base64 authorization identity;
-the receiver also accepts `=` as the explicit empty initial response and assigns
-the already verified source domain. For an omitted initial response, issue one
-empty SASL challenge and accept one bounded response. Empty means the source
-identity; a nonempty prepared domain must equal it. No alternate authorization
-identity, user lookup, password or fallback mechanism is supported.
+The Waddle initiator acts as its own certificate-verified source domain, including
+on component-domain streams, and sends a zero-length initial response as `=`.
+It MUST NOT send a same-identity authzid: [RFC 6120 section 6.3.8](https://www.rfc-editor.org/rfc/rfc6120.html#section-6.3.8)
+prohibits providing an authorization identity when not acting for another entity.
+The pinned XEP-0178 section 3 compatibility recommendation to include an authzid
+conflicts with that rule in this case; this design follows the RFC requirement.
+
+The receiver assigns an empty response to the already verified source domain.
+For an omitted initial response, issue one empty SASL challenge and accept one
+bounded response. A peer's optional nonempty authzid is tolerated only when it
+is a prepared domain exactly equal to the certificate-verified, pair-authorized
+source; this grants no extra identity and does not cause Waddle to send one.
+A different domain, account JID or resource JID receives `invalid-authzid`.
+No alternate authorization identity, user lookup, password or fallback mechanism
+is supported. Omitted data and the explicit zero-length initial response remain
+distinct parser events.
+
+SASL has explicit `AwaitAuth`, `AwaitResponse` and `Authorizing` substates before
+success. Process incoming control elements in order. Each accepted `auth` starts
+a new exchange generation; cancelling/replacing it invalidates pending checks
+and prevents their late completions from emitting success. TLS evidence, domain
+pair, byte/rate accounting and connection deadlines survive these transitions.
+The following transitions take precedence over the generic unexpected-command
+rule; none restarts the XML stream or TLS handshake:
+
+| SASL state and input | Transition and response |
+| --- | --- |
+| `AwaitAuth` + `auth` | Start an exchange; explicit response enters `Authorizing`, omitted response emits one empty challenge and enters `AwaitResponse`. Validate the requested mechanism and payload with the failure table below. |
+| `AwaitResponse` or `Authorizing` + replacement `auth` | Discard the unfinished exchange and process the new requested handshake, per [RFC 6120 section 6.4.2](https://www.rfc-editor.org/rfc/rfc6120.html#section-6.4.2). Do not emit a failure for the discarded exchange. An unsupported replacement mechanism receives `invalid-mechanism`, not generic `policy-violation`. |
+| `AwaitResponse` + `response` | Consume the one response and enter `Authorizing`; empty response uses the verified source, nonempty response receives the same authzid checks as initial data. |
+| Unauthenticated SASL state + `abort` | Invalidate any unfinished exchange and emit SASL failure `aborted`, per [RFC 6120 section 6.4.4](https://www.rfc-editor.org/rfc/rfc6120.html#section-6.4.4). Return to `AwaitAuth` while the limits below allow another exchange; otherwise close after the required `aborted` response. An abort never authenticates or resets a deadline. |
+| Successful current-generation authorization | Emit success exactly once, leave SASL and require the post-SASL stream header. Further SASL traffic is outside an ongoing exchange and closes with `policy-violation`. |
+
+Allow at most three `auth` starts total per TCP connection (initial plus two
+replacement/retry starts), and at most three `abort` elements. A fourth `auth`
+closes with `policy-violation` because the exchange budget is exhausted, not
+because replacement authentication is unsupported. The third abort emits
+`aborted` and closes; an abort after the third start also emits `aborted` and
+closes because no starts remain. Awaiting another auth cannot extend the
+5-second SASL-phase deadline, anchored at the mechanisms offer, or the 20-second
+whole-negotiation deadline. One STARTTLS restart and one successful-SASL restart
+are the only permitted XML stream restarts. The ordinary terminal SASL failures
+below still close: this EXTERNAL-only profile does not retry invalid certificate
+or identity evidence as if it were a mistyped user password.
 
 Use the following ordered failure mapping. Errors are typed and contain no
 reflected peer XML/JIDs. Send at most one bounded terminal response and close;
-if the protocol state cannot safely carry it, close TCP. Do not send XML inside
-a failed TLS handshake. Receiving a terminal peer error closes without replying
-with another error. The opening response required to carry a stream error must
-itself follow RFC 6120; B1 includes malformed initial-header cases.
+if the protocol state cannot safely carry it, close TCP. The `aborted` transition
+above is explicitly nonterminal while retry budget and deadlines remain. Do not
+send XML inside a failed TLS handshake. Receiving a terminal peer error closes
+without replying with another error. The opening response required to carry a
+stream error must itself follow RFC 6120; B1 includes malformed initial-header
+cases.
 
 | Condition | Proposed wire result and lifetime |
 | --- | --- |
@@ -213,7 +253,7 @@ itself follow RFC 6120; B1 includes malformed initial-header cases.
 | Header recipient not served or not the selected destination | `host-unknown`, then close. |
 | Source pair not allowed, or source identity changes | `invalid-from`, then close. |
 | Application stanza before completed authentication | `not-authorized`, then close. |
-| Peer declines/strips STARTTLS or sends another negotiation command | Attempt required STARTTLS if the feature was stripped; refuse any fallback. Unexpected command: `policy-violation`; close. |
+| Peer declines/strips STARTTLS or sends another negotiation command | Attempt required STARTTLS if the feature was stripped; refuse any fallback. Unexpected command outside the defined SASL replacement/abort transitions: `policy-violation`; close. |
 | TLS/certificate/path/name/revocation failure | TLS alert when available, then TCP close; never EXTERNAL success. |
 | Unsupported SASL mechanism | SASL `invalid-mechanism`, then close. |
 | Bad SASL base64, invalid UTF-8 or structurally invalid exchange | SASL `incorrect-encoding` for encoding failure, otherwise `malformed-request`, then close. |
@@ -253,7 +293,9 @@ cancellation; no unbounded spawned-task or logging queue is allowed.
 | XML buffering | 128 KiB maximum per connection; reject DTDs/external entities and unsupported encodings; bounded whitespace counts toward rate/deadline. |
 | TLS handshake buffering | 128 KiB per connection, chain at most 8 certificates and 64 KiB encoded; demonstrate library enforcement under B2. |
 | Output buffer | 16 control frames and 64 KiB per connection; first exhausted bound closes. No application queue. |
-| TCP connect / initial header / TLS / each restart or SASL step | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |
+| TCP connect / initial header / TLS / each expected stream restart | 5 seconds each; 20 seconds total through authenticated post-SASL header. Timers do not reset on partial bytes. |
+| Whole SASL phase | 5 seconds from mechanisms offer, including challenges, replacements and abort/retry; never renew this or the total negotiation deadline. |
+| SASL exchanges / aborts / XML stream restarts | 3 auth starts total, 3 abort elements total; at most the expected post-TLS and post-success headers. Replacements/aborts never add a stream restart. |
 | Established incomplete element / idle | 5 seconds / 30 seconds; continuous whitespace cannot avoid the element/rate limits. |
 | Input rate | 64 KiB/second, burst 128 KiB per socket; 512 KiB/second, burst 1 MiB globally. |
 | Terminal write and close / operator drain | 1 second / 5 seconds, capped by the process's remaining drain budget. |
@@ -271,7 +313,7 @@ waiting for a remote peer. The two-process tests must prove unrelated C2S progre
 
 | ID | Required resolution before implementation |
 | --- | --- |
-| B1: standards profile | Record RFC 6120/7590/7622/9325/9525 updates and errata disposition; reconcile TLS 1.3-only restriction, DNS-ID/SRV-ID/XmppAddr treatment, IDNA/preparation, SASL empty/omitted responses and exact malformed-header/error behavior. Identify intentional pilot restrictions without claiming general compliance. |
+| B1: standards profile | Record RFC 6120/7590/7622/9325/9525 updates and errata disposition; reconcile TLS 1.3-only restriction, DNS-ID/SRV-ID/XmppAddr treatment, IDNA/preparation, remaining SASL conformance and exact malformed-header/error behavior. The authzid precedence and replacement/abort rules above resolve those specific review findings; other B1 questions remain open. Identify intentional pilot restrictions without claiming general compliance. |
 | B2: concrete TLS verifier | Select exact rustls/webpki/parser versions and APIs; prove server certificate identity verification in both TLS roles, SRV-ID support, EKU/chain constraints, signed CRL coverage/freshness and enforceable pre-verification memory/CPU limits. No permissive custom verifier or unchecked fallback. |
 | B3: codec and boundary | Select streaming parser/version and prove namespace inheritance, UTF-8 segmentation, element/attribute/depth accounting and STARTTLS/SASL restart buffer ownership with executable adversarial cases. |
 | B4: independent review | An independent reviewer must challenge this exact design/head and its resolved B1-B3 evidence. Unresolved blocking findings pause transport implementation. |
@@ -310,7 +352,16 @@ outcome, never private keys, tokens or stanza bodies.
 3. Attack pre/post-TLS and post-SASL header changes, wrong recipient, spoofed
    sender, relay attempts, authzid mismatch, omitted/empty responses, bad base64,
    mechanism downgrade, stripped STARTTLS, unsolicited bind/SM and stale
-   authenticated bytes retained across restarts. Assert the exact error table.
+   authenticated bytes retained across restarts. Assert that Waddle's own
+   EXTERNAL auth contains `=` and no authzid, while matching optional peer
+   authzids pass only the existing certificate/pair check. Replace unfinished
+   exchanges both before response and during pending authorization; assert no
+   stale success, and `invalid-mechanism` for an unsupported replacement. Abort
+   at each unauthenticated SASL substate and assert `aborted`, permitted restart
+   within budget, and bounded closure at the specified limits. Exercise the
+   fourth auth, third abort and repeated partial/control inputs near the SASL
+   and total deadlines; assert no timer, counter, XML restart or TLS reset.
+   Assert the exact transition and failure tables.
 4. Fragment every transition and coalesce plaintext/TLS/SASL boundary bytes.
    Test inherited namespace changes, invalid UTF-8, DTD/entity attempts, malformed
    addresses, deeply nested XML, huge attributes, oversized/incomplete stanzas,
