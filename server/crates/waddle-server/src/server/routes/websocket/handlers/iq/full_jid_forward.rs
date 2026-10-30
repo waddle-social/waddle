@@ -23,12 +23,20 @@ pub(super) async fn route_full_jid_iq(
             not_authorized_iq_error("Authentication required."),
         )];
     };
+    let is_request = matches!(
+        &iq,
+        xmpp_parsers::iq::Iq::Get { .. } | xmpp_parsers::iq::Iq::Set { .. }
+    );
     let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
     match blocking
         .is_blocked_jid(&target.to_bare(), &Jid::from(sender_jid.clone()))
         .await
     {
         Ok(true) => {
+            // XEP-0191 §3.3: blocked IQ replies are silently discarded.
+            if !is_request {
+                return Vec::new();
+            }
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
@@ -39,6 +47,10 @@ pub(super) async fn route_full_jid_iq(
         Ok(false) => {}
         Err(error) => {
             warn!(error = %error, target = %target, sender = %sender_jid, "Failed to check blocklist before routing IQ");
+            // RFC 6120 §8.2.3: never answer a result/error with another IQ.
+            if !is_request {
+                return Vec::new();
+            }
             return vec![build_iq_error_xml_typed(
                 iq.id(),
                 response_from,
