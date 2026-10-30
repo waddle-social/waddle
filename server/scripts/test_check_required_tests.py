@@ -63,6 +63,17 @@ class RequiredTestTests(unittest.TestCase):
                       "pure_two_node_detached_steal_race_exactly_one_winner", result.stderr)
         self.assertTrue(self.executed.is_file(), "executed names are emitted even on failure")
 
+    def test_failure_log_lists_executed_names_of_the_affected_binary(self):
+        self.required.write_text(
+            "waddle-server::clustering_cluster_e2e lone_survivor_renamed\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("executed in waddle-server::clustering_cluster_e2e: 2 tests", result.stderr)
+        self.assertIn("  waddle-server::clustering_cluster_e2e lone_survivor_and_isolation_fencing",
+                      result.stderr)
+        self.assertNotIn("ingress::tests::postgres_case", result.stderr,
+                         "binaries without a missing test are not dumped")
+
     def test_same_name_in_another_binary_does_not_count(self):
         self.required.write_text("waddle-server::other_binary lone_survivor_and_isolation_fencing\n")
         self.assertEqual(self.run_check().returncode, 1)

@@ -79,6 +79,24 @@ def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId]]:
     return executed, failed
 
 
+EXECUTED_PER_BINARY_LIMIT = 500
+
+
+def report_failure(missing: list[TestId], failing: list[TestId], executed: set[TestId]) -> None:
+    for test in missing:
+        print(f"required test did not run: {test}", file=sys.stderr)
+    for test in failing:
+        print(f"required test failed: {test}", file=sys.stderr)
+    # A renamed or moved test shows up as a near-identical executed name.
+    for binary in sorted({test.binary for test in missing}):
+        names = sorted(test.name for test in executed if test.binary == binary)
+        print(f"executed in {binary}: {len(names)} tests", file=sys.stderr)
+        for name in names[:EXECUTED_PER_BINARY_LIMIT]:
+            print(f"  {binary} {name}", file=sys.stderr)
+        if len(names) > EXECUTED_PER_BINARY_LIMIT:
+            print(f"  ... {len(names) - EXECUTED_PER_BINARY_LIMIT} more", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--required", type=Path, required=True, help="committed required-test list")
@@ -95,11 +113,10 @@ def main() -> int:
         args.executed_out.write_text("".join(f"{test}\n" for test in sorted(executed)))
     missing = [test for test in required if test not in executed]
     failing = [test for test in required if test in failed]
-    for test in missing:
-        print(f"required test did not run: {test}", file=sys.stderr)
-    for test in failing:
-        print(f"required test failed: {test}", file=sys.stderr)
     if missing or failing:
+        # On main the diagnostics artifact is uploaded only when the lane
+        # passes, so the log must carry what is needed to act on a failure.
+        report_failure(missing, failing, executed)
         print(f"{len(missing) + len(failing)} of {len(required)} required tests did not pass "
               f"({len(executed)} tests executed in {len(args.reports)} reports)", file=sys.stderr)
         return 1

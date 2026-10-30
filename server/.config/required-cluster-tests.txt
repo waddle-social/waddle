@@ -8,7 +8,12 @@
 # executed test names from each shard's nextest JUnit report
 # (`scripts/check_required_tests.py`) and fails, blocking publish, if any test
 # below did not execute or did not pass. The executed names are saved as
-# `.ci/nextest-archive/executed-tests.txt` in the lane's diagnostics artifact.
+# `.ci/nextest-archive/executed-tests.txt` in the lane's diagnostics artifact
+# (uploaded on PRs always, on main only when the lane passes); on failure the
+# missing names and the executed names of their binaries are printed to the
+# job log. A test nextest reports as flaky (passed on retry) counts as failed;
+# the `ci` profile sets `retries = 0`, so keep that coupling in mind before
+# adding retries.
 #
 # FORMAT: one test per line, `<binary-id> <test-name>`, separated by
 # whitespace, exactly as `cargo nextest list --workspace --all-features`
