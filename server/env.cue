@@ -846,6 +846,9 @@ schema.#Project & {
 		}
 
 		fmt: xRust.#Fmt & {
+			// Cargo loads the local fixture workspace. Run uncached in the live
+			// checkout without widening the production publisher triggers.
+			hermetic: false
 			args: ["fmt", "--all", "--", "--check"]
 			inputs: _rustInputs
 		}
