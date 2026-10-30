@@ -622,6 +622,7 @@ schema.#Project & {
 
 					python3 -m unittest discover -s scripts -p 'test_cutover_*.py'
 					python3 -m unittest discover -s scripts -p 'test_publish_chart.py'
+					python3 -m unittest discover -s scripts -p 'test_chart_shutdown_budget.py'
 					python3 -m unittest discover -s scripts -p 'test_observer_release.py'
 
 					# Fail before merge when the chart changed but its version did not.
