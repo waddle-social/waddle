@@ -379,12 +379,15 @@ async fn spawn_cluster_server_with_envs(
     pool_env: &str,
     swarm_port: u16,
     bootstrap_ports: &[u16],
-    extra_envs: &[(&'static str, &'static str)],
+    extra_envs: &[(&str, &str)],
 ) -> (TestServer, String, String) {
     let postgres_url = postgres_url.to_string();
     let pool_env = pool_env.to_string();
     let bootstrap_ports = bootstrap_ports.to_vec();
-    let extra_envs = extra_envs.to_vec();
+    let extra_envs: Vec<(String, String)> = extra_envs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
     tokio::task::spawn_blocking(move || {
         let node_id_file = std::env::temp_dir().join(format!(
             "waddle-clustering-e2e-node-{}",
@@ -481,7 +484,11 @@ async fn spawn_cluster_server_with_envs(
         if !bootstrap_peers.is_empty() {
             envs.push(("WADDLE_CLUSTERING_BOOTSTRAP_PEERS", &bootstrap_peers));
         }
-        envs.extend(extra_envs.iter().copied());
+        envs.extend(
+            extra_envs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
 
         let server = TestServer::start_with_extra_envs(
             &[(CLUSTER_PEER_USERNAME, CLUSTER_PEER_PASSWORD)],
@@ -3534,15 +3541,21 @@ async fn muji_initiate_routes_to_foreign_room_owner() {
     const DOMAIN: &str = "localhost";
     const OWNER_USERNAME: &str = "admin";
     const NS_MUC: &str = "http://jabber.org/protocol/muc";
-    // The api-secret must be >= 32 bytes; none of these reach a real
-    // LiveKit — the mint is a pure local JWT signature.
-    let livekit_envs: &[(&'static str, &'static str)] = &[
+    // Keep the fixture alive across both nodes: preparation performs actual
+    // admin HTTP probes, answered here with an empty provider inventory.
+    let livekit_admin = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&livekit_admin)
+        .await;
+    let livekit_ws_url = livekit_admin.uri().replacen("http://", "ws://", 1);
+    let livekit_envs: &[(&str, &str)] = &[
         ("LIVEKIT_API_KEY", "APItestkeycluster"),
         (
             "LIVEKIT_API_SECRET",
             "test-secret-with-at-least-32-bytes-of-payload",
         ),
-        ("LIVEKIT_WS_URL", "wss://livekit.example.test"),
+        ("LIVEKIT_WS_URL", &livekit_ws_url),
         ("LIVEKIT_TURN_HOST", "turn.example.test"),
         (
             "LIVEKIT_TURN_SHARED_SECRET",
@@ -3729,20 +3742,19 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
     // each node its own mock attributes every admin call to the node
     // that made it — the assertion below is "the OWNER pushed", not
     // "someone pushed".
-    async fn fake_livekit_admin() -> (wiremock::MockServer, &'static str) {
+    async fn fake_livekit_admin() -> (wiremock::MockServer, String) {
         let mock = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&mock)
             .await;
-        let ws_url: &'static str =
-            Box::leak(mock.uri().replacen("http://", "ws://", 1).into_boxed_str());
+        let ws_url = mock.uri().replacen("http://", "ws://", 1);
         (mock, ws_url)
     }
     let (livekit_admin_a, ws_url_a) = fake_livekit_admin().await;
     let (livekit_admin_b, ws_url_b) = fake_livekit_admin().await;
 
-    fn livekit_envs(ws_url: &'static str) -> Vec<(&'static str, &'static str)> {
+    fn livekit_envs(ws_url: &str) -> Vec<(&str, &str)> {
         vec![
             ("LIVEKIT_API_KEY", "APItestkeycluster"),
             (
@@ -3766,7 +3778,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         &pool.pool_env,
         port_a,
         &[port_b],
-        &livekit_envs(ws_url_a),
+        &livekit_envs(&ws_url_a),
     )
     .await;
     let (server_b, _node_b, _peer_b) = spawn_cluster_server_with_envs(
@@ -3774,7 +3786,7 @@ async fn participant_joined_webhook_reasserts_grants_on_foreign_room_owner() {
         &pool.pool_env,
         port_b,
         &[port_a],
-        &livekit_envs(ws_url_b),
+        &livekit_envs(&ws_url_b),
     )
     .await;
 
