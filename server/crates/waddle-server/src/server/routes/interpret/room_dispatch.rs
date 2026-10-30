@@ -428,23 +428,37 @@ pub(super) async fn dispatch_to_room(
             });
     }
 
-    // ADR-0017 Phase 3 Slice 7: the two-part demotion protocol's
-    // guaranteed backstop — a fenced `SELECT ... FOR SHARE` against this
-    // room's Postgres claim, run before any local fan-out (this is the
-    // actual production fan-out call site; the legacy
-    // `RoomActor::BuildGroupchatBroadcast` message this check was
-    // originally sketched against is superseded by this
-    // `GetRoomSnapshot`-based sans-I/O chain and carries no live
-    // production caller). `None` (clustering disabled, non-Postgres, or a
-    // build without the `clustering` feature) skips this entirely —
-    // single-node behavior, unchanged. Only a definitive non-serving result
-    // demotes; that includes a missing exact row and local identity rotation.
-    // Backend uncertainty fails closed WITHOUT demotion (#2046 W1.4): after
-    // the bounded retry in `check_fenced_fanout_bounded` the sender gets a
-    // retryable bounce and nothing fans out, but the actor stays registered,
-    // because demoting on uncertainty would retire every room on a database
-    // switchover. This remains the legacy cache-backed boundary; #1283 owns
-    // its replacement.
+    // ADR-0017 Phase 3 Slice 7: the cache-backed pre-fan-out backstop — a
+    // fenced `SELECT ... FOR SHARE` against this room's Postgres claim, run
+    // before any local fan-out on the IMMEDIATE interpreter path only.
+    //
+    // Where the room fence is enforced, per path:
+    // - Authenticated client groupchat (`dispatch_authoritative_message` ->
+    //   `plan_message_dispatch`) and owner-side relayed room submissions
+    //   (`plan_muc_for_relay`) are PLANNED (`PlanSink`,
+    //   `is_planning() == true`), so this check is skipped. (Extension-bot
+    //   groupchat is planned too and never calls `dispatch_to_room`.) The
+    //   plan records the snapshot's fence as
+    //   `RoomFenceRequirement::Guarded` above, and the ingress transaction
+    //   asserts it (`ingress/commit_room.rs`,
+    //   `ClaimRepository::assert_room_claim`). A database outage there fails
+    //   the commit; this code is not involved.
+    // - The only production caller that reaches this check is the
+    //   non-ingress `handlers::message::handle_message` fallback in
+    //   `frame.rs`, taken when a bound connection has no authenticated
+    //   session or its persisted principal JID does not parse. SASL and SM
+    //   resume always set the session, so client traffic does not normally
+    //   get here. Tests drive it directly.
+    //
+    // `None` (clustering disabled, non-Postgres, or a build without the
+    // `clustering` feature) skips this entirely. Only a definitive
+    // non-serving result demotes; that includes a missing exact row and
+    // local identity rotation. Backend uncertainty fails closed WITHOUT
+    // demotion (#2046 W1.4): after the bounded retry in
+    // `check_fenced_fanout_bounded` the sender gets a retryable bounce and
+    // nothing fans out, but the actor stays registered, because demoting on
+    // uncertainty would retire every room on a database switchover. #1283
+    // owns this boundary's replacement.
     #[cfg(feature = "clustering")]
     if let Some(store) = state
         .deps
@@ -499,7 +513,6 @@ pub(super) async fn dispatch_to_room(
                     "DispatchToRoom: fenced ownership check stayed unavailable after bounded \
                      retries; bouncing the sender without demoting the room actor"
                 );
-                waddle_xmpp::telemetry::reliability::increment_muc_fanout_fence_unavailable();
                 push_sender_error_reply(
                     deps,
                     &mut outcome,

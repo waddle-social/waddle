@@ -2482,9 +2482,15 @@ impl MucDurableStore for PostgresMucRoomStore {
     }
 
     /// Cache-backed legacy pre-fanout backstop: a fenced,
-    /// standalone-autocommit `SELECT ... FOR SHARE` on the main pool. This
-    /// remains in production for groupchat dispatch/MAM until #1283 replaces
-    /// it; actor-owned durable operations use their immutable fence instead.
+    /// standalone-autocommit `SELECT ... FOR SHARE` on the main pool. Only
+    /// `dispatch_to_room` on the immediate (non-planning) interpreter path
+    /// calls it, which in production means the non-ingress
+    /// `handlers::message::handle_message` fallback. Authenticated client
+    /// groupchat and relayed room submissions are planned instead, and their
+    /// room fence is asserted inside the ingress transaction
+    /// (`ingress/commit_room.rs`, `ClaimRepository::assert_room_claim`).
+    /// Actor-owned durable operations use their immutable fence. #1283 owns
+    /// this boundary's replacement.
     fn check_fenced_fanout<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
         Box::pin(async move {
             let Some(fence) = self

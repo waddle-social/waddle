@@ -246,10 +246,6 @@ reliability_counters! {
         "muc.cleanup.not_occupant",
         "{departure}",
         "Generation-scoped MUC cleanup attempts whose resource is no longer an occupant.";
-    increment increment_muc_fanout_fence_unavailable,
-        "xmpp.muc.fanout_fence.unavailable",
-        "{message}",
-        "Groupchat messages bounced because the fenced fan-out ownership check stayed unavailable after bounded retries.";
     add add_sm_promotion_storage_failed,
         "xmpp.sm.promotion_storage_failed",
         "{stanza}",

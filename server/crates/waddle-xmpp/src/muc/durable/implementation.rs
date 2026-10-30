@@ -519,7 +519,8 @@ pub trait MucDurableStore: Send + Sync {
     }
 
     /// Cache-based ownership check for the legacy pre-fanout groupchat
-    /// dispatch/MAM path. New room actor paths must use
+    /// dispatch path on the immediate (non-ingress) interpreter; ingress-planned
+    /// groupchat is fenced inside its commit instead. New room actor paths must use
     /// [`Self::check_exact_claim_fence`] with the fence retained by their actor
     /// incarnation. `Ok(true)` iff this process can still serve the published
     /// claim; `Ok(false)` means no published fence is currently serviceable,

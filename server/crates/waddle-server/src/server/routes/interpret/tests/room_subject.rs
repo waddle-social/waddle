@@ -1650,9 +1650,6 @@ impl FencedFanoutFixture {
 }
 
 #[cfg(feature = "clustering")]
-const FANOUT_FENCE_UNAVAILABLE_COUNTER: &str = "xmpp.muc.fanout_fence.unavailable";
-
-#[cfg(feature = "clustering")]
 fn assert_retryable_resource_constraint_bounce(outcome: &super::super::InterpretOutcome) {
     assert_eq!(
         outcome.frames.len(),
@@ -1682,7 +1679,6 @@ fn assert_retryable_resource_constraint_bounce(outcome: &super::super::Interpret
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep_0045_fenced_fanout_backend_error_retries_then_bounces_without_demotion() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let store = Arc::new(SubjectMutationStore::new(claim_store));
     let mut fixture = FencedFanoutFixture::new(&store).await;
@@ -1700,16 +1696,11 @@ async fn xep_0045_fenced_fanout_backend_error_retries_then_bounces_without_demot
     fixture.assert_actor_not_demoted().await;
     assert_eq!(fixture.archived_message_count().await, 0);
     fixture.assert_nothing_reflected();
-    assert_eq!(
-        metrics.counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[]),
-        Some(1)
-    );
 }
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep_0045_fenced_fanout_transient_error_recovers_within_retry_bound() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let store = Arc::new(SubjectMutationStore::new(claim_store));
     let mut fixture = FencedFanoutFixture::new(&store).await;
@@ -1732,13 +1723,6 @@ async fn xep_0045_fenced_fanout_transient_error_recovers_within_retry_bound() {
         fixture.sender_rx.try_recv().is_ok(),
         "the recovered message is reflected to the occupant"
     );
-    assert_eq!(
-        metrics
-            .counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[])
-            .unwrap_or(0),
-        0,
-        "a recovered check is not counted as a bounce"
-    );
 }
 
 #[cfg(feature = "clustering")]
@@ -1746,7 +1730,6 @@ async fn xep_0045_fenced_fanout_transient_error_recovers_within_retry_bound() {
 // where a paused clock's auto-advance could fire unrelated timeouts.
 #[tokio::test]
 async fn xep_0045_fenced_fanout_hung_check_bounces_at_budget_without_demotion() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let store = Arc::new(SubjectMutationStore::new(claim_store));
     let mut fixture = FencedFanoutFixture::new(&store).await;
@@ -1770,16 +1753,11 @@ async fn xep_0045_fenced_fanout_hung_check_bounces_at_budget_without_demotion() 
     fixture.assert_actor_not_demoted().await;
     assert_eq!(fixture.archived_message_count().await, 0);
     fixture.assert_nothing_reflected();
-    assert_eq!(
-        metrics.counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[]),
-        Some(1)
-    );
 }
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep_0045_fenced_fanout_definitive_non_serving_demotes_once_without_retry() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let claim_store = Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let store = Arc::new(SubjectMutationStore::new(claim_store));
     let mut fixture = FencedFanoutFixture::new(&store).await;
@@ -1809,11 +1787,4 @@ async fn xep_0045_fenced_fanout_definitive_non_serving_demotes_once_without_retr
     );
     assert_eq!(fixture.archived_message_count().await, 0);
     fixture.assert_nothing_reflected();
-    assert_eq!(
-        metrics
-            .counter_sum(FANOUT_FENCE_UNAVAILABLE_COUNTER, &[])
-            .unwrap_or(0),
-        0,
-        "the definitive path is not counted as backend unavailability"
-    );
 }
