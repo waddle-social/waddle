@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
@@ -32,12 +33,81 @@ impl std::str::FromStr for DatabaseDriver {
     }
 }
 
+/// Longest a main-pool caller waits for a connection before sqlx returns
+/// `PoolTimedOut`. sqlx's default is 30 s, which let every database call
+/// (and the DB actor serving readiness) hang for half a minute during a
+/// Postgres outage. Five seconds keeps a stalled acquisition:
+/// - below the readiness probe period (10 s), so health checks queued on the
+///   DB actor drain instead of piling up while the database is gone;
+/// - below the 15 s stanza-handler wedge backstop, so a database stall
+///   surfaces as a typed timeout rather than a wedged connection;
+/// - well above the readiness budgets (1.2 s per probe, 1.5 s overall),
+///   which stay the bound on `/ready`.
+///
+/// A pool saturated for longer than this is overloaded; failing the caller
+/// with a classified timeout (`ingress_uow::is_database_timeout`,
+/// lineage `is_transport_error`) is the intended outcome.
+pub(crate) const MAIN_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Acquire bound for the clustering control-plane pool, kept at sqlx's
+/// former 30 s default on purpose. Its callers (node-lease heartbeat, claim
+/// CAS) are already raced against the lease deadline and retried only on
+/// the next heartbeat tick, so a short acquire timeout would abandon a
+/// renewal that could still land inside the lease when Postgres returns,
+/// turning a survivable failover into a self-fence.
+pub(crate) const CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Startup budget for a pool's first connection: sqlx's former default
+/// acquire timeout, so a pod booting during a short database failover keeps
+/// retrying refused connections for as long as it did before the main pool
+/// got its shorter [`MAIN_POOL_ACQUIRE_TIMEOUT`].
+const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which pool a backend connection pool serves; decides its acquire bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PoolRole {
+    /// The shared main pool: application reads/writes and fenced writes.
+    Main,
+    /// The ADR-0017 control-plane pool: node/claim liveness statements.
+    ControlPlane,
+}
+
+impl PoolRole {
+    pub(crate) fn acquire_timeout(self) -> Duration {
+        match self {
+            Self::Main => MAIN_POOL_ACQUIRE_TIMEOUT,
+            Self::ControlPlane => CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
+        }
+    }
+}
+
+/// Wait for a lazily built pool's first connection, retrying acquire
+/// timeouts until [`STARTUP_CONNECT_TIMEOUT`]. Any other error (bad
+/// credentials, unknown host, TLS) fails immediately, exactly as sqlx's
+/// eager `connect` does.
+async fn await_first_connection<DB: sqlx::Database>(
+    pool: &sqlx::Pool<DB>,
+) -> Result<(), DatabaseError> {
+    let deadline = tokio::time::Instant::now() + STARTUP_CONNECT_TIMEOUT;
+    loop {
+        match pool.acquire().await {
+            Ok(connection) => {
+                drop(connection);
+                return Ok(());
+            }
+            Err(sqlx::Error::PoolTimedOut) if tokio::time::Instant::now() < deadline => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 #[async_trait]
 trait DatabaseAdapter: Send + Sync {
     async fn connect(
         &self,
         database_url: &str,
         pool_size: u32,
+        role: PoolRole,
     ) -> Result<DatabaseBackend, DatabaseError>;
 }
 
@@ -50,6 +120,7 @@ impl DatabaseAdapter for SqlxSqliteAdapter {
         &self,
         database_url: &str,
         pool_size: u32,
+        role: PoolRole,
     ) -> Result<DatabaseBackend, DatabaseError> {
         // WAL mode allows concurrent readers + one writer, but two
         // pooled connections that both want the writer slot can race —
@@ -66,8 +137,9 @@ impl DatabaseAdapter for SqlxSqliteAdapter {
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(pool_size)
-            .connect_with(connect_options)
-            .await?;
+            .acquire_timeout(role.acquire_timeout())
+            .connect_lazy_with(connect_options);
+        await_first_connection(&pool).await?;
         Ok(DatabaseBackend::Sqlite(pool))
     }
 }
@@ -81,11 +153,13 @@ impl DatabaseAdapter for SqlxPostgresAdapter {
         &self,
         database_url: &str,
         pool_size: u32,
+        role: PoolRole,
     ) -> Result<DatabaseBackend, DatabaseError> {
         let pool = PgPoolOptions::new()
             .max_connections(pool_size)
-            .connect(database_url)
-            .await?;
+            .acquire_timeout(role.acquire_timeout())
+            .connect_lazy(database_url)?;
+        await_first_connection(&pool).await?;
         Ok(DatabaseBackend::Postgres(pool))
     }
 }
@@ -98,10 +172,19 @@ pub(super) async fn connect_backend(
     driver: DatabaseDriver,
     database_url: &str,
     pool_size: u32,
+    role: PoolRole,
 ) -> Result<DatabaseBackend, DatabaseError> {
     match driver {
-        DatabaseDriver::Sqlite => SqlxSqliteAdapter.connect(database_url, pool_size).await,
-        DatabaseDriver::Postgres => SqlxPostgresAdapter.connect(database_url, pool_size).await,
+        DatabaseDriver::Sqlite => {
+            SqlxSqliteAdapter
+                .connect(database_url, pool_size, role)
+                .await
+        }
+        DatabaseDriver::Postgres => {
+            SqlxPostgresAdapter
+                .connect(database_url, pool_size, role)
+                .await
+        }
     }
 }
 
@@ -907,5 +990,57 @@ mod tests {
         drop(tx);
         drop(db);
         drop_postgres_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn pools_carry_their_role_acquire_timeout() {
+        for (role, expected) in [
+            (PoolRole::Main, MAIN_POOL_ACQUIRE_TIMEOUT),
+            (PoolRole::ControlPlane, CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT),
+        ] {
+            let backend = connect_backend(DatabaseDriver::Sqlite, "sqlite::memory:", 1, role)
+                .await
+                .expect("open sqlite backend");
+            let acquire_timeout = match &backend {
+                DatabaseBackend::Sqlite(pool) => pool.options().get_acquire_timeout(),
+                DatabaseBackend::Postgres(pool) => pool.options().get_acquire_timeout(),
+            };
+            assert_eq!(acquire_timeout, expected, "{role:?}");
+        }
+    }
+
+    /// A saturated main pool fails the caller after the named acquire
+    /// timeout (not sqlx's 30 s default), and the failure keeps the
+    /// classification its consumers rely on: an ingress `Timeout`.
+    #[tokio::test]
+    async fn saturated_main_pool_times_out_as_a_classified_database_timeout() {
+        let mut config = DatabaseConfig::new(
+            DatabaseDriver::Sqlite,
+            "sqlite:file:saturated-main-pool?mode=memory&cache=shared",
+        );
+        config.pool_size = 1;
+        let db = Database::from_config("saturated-main-pool", &config)
+            .await
+            .expect("open single-connection database");
+        let held = db.begin().await.expect("hold the only connection");
+
+        let started = std::time::Instant::now();
+        let result = db.guard().await.expect("guard").query("SELECT 1", ()).await;
+        let Err(error) = result else {
+            panic!("no connection can be acquired while the only one is held");
+        };
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(error, DatabaseError::Internal(sqlx::Error::PoolTimedOut)),
+            "unexpected error: {error:?}"
+        );
+        assert!(crate::ingress_uow::is_database_timeout(&error));
+        assert!(
+            elapsed >= MAIN_POOL_ACQUIRE_TIMEOUT - Duration::from_millis(250)
+                && elapsed < CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
+            "acquire waited {elapsed:?}"
+        );
+        held.rollback().await.expect("release the held connection");
     }
 }

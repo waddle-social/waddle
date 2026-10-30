@@ -272,6 +272,10 @@ secret:
   clusteringKeypairPool: ""
 
 probes:
+  # Liveness reports process progress only (runtime heartbeat) and never
+  # touches the database: a Postgres outage must leave pods live and
+  # unready, not restart them. Readiness owns the database, lineage and
+  # claim checks and answers within 1.5s, inside timeoutSeconds.
   liveness:
     path: /health
     initialDelaySeconds: 15

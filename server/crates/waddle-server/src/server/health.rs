@@ -2,6 +2,7 @@ use crate::clustering::NodeAdmissionError;
 use crate::clustering::NodeLifecycle;
 use crate::db::lineage::{LineageReport, LineageStatus};
 use crate::db::PoolHealth;
+use crate::server::liveness::{RuntimeProgress, RUNTIME_PROGRESS_STALL_LIMIT};
 use crate::server::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderName, Method, StatusCode};
@@ -110,11 +111,22 @@ impl From<PoolHealth> for DatabaseHealthStatus {
     }
 }
 
-/// Simple health check endpoint (for load balancers)
+/// Liveness endpoint (`/health`, `/healthz`).
+///
+/// Reports process progress only: whether the runtime-progress heartbeat
+/// (`crate::server::liveness`) has run recently. It never touches a
+/// database, lineage, claim or lifecycle state — those are readiness
+/// concerns. A Postgres outage must take pods out of the endpoint set via
+/// `/ready` while they stay live; failing liveness on it would restart every
+/// replica at once and reconnect every client when the database returns.
 pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Quick health check - just verify the global DB is accessible
-    match state.db_pool.global().health_check().await {
-        Ok(true) => (
+    liveness_response(&state.runtime_progress)
+}
+
+fn liveness_response(progress: &RuntimeProgress) -> (StatusCode, Json<serde_json::Value>) {
+    let stalled_for = progress.stalled_for();
+    if stalled_for <= RUNTIME_PROGRESS_STALL_LIMIT {
+        return (
             StatusCode::OK,
             Json(json!({
                 "status": "healthy",
@@ -122,32 +134,23 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
                 "version": env!("CARGO_PKG_VERSION"),
                 "license": env!("CARGO_PKG_LICENSE")
             })),
-        ),
-        Ok(false) => {
-            warn!("Health check: database unhealthy");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unhealthy",
-                    "service": "waddle-server",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "error": "database unhealthy"
-                })),
-            )
-        }
-        Err(e) => {
-            warn!("Health check failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unhealthy",
-                    "service": "waddle-server",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "error": format!("database error: {}", e)
-                })),
-            )
-        }
+        );
     }
+    let stalled_ms = u64::try_from(stalled_for.as_millis()).unwrap_or(u64::MAX);
+    warn!(
+        stalled_ms,
+        "Liveness check: runtime-progress heartbeat has stalled"
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "unhealthy",
+            "service": "waddle-server",
+            "version": env!("CARGO_PKG_VERSION"),
+            "error": "runtime_stalled",
+            "stalled_ms": stalled_ms
+        })),
+    )
 }
 
 async fn health_for_serving_generation<T>(
@@ -186,8 +189,11 @@ fn lifecycle_not_ready_response(
 
 /// Readiness check endpoint (for orchestrators).
 ///
-/// Readiness is stricter than liveness and validates overall DB pool health
-/// **and** the ADR-0017 Phase 3 Slice 2 clustering readiness signal: a node
+/// Readiness owns every dependency check — liveness (`/health`) reports
+/// process progress only. It validates DB pool health, per-store lineage
+/// **and** the ADR-0017 Phase 3 Slice 2 clustering readiness signal, all
+/// inside `LINEAGE_PROBE_TIMEOUT` so an unreachable database answers `503`
+/// before the kubelet's 2 s probe timeout: a node
 /// that has self-fenced its entity-ownership claims (node-lease heartbeat
 /// lost, or Postgres unreachable past the lease deadline) must not stay in
 /// the client Service/Ingress endpoint set — clients whose sockets it just
@@ -954,6 +960,123 @@ mod readiness_generation_tests {
 
         assert_eq!(json["status"], "not_ready");
         assert_eq!(json["admission"], "FencedRecovering");
+    }
+
+    /// Global pool plus an attested lineage store on a separate database, so
+    /// readiness reaches its database arm and only the global pool's health
+    /// decides the outcome.
+    async fn attested_state_with_global(pool: Arc<DatabasePool>, name: &str) -> Arc<AppState> {
+        let lineage_db = Database::in_memory(name)
+            .await
+            .expect("open lineage database");
+        enroll(&lineage_db, &configured_lineage())
+            .await
+            .expect("enroll lineage");
+        let state = test_state(pool, false);
+        let mut registry = LineageRegistryBuilder::default();
+        registry.register_probe(
+            DurableStore::Global,
+            Arc::new(DatabaseLineageAttestor::new(lineage_db)),
+        );
+        let _ = state.lineage_registry.set(registry.seal());
+        crate::server::liveness::spawn_runtime_progress_heartbeat(&state.runtime_progress);
+        Arc::new(state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_reports_a_stalled_runtime() {
+        let progress = RuntimeProgress::new();
+        assert_eq!(liveness_response(&progress).0, StatusCode::OK);
+
+        tokio::time::advance(RUNTIME_PROGRESS_STALL_LIMIT + std::time::Duration::from_secs(1))
+            .await;
+        let (status, Json(body)) = liveness_response(&progress);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "unhealthy");
+        assert_eq!(body["error"], "runtime_stalled");
+        assert_eq!(body["stalled_ms"], 11_000);
+
+        progress.record();
+        assert_eq!(liveness_response(&progress).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_ignores_a_closed_database_that_fails_readiness() {
+        let pool = sqlite_pool("liveness-closed-global").await;
+        let state = attested_state_with_global(pool, "liveness-closed-lineage").await;
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(
+            ready.status(),
+            StatusCode::OK,
+            "precondition: node is ready"
+        );
+
+        state
+            .db_pool
+            .global()
+            .sqlite_pool()
+            .expect("sqlite global pool")
+            .close()
+            .await;
+
+        let live = health_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(live.status(), StatusCode::OK);
+        assert_eq!(response_json(live).await["status"], "healthy");
+
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(ready).await;
+        assert_eq!(json["status"], "not_ready");
+        assert_eq!(json["database"]["global_healthy"], false);
+    }
+
+    #[tokio::test]
+    async fn stalled_database_acquisition_fails_readiness_inside_probe_timeout_only() {
+        let mut config = DatabaseConfig::new(
+            DatabaseDriver::Sqlite,
+            "sqlite:file:liveness-stalled-global?mode=memory&cache=shared",
+        );
+        config.pool_size = 1;
+        let pool = Arc::new(
+            DatabasePool::try_new(config, PoolConfig)
+                .await
+                .expect("single-connection sqlite pool"),
+        );
+        let state = attested_state_with_global(Arc::clone(&pool), "liveness-stalled-lineage").await;
+        let global = pool.global().clone();
+        // Hold the pool's only connection: every further acquisition waits
+        // for the main-pool acquire timeout, exactly like a Postgres outage.
+        let held = global.begin().await.expect("hold the only connection");
+
+        let started = std::time::Instant::now();
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "readiness must answer inside the kubelet's 2 s probe timeout, took {elapsed:?}"
+        );
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response_json(ready).await["database"]["status"], "timeout");
+
+        // Liveness never queues behind the database.
+        let live = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            health_handler(State(Arc::clone(&state))),
+        )
+        .await
+        .expect("liveness must not wait for a database connection")
+        .into_response();
+        assert_eq!(live.status(), StatusCode::OK);
+
+        held.rollback().await.expect("release the held connection");
     }
 
     #[tokio::test]

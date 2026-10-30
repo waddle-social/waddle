@@ -39,9 +39,14 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 - `PUT /api/upload/:slot_id`: XEP-0363 upload transfer after an XMPP slot request.
 - `OPTIONS /api/upload/:slot_id`: CORS preflight for XEP-0363 upload transfer.
 - `GET /api/files/:slot_id/:filename`: XEP-0363 download transfer.
-- `GET /health`: Liveness.
+- `GET /health`: Liveness. Reports process progress only (a runtime
+  heartbeat that has ticked within the last 10 s); never touches the
+  database, lineage or claims. `503` with `"error": "runtime_stalled"` means
+  the async runtime stopped polling tasks.
 - `GET /healthz`: Liveness alias.
-- `GET /ready`: Readiness.
+- `GET /ready`: Readiness. Database pool health, per-store lineage and the
+  node lifecycle (claims/self-fence, drain), all bounded so the answer
+  arrives within 1.5 s; an unreachable database returns `503`.
 - `GET /readyz`: Readiness alias.
 - `GET /metrics`: Prometheus metrics.
 - `GET /api/v1/health`: Detailed health.

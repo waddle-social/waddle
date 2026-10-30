@@ -21,7 +21,7 @@ use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
-use backend::{connect_backend, DatabaseBackend};
+use backend::{connect_backend, DatabaseBackend, PoolRole};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use migrations::{
     migration_checksum, MigrationLedgerError, MigrationNamespace, MigrationRunner,

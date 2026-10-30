@@ -361,7 +361,12 @@ a ConfigMap. The full procedure is in
 
 ## Probes
 
-- Liveness probe: `GET /health`
-- Readiness probe: `GET /ready`
+- Liveness probe: `GET /health` — process progress only (runtime
+  heartbeat). It never checks the database, so a Postgres outage does not
+  restart pods.
+- Readiness probe: `GET /ready` — database, lineage and node lifecycle
+  (claims/self-fence, drain), answered within 1.5 s. During a Postgres
+  outage every pod goes unready (no Service endpoints) and stays live.
 
-Both are configurable via `probes.*`.
+Both are configurable via `probes.*`. Keep `probes.readiness.timeoutSeconds`
+at 2 or more: readiness bounds itself at 1.5 s.
