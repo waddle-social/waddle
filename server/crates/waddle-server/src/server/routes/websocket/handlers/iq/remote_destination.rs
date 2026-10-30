@@ -1,4 +1,5 @@
 use jid::{BareJid, FullJid, Jid};
+use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::protocol::handlers::jingle::calls_mixer_jid;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -67,10 +68,12 @@ pub(super) fn remote_iq_error(
         return None;
     }
 
-    let description = if payload.ns() == waddle_xmpp::carbons::CARBONS_NS {
-        "Remote Carbons routing is not allowed by this server."
-    } else {
-        "Remote ping routing is not allowed by this server."
+    let description = match payload.ns().as_str() {
+        waddle_xmpp::carbons::CARBONS_NS => "Remote Carbons routing is not allowed by this server.",
+        DISCO_INFO_NS | DISCO_ITEMS_NS => {
+            "Remote service discovery routing is not allowed by this server."
+        }
+        _ => "Remote ping routing is not allowed by this server.",
     };
     let mut error = StanzaError::new(
         ErrorType::Cancel,
