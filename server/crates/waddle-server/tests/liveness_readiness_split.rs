@@ -8,9 +8,9 @@
 //! database returns, readiness recovers without a restart.
 //!
 //! The server runs without clustering. A clustered node whose outage outlasts
-//! the node-lease TTL self-fences before re-serving, and one that takes a
-//! fatal fence fails liveness (`terminally_fenced`); neither is exercised
-//! here.
+//! the 30 s keypair-slot / node-lease TTL stops clustering and fails liveness
+//! (`clustering_stopped`, or `terminally_fenced` after a fatal fence), so it
+//! is restarted rather than re-served; that path is not exercised here.
 //!
 //! PostgreSQL is optional in local development, so the test skips unless
 //! `WADDLE_TEST_POSTGRES_URL` is configured.

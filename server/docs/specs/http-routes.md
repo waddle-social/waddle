@@ -45,9 +45,17 @@ stack, authentication bootstrap, upload transfer, or operations require it.
   10 s. `503` with `"error": "terminally_fenced"`: the node took a clustering
   fatal fence (while serving or while re-registering) and its node-lease loop
   finished the terminal demotion and exited, so it can never serve again in
-  this process. The demotion has no deadline of its own; a wedged
-  publication guard or actor delays this signal. A shutdown that finds the
-  lease unavailable also reports it while the pod terminates.
+  this process. This includes clustering's own shutdown finding the node
+  lease unavailable, which takes a fatal fence. The demotion has no deadline
+  of its own; a wedged publication guard or actor delays this signal. `503`
+  with `"error": "clustering_stopped"`: the clustering scope stopped while
+  the process keeps running (for example the swarm's keypair-slot lease
+  self-fenced) and the node-lease loop exited, with no fatal fence; nothing
+  re-serves the node in this process. `clustering_stopped` is never reported
+  while the process itself is stopping; `terminally_fenced` can be, when the
+  shutdown drain finds the lease unavailable (harmless then). A clustered
+  Postgres outage longer than the 30 s lease TTL ends in one of these two
+  reasons, so liveness restarts the pod.
 - `GET /healthz`: Liveness alias.
 - `GET /ready`: Readiness. Database pool health, per-store lineage and the
   node lifecycle (claims/self-fence, drain), all bounded so the answer

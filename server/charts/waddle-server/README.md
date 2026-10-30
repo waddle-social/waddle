@@ -370,20 +370,24 @@ a ConfigMap. The full procedure is in
 ## Probes
 
 - Liveness probe: `GET /health` — fails only when a restart is the fix: a
-  stalled runtime heartbeat, or a node that took a clustering fatal fence
-  and whose node-lease loop finished the terminal demotion and exited
-  (`terminally_fenced`), whether the fence hit while serving or while
-  re-registering. It never checks the database, so a Postgres outage by
-  itself does not restart pods. The terminal demotion has no deadline of its
-  own, so a wedged publication guard or actor delays the restart.
+  stalled runtime heartbeat (`runtime_stalled`); a node that took a
+  clustering fatal fence and whose node-lease loop finished the terminal
+  demotion and exited (`terminally_fenced`), whether the fence hit while
+  serving or while re-registering; or a node whose clustering scope stopped
+  while the process keeps running and whose node-lease loop exited
+  (`clustering_stopped`, e.g. the swarm's keypair-slot lease self-fenced). It
+  never checks the database itself. The terminal demotion has no deadline of
+  its own, so a wedged publication guard or actor delays the restart.
 - Readiness probe: `GET /ready` — database, lineage and node lifecycle
   (claims/self-fence, drain), answered within 1.5 s. During a Postgres
-  outage every pod goes unready (no Service endpoints) and stays live.
-  When Postgres returns, a non-clustered pod, or a clustered pod whose
-  outage was shorter than the node-lease TTL, becomes ready again in place.
-  A longer outage self-fences first (sockets closed, then re-served); a
-  fatal fence, on either path, restarts the pod through liveness once the
-  terminal demotion finishes.
+  outage every pod goes unready (no Service endpoints). A non-clustered pod
+  stays live and becomes ready again in place when Postgres returns, as does
+  a clustered pod whose outage was shorter than the 30 s keypair-slot and
+  node-lease TTLs (in practice about 20–30 s, depending on where in the 10 s
+  renewal cycle the outage starts). A clustered outage longer than that
+  stops clustering, and liveness restarts the pod (`clustering_stopped` or
+  `terminally_fenced`). So "no restart storm" holds for clustered pods only
+  for outages shorter than the lease TTL.
 
 Both are configurable via `probes.*`. Keep `probes.readiness.timeoutSeconds`
 at 2 or more: readiness bounds itself at 1.5 s.
