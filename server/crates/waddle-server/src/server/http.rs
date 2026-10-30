@@ -112,7 +112,8 @@ pub(crate) struct HttpServerDeps {
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The one enclosing shutdown deadline (#2046 W1.10).
+    pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
 }
 
 const HTTP_FORCED_EXIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
@@ -143,10 +144,18 @@ impl waddle_sfu::AdminCallObserver for LiveKitAdminFailureObserver {
     }
 }
 
+/// The HTTP server's absolute exit point: its drain stage plus a small
+/// margin, never past the enclosing shutdown deadline (#2046 W1.10).
+fn http_forced_exit_at(
+    shutdown: crate::shutdown_deadline::StartedShutdown,
+) -> tokio::time::Instant {
+    (shutdown.drain_deadline() + HTTP_FORCED_EXIT_MARGIN).min(shutdown.deadline())
+}
+
 async fn await_http_server_or_forced_exit<F, T>(
     server: F,
     stop_token: tokio_util::sync::CancellationToken,
-    drain_timeout: std::time::Duration,
+    shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
 ) -> Option<T>
 where
     F: std::future::Future<Output = T>,
@@ -156,7 +165,7 @@ where
         result = server.as_mut() => Some(result),
         _ = async {
             stop_token.cancelled().await;
-            tokio::time::sleep(drain_timeout + HTTP_FORCED_EXIT_MARGIN).await;
+            tokio::time::sleep_until(http_forced_exit_at(shutdown_deadline.start())).await;
         } => None,
     }
 }
@@ -174,13 +183,13 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         shutdown_handle,
         drain_complete,
         sm_drain_complete,
-        sm_drain_started,
+        shutdown_deadline,
         connections_drained,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
     let force_stop_token = stop_token.clone();
-    let drain_timeout = shutdown_handle.drain_timeout();
+    let http_shutdown_deadline = shutdown_deadline.clone();
     let app = create_router(RouterDeps {
         state,
         server_config,
@@ -192,7 +201,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         drain_complete: drain_complete.clone(),
         sm_drain_complete: sm_drain_complete.clone(),
         connections_drained,
-        sm_drain_started,
+        shutdown_deadline: shutdown_deadline.clone(),
     })
     .await;
     let app = match app {
@@ -220,13 +229,15 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         .with_graceful_shutdown(async move {
             stop_token.cancelled().await;
             info!("HTTP server received shutdown signal; awaiting SM Q6 drain");
-            let drain_wait = drain_timeout;
-            if tokio::time::timeout(drain_wait, drain_complete.notified())
-                .await
-                .is_err()
+            if tokio::time::timeout_at(
+                http_shutdown_deadline.start().drain_deadline(),
+                drain_complete.notified(),
+            )
+            .await
+            .is_err()
             {
                 warn!(
-                    timeout_secs = drain_timeout.as_secs(),
+                    timeout_secs = http_shutdown_deadline.budget().drain().as_secs(),
                     "HTTP server: SM drain notification timed out; forcing connection drain"
                 );
             } else {
@@ -234,11 +245,13 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
             }
         })
         .into_future();
-    match await_http_server_or_forced_exit(server, force_stop_token, drain_timeout).await {
+    match await_http_server_or_forced_exit(server, force_stop_token, shutdown_deadline.clone())
+        .await
+    {
         Some(result) => result?,
         None => {
             warn!(
-                timeout_secs = drain_timeout.as_secs(),
+                timeout_secs = shutdown_deadline.budget().drain().as_secs(),
                 margin_secs = HTTP_FORCED_EXIT_MARGIN.as_secs(),
                 "HTTP graceful shutdown exceeded its absolute deadline; terminating remaining connection tasks"
             );
@@ -417,7 +430,8 @@ pub(crate) struct RouterDeps {
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
     pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The one enclosing shutdown deadline (#2046 W1.10).
+    pub(crate) shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
 }
 
 /// Create the Axum router with all routes and middleware.
@@ -432,7 +446,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         shutdown_handle,
         drain_complete,
         sm_drain_complete,
-        sm_drain_started,
+        shutdown_deadline,
         connections_drained,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
@@ -535,7 +549,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         shutdown_stop_token,
         Arc::clone(&drain_complete),
         sm_drain_complete,
-        sm_drain_started,
+        shutdown_deadline,
         connections_drained,
     );
 
@@ -1910,6 +1924,11 @@ fn env_flag(key: &str) -> bool {
 #[cfg(test)]
 mod shutdown_bound_tests {
     use super::await_http_server_or_forced_exit;
+    use crate::shutdown_deadline::{ShutdownBudget, ShutdownDeadline};
+
+    fn drain_deadline(drain: std::time::Duration) -> ShutdownDeadline {
+        ShutdownDeadline::new(ShutdownBudget::new(drain, std::time::Duration::ZERO))
+    }
 
     #[tokio::test(start_paused = true)]
     async fn stalled_connection_work_cannot_outlive_http_shutdown_deadline() {
@@ -1919,7 +1938,7 @@ mod shutdown_bound_tests {
         let outcome = await_http_server_or_forced_exit(
             std::future::pending::<()>(),
             stop,
-            std::time::Duration::from_millis(10),
+            drain_deadline(std::time::Duration::from_millis(10)),
         )
         .await;
 
@@ -1932,7 +1951,7 @@ mod shutdown_bound_tests {
         let outcome = await_http_server_or_forced_exit(
             std::future::ready(7_u8),
             stop,
-            std::time::Duration::from_secs(30),
+            drain_deadline(std::time::Duration::from_secs(30)),
         )
         .await;
 

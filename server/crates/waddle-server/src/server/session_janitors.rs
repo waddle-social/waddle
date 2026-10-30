@@ -7366,6 +7366,7 @@ mod graceful_shutdown_drain_tests {
         create_test_websocket_state_with_sm_registry_pending_and_blocking,
         register_test_connection,
     };
+    use crate::shutdown_deadline::{ShutdownBudget, ShutdownDeadline};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
@@ -7383,6 +7384,12 @@ mod graceful_shutdown_drain_tests {
     };
     use waddle_xmpp::Stanza;
     use xmpp_parsers::message::{Message, MessageType};
+
+    /// A shutdown deadline whose drain stage is `drain`; these tests run
+    /// without a clustering room drain.
+    fn drain_deadline(drain: Duration) -> ShutdownDeadline {
+        ShutdownDeadline::new(ShutdownBudget::new(drain, Duration::ZERO))
+    }
 
     fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
         DetachedSession {
@@ -7578,8 +7585,7 @@ mod graceful_shutdown_drain_tests {
             stop,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -7869,8 +7875,7 @@ mod graceful_shutdown_drain_tests {
             stop.clone(),
             Arc::new(Notify::new()),
             completion.clone(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(40),
+            drain_deadline(Duration::from_millis(40)),
             proof.clone(),
         )
         .await;
@@ -7889,8 +7894,7 @@ mod graceful_shutdown_drain_tests {
             stop,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(40),
+            drain_deadline(Duration::from_millis(40)),
             proof.clone(),
         )
         .await;
@@ -7916,8 +7920,7 @@ mod graceful_shutdown_drain_tests {
                 stop,
                 Arc::new(Notify::new()),
                 tokio_util::sync::CancellationToken::new(),
-                Arc::new(std::sync::OnceLock::new()),
-                Duration::from_millis(80),
+                drain_deadline(Duration::from_millis(80)),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ),
         )
@@ -7933,10 +7936,8 @@ mod graceful_shutdown_drain_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
         let completion = tokio_util::sync::CancellationToken::new();
-        let started = Arc::new(std::sync::OnceLock::new());
-        started
-            .set(tokio::time::Instant::now() - Duration::from_secs(3))
-            .expect("set shared shutdown start");
+        let started = drain_deadline(Duration::from_secs(2));
+        started.start_at(tokio::time::Instant::now() - Duration::from_secs(3));
 
         tokio::time::timeout(
             Duration::from_millis(500),
@@ -7946,7 +7947,6 @@ mod graceful_shutdown_drain_tests {
                 Arc::new(Notify::new()),
                 completion.clone(),
                 started,
-                Duration::from_secs(2),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ),
         )
@@ -7993,8 +7993,7 @@ mod graceful_shutdown_drain_tests {
             token,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8091,8 +8090,7 @@ mod graceful_shutdown_drain_tests {
             token,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8165,8 +8163,7 @@ mod graceful_shutdown_drain_tests {
             token,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8237,8 +8234,7 @@ mod graceful_shutdown_drain_tests {
             stop,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(4),
+            drain_deadline(Duration::from_secs(4)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8336,8 +8332,7 @@ mod graceful_shutdown_drain_tests {
                 stop,
                 Arc::new(Notify::new()),
                 tokio_util::sync::CancellationToken::new(),
-                Arc::new(std::sync::OnceLock::new()),
-                Duration::from_secs(8),
+                drain_deadline(Duration::from_secs(8)),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ),
         )
@@ -8470,8 +8465,7 @@ mod graceful_shutdown_drain_tests {
             stop,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(4),
+            drain_deadline(Duration::from_secs(4)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8547,8 +8541,7 @@ mod graceful_shutdown_drain_tests {
             stop,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(500),
+            drain_deadline(Duration::from_millis(500)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
@@ -8605,8 +8598,7 @@ mod graceful_shutdown_drain_tests {
             stop.clone(),
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
         stop.cancel();
@@ -8716,8 +8708,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::clone(&drain_notify),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(400),
+            drain_deadline(Duration::from_millis(400)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
 
@@ -8804,8 +8795,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::clone(&drain_notify),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(400),
+            drain_deadline(Duration::from_millis(400)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
         drain_token.cancel();
@@ -8874,8 +8864,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::clone(&drain_notify),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(75),
+            drain_deadline(Duration::from_millis(75)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
         drain_token.cancel();
@@ -8963,8 +8952,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::new(Notify::new()),
             completion.clone(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_secs(5),
+            drain_deadline(Duration::from_secs(5)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
         drain_token.cancel();
@@ -9030,8 +9018,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::clone(&drain_notify),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(50),
+            drain_deadline(Duration::from_millis(50)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
 
@@ -9100,8 +9087,7 @@ mod graceful_shutdown_drain_tests {
             drain_token.clone(),
             Arc::clone(&drain_notify),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            Duration::from_millis(75),
+            drain_deadline(Duration::from_millis(75)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
 

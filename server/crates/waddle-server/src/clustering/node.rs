@@ -17,7 +17,6 @@ use super::swarm;
 use super::Arc;
 use super::CancellationToken;
 use super::ClusteringConfig;
-use super::Duration;
 use super::{Database, DatabaseDriver};
 
 /// A node's per-process clustering identity: freshly generated on every
@@ -649,21 +648,22 @@ impl ClusteringHandles {
 pub struct ClusteringShutdown(pub(in crate::clustering) Option<tokio::task::JoinHandle<()>>);
 
 impl ClusteringShutdown {
-    /// Await the node-lease loop's own exit, bounded by `budget` so a
-    /// wedged drain task cannot hang process shutdown forever — a timeout
-    /// here is logged and the process proceeds to exit anyway: any
+    /// Await the node-lease loop's own exit, bounded by the enclosing
+    /// shutdown `deadline` (#2046 W1.10) so a wedged drain task cannot hang
+    /// process shutdown forever. The loop bounds each of its own stages by
+    /// the same deadline, so in practice it returns before this does. A
+    /// timeout here is logged and the process proceeds to exit anyway: any
     /// un-released claims are simply fenced-safe and reclaimed later by
     /// another node's orphan reaper (`claims_abandoned_on_drain` already
     /// counts them). A `None` inner handle (clustering disabled, or a
     /// build without the `clustering` feature) returns immediately.
-    pub async fn await_drain(self, budget: Duration) {
+    pub async fn await_drain_until(self, deadline: tokio::time::Instant) {
         let Some(handle) = self.0 else {
             return;
         };
-        if tokio::time::timeout(budget, handle).await.is_err() {
+        if tokio::time::timeout_at(deadline, handle).await.is_err() {
             tracing::warn!(
-                budget_ms = budget.as_millis() as u64,
-                "clustering: node-lease drain did not complete within the shutdown budget; \
+                "clustering: node-lease drain did not complete within the shutdown deadline; \
                  proceeding with process exit (fenced-safe: un-released claims are simply \
                  reclaimed later)"
             );
@@ -678,8 +678,9 @@ pub struct ShutdownSmDrain {
     pub complete: CancellationToken,
     /// Closure proof, separate from Q6 settlement (which may time out).
     pub connections_drained: Arc<std::sync::atomic::AtomicBool>,
-    pub budget: Duration,
-    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The process-wide enclosing shutdown deadline (#2046 W1.10), shared
+    /// with the Q6 drain and the HTTP server.
+    pub deadline: crate::shutdown_deadline::ShutdownDeadline,
 }
 
 /// Conditionally start the clustering swarm subsystem.

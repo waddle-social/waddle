@@ -2718,8 +2718,12 @@ async fn run_test_shutdown_drain(state: Arc<crate::server::routes::websocket::We
             stop,
             Arc::new(tokio::sync::Notify::new()),
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(std::sync::OnceLock::new()),
-            std::time::Duration::from_secs(8),
+            crate::shutdown_deadline::ShutdownDeadline::new(
+                crate::shutdown_deadline::ShutdownBudget::new(
+                    std::time::Duration::from_secs(8),
+                    std::time::Duration::ZERO,
+                ),
+            ),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ),
     )
