@@ -62,8 +62,9 @@
   margin. The kill margin is not free slack: it covers the post-deadline
   exit tail (the pre-exit metrics flush, bounded at 5 s, then telemetry
   shutdown). Every claim is handed off before the deadline; a stalled OTLP
-  exporter can still be SIGKILLed inside the margin, losing only telemetry. $retireBudget and $terminalSweepBudget
-  mirror SHUTDOWN_RETIRE_BUDGET and SHUTDOWN_TERMINAL_SWEEP_BUDGET in
+  exporter can still be SIGKILLed inside the margin, losing only telemetry.
+  $retireBudget and $terminalSweepBudget mirror SHUTDOWN_RETIRE_BUDGET and
+  SHUTDOWN_TERMINAL_SWEEP_BUDGET in
   crates/waddle-server/src/shutdown_deadline.rs;
   scripts/test_chart_shutdown_budget.py checks they agree.
 */ -}}
