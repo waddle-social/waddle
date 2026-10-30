@@ -11,6 +11,8 @@ on:
     - .github/workflows/hestia-cache-gc.yml/**
     - .github/workflows/waddle-ci-cache-benchmark.yml
     - .github/workflows/waddle-ci-cache-benchmark.yml/**
+    - .github/workflows/waddle-integration.yml
+    - .github/workflows/waddle-integration.yml/**
     - .github/workflows/waddle-server-*.yml
     - .github/workflows/waddle-server-default.yml
     - .rules.cue
@@ -55,6 +57,7 @@ on:
     - namespace.cue
     - namespace.cue/**
     - scripts/*cache-benchmark*
+    - scripts/integration-ci*.ts
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
     - server/**/env.cue

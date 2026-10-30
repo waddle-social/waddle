@@ -1,0 +1,1247 @@
+# Generated from existing PR workflow graphs; do not edit manually.
+# Regenerate with: bun scripts/integration-ci.ts sync
+
+name: waddle-integration
+"on":
+  pull_request:
+    {}
+  merge_group:
+    types:
+      - checks_requested
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: Full ancestor SHA to compare with the selected workflow ref
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: "integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}"
+  cancel-in-progress: true
+jobs:
+  plan:
+    name: Plan exact candidate verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      expected: "${{ steps.plan.outputs.expected }}"
+      waddle_android_devicetests: "${{ steps.plan.outputs.waddle_android_devicetests }}"
+      waddle_android_pullrequest: "${{ steps.plan.outputs.waddle_android_pullrequest }}"
+      waddle_apple_pullrequest: "${{ steps.plan.outputs.waddle_apple_pullrequest }}"
+      waddle_chat_pullrequest: "${{ steps.plan.outputs.waddle_chat_pullrequest }}"
+      waddle_cloud_pullrequest: "${{ steps.plan.outputs.waddle_cloud_pullrequest }}"
+      waddle_colony_pullrequest: "${{ steps.plan.outputs.waddle_colony_pullrequest }}"
+      waddle_linux_pullrequest: "${{ steps.plan.outputs.waddle_linux_pullrequest }}"
+      waddle_server_federationgrantfence: "${{ steps.plan.outputs.waddle_server_federationgrantfence }}"
+      waddle_server_namespacerustchecks: "${{ steps.plan.outputs.waddle_server_namespacerustchecks }}"
+      waddle_server_pullrequest: "${{ steps.plan.outputs.waddle_server_pullrequest }}"
+      waddle_server_rootsync: "${{ steps.plan.outputs.waddle_server_rootsync }}"
+      waddle_server_rusttests: "${{ steps.plan.outputs.waddle_server_rusttests }}"
+      waddle_server_xmppcompliance: "${{ steps.plan.outputs.waddle_server_xmppcompliance }}"
+      waddle_server_xmppservercompliance: "${{ steps.plan.outputs.waddle_server_xmppservercompliance }}"
+      waddle_website_pullrequest: "${{ steps.plan.outputs.waddle_website_pullrequest }}"
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: "${{ github.sha }}"
+          fetch-depth: 0
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - name: Check graph parity and planner contracts
+        run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts"
+      - id: plan
+        name: Select every applicable lane
+        run: bun scripts/integration-ci.ts plan
+  waddle_android_devicetests__waddle-android-devicetests:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      packages: none
+      id-token: write
+    name: waddle-android-deviceTests / waddle-android-deviceTests
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Cache Android SDK and Gradle on Namespace volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: "/home/runner/.android-sdk\n/home/runner/.gradle"
+      - name: Bound CUE evaluator memory
+        run: "# GITHUB_ENV applies to subsequent steps, including cuenv startup.\nprintf '%s\\n' 'GOGC=100' >> \"$GITHUB_ENV\""
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Run pipeline: deviceTests"
+        run: cuenv ci --pipeline deviceTests --path apps/android
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+      - name: Upload Android test failure reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          if-no-files-found: ignore
+          name: waddle_android_devicetests-android-test-failure-reports
+          path: "apps/android/app/build/outputs/roborazzi/\napps/android/app/build/reports/roborazzi/\napps/android/app/build/test-results/\napps/android/app/build/reports/tests/"
+          retention-days: 3
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_android_devicetests == 'true' }}"
+  waddle_android_pullrequest__waddle-android-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      packages: none
+      id-token: write
+    name: waddle-android-pullRequest / waddle-android-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Cache Android SDK and Gradle on Namespace volume
+        uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
+        with:
+          path: "/home/runner/.android-sdk\n/home/runner/.gradle"
+      - name: Bound CUE evaluator memory
+        run: "# GITHUB_ENV applies to subsequent steps, including cuenv startup.\nprintf '%s\\n' 'GOGC=100' >> \"$GITHUB_ENV\""
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path apps/android
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+      - name: Upload Android test failure reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          if-no-files-found: ignore
+          name: waddle_android_pullrequest-android-test-failure-reports
+          path: "apps/android/app/build/outputs/roborazzi/\napps/android/app/build/reports/roborazzi/\napps/android/app/build/test-results/\napps/android/app/build/reports/tests/"
+          retention-days: 3
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_android_pullrequest == 'true' }}"
+  waddle_apple_pullrequest__apple-xmpp-client:
+    name: waddle-apple-pullrequest / apple-xmpp-client
+    runs-on: namespace-profile-darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ github.sha }}"
+      - name: Install pinned Rust toolchain
+        working-directory: server
+        run: rustup toolchain install
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check native telemetry contract
+        run: bash scripts/check-native-remote-telemetry.sh --apple
+      - name: Test WaddleKit
+        working-directory: apps/apple/WaddleKit
+        run: swift test
+      - name: Build XMPP client XCFramework
+        run: bash scripts/build-xcframework.sh --debug
+      - name: Build macOS app
+        run: "xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-macOS -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build"
+      - name: Build iOS app
+        run: "xcodebuild -project apps/apple/Waddle.xcodeproj -scheme Waddle-iOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_apple_pullrequest == 'true' }}"
+    permissions:
+      contents: read
+  waddle_chat_pullrequest__waddle-chat-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      packages: none
+      id-token: write
+    name: waddle-chat-pullRequest / waddle-chat-pullRequest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: cuenv:contributor:bun.workspace.setup
+        run: "true"
+      - name: Install Bun dependencies
+        run: cuenv exec -- bun install --frozen-lockfile
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path chat
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_chat_pullrequest == 'true' }}"
+  waddle_cloud_pullrequest__waddle-cloud-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      id-token: write
+    name: waddle-cloud-pullRequest / waddle-cloud-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path infrastructure/waddle.cloud
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_cloud_pullrequest == 'true' }}"
+  waddle_colony_pullrequest__waddle-colony-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      packages: none
+      id-token: write
+    name: waddle-colony-pullRequest / waddle-colony-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: cuenv:contributor:bun.workspace.setup
+        run: "true"
+      - name: Install Bun dependencies
+        run: cuenv exec -- bun install --frozen-lockfile
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path colony
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_colony_pullrequest == 'true' }}"
+  waddle_linux_pullrequest__waddle-linux-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      id-token: write
+    name: waddle-linux-pullRequest / waddle-linux-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path apps/linux
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_linux_pullrequest == 'true' }}"
+  waddle_server_federationgrantfence__federationgrantfenceproof:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-federationGrantFence / federationGrantFenceProof
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: federationGrantFenceProof
+        run: cuenv task federationGrantFenceProof --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_federationgrantfence == 'true' }}"
+  waddle_server_namespacerustchecks__clippy:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-namespaceRustChecks / clippy
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: clippy
+        run: cuenv task clippy --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_namespacerustchecks == 'true' }}"
+  waddle_server_namespacerustchecks__doctest:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-namespaceRustChecks / doctest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: doctest
+        run: cuenv task doctest --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_namespacerustchecks == 'true' }}"
+  waddle_server_namespacerustchecks__test:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-namespaceRustChecks / test
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: test
+        run: cuenv task test --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_namespacerustchecks == 'true' }}"
+  waddle_server_pullrequest__checkcidrift:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / checkCiDrift
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: checkCiDrift
+        run: cuenv task checkCiDrift --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__checkswitchablealternativeprogram:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / checkSwitchableAlternativeProgram
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: checkSwitchableAlternativeProgram
+        run: cuenv task checkSwitchableAlternativeProgram --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__checkxmppclientffibindings:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / checkXmppClientFfiBindings
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: checkXmppClientFfiBindings
+        run: cuenv task checkXmppClientFfiBindings --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixbuildci:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixBuildCi
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixBuildCi
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-ci-build"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixbuildextensionmodules:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixBuildExtensionModules
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixBuildExtensionModules
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-extension-runtime"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixbuildimagestream:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixBuildImageStream
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixBuildImageStream
+        run: "nix build --print-build-logs ../#waddle-server-image-stream"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixclippy:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixClippy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixClippy
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-clippy"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixdoctest:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixDoctest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixDoctest
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-doctest"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__nixfmt:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / nixFmt
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixFmt
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-fmt"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_pullrequest__renderdeployment:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-pullRequest / renderDeployment
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: renderDeployment
+        run: cuenv task renderDeployment --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
+  waddle_server_rootsync__checkrootsyncdrift:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-rootSync / checkRootSyncDrift
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: checkRootSyncDrift
+        run: cuenv task checkRootSyncDrift --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_rootsync == 'true' }}"
+  waddle_server_rusttests__nixtest-builder:
+    name: waddle-server-rustTests / nixTest (compile and four isolated shards)
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-32x64-with-features
+      - namespace-features:container.privileged=true;job.priority=1
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          version: v2.0.0
+          upstream-cache-filter: "true"
+          drain-timeout: "900"
+      - name: Validate CI helper contracts
+        shell: bash
+        run: "python3 tests/ci-timings-test.py\npython3 server/scripts/test_check_nextest_shards.py\npython3 server/scripts/test_nextest_archive_transfer.py\npython3 server/scripts/test_build_nextest_archive.py\npython3 server/scripts/test_plan_nextest_binary_shards.py\npython3 server/scripts/test_pin_nextest_shard.py\npython3 server/scripts/test_run_nextest_shards.py"
+      - name: Compile and run four isolated test shards
+        shell: bash
+        run: bash scripts/run-nextest-shards.sh
+        working-directory: server
+      - name: Upload compiler and coverage diagnostics
+        if: "${{ !cancelled() }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_server_rusttests-nixTestArchive-diagnostics
+          path: server/.ci/nextest-archive
+          if-no-files-found: error
+          include-hidden-files: true
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_rusttests == 'true' }}"
+  waddle_server_rusttests__nixtest:
+    name: waddle-server-rustTests / nixTest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: "${{ (always()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_rusttests == 'true' }}"
+    needs:
+      - plan
+      - waddle_server_rusttests__nixtest-builder
+    steps:
+      - name: Require compilation and all four isolated test shards
+        shell: bash
+        env:
+          TEST_RESULT: "${{ needs['waddle_server_rusttests__nixtest-builder'].result }}"
+        run: "set -euo pipefail\nif [[ \"$TEST_RESULT\" != success ]]; then\n  echo \"Compilation and all four shards must succeed; received: ${TEST_RESULT:-missing}\" >&2\n  exit 1\nfi\necho \"All four test shards and inventory checks passed.\""
+    permissions:
+      {}
+  waddle_server_xmppcompliance__nixxmppunittests:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-xmppCompliance / nixXmppUnitTests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixXmppUnitTests
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-unit-tests"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_xmppcompliance == 'true' }}"
+  waddle_server_xmppcompliance__nixxmppxepintegration:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-xmppCompliance / nixXmppXepIntegration
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixXmppXepIntegration
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-xep-integration"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_xmppcompliance == 'true' }}"
+  waddle_server_xmppservercompliance__nixxmppservertests:
+    permissions:
+      contents: read
+      id-token: write
+    name: waddle-server-xmppServerCompliance / nixXmppServerTests
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: nixXmppServerTests
+        run: "nix build --print-build-logs ../#checks.x86_64-linux.waddle-server-xmpp-server-tests"
+        working-directory: server
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_xmppservercompliance == 'true' }}"
+  waddle_website_pullrequest__waddle-website-pullrequest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      packages: none
+      id-token: write
+    name: waddle-website-pullRequest / waddle-website-pullRequest
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: "${{ github.sha }}"
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f
+        with:
+          use-gha-cache: disabled
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: cuenv:contributor:bun.workspace.setup
+        run: "true"
+      - name: Install Bun dependencies
+        run: cuenv exec -- bun install --frozen-lockfile
+      - name: "Run pipeline: pullRequest"
+        run: cuenv ci --pipeline pullRequest --path website
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_website_pullrequest == 'true' }}"
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: "${{ always() }}"
+    needs:
+      - plan
+      - waddle_android_devicetests__waddle-android-devicetests
+      - waddle_android_pullrequest__waddle-android-pullrequest
+      - waddle_apple_pullrequest__apple-xmpp-client
+      - waddle_chat_pullrequest__waddle-chat-pullrequest
+      - waddle_cloud_pullrequest__waddle-cloud-pullrequest
+      - waddle_colony_pullrequest__waddle-colony-pullrequest
+      - waddle_linux_pullrequest__waddle-linux-pullrequest
+      - waddle_server_federationgrantfence__federationgrantfenceproof
+      - waddle_server_namespacerustchecks__clippy
+      - waddle_server_namespacerustchecks__doctest
+      - waddle_server_namespacerustchecks__test
+      - waddle_server_pullrequest__checkcidrift
+      - waddle_server_pullrequest__checkswitchablealternativeprogram
+      - waddle_server_pullrequest__checkxmppclientffibindings
+      - waddle_server_pullrequest__nixbuildci
+      - waddle_server_pullrequest__nixbuildextensionmodules
+      - waddle_server_pullrequest__nixbuildimagestream
+      - waddle_server_pullrequest__nixclippy
+      - waddle_server_pullrequest__nixdoctest
+      - waddle_server_pullrequest__nixfmt
+      - waddle_server_pullrequest__renderdeployment
+      - waddle_server_rootsync__checkrootsyncdrift
+      - waddle_server_rusttests__nixtest-builder
+      - waddle_server_rusttests__nixtest
+      - waddle_server_xmppcompliance__nixxmppunittests
+      - waddle_server_xmppcompliance__nixxmppxepintegration
+      - waddle_server_xmppservercompliance__nixxmppservertests
+      - waddle_website_pullrequest__waddle-website-pullrequest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: "${{ github.sha }}"
+          fetch-depth: 0
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - name: Require successful applicable jobs
+        run: bun scripts/integration-ci.ts gate
+        env:
+          JOB_RESULTS: "${{ toJSON(needs) }}"
+          EXPECTED_JOBS: "${{ needs.plan.outputs.expected }}"

@@ -9,6 +9,8 @@ name: waddle-server-rustTests
       - .github/workflows/hestia-cache-gc.yml/**
       - .github/workflows/waddle-ci-cache-benchmark.yml
       - .github/workflows/waddle-ci-cache-benchmark.yml/**
+      - .github/workflows/waddle-integration.yml
+      - .github/workflows/waddle-integration.yml/**
       - .github/workflows/waddle-server-*.yml
       - .github/workflows/waddle-server-rusttests.yml
       - apps/apple/**/Tests/**
@@ -45,6 +47,7 @@ name: waddle-server-rustTests
       - scripts/*cache-benchmark*
       - scripts/ci-timings.py
       - scripts/ci-timings.py/**
+      - scripts/integration-ci*.ts
       - scripts/sync-rust-tests.sh
       - scripts/sync-rust-tests.sh/**
       - server/**/env.cue
