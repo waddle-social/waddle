@@ -2,7 +2,7 @@
 //!
 //! Postgres-backed tests skip when no test database is configured, so a
 //! local run without Postgres still passes. A CI lane that provisions
-//! Postgres also sets [`REQUIRE_TEST_POSTGRES_ENV`]`=1`; there a missing URL
+//! Postgres also sets `WADDLE_TEST_REQUIRE_POSTGRES=1`; there a missing URL
 //! is a lane defect, and returning `None` would let an early `return` report
 //! a skipped test as a pass. `scripts/check-test-postgres-env.py` rejects
 //! reads of either variable outside this module.
@@ -12,17 +12,19 @@ use std::ffi::OsString;
 use std::fmt;
 
 /// Connection URL of the Postgres database that tests may reset freely.
-pub const TEST_POSTGRES_URL_ENV: &str = "WADDLE_TEST_POSTGRES_URL";
+/// Private so that no caller can read the variable by name and bypass the
+/// requirement (or `scripts/check-test-postgres-env.py`).
+const TEST_POSTGRES_URL_ENV: &str = "WADDLE_TEST_POSTGRES_URL";
 
 /// Set to `1` by lanes in which every Postgres-backed test must run.
-pub const REQUIRE_TEST_POSTGRES_ENV: &str = "WADDLE_TEST_REQUIRE_POSTGRES";
+const REQUIRE_TEST_POSTGRES_ENV: &str = "WADDLE_TEST_REQUIRE_POSTGRES";
 
 /// Returns the test database URL, or `None` when the caller should skip.
 ///
 /// # Panics
 ///
-/// Panics, at the caller's location, when [`REQUIRE_TEST_POSTGRES_ENV`] is
-/// `1` and [`TEST_POSTGRES_URL_ENV`] is unset or empty, when the URL is not
+/// Panics, at the caller's location, when `WADDLE_TEST_REQUIRE_POSTGRES` is
+/// `1` and `WADDLE_TEST_POSTGRES_URL` is unset or empty, when the URL is not
 /// Unicode, or when the requirement flag holds a value other than unset,
 /// empty, `0` or `1`.
 #[track_caller]

@@ -26,9 +26,7 @@ use tokio_tungstenite::{connect_async, tungstenite};
 
 mod test_postgres;
 
-pub use test_postgres::{
-    require_test_postgres_url, REQUIRE_TEST_POSTGRES_ENV, TEST_POSTGRES_URL_ENV,
-};
+pub use test_postgres::require_test_postgres_url;
 
 /// Re-exported so suites can match on raw frames from
 /// [`WsXmppClient::recv_raw_timeout`] without a direct dependency.
