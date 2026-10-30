@@ -10,6 +10,7 @@ pub(super) async fn stale_vectors(
     fixture: &Fixture,
     binary: &Path,
     cases: &mut Vec<Case>,
+    fail_after_first: bool,
 ) -> Result<()> {
     for (kind, positive, negative) in [
         (
@@ -121,6 +122,9 @@ pub(super) async fn stale_vectors(
                 .await?;
             count(fixture, &effect, i64::from(unsafe_control)).await?;
             passed(cases, if unsafe_control { negative } else { positive });
+            if fail_after_first {
+                anyhow::bail!("injected failure after completed multi-edge case");
+            }
         }
     }
     // The direct witness also requires the stable lifecycle row.

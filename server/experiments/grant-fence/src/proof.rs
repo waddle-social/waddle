@@ -244,8 +244,12 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             &mut report.lost_response_cases,
         )
         .await?;
-        report.multi_edge_cases =
-            crate::multi_edge::run(&fixture, Path::new(worker_binary)).await?;
+        crate::multi_edge::run(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.multi_edge_cases,
+        )
+        .await?;
         Ok(())
     }
     .await;

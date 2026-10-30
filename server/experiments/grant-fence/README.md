@@ -292,14 +292,16 @@ outstanding child is now an explicit sticky failure that retains private data.
 
 ## Finite synthetic multi-edge admission
 
-Thirty-one additional schedules test one channel, two possible parents, one subject
+Thirty-two additional schedules test one channel, two possible parents, one subject
 and a direct alternative, using the extracted native fixture. This is a fixed
 experimental policy, not existing MUC admission: `direct OR (parent AND member)`.
 The graph exposes separate `direct_access` and `inherited` checks. A fixture-only
 denial relation is empty in ordinary schedules; one negative control sets it to
 prove that matching markers and edges do not allow a denied selected branch to
 borrow direct access. A separate malformed-marker control verifies graph errors
-fail the worker rather than becoming denials. No generic OR allow is accepted as
+fail the worker rather than becoming denials. A controlled stage failure after a
+real completed scenario verifies that its evidence remains in the caller-owned
+report; an incomplete scenario is never recorded as passed. No generic OR allow is accepted as
 evidence for either selected dependency branch.
 
 Every scope pre-creates retained current lifecycle, binding, ancestor-membership
@@ -372,7 +374,7 @@ queue/socket delivery or federation activation is established.
 
 The existing pinned workspace runner and nonpublishing CI lanes execute these
 schedules together with all previous proofs and shared cleanup tests. The report
-requires the exact 31-case inventory and records their asserted outcomes. Source
+requires the exact 32-case inventory and records their asserted outcomes. Source
 provenance recursively includes the new modules and schemas; credentials and
 cleanup use the unchanged shared supervisor. Any scenario error fails the full
 run; there is no prerequisite skip or separate opt-in for these cases.
