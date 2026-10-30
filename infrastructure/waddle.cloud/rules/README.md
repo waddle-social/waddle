@@ -17,7 +17,10 @@ issue #1324):
 
 - **Every PR** touching `rules/**` runs `mimirtool rules lint` and
   `lokitool rules lint` (the `pullRequest` pipeline in `../env.cue`).
-  A broken rule file fails the PR, not the pager.
+  A broken rule file fails the PR, not the pager. The same pipeline's
+  `rulesTest` task runs `tests/run.sh` with `PROMETHEUS_BIN` set: the
+  promtool rule unit tests plus the real-translator OTLP name contract
+  below (promtool and prometheus come from the root dev shell).
 - **Every main push** syncs the trees to the Grafana Cloud rulers via
   `mimirtool rules sync` / `lokitool rules sync` (the `rulesSync` task
   in the `default` pipeline). Sync is authoritative: rules deleted
@@ -104,8 +107,8 @@ docker run --rm --network none --entrypoint /bin/sh \
 
 The suite covers normal live unresolved attempts, flat aged obligations, the
 age threshold and hold/reset/resolution, primary failover, missing age telemetry,
-and independent per-kind backlog growth. Run it when changing ingress alerts;
-the existing PR pipeline lints rule syntax but does not run these behavioral tests.
+and independent per-kind backlog growth. The PR pipeline runs it (`rulesTest`);
+run it locally when changing ingress alerts.
 
 The runner also evaluates `tests/push.test.yaml`. To verify the Rust-exported
 push gauge units through a real OTLP receiver and the same recording rules,
@@ -119,3 +122,13 @@ This contract uses annotation count units and checks the translated series and
 recording aliases. A dimensionless-unit control must produce `_ratio`, which
 guards against bypassing translation. No tools are downloaded or cloud writes
 performed. Check the actual Grafana/Mimir series again after deployment.
+
+The same contract covers the clustering instruments the alert rules read,
+from `server/crates/waddle-server/src/clustering/alert_metric_contract.json`:
+each `(name, unit)` must translate to exactly its `prometheus_name`, and no
+spelling listed in `unexported_rule_spellings` may appear. A unit test in
+`clustering/metrics.rs` binds that fixture to the exported instruments, and
+`server/crates/waddle-server/tests/clustering_alert_metric_contract.rs` fails
+when a rule reads a `waddle_clustering_*` series without a fixture entry, so
+renaming an instrument or changing its unit breaks a test before the alert
+goes silent.

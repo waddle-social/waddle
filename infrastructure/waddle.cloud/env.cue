@@ -16,6 +16,15 @@ schema.#Project & {
 
 	let _t = tasks
 
+	// Shared by rulesTest (gates rulesSync on main) and
+	// rulesTestPullRequest; see rulesTest.
+	let _rulesTestArgs = ["-c", #"""
+		set -euo pipefail
+		prometheus_bin="$(command -v prometheus)"
+		PROMETHEUS_BIN="${prometheus_bin}" sh rules/tests/run.sh
+		echo "Alert rule tests and OTLP name contract pass."
+		"""#]
+
 	ci: providers: ["github"]
 	ci: contributors: [wc.#Nix, wc.#FlakeHubCache, wc.#Hestia, wc.#CuenvRelease, c.#OnePassword]
 
@@ -71,7 +80,7 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesSync, _t.dashboardsSync]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesLint, _t.rulesTest, _t.rulesSync, _t.dashboardsSync]
 		}
 		pullRequest: {
 			derivePaths: true
@@ -82,7 +91,7 @@ schema.#Project & {
 				checks:          "write"
 				"pull-requests": "write"
 			}
-			tasks: [_t.rulesLint, _t.dashboardsLint]
+			tasks: [_t.rulesLint, _t.rulesTestPullRequest, _t.dashboardsLint]
 		}
 	}
 
@@ -267,6 +276,36 @@ schema.#Project & {
 				"""#]
 			inputs: ["rules/**", "env.cue"]
 		}
+		// Behavioural alert evidence (#2046 W1.12): promtool checks and
+		// unit tests for every Mimir rule file, then the real-translator
+		// OTLP contract that binds the Rust-pinned instrument names and
+		// units (shared fixtures under server/) to the Prometheus series
+		// the rules read. It reads those fixtures from the live checkout
+		// (the "dir" sandbox rejects ../ inputs), so it is not hermetic.
+		// Inputs stay rules-only: the default pipeline is one job whose
+		// trigger paths are the union of its tasks' inputs, so wider inputs
+		// here would re-run the gitops push and deploy annotation on main
+		// for unrelated changes.
+		rulesTest: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     _rulesTestArgs
+			inputs: ["rules/**", "env.cue"]
+		}
+		// The same check on PRs, also triggered by the contract fixtures
+		// and by the dev shell that provides promtool and prometheus.
+		rulesTestPullRequest: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args:     _rulesTestArgs
+			inputs: [
+				"rules/**",
+				"env.cue",
+				"../../flake.nix",
+				"../../server/crates/waddle-server/src/clustering/alert_metric_contract.json",
+				"../../server/crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
+			]
+		}
 		// Validate every dashboard document on PRs. The skeleton exemption is
 		// declared in the dashboard's own tags rather than hidden in CI logic.
 		dashboardsLint: schema.#Task & {
@@ -279,8 +318,10 @@ schema.#Project & {
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push
 		// only). Sync is authoritative within the `waddle` namespace;
-		// see rules/README.md for the required secrets.
+		// see rules/README.md for the required secrets. Never publishes
+		// rules that fail lint or their promtool/contract tests.
 		rulesSync: schema.#Task & {
+			dependsOn: [rulesLint, rulesTest]
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail

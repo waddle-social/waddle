@@ -3,7 +3,8 @@
 
 Needs Python's standard library and an existing Prometheus binary (3.x).
 Run with --prometheus /path/to/prometheus; no services or credentials needed.
-The Rust exported-metric test binds this shared fixture to production units.
+The Rust exported-metric tests bind both shared fixtures (push gauges and the
+clustering instruments the alert rules read) to production names and units.
 Alloy forwards OTLP unchanged to Grafana Cloud, whose default suffix contract
 matches UnderscoreEscapingWithSuffixes:
 https://grafana.com/docs/grafana-cloud/send-data/otlp/otlp-format-considerations/
@@ -35,6 +36,7 @@ def read_json(url, payload=None):
 def run(prometheus):
     repo = pathlib.Path(__file__).resolve().parents[4]
     contract = json.loads((repo / "server/crates/waddle-xmpp/src/telemetry/push_gauge_contract.json").read_text())
+    cluster_contract = json.loads((repo / "server/crates/waddle-server/src/clustering/alert_metric_contract.json").read_text())
     with tempfile.TemporaryDirectory(prefix="waddle-push-otlp-") as directory:
         work = pathlib.Path(directory)
         rules = (repo / "infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml").read_text()
@@ -82,6 +84,20 @@ def run(prometheus):
                     })
                     expected[entry["prometheus_name"]] = value
                     expected[entry["recording_name"]] = value
+                # Clustering instruments are f64 gauges; the translated name
+                # must be the one the alert rules read, and no other spelling.
+                cluster_expected = set()
+                unexported = set()
+                for entry in cluster_contract:
+                    metrics.append({
+                        "name": entry["name"], "unit": entry["unit"],
+                        "gauge": {"dataPoints": [{
+                            "timeUnixNano": str(timestamp), "asDouble": float(entry["value"]),
+                        }]},
+                    })
+                    expected[entry["prometheus_name"]] = entry["value"]
+                    cluster_expected.add(entry["prometheus_name"])
+                    unexported.update(entry["unexported_rule_spellings"])
                 # A negative control proves suffix translation really ran.
                 metrics.append({
                     "name": "waddle.translation.dimensionless", "unit": "1",
@@ -96,7 +112,7 @@ def run(prometheus):
                 })
                 if response.get("partialSuccess"):
                     raise RuntimeError(f"OTLP receiver rejected points: {response}")
-                selector = '{__name__=~"xmpp_push_.*|waddle_push_.*|waddle_translation_.*"}'
+                selector = '{__name__=~"xmpp_push_.*|waddle_push_.*|waddle_translation_.*|waddle_clustering_.*"}'
                 query = base + "/api/v1/query?" + urllib.parse.urlencode({"query": selector})
                 deadline = time.monotonic() + 10
                 while True:
@@ -104,12 +120,19 @@ def run(prometheus):
                     actual = {sample["metric"]["__name__"]: float(sample["value"][1])
                               for sample in result["data"]["result"]}
                     if all(actual.get(name) == value for name, value in expected.items()):
+                        cluster_actual = {name for name in actual if name.startswith("waddle_clustering_")}
+                        if cluster_actual != cluster_expected or cluster_actual & unexported:
+                            raise AssertionError(
+                                f"clustering series mismatch\nexpected={sorted(cluster_expected)}\n"
+                                f"actual={sorted(cluster_actual)}\nunexported={sorted(unexported)}")
                         break
                     if time.monotonic() >= deadline:
                         raise AssertionError(f"translated series/recording rule mismatch\nexpected={expected}\nactual={actual}")
                     time.sleep(0.1)
                 for name in sorted(expected):
                     print(f"PASS {name}={actual[name]:g}")
+                for name in sorted(unexported):
+                    print(f"PASS {name} absent")
             except BaseException:
                 log.flush()
                 log.seek(0)

@@ -7,6 +7,8 @@ on:
     paths:
     - .github/workflows/waddle-cloud-pullrequest.yml
     - cue.mod/**
+    - flake.nix
+    - flake.nix/**
     - infrastructure/waddle.cloud/dashboards/**
     - infrastructure/waddle.cloud/env.cue
     - infrastructure/waddle.cloud/env.cue/**
@@ -14,6 +16,10 @@ on:
     - infrastructure/waddle.cloud/schema/**
     - infrastructure/waddle.cloud/scripts/validate-dashboards.sh
     - infrastructure/waddle.cloud/scripts/validate-dashboards.sh/**
+    - server/crates/waddle-server/src/clustering/alert_metric_contract.json
+    - server/crates/waddle-server/src/clustering/alert_metric_contract.json/**
+    - server/crates/waddle-xmpp/src/telemetry/push_gauge_contract.json
+    - server/crates/waddle-xmpp/src/telemetry/push_gauge_contract.json/**
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
