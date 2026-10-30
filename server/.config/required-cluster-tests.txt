@@ -104,9 +104,11 @@ waddle-server ingress_substrate::tests::epoch_and_manifest_tables_enforce_their_
 waddle-server ingress_substrate::tests::epoch_guard_manifest_matches_rust_and_live_trigger_catalog
 
 # W1.6c characterization (#2046): XEP-0198 resume and XEP-0045 join-burst
-# seams. They need the `test-support` feature, which only the --all-features
-# lanes enable, so this is the one publish-gating lane that runs them; the
-# suite's seam-free tests also run in the default `test` lane.
+# seams. They need the `test-support` feature. The default `test` lane builds
+# without it; the xmppServerCompliance lane (waddle-server-xmpp-server-tests,
+# `--features test-support`, no clustering) runs them but does not gate
+# publish, so this is the one publish-gating lane that runs them. The suite's
+# seam-free tests also run in the default `test` lane.
 waddle-server::characterization_resume_muc seams::muc_live_message_queued_during_join_burst_is_written_after_subject
 waddle-server::characterization_resume_muc seams::sm_replay_precedes_live_with_concurrently_delivering_peer
 waddle-server::characterization_resume_muc seams::sm_detach_canonical_read_outage_replays_unacked_ingress_frame_unkeyed
