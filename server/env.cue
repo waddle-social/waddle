@@ -996,7 +996,7 @@ schema.#Project & {
 					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 				"""#]
-			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py", "scripts/*publish_chart.py"]])
+			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py", "scripts/*publish_chart.py", "scripts/test_chart_shutdown_budget.py", "crates/waddle-server/src/shutdown_deadline.rs"]])
 		}
 
 		buildContainerImage: schema.#Task & {
