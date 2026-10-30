@@ -28,10 +28,15 @@ pub(super) async fn route_full_jid_iq(
         xmpp_parsers::iq::Iq::Get { .. } | xmpp_parsers::iq::Iq::Set { .. }
     );
     let blocking = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
-    match blocking
-        .is_blocked_jid(&target.to_bare(), &Jid::from(sender_jid.clone()))
-        .await
-    {
+    // XEP-0191 note 8: a block rule cannot separate a user's own resources.
+    let blocked = if target.to_bare() == sender_jid.to_bare() {
+        Ok(false)
+    } else {
+        blocking
+            .is_blocked_jid(&target.to_bare(), &Jid::from(sender_jid.clone()))
+            .await
+    };
+    match blocked {
         Ok(true) => {
             // XEP-0191 §3.3: blocked IQ replies are silently discarded.
             if !is_request {

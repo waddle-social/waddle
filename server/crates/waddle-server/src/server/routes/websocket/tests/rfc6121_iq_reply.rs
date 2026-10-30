@@ -99,6 +99,45 @@ async fn local_full_jid_replies_preserve_contents_and_bind_the_sender() {
 }
 
 #[tokio::test]
+async fn own_account_block_rules_do_not_block_full_jid_requests_or_replies() {
+    let state = create_test_websocket_state().await;
+    let (mut conn, _origin_rx) = bound_connection(&state).await;
+    let storage = DatabaseBlockingStorage::new(state.deps.app_state.db_pool.global().clone());
+    storage
+        .add_blocks(
+            &origin().to_bare(),
+            &[
+                Jid::from(origin().to_bare()),
+                DOMAIN.parse().expect("domain block"),
+            ],
+        )
+        .await
+        .expect("own-account block rules");
+    for target in [ORIGIN, "alice@example.com/phone"] {
+        let target: FullJid = target.parse().expect("same-account resource");
+        let (tx, mut rx) = mpsc::channel(8);
+        let owner = register_test_connection(&state, &target, tx).await;
+        if target == origin() {
+            conn.registry_owner = Some(owner);
+        }
+        let mut stanzas = replies(Some(target.as_str()), None);
+        for payload in [IqPayload::Get, IqPayload::Set] {
+            stanzas.push(request(
+                payload(Element::builder("ping", NS_PING).build()),
+                Some(target.as_str()),
+                None,
+                "own-request",
+            ));
+        }
+        for mut stanza in stanzas {
+            assert!(dispatch(&state, &mut conn, stanza.clone()).await.is_empty());
+            *stanza.from_mut() = Some(Jid::from(origin()));
+            assert_eq!(receive(&mut rx).await, stanza);
+        }
+    }
+}
+
+#[tokio::test]
 async fn unavailable_and_closed_resources_never_bounce_a_reply() {
     let state = create_test_websocket_state().await;
     let (mut conn, mut origin_rx) = bound_connection(&state).await;
