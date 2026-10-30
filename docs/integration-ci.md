@@ -1,10 +1,14 @@
 # Merge candidate verification
 
 `waddle-integration` runs on every pull request, merge-group `checks_requested`
-event, and explicit workflow dispatch. Its `integration` job is the proposed
-required context. No repository rules or runner settings are changed by this
-workflow addition. A successful PR check alone does not authorize merging while
-the required context is not enforced on the queue candidate.
+event, and explicit workflow dispatch. **Its same-repository `integration`
+aggregate is candidate-controlled and is not eligible as the required trusted
+gate.** A candidate can edit the workflow, generator, adapter, tests or task
+definitions and manufacture success. Action SHA pins, read-only permissions,
+report validation and green checks do not establish an independent trust boundary.
+This draft prepares verification machinery; the trusted external/organization
+boundary and protected task contract remain open design blockers. No repository
+rules, release pins or runner settings are changed by this addition.
 
 ## Coverage and candidate identity
 
@@ -19,6 +23,21 @@ artifact names, explicitly checks out `github.sha`, and selects lanes from their
 original path filters. Branch filters are conservatively ignored. Unknown glob
 syntax selects coverage rather than excluding it. Renames are diffed as deletion
 and addition so both old and new paths participate; filenames stay NUL separated.
+
+Every generated `uses:` reference must identify a full 40-character Git commit.
+The generator translates only these reviewed mutable source aliases, resolved
+with `git ls-remote` against their official upstream repositories on 2026-10-30:
+
+| Source alias | Fixed generated reference |
+| --- | --- |
+| `actions/checkout@v4` | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262) |
+| `actions/setup-python@v5` | [`a26af69be951a213d495a4c3e4e4022e16d87065`](https://github.com/actions/setup-python/commit/a26af69be951a213d495a4c3e4e4022e16d87065) |
+
+Existing full SHAs are preserved, including the separate utility checkout pin.
+Unknown tags/branches, shortened SHAs, expressions, local actions and container
+references fail generation. Full-graph tests verify every generated reference.
+These pins freeze the referenced action commits; they do not make a
+candidate-controlled workflow or its task definitions authoritative.
 
 The planner compares the event's full base SHA with the exact candidate SHA.
 Missing objects, invalid event identity, non-ancestor bases, and empty diffs fail.
@@ -64,7 +83,8 @@ After upstream review/merge and an actual supported release, explicitly set
 `ci.cuenv.version` to that existing release in the source configuration, regenerate
 setup/source/integration workflows, test compatibility with the separately pinned
 0.57.3 CUE schema, and repeat actual hosted lane execution and exact-head review.
-Only then can this gate be activated. Do not publish or merge upstream as part
+That resolves only the CLI/hosted-execution blocker; it does not make the
+candidate-controlled aggregate eligible as a trusted required gate. Do not publish or merge upstream as part
 of this draft's local validation.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
@@ -90,51 +110,59 @@ python3 scripts/test_integration_ci_project.py
 WADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py
 ```
 
+The local inline/false fixtures scrub all `GITHUB_*` and `WADDLE_CI_*` variables,
+Buildkite detection and GitHub token environment from every adapter subprocess.
+A poisoned-ambient regression checks this per invocation. The separate real-event
+fixture explicitly supplies its own merge-group identity. This test isolation
+does not override the real workflow execution context.
+
 The existing server `checkCiDrift` and the integration planner check graph parity.
 Adding or changing a source PR lane without regenerating fails those checks.
 Original PR workflows remain active with their existing privileges, so applicable PR jobs temporarily execute
 in both workflows. This increases demand and deliberately preserves coverage;
-runner provisioning must be repaired before enabling the required gate. Omitting
+runner provisioning must be repaired before any separately trusted gate is enabled. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
 warnings in `crates/ci/src/executor/reporting.rs` of cuenv v0.57.3. Generated
 integration jobs rely on Actions job results rather than those notifications.
 
-## Reviewed settings proposal and activation evidence
+## Open trusted-gate boundary
 
 At inspection on 2026-10-30, repository ruleset `6335231` contained a merge queue
 but no `required_status_checks`; classic branch protection returned HTTP 404.
 The current user was an always-bypass actor. The queue alone is not a CI gate.
 
-The adjacent `integration-ci-ruleset-proposal.json` is an additive rule proposal,
-not a complete ruleset replacement. After reviewing the full current ruleset,
-append its `required_status_checks` rule while preserving deletion, linear
-history, non-fast-forward and merge-queue protections. The context is
-`integration` from the GitHub Actions app (integration ID `15368`). Preserve the
-queue; set its check-response timeout only after measuring actual capacity.
+The adjacent `integration-ci-ruleset-proposal.json` is a historical illustrative
+status-rule shape, **not an eligible or approved configuration to apply**: it
+requires the candidate-controlled `integration` context from shared Actions app
+15368. That binding does not identify trusted verifier code. Do not activate it
+as the required trusted gate. Main policy is unchanged.
 
-A required context protects against accidental failed/missing verification; it
-is not tamper resistant against changes to this repository's own workflow,
-generator, filters or tests. For that threat model, enforce an organization
-required workflow from a separately protected source, or require independent CI
-owner review for all gate, source workflow, env.cue, pipeline and task
-definition changes and remove routine bypass
-actors. A same-repository context rule alone must never be represented as that
-stronger assurance. Original workflows still have existing checks-write tokens
-and OIDC access; their ability to forge a same-name context and their external
-OIDC trust bindings have not been audited. That existing authority is a separate
-activation blocker, even with the new integration jobs restricted to read-only
-repository access. Requiring the context alone does not resolve it. This PR does
-not silently add reviewers or remove bypasses.
+Two architecture directions remain open: a required organization workflow whose
+verifier comes from a separately protected source, or an external verifier with
+independent authority and a separately protected implementation. Neither boundary
+is implemented here. Either design must bind evidence to the exact candidate,
+use a protected complete task contract, handle candidate attempts to alter or omit
+verification, and prevent other candidate jobs from forging the required result.
+The protected contract must cover surfaces/path selection, projects, pipelines,
+named tasks, inputs/assertions, dependency closures, hooks, runtime/environment
+behavior and indirect executables. Candidate changes to that contract require a
+separate reviewed transition; reading a candidate's own task inventory is not
+proof that it preserved the required work. CI-owner review is useful but does not
+replace the missing execution/authority boundary.
 
-Activation must be separately reviewed. Keep the federation merge freeze during
-bootstrap; do not merge this PR through the currently unenforced queue. Before
-claiming enforced verification, inspect the activated ruleset, observe a real
-merge-group run at its exact head SHA, deliberately fail an applicable lane and
-prove the queue refuses it, then prove a clean candidate passes. Also exercise
-an advancing base, cancellation, empty diff and a source-lane addition. Local
-contract tests establish implementation behavior but not GitHub enforcement.
+Original workflows still have checks-write tokens and OIDC access. Their ability
+to forge a same-name context and their external trust bindings remain unaudited.
+The new generated jobs retain read-only repository permissions, but that alone
+does not isolate required-check authority from the original jobs. No organization
+settings, repositories, apps, production release pins or main rules are created
+or modified by this draft.
+
+Any eventual activation needs independent architecture review, protected-source
+and task-contract enforcement, audited credential authority, real current-head
+execution and controlled negative/positive queue proofs on the actual policy.
+Local contracts and isolated canary behavior do not establish main enforcement.
 
 ## Runner availability
 
@@ -167,83 +195,35 @@ GitHub documents the separate merge-group trigger and skipped-job behavior in
 [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group)
 and [troubleshooting required checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 
-## Bootstrap without an unenforced interval
+## Bootstrap evidence and remaining work
 
-This main-branch sequence still requires separate owner review and activation.
-Controlled canary evidence below does not establish actual main enforcement. The current ruleset has no required status context, so an
-operator's promise to wait is not an enforced freeze.
+There is no executable main-activation sequence approved for this draft. Keep
+federation merges blocked while the trusted boundary and protected task contract
+are unresolved. A same-repository context requirement must not be substituted
+for that work. A future bootstrap must establish and read back the independently
+trusted rule before admitting candidates, retain an effective exclusive freeze
+through the transition, and prove candidate failure/missing evidence cannot
+advance main. The previously proposed no-bypass update freeze still needs queue
+behavior proof; administrators' ability to edit rules also needs coordination.
 
-1. Create a separate active main-only bootstrap ruleset with no bypass actors
-   and an `update` restriction. Proposed shape:
+Controlled canary evidence on 2026-10-30:
+[#2072](https://github.com/waddle-social/waddle/pull/2072) used ruleset 26220154,
+required Actions app 15368 context `integration-canary-2047`, and no bypass.
+GitHub accepted the required context before the target contained its workflow and
+ran candidate-only merge-group run 41089409061 at `d350fd6`. The failing candidate
+was dequeued without changing base `d12e90e`; passing candidate `b4133ce` then
+merged. This proves platform discovery/status enforcement for that isolated
+canary, not independent trust in candidate-controlled code or the main policy.
+[#2073](https://github.com/waddle-social/waddle/pull/2073) proved that a no-bypass
+update restriction rejects direct pushes; queue behavior while frozen remained
+inconclusive because an optional review was pending. Temporary rulesets and
+remote canary branches were removed. No actual main enforcement is claimed.
 
-   ```json
-   {
-     "name": "integration-ci-bootstrap-freeze",
-     "target": "branch",
-     "enforcement": "active",
-     "bypass_actors": [],
-     "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
-     "rules": [{"type": "update"}]
-   }
-   ```
-
-   First validate that restriction and ordinary-actor denial on a controlled
-   canary branch/repository, including merge-queue updates. Read back the actual
-   main rule after activation, preserve the existing rules, and stop federation
-   queue admissions. Do not claim a freeze until its effective enforcement and
-   bypass configuration are verified. Repository administrators can still edit
-   rules; coordinate a single reviewed settings operator during bootstrap.
-
-2. Repair capacity, complete exact-head PR CI and independent source review, and
-   resolve the original workflow write-token/OIDC and definition-review policy.
-   Keep main frozen. The required `integration` context must have a real recent
-   successful run in this repository from Actions app 15368. GitHub documents a
-   successful-check lookback of seven days, not a requirement that the workflow
-   already be on main. Do not seed eligibility with a fabricated status or an
-   unrelated dispatch check.
-
-3. In a controlled repository with the same queue/rules capabilities, test both
-   platform assumptions before depending on them here: add the required context
-   while its new workflow exists only in a PR, then queue that candidate. Prove
-   an intentionally failing applicable job produces a failing check on the
-   exact `merge_group.head_sha` and blocks the queue even when its PR check was
-   green. Then prove a clean candidate containing the newly introduced workflow
-   runs and can pass. Record the event, workflow revision, SHA, app identity,
-   effective rules and unchanged base on the failing case.
-
-   Controlled canary evidence on 2026-10-30: [#2072](https://github.com/waddle-social/waddle/pull/2072)
-   used ruleset 26220154 with required Actions app 15368 context
-   `integration-canary-2047` and no bypass. GitHub accepted the context before
-   the target contained the workflow and ran candidate-only `merge_group` run
-   41089409061 at `d350fd6`. The failing candidate was dequeued without changing
-   base `d12e90e`; passing candidate `b4133ce` then merged. This establishes those
-   discovery/enforcement behaviors for that isolated canary, not the proposed
-   integration workflow or main policy. [#2073](https://github.com/waddle-social/waddle/pull/2073)
-   also proved no-bypass update restriction rejects direct pushes; queue behavior
-   while frozen remained inconclusive because an optional review was pending.
-   Temporary rulesets and remote canary branches were removed. Main activation
-   still needs its own effective-rule readback and exact-candidate proof.
-
-4. With the freeze still active, add the reviewed required-status rule, confirm
-   its effective configuration and the credential/review protections, and
-   admit only the reviewed bootstrap PR. Remove the temporary update freeze
-   only after the required gate is active and the controlled negative test has
-   passed; never remove the required gate to get the bootstrap PR through.
-   Observe its real merge-group run at the actual combined candidate SHA.
-   Missing workflow discovery must leave the check pending and block the queue.
-   Complete a controlled negative/positive test on the actual main policy before
-   reopening normal admissions; hold federation PRs until that proof is recorded.
-
-5. If candidate-only workflow discovery or pre-main context enforcement cannot
-   be proved, retain the freeze. Use a separately protected organization
-   required workflow or independently trusted CI integration that can verify
-   the bootstrap candidate under an enforced rule, subject to account feature
-   availability and separate review. Do not assume that capability exists, and
-   do not substitute a one-off bypass, unchecked merge, or removed requirement.
-
-The temporary freeze proposal is intentionally separate from the additive
-required-status JSON so preserving or removing one cannot accidentally remove
-the other. Relevant platform references are GitHub's
+Once a trusted design is independently reviewed and implemented, repeat the
+actual exact-candidate workflow and negative/positive enforcement checks against
+its final policy, including advancing base, cancellation, missing evidence and a
+source-lane/task-contract change. Never remove a required gate or use a bypass
+to get bootstrap through. Relevant platform references are GitHub's
 [merge-group event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group),
 [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks),
 and [update restrictions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#restrict-updates).

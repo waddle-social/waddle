@@ -3,6 +3,7 @@ import copy
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import sys
 import os
 import json
@@ -15,6 +16,17 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("integration_ci_project", Path(__file__).with_name("integration-ci-project.py"))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+
+def local_fixture_environment(environment):
+    return {key: value for key, value in environment.items()
+            if not key.startswith(("GITHUB_", "WADDLE_CI_")) and key not in ("BUILDKITE", "GH_TOKEN")}
+
+
+class FixtureEnvironmentContracts(unittest.TestCase):
+    def test_scrubs_all_github_candidate_and_base_variables(self):
+        environment = {"PATH": "/tools", "GITHUB_ACTIONS": "true", "GITHUB_SHA": "candidate", "GITHUB_BASE_REF": "main", "GITHUB_EVENT_PATH": "/event.json", "GITHUB_FUTURE_CONTEXT": "unknown", "WADDLE_CI_HEAD_SHA": "candidate", "WADDLE_CI_BASE_SHA": "base", "BUILDKITE": "true", "GH_TOKEN": "secret"}
+        self.assertEqual(local_fixture_environment(environment), {"PATH": "/tools"})
 
 
 class DiscoveryContracts(unittest.TestCase):
@@ -140,21 +152,20 @@ class PinnedCuenvContracts(unittest.TestCase):
             git("init", "-q"); git("config", "user.name", "Integration contracts"); git("config", "user.email", "integration@example.test")
             git("add", "."); git("commit", "-qm", "base"); base = git("rev-parse", "HEAD")
             (root / "input").write_text("changed"); git("add", "."); git("commit", "-qm", "head")
-            environment = dict(os.environ)
-            environment.pop("GITHUB_ACTIONS", None); environment.pop("BUILDKITE", None)
+            environment = local_fixture_environment(os.environ)
             command = ["cuenv", "ci", "--pipeline", "pullRequest", "--path", ".", "--from", base]
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             attest = [sys.executable, str(helper), "--path", ".", "--pipeline", "pullRequest"]
-            self.assertNotEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
+            self.assertNotEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
             bound_inline = inline.replace('hermetic: false}], tasks: unused:', 'hermetic: false, stdout: cuenvTask: "reject", stderr: cuenvTask: "reject", exitCode: cuenvTask: "reject"}], tasks: reject:').replace(true_command, false_command)
             (root / "env.cue").write_text(bound_inline)
             self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
-            self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
-            bound_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
+            bound_result = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(bound_result.returncode, 0)
             self.assertIn("named task references", bound_result.stderr)
             (root / "env.cue").write_text(named)
-            self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
+            self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
             result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Executing reject", result.stdout)
@@ -162,15 +173,15 @@ class PinnedCuenvContracts(unittest.TestCase):
             shell = json.dumps(shutil.which("sh"))
             dependent = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {let _tasks = tasks, name: "fixture", ci: pipelines: pullRequest: tasks: [_tasks.second], tasks: {first: {command: ' + shell + ', args: ["-c", "printf before >> trace"], hermetic: false}, second: {command: ' + shell + ', args: ["-c", "printf after >> trace"], hermetic: false, dependsOn: [_tasks.first]}}}\n'
             (root / "env.cue").write_text(dependent)
-            dependency_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            dependency_result = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertEqual(dependency_result.returncode, 0, dependency_result.stderr)
             self.assertEqual((root / "trace").read_text(), "beforeafter")
-            stale = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            stale = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(stale.returncode, 0)
             self.assertIn("report already exists", stale.stderr)
             shutil.rmtree(root / ".cuenv/reports")
             (root / "env.cue").write_text(dependent.replace("printf before >> trace", "exit 7"))
-            dependency_failure = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            dependency_failure = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(dependency_failure.returncode, 0)
             shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             for option_name in ("--help", "--dry-run"):
@@ -178,15 +189,33 @@ class PinnedCuenvContracts(unittest.TestCase):
                     quoted_name = json.dumps(option_name)
                     option_task = named.replace("_tasks.reject", "_tasks[" + quoted_name + "]").replace("tasks: reject:", "tasks: " + quoted_name + ":")
                     (root / "env.cue").write_text(option_task)
-                    self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
-                    option_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+                    self.assertEqual(subprocess.run(attest, cwd=root, env=environment, capture_output=True).returncode, 0)
+                    option_result = subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True, text=True)
                     self.assertNotEqual(option_result.returncode, 0)
                     self.assertIn("failed", option_result.stdout + option_result.stderr)
                     shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             for invalid in ('package cuenv\n', named.replace('tasks: [_tasks.reject]', 'tasks: []'), named.replace('pullRequest:', 'missing:'), 'package cuenv\ninvalid: ['):
                 (root / "env.cue").write_text(invalid)
                 with self.subTest(invalid=invalid):
-                    self.assertNotEqual(subprocess.run(attest + ["--run"], cwd=root, capture_output=True).returncode, 0)
+                    self.assertNotEqual(subprocess.run(attest + ["--run"], cwd=root, env=environment, capture_output=True).returncode, 0)
+
+
+    def test_every_inline_adapter_subprocess_receives_scrubbed_environment(self):
+        helper = str(Path(__file__).with_name("integration-ci-project.py").resolve())
+        poisoned = {key: "leaked" for key in ("GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_EVENT_PATH", "GITHUB_BEFORE", "GITHUB_TOKEN", "WADDLE_CI_HEAD_SHA", "WADDLE_CI_BASE_SHA")}
+        poisoned.update(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="merge_group", BUILDKITE="true", GH_TOKEN="secret")
+        original_run = subprocess.run
+        adapter_calls = []
+        def checked_run(command, **options):
+            if command[:2] == [sys.executable, helper]:
+                adapter_calls.append(command)
+                self.assertIn("env", options)
+                self.assertEqual(options["env"], local_fixture_environment(options["env"]))
+                self.assertTrue(all(key not in options["env"] for key in poisoned))
+            return original_run(command, **options)
+        with patch.dict(os.environ, poisoned), patch.object(subprocess, "run", side_effect=checked_run):
+            self.test_inline_false_noop_is_rejected_and_named_false_executes()
+        self.assertGreaterEqual(len(adapter_calls), 15)
 
 
     def test_real_event_hooks_and_missing_or_forged_reports(self):

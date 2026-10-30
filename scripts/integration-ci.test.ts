@@ -91,6 +91,38 @@ describe("graph parity", () => {
   });
 });
 
+
+describe("immutable generated action references", () => {
+  const collect = (value: any): string[] => {
+    if (Array.isArray(value)) return value.flatMap(collect);
+    if (!value || typeof value !== "object") return [];
+    return Object.entries(value).flatMap(([key, item]) => key === "uses" ? [item as string] : collect(item));
+  };
+  test("pins known mutable aliases and retains existing full SHAs", () => {
+    const source = lane();
+    const preserved = "example/action/subpath@" + "A".repeat(40);
+    source.workflow.jobs.build.steps.push({ uses: "actions/setup-python@v5" }, { uses: preserved });
+    const workflow = Bun.YAML.parse(generate([source])) as any;
+    expect(workflow.jobs.example__build.steps[0].uses).toBe("actions/checkout@11d5960a326750d5838078e36cf38b85af677262");
+    expect(workflow.jobs.example__build.steps[2].uses).toBe("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065");
+    expect(workflow.jobs.example__build.steps[3].uses).toBe(preserved);
+  });
+  test("every action in the complete generated graph uses a full commit SHA", () => {
+    const lanes = readLanes();
+    const references = collect(Bun.YAML.parse(generate(lanes)));
+    expect(references.length).toBeGreaterThan(30);
+    for (const reference of references) expect(reference).toMatch(/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.-]*)*@[0-9a-fA-F]{40}$/);
+    for (const reference of collect(lanes).filter(reference => /@[0-9a-fA-F]{40}$/.test(reference) && !reference.startsWith("DeterminateSystems/flakehub-cache-action@"))) expect(references).toContain(reference);
+  });
+  test("rejects unknown mutable, shortened, local, container and expression references", () => {
+    for (const reference of ["actions/checkout@v5", "actions/setup-python@main", "unknown/action@v1", "unknown/action@abcdef0", "./candidate-action", "./candidate-action@" + "a".repeat(40), "docker://example:latest", "${{ inputs.action }}"]) {
+      const source = lane();
+      source.workflow.jobs.build.steps.push({ uses: reference });
+      expect(() => generate([source])).toThrow("Unreviewed mutable action reference");
+    }
+  });
+});
+
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";

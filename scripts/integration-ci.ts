@@ -5,6 +5,24 @@ const workflowDirectory = ".github/workflows";
 export const outputFile = `${workflowDirectory}/waddle-integration.yml`;
 const checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5";
 const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
+// Resolved from the official upstream tag refs on 2026-10-30; see docs/integration-ci.md.
+const reviewedActionPins: Record<string, string> = {
+  "actions/checkout@v4": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+  "actions/setup-python@v5": "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+};
+const immutableAction = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.-]*)*@[0-9a-fA-F]{40}$/;
+
+function pinActionReferences(value: any): any {
+  if (Array.isArray(value)) return value.map(pinActionReferences);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (key !== "uses") return [key, pinActionReferences(item)];
+    const action = typeof item === "string" ? (reviewedActionPins[item] ?? item) : item;
+    if (typeof action !== "string" || !immutableAction.test(action)) throw new Error(`Unreviewed mutable action reference: ${String(item)}`);
+    return [key, action];
+  }));
+}
+
 type Workflow = Record<string, any>;
 export type Lane = { id: string; file: string; workflow: Workflow };
 
@@ -145,7 +163,7 @@ export function generate(lanes: Lane[]): string {
     concurrency: { group: "integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}", "cancel-in-progress": true },
     jobs,
   };
-  return "# Generated from existing PR workflow graphs; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(workflow, null, 2).replace(/[ \t]+$/gm, "") + "\n";
+  return "# Generated from existing PR workflow graphs; do not edit manually.\n# Regenerate with: bun scripts/integration-ci.ts sync\n\n" + Bun.YAML.stringify(pinActionReferences(workflow), null, 2).replace(/[ \t]+$/gm, "") + "\n";
 }
 
 export function verifyGate(results: Record<string, { result: string }>, expected: string[], allJobs: string[]): void {
