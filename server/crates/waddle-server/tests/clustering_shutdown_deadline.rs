@@ -368,3 +368,84 @@ async fn sigterm_with_a_held_publication_guard_does_not_retire() {
     assert!(live_identity.current().is_active());
     drop(publication);
 }
+
+/// Local claims whose room-drain inventory read waits for `release`.
+struct GatedRoomDrain {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl LocallyClaimedEntities for GatedRoomDrain {
+    async fn owned(&self) -> Vec<Entity> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Vec::new()
+    }
+    async fn demote(&self, _entity: &Entity) {}
+    async fn health_check(&self, _entity: &Entity) -> bool {
+        true
+    }
+}
+
+/// A clustering-only stop (for example the swarm's keypair-slot self-fence)
+/// starts the node-lease shutdown; SIGTERM then arrives while the room
+/// drain is still running. The node must still keep its identity
+/// authoritative for the Q6 drain, bounded by the drain phase of the
+/// enclosing deadline, before `disable()` and retirement.
+#[tokio::test(start_paused = true)]
+async fn sigterm_during_a_clustering_only_room_drain_still_waits_for_q6() {
+    let owner = identity();
+    let live_identity = SharedNodeIdentity::new(owner.clone());
+    let deadline = ten_second_deadline();
+    let probe_deadline = deadline.clone();
+    let lease = RecordingLease::new(
+        true,
+        Box::new(move |_| {
+            probe_deadline.started().is_some_and(|shutdown| {
+                let now = tokio::time::Instant::now();
+                now >= shutdown.drain_deadline() && now <= shutdown.deadline()
+            })
+        }),
+    );
+    let retirements = Arc::clone(&lease.retirements);
+    let process_stop = CancellationToken::new();
+    let clustering_stop = CancellationToken::new();
+    let room_drain = GatedRoomDrain {
+        entered: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let entered = Arc::clone(&room_drain.entered);
+    let release = Arc::clone(&room_drain.release);
+    let task = tokio::spawn(run_node_lease(
+        lease,
+        owner.clone(),
+        clustering_stop.clone(),
+        run_config(
+            Duration::from_secs(10),
+            Arc::new(room_drain),
+            NodeLifecycle::new(),
+            live_identity.clone(),
+            Some(stalled_q6(&process_stop, &deadline)),
+        ),
+    ));
+    tokio::task::yield_now().await;
+
+    // Clustering-only stop: the room drain starts without a process stop.
+    clustering_stop.cancel();
+    entered.notified().await;
+    // SIGTERM while the room drain is still running.
+    process_stop.cancel();
+    let shutdown = deadline.start();
+    release.notify_one();
+    tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+        .await
+        .expect("node-lease shutdown must end inside the enclosing deadline")
+        .expect("node-lease task");
+
+    assert_eq!(
+        retirements.lock().expect("lock").as_slice(),
+        &[(owner, true)],
+        "retired once, only after the Q6 wait reached the drain stage's end"
+    );
+}
