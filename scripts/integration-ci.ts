@@ -53,7 +53,7 @@ function remapNeeds(value: any, lane: Lane): any {
 }
 
 const utilitySteps = () => [
-  { name: "Checkout exact candidate", uses: checkout, with: { ref: "${{ github.sha }}", "fetch-depth": 0 } },
+  { name: "Checkout exact candidate", uses: checkout, with: { ref: "${{ github.sha }}", "fetch-depth": 0, "persist-credentials": false } },
   { name: "Install Bun", uses: setupBun, with: { "bun-version": "1.4.2" } },
 ];
 
@@ -82,7 +82,9 @@ export function generate(lanes: Lane[]): string {
       const condition = source.if ? String(source.if).replace(/^\$\{\{\s*|\s*\}\}$/g, "") : "success()";
       job.if = `\${{ (${condition}) && needs.plan.result == 'success' && needs.plan.outputs.${lane.id} == 'true' }}`;
       job.name = `${lane.workflow.name} / ${source.name ?? id}`;
-      job.permissions ??= lane.workflow.permissions ?? { contents: "read" };
+      // Verification code must not inherit reporter writes or cloud identity.
+      // FlakeHub cache requires OIDC, so keep Hestia and omit that setup step.
+      job.steps = job.steps.filter((step: Workflow) => !step.uses?.startsWith("DeterminateSystems/flakehub-cache-action@"));
       if (lane.workflow.env) job.env = { ...lane.workflow.env, ...job.env };
       if (lane.workflow.defaults) job.defaults = { ...lane.workflow.defaults, ...job.defaults };
       let checkouts = 0;
@@ -90,13 +92,21 @@ export function generate(lanes: Lane[]): string {
         if (step.uses?.startsWith("actions/checkout@")) {
           checkouts++;
           if (step.with?.repository || step.with?.ref) throw new Error(`Unexpected checkout override in ${lane.file}/${id}`);
-          step.with = { ...step.with, ref: "${{ github.sha }}" };
+          step.with = { ...step.with, ref: "${{ github.sha }}", "persist-credentials": false };
         }
         if (/^actions\/(upload|download)-artifact@/.test(step.uses ?? "")) {
           if (!step.with?.name || step.with.pattern) throw new Error(`Unsupported artifact in ${lane.file}/${id}`);
           step.with.name = `${lane.id}-${step.with.name}`;
         }
       }
+      job.permissions = checkouts ? { contents: "read" } : {};
+      for (const environment of [job.env, ...job.steps.map((step: Workflow) => step.env)]) {
+        if (environment) { delete environment.GITHUB_TOKEN; delete environment.GH_TOKEN; }
+      }
+      for (const owner of [job, ...job.steps]) {
+        if (owner.env && !Object.keys(owner.env).length) delete owner.env;
+      }
+      if (/\$\{\{[^}]*secrets\./.test(JSON.stringify(job))) throw new Error(`Unreviewed secret use in ${lane.file}/${id}`);
       // The old nixTest aggregate has no checkout or source-executing steps.
       if (!checkouts && !dependencies.length) throw new Error(`Unbound source execution in ${lane.file}/${id}`);
       jobs[`${lane.id}__${id.toLowerCase()}`] = job;

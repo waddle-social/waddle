@@ -82,8 +82,10 @@ describe("graph parity", () => {
       for (const [id, source] of Object.entries(lane.workflow.jobs) as [string, any][]) {
         const generated = workflow.jobs[`${lane.id}__${id.toLowerCase()}`];
         expect(generated["runs-on"]).toEqual(source["runs-on"]);
-        expect(generated.permissions).toEqual(source.permissions ?? lane.workflow.permissions ?? { contents: "read" });
-        expect(generated.steps.map((step: any) => step.run)).toEqual(source.steps.map((step: any) => step.run));
+        expect(generated.permissions).toEqual(source.steps.some((step: any) => step.uses?.startsWith("actions/checkout@")) ? { contents: "read" } : {});
+        expect(JSON.stringify(generated)).not.toContain("secrets.");
+        expect(generated.steps.some((step: any) => step.uses?.startsWith("DeterminateSystems/flakehub-cache-action@"))).toBe(false);
+        expect(generated.steps.filter((step: any) => step.run).map((step: any) => step.run)).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
       }
     }
   });
@@ -134,4 +136,28 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
 
 test("duplicate job identifiers fail rather than overwrite coverage", () => {
   expect(() => generate([lane(), lane()])).toThrow("Duplicate");
+});
+
+test("candidate jobs cannot inherit check writes, PR writes, OIDC or explicit GitHub credentials", () => {
+  const source = lane();
+  source.workflow.jobs.build.permissions = { contents: "read", checks: "write", "pull-requests": "write", "id-token": "write" };
+  source.workflow.jobs.build.env = { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" };
+  source.workflow.jobs.build.steps.push({ uses: "DeterminateSystems/flakehub-cache-action@pinned" });
+  source.workflow.jobs.build.steps.push({ run: "verify", env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" } });
+  const workflow = Bun.YAML.parse(generate([source])) as any;
+  const job = workflow.jobs.example__build;
+  expect(job.permissions).toEqual({ contents: "read" });
+  expect(job.env).toBeUndefined();
+  expect(job.steps[0].with["persist-credentials"]).toBe(false);
+  expect(job.steps[2].run).toBe("verify");
+  expect(job.steps[2].env).toBeUndefined();
+  expect(JSON.stringify(job)).not.toContain("flakehub-cache-action");
+  expect(JSON.stringify(job)).not.toContain("secrets.");
+  expect(workflow.jobs.example__verify.permissions).toEqual({});
+});
+
+test("new unreviewed secret use fails generation", () => {
+  const source = lane();
+  source.workflow.jobs.build.steps.push({ run: "verify", env: { PRIVATE_TOKEN: "${{ secrets.PRIVATE_TOKEN }}" } });
+  expect(() => generate([source])).toThrow("Unreviewed secret");
 });

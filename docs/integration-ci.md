@@ -10,7 +10,11 @@ the required context is not enforced on the queue candidate.
 
 The generator discovers every checked-in workflow with a `pull_request` trigger,
 including native experiments. It copies its jobs, commands, runner sizes,
-permissions, dependencies, and internal failure checks. It namespaces job and
+dependencies, and internal failure checks. Generated verification jobs are capped
+at `contents: read` (or no permissions for a pure result check). They omit
+FlakeHub cache setup, which requires cloud OIDC, retain Hestia, remove explicit
+run-step GitHub tokens, and disable persisted checkout credentials. Original
+workflow permissions and behavior are unchanged. It namespaces job and
 artifact names, explicitly checks out `github.sha`, and selects lanes from their
 original path filters. Branch filters are conservatively ignored. Unknown glob
 syntax selects coverage rather than excluding it. Renames are diffed as deletion
@@ -37,9 +41,14 @@ bun test scripts/integration-ci.test.ts
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
 Adding or changing a source PR lane without regenerating fails those checks.
-Original PR workflows remain active, so applicable PR jobs temporarily execute
+Original PR workflows remain active with their existing privileges, so applicable PR jobs temporarily execute
 in both workflows. This increases demand and deliberately preserves coverage;
-runner provisioning must be repaired before enabling the required gate.
+runner provisioning must be repaired before enabling the required gate. Omitting
+FlakeHub cache can increase compile and download time; no verification commands,
+runner resources, or assertions are removed. The pinned cuenv reporter only uses
+check/PR write permissions for optional notifications; notification failures are
+warnings in `crates/ci/src/executor/reporting.rs` of cuenv v0.57.3. Generated
+integration jobs rely on Actions job results rather than those notifications.
 
 ## Reviewed settings proposal and activation evidence
 
@@ -60,7 +69,12 @@ generator, filters or tests. For that threat model, enforce an organization
 required workflow from a separately protected source, or require independent CI
 owner review for all gate and source workflow changes and remove routine bypass
 actors. A same-repository context rule alone must never be represented as that
-stronger assurance. This PR does not silently add reviewers or remove bypasses.
+stronger assurance. Original workflows still have existing checks-write tokens
+and OIDC access; their ability to forge a same-name context and their external
+OIDC trust bindings have not been audited. That existing authority is a separate
+activation blocker, even with the new integration jobs restricted to read-only
+repository access. Requiring the context alone does not resolve it. This PR does
+not silently add reviewers or remove bypasses.
 
 Activation must be separately reviewed. Keep the federation merge freeze during
 bootstrap; do not merge this PR through the currently unenforced queue. Before
