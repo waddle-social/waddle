@@ -92,15 +92,15 @@ export function generate(lanes: Lane[]): string {
         if (step.run?.includes("cuenv ci")) {
           const invocation = step.run.match(/^cuenv ci --pipeline ([a-zA-Z0-9_-]+) --path ([a-zA-Z0-9_./-]+)$/);
           if (!invocation || step["working-directory"]) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
-          // Pinned cuenv affectedness can skip unresolved inline tasks.
-          // Execute all attested named tasks directly with their dependencies.
+          // Original CI execution preserves runtime/dependency behavior.
+          // Fail closed until a supported --all CLI is explicitly pinned.
           step.run = [
             "set -euo pipefail",
             'test "$(git rev-parse HEAD)" = "$WADDLE_CI_HEAD_SHA"',
             'git cat-file -e "${WADDLE_CI_BASE_SHA}^{commit}"',
             'git merge-base --is-ancestor "$WADDLE_CI_BASE_SHA" "$WADDLE_CI_HEAD_SHA"',
             'git -c diff.renames=false diff --no-renames --name-only -z "$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA" > /dev/null',
-            "WADDLE_TEST_PINNED_CUENV=1 python3 scripts/test_integration_ci_project.py",
+            "WADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py",
             `python3 scripts/integration-ci-project.py --path ${invocation[2]} --pipeline ${invocation[1]} --run`,
           ].join("\n");
           step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}", WADDLE_CI_HEAD_SHA: "${{ github.sha }}" };

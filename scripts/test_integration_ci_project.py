@@ -69,17 +69,61 @@ class DiscoveryContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
+    def test_supported_pipelines_are_narrowly_scoped(self):
+        for pipeline in ("default", "publish", "--help", "deviceTests"):
+            with self.subTest(pipeline=pipeline), self.assertRaises(ValueError):
+                module.verify_project(self.summary, self.metadata, self.root / "chat", pipeline)
+        self.summary["projects"][0].update(name="waddle-android", path="apps/android")
+        config = self.metadata["instances"].pop("chat")
+        config["name"] = "waddle-android"
+        config["ci"]["pipelines"]["deviceTests"] = config["ci"]["pipelines"]["pullRequest"]
+        self.metadata["instances"]["apps/android"] = config
+        self.assertEqual(module.verify_project(self.summary, self.metadata, self.root / "apps/android", "deviceTests")["tasks"], 1)
+
     def test_mismatched_metadata_fails(self):
         self.metadata["instances"]["chat"]["name"] = "other"
         with self.assertRaises(ValueError):
             self.verify()
 
 
-@unittest.skipUnless(os.environ.get("WADDLE_TEST_PINNED_CUENV") == "1", "requires explicit pinned-cuenv regression run")
+class ReportContracts(unittest.TestCase):
+    def setUp(self):
+        self.context = {"provider": "github", "event": "merge_group", "ref_name": "gh-readonly-queue/main/example", "base_ref": "", "sha": "a" * 40}
+        self.result = {"pipeline": "pullRequest", "task_names": ["verify"]}
+        self.report = {"version": "0.63.0", "project": "/fixture", "pipeline": "pullRequest", "context": copy.deepcopy(self.context), "status": "success", "started_at": "1970-01-01T00:00:11Z", "completed_at": "1970-01-01T00:00:12Z", "tasks": [{"name": "verify", "status": "success", "exit_code": 0}]}
+
+    def verify(self, report):
+        module.verify_report(report, self.result, "/fixture", self.context, "0.63.0", 10, 13)
+
+    def test_exact_report_and_invalid_reports(self):
+        self.verify(self.report)
+        variants = []
+        for key, value in (("version", "old"), ("project", "/other"), ("pipeline", "default"), ("status", "failed"), ("started_at", "1970-01-01T00:00:09Z"), ("completed_at", "1970-01-01T00:00:14Z"), ("tasks", []), ("tasks", self.report["tasks"] * 2)):
+            report = copy.deepcopy(self.report); report[key] = value; variants.append(report)
+        for key in self.context:
+            report = copy.deepcopy(self.report); report["context"][key] = "wrong"; variants.append(report)
+        for status, code in (("skipped", 0), ("cached", 0), ("failed", 1), ("success", 1), ("success", False), ("success", None)):
+            report = copy.deepcopy(self.report); report["tasks"][0].update(status=status, exit_code=code); variants.append(report)
+        for report in variants:
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                self.verify(report)
+        for text in ('{"status":"success","status":"failed"}', '{invalid', 'null'):
+            with self.subTest(text=text), self.assertRaises((ValueError, AttributeError)):
+                self.verify(json.loads(text, object_pairs_hook=module.unique_json_object))
+
+    def test_report_parent_symlinks_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "link").symlink_to(root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                module.check_report_parents(root / "link" / "report.json")
+
+
+@unittest.skipUnless(os.environ.get("WADDLE_TEST_ALL_CUENV") == "1", "requires reviewed --all CLI in PATH")
 class PinnedCuenvContracts(unittest.TestCase):
     def test_inline_false_noop_is_rejected_and_named_false_executes(self):
         version = subprocess.run(["cuenv", "--version"], check=True, capture_output=True, text=True).stdout.strip()
-        self.assertEqual(version, "cuenv 0.57.3")
+        self.assertTrue(version.startswith("cuenv "))
         helper = Path(__file__).with_name("integration-ci-project.py").resolve()
         with tempfile.TemporaryDirectory(prefix="waddle-discovery-pinned-") as temporary:
             root = Path(temporary)
@@ -99,27 +143,36 @@ class PinnedCuenvContracts(unittest.TestCase):
             environment = dict(os.environ)
             environment.pop("GITHUB_ACTIONS", None); environment.pop("BUILDKITE", None)
             command = ["cuenv", "ci", "--pipeline", "pullRequest", "--path", ".", "--from", base]
-            self.assertEqual(subprocess.run(command, cwd=root, env=environment, capture_output=True).returncode, 0)
+            self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             attest = [sys.executable, str(helper), "--path", ".", "--pipeline", "pullRequest"]
             self.assertNotEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
             bound_inline = inline.replace('hermetic: false}], tasks: unused:', 'hermetic: false, stdout: cuenvTask: "reject", stderr: cuenvTask: "reject", exitCode: cuenvTask: "reject"}], tasks: reject:').replace(true_command, false_command)
             (root / "env.cue").write_text(bound_inline)
-            self.assertEqual(subprocess.run(command, cwd=root, env=environment, capture_output=True).returncode, 0)
+            self.assertNotEqual(subprocess.run(command + ["--all"], cwd=root, env=environment, capture_output=True).returncode, 0)
             self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
             bound_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
             self.assertNotEqual(bound_result.returncode, 0)
-            self.assertIn("failed with exit code 1", bound_result.stderr)
+            self.assertIn("named task references", bound_result.stderr)
             (root / "env.cue").write_text(named)
             self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
             result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Executing reject", result.stdout)
+            shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             shell = json.dumps(shutil.which("sh"))
             dependent = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {let _tasks = tasks, name: "fixture", ci: pipelines: pullRequest: tasks: [_tasks.second], tasks: {first: {command: ' + shell + ', args: ["-c", "printf before >> trace"], hermetic: false}, second: {command: ' + shell + ', args: ["-c", "printf after >> trace"], hermetic: false, dependsOn: [_tasks.first]}}}\n'
             (root / "env.cue").write_text(dependent)
             dependency_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
             self.assertEqual(dependency_result.returncode, 0, dependency_result.stderr)
             self.assertEqual((root / "trace").read_text(), "beforeafter")
+            stale = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("report already exists", stale.stderr)
+            shutil.rmtree(root / ".cuenv/reports")
+            (root / "env.cue").write_text(dependent.replace("printf before >> trace", "exit 7"))
+            dependency_failure = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(dependency_failure.returncode, 0)
+            shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
             for option_name in ("--help", "--dry-run"):
                 with self.subTest(task_name=option_name):
                     quoted_name = json.dumps(option_name)
@@ -128,7 +181,54 @@ class PinnedCuenvContracts(unittest.TestCase):
                     self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
                     option_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
                     self.assertNotEqual(option_result.returncode, 0)
-                    self.assertIn("failed with exit code 1", option_result.stderr)
+                    self.assertIn("failed", option_result.stdout + option_result.stderr)
+                    shutil.rmtree(root / ".cuenv/reports", ignore_errors=True)
+            for invalid in ('package cuenv\n', named.replace('tasks: [_tasks.reject]', 'tasks: []'), named.replace('pullRequest:', 'missing:'), 'package cuenv\ninvalid: ['):
+                (root / "env.cue").write_text(invalid)
+                with self.subTest(invalid=invalid):
+                    self.assertNotEqual(subprocess.run(attest + ["--run"], cwd=root, capture_output=True).returncode, 0)
+
+
+    def test_real_event_hooks_and_missing_or_forged_reports(self):
+        helper = Path(__file__).with_name("integration-ci-project.py").resolve()
+        real_cli = shutil.which("cuenv")
+        with tempfile.TemporaryDirectory(prefix="waddle-report-all-") as temporary:
+            root = Path(temporary)
+            (root / "cue.mod").mkdir()
+            (root / "cue.mod/module.cue").write_text('module: "example.test/integration"\nlanguage: version: "v0.14.0"\ndeps: "github.com/cuenv/cuenv@v0": v: "v0.57.3"\n')
+            shell = json.dumps(shutil.which("sh"))
+            source = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {\n  let _tasks = tasks\n  name: "fixture"\n  hooks: onEnter: observe: {\n    command: SHELL\n    args: ["-c", #"printf \'export OBSERVED_EVENT=%s\\n\' "$GITHUB_EVENT_NAME""#]\n    source: true\n  }\n  ci: pipelines: pullRequest: tasks: [_tasks.check]\n  tasks: check: {\n    command: SHELL\n    args: ["-c", #"test "$OBSERVED_EVENT" = merge_group && printf checked > checked"#]\n    hermetic: false\n  }\n}\n'.replace("SHELL", shell)
+            (root / "env.cue").write_text(source)
+            def git(*args):
+                return subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+            git("init", "-q"); git("config", "user.name", "Report contracts"); git("config", "user.email", "integration@example.test"); git("add", "."); git("commit", "-qm", "base")
+            head = git("rev-parse", "HEAD")
+            environment = dict(os.environ, GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="merge_group", GITHUB_REPOSITORY="example/fixture", GITHUB_REF="refs/heads/gh-readonly-queue/main/example", GITHUB_REF_NAME="gh-readonly-queue/main/example", GITHUB_SHA=head, GITHUB_BASE_REF="")
+            for key in ("BUILDKITE", "GITHUB_TOKEN", "GH_TOKEN"):
+                environment.pop(key, None)
+            command = [sys.executable, str(helper), "--path", ".", "--pipeline", "pullRequest", "--run"]
+            result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "checked").read_text(), "checked")
+            reports = root / ".cuenv/reports"
+            report = next(reports.rglob("*.json"))
+            value = json.loads(report.read_text())
+            self.assertEqual(value["context"]["event"], "merge_group")
+            self.assertEqual(value["context"]["sha"], head)
+            stale = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("report already exists", stale.stderr)
+            # Delegate to the real CLI, then corrupt only its on-disk evidence.
+            binary_dir = root / "bin"; binary_dir.mkdir()
+            wrapper = binary_dir / "cuenv"
+            wrapper.write_text("#!" + sys.executable + "\n" + "import json, os, pathlib, subprocess, sys, time\n" + "result = subprocess.run([" + repr(real_cli) + "] + sys.argv[1:])\n" + "if sys.argv[1:3] == ['ci', '--all'] and result.returncode == 0:\n" + "    path = next(pathlib.Path('.cuenv/reports').rglob('*.json'))\n" + "    mode = os.environ['REPORT_TAMPER']\n" + "    if mode == 'missing': path.unlink()\n" + "    elif mode == 'symlink':\n" + "        other = path.with_suffix('.saved'); path.rename(other); path.symlink_to(other.name)\n" + "    elif mode == 'future': os.utime(path, (time.time() + 60, time.time() + 60))\n" + "    elif mode == 'parse': path.write_text('{invalid')\n" + "    else:\n" + "        value = json.loads(path.read_text())\n" + "        if mode == 'identity': value['context']['sha'] = 'b' * 40\n" + "        if mode == 'duplicate': value['tasks'] *= 2\n" + "        if mode == 'skipped': value['tasks'][0]['status'] = 'skipped'\n" + "        if mode == 'failed': value['tasks'][0]['exit_code'] = 1\n" + "        path.write_text(json.dumps(value))\n" + "sys.exit(result.returncode)\n")
+            wrapper.chmod(0o755)
+            for mode in ("missing", "identity", "duplicate", "skipped", "failed", "parse", "symlink", "future"):
+                shutil.rmtree(reports)
+                altered = dict(environment, PATH=str(binary_dir) + os.pathsep + environment["PATH"], REPORT_TAMPER=mode)
+                with self.subTest(mode=mode):
+                    result = subprocess.run(command, cwd=root, env=altered, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

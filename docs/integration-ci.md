@@ -28,24 +28,44 @@ success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
 reuse of prior PR results.
 
-Thin source workflows invoke `cuenv ci`, whose pinned affected-task selection can
-silently skip unresolved inline tasks or failed diffs. Integration replaces that
-nested planner with explicit named execution: it discovers the exact project
-using explicit-path `cuenv info --json`, reads its requested pipeline with
-`--json --meta`, and requires a nonempty task inventory. Each executable must
-exactly match a named binding in the project's task index. The runner invokes
-`cuenv task --path PROJECT NAME` for every attested pipeline task, with normal
-runtime and dependency execution, and fails on any nonzero exit. This includes
-all tasks of every selected thin lane, even when its own affectedness would
-have skipped them. Unsupported unnamed tasks, matrix task forms and pipeline
-execution options fail instead of being silently approximated.
+Thin source workflows retain the original `cuenv ci` executor, using its supported
+`--all` selection policy to execute every declared task of each selected thin
+lane with the original runtime, environment, inputs and dependency behavior.
+There is no provider/event override and no switch to the different `cuenv task`
+sandbox implementation. The adapter supports only the reviewed non-publishing
+`pullRequest` pipelines and Android `deviceTests`. It uses explicit-path `cuenv info --json [--meta]` to
+require one exact project, a nonempty executable task inventory, and consistent
+named bindings. Environment/continue-on-error pipeline options and unsupported
+task forms fail. Upstream `--all` independently rejects inline tasks, including
+an inline task that imitates a named binding's JSON output references.
 
-Named JSON equality alone does not prove cuenv's original source reference map:
-an inline task can imitate output names. Direct named execution avoids relying
-on that map. The pinned-cuenv regression reproduces both an unnamed inline false
-and an inline false equal to a named binding; the first is rejected and the
-second executes the named false task and fails. Every thin runner runs that
-regression before executing its project.
+Before execution, the fixed report filename must be absent and every existing
+parent must be a real directory. After a successful CLI exit, the adapter requires
+a fresh non-symlink regular JSON report of at most 4 MiB, rejects duplicate JSON
+keys, and checks its version, absolute project spelling, pipeline, provider,
+unchanged event/ref/base/SHA, task multiset, successful task statuses and integer
+zero exit codes. File modification and start/completion timestamps must lie
+within this invocation's wall-clock window. Missing, stale, future, malformed,
+duplicate-task, skipped, failed or wrong-identity reports fail. HEAD and the
+resolved project definition digest are rechecked after execution. Dependencies
+are executed by the original CI runner; its report lists pipeline entry tasks,
+so real dependency ordering and failure propagation are covered by CLI fixtures.
+Reports establish completion under trusted task definitions; they are not
+cryptographic evidence against arbitrary candidate code forging its own files.
+
+**Release blocker:** the repository still downloads cuenv 0.57.3, which lacks
+`ci --all`. No nonexistent release or schema version is pinned here. The adapter
+and its CLI regressions fail with that old binary. Downstream behavior is tested
+only with the local binary built from reviewed
+[cuenv #559](https://github.com/cuenv/cuenv/pull/559), exact commit
+`65538df73b5b56dde0b7fb3f6d555e978efd6d97`; its version label is 0.63.0 and does
+not mean that the published 0.63.0 release contains the patch. Keep this PR draft.
+After upstream review/merge and an actual supported release, explicitly set
+`ci.cuenv.version` to that existing release in the source configuration, regenerate
+setup/source/integration workflows, test compatibility with the separately pinned
+0.57.3 CUE schema, and repeat actual hosted lane execution and exact-head review.
+Only then can this gate be activated. Do not publish or merge upstream as part
+of this draft's local validation.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
 NUL-safe diff success. Deleted, empty, malformed, stale or empty-pipeline
@@ -58,16 +78,16 @@ A dispatch uses the selected workflow ref as its exact
 candidate and requires an explicit ancestor `base_sha`; it does not certify a
 later merge queue candidate.
 
-Regenerate normal cuenv workflows first with the release in `cue.mod/module.cue`,
-then run:
+Regenerate normal cuenv workflows with their deliberately selected CLI release
+(the CUE schema dependency is a separate pin), then run:
 
 ```sh
 bun scripts/integration-ci.ts sync
 bun scripts/integration-ci.ts --check
 bun test scripts/integration-ci.test.ts
 python3 scripts/test_integration_ci_project.py
-# Requires cuenv 0.57.3 in PATH; every selected thin job runs this too.
-WADDLE_TEST_PINNED_CUENV=1 python3 scripts/test_integration_ci_project.py
+# Requires the reviewed --all CLI in PATH; every selected thin job runs this too.
+WADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py
 ```
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
@@ -76,7 +96,7 @@ Original PR workflows remain active with their existing privileges, so applicabl
 in both workflows. This increases demand and deliberately preserves coverage;
 runner provisioning must be repaired before enabling the required gate. Omitting
 FlakeHub cache can increase compile and download time; no verification commands,
-runner resources, or assertions are removed. The pinned cuenv reporter only uses
+runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
 warnings in `crates/ci/src/executor/reporting.rs` of cuenv v0.57.3. Generated
 integration jobs rely on Actions job results rather than those notifications.
@@ -149,8 +169,8 @@ and [troubleshooting required checks](https://docs.github.com/en/pull-requests/h
 
 ## Bootstrap without an unenforced interval
 
-This is a proposed sequence requiring separate owner review; nothing here has
-been applied. The current ruleset has no required status context, so an
+This main-branch sequence still requires separate owner review and activation.
+Controlled canary evidence below does not establish actual main enforcement. The current ruleset has no required status context, so an
 operator's promise to wait is not an enforced freeze.
 
 1. Create a separate active main-only bootstrap ruleset with no bypass actors
@@ -191,14 +211,18 @@ operator's promise to wait is not an enforced freeze.
    runs and can pass. Record the event, workflow revision, SHA, app identity,
    effective rules and unchanged base on the failing case.
 
-   The official merge-group event reference specifies the group SHA and
-   separate trigger. Unlike several other events, its section does not state
-   a default-branch-file requirement. That omission does not prove whether a
-   workflow introduced only by the queued candidate will execute. Requiring a
-   context before that workflow reaches main and candidate-only workflow
-   discovery are both unproven for this repository until controlled live tests
-   and API readback establish them. A rejected rule update is a blocker, not
-   permission to omit the requirement.
+   Controlled canary evidence on 2026-10-30: [#2072](https://github.com/waddle-social/waddle/pull/2072)
+   used ruleset 26220154 with required Actions app 15368 context
+   `integration-canary-2047` and no bypass. GitHub accepted the context before
+   the target contained the workflow and ran candidate-only `merge_group` run
+   41089409061 at `d350fd6`. The failing candidate was dequeued without changing
+   base `d12e90e`; passing candidate `b4133ce` then merged. This establishes those
+   discovery/enforcement behaviors for that isolated canary, not the proposed
+   integration workflow or main policy. [#2073](https://github.com/waddle-social/waddle/pull/2073)
+   also proved no-bypass update restriction rejects direct pushes; queue behavior
+   while frozen remained inconclusive because an optional review was pending.
+   Temporary rulesets and remote canary branches were removed. Main activation
+   still needs its own effective-rule readback and exact-candidate proof.
 
 4. With the freeze still active, add the reviewed required-status rule, confirm
    its effective configuration and the credential/review protections, and

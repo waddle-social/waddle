@@ -168,7 +168,7 @@ test("new unreviewed secret use fails generation", () => {
   expect(() => generate([source])).toThrow("Unreviewed secret");
 });
 
-test("thin pipelines validate exact revisions and execute all attested named tasks", () => {
+test("thin pipelines validate exact revisions and attest complete original CI execution", () => {
   const source = lane(["chat/**"]);
   source.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
   const workflow = Bun.YAML.parse(generate([source])) as any;
@@ -201,7 +201,7 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
     writeFileSync(join(directory, "file"), "head"); git("add", "."); git("commit", "-qm", "head");
     const head = git("rev-parse", "HEAD");
     const marker = join(directory, "cuenv-called");
-    const testCommand = command.replace(/^WADDLE_TEST_PINNED_CUENV=1[^\n]+\n/m, "").replace(/python3 scripts\/integration-ci-project\.py[^\n]+$/, `printf called > '${marker}'`);
+    const testCommand = command.replace(/^WADDLE_TEST_ALL_CUENV=1[^\n]+\n/m, "").replace(/python3 scripts\/integration-ci-project\.py[^\n]+$/, `printf called > '${marker}'`);
     const env = { WADDLE_CI_BASE_SHA: base, WADDLE_CI_HEAD_SHA: head };
     expect(run(["bash", "-c", testCommand], env).exitCode).toBe(0);
     expect(readFileSync(marker, "utf8")).toBe("called");
