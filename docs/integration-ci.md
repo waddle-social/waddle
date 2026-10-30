@@ -36,7 +36,10 @@ base ancestry, and successful full diff before invoking cuenv: the pinned local
 provider otherwise silently accepts Git diff failures as zero affected tasks.
 Each runner also requires `cuenv info PATH --json` to discover exactly the
 requested project, then checks the exact instance from `--json --meta` has the
-requested pipeline with nonempty executable tasks. Deleted, empty, malformed or
+requested pipeline with nonempty executable tasks. Every task must carry a
+consistent named output reference and exactly match that binding in the project
+task index; unsupported inline tasks are rejected because pinned cuenv can
+silently treat them as unaffected. Deleted, empty, malformed or
 stale project/pipeline definitions fail before cuenv can report no-op success.
 The info commands evaluate one explicit path, avoiding recursive partial
 discovery. Their Git diff disables rename collapsing. The outer planner
@@ -55,6 +58,8 @@ bun scripts/integration-ci.ts sync
 bun scripts/integration-ci.ts --check
 bun test scripts/integration-ci.test.ts
 python3 scripts/test_integration_ci_project.py
+# Requires cuenv 0.57.3 in PATH; every selected thin job runs this too.
+WADDLE_TEST_PINNED_CUENV=1 python3 scripts/test_integration_ci_project.py
 ```
 
 The existing server `checkCiDrift` and the integration planner check graph parity.

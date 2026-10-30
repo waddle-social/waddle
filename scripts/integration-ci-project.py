@@ -30,6 +30,19 @@ def verify_project(summary, metadata, requested_path, pipeline):
     for task in tasks:
         if not isinstance(task, dict) or not any(isinstance(task.get(key), str) and task[key] for key in ("command", "script")):
             raise ValueError("pipeline contains a non-executable or unsupported task")
+        references = [task.get(key) for key in ("stdout", "stderr", "exitCode")]
+        if any(not isinstance(ref, dict) or ref.get("cuenvOutputRef") is not True or not isinstance(ref.get("cuenvTask"), str) or not ref["cuenvTask"] for ref in references):
+            raise ValueError("pipeline task lacks a named executable binding")
+        names = {ref["cuenvTask"] for ref in references}
+        if len(names) != 1:
+            raise ValueError("pipeline task references disagree")
+        binding = config.get("tasks", {})
+        for part in references[0]["cuenvTask"].split("."):
+            if not part or not isinstance(binding, dict) or part not in binding:
+                raise ValueError("pipeline task is absent from the project task index")
+            binding = binding[part]
+        if binding != task:
+            raise ValueError("pipeline task differs from its named executable binding")
     return {"project": project["name"], "path": project["path"], "pipeline": pipeline, "tasks": len(tasks)}
 
 
