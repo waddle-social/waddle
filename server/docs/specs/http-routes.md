@@ -43,8 +43,11 @@ stack, authentication bootstrap, upload transfer, or operations require it.
   touches the database, lineage or claims. `503` with
   `"error": "runtime_stalled"`: the runtime heartbeat has not ticked for
   10 s. `503` with `"error": "terminally_fenced"`: the node took a clustering
-  fatal fence and finished fencing, so it can never serve again in this
-  process.
+  fatal fence (while serving or while re-registering) and its node-lease loop
+  finished the terminal demotion and exited, so it can never serve again in
+  this process. The demotion has no deadline of its own; a wedged
+  publication guard or actor delays this signal. A shutdown that finds the
+  lease unavailable also reports it while the pod terminates.
 - `GET /healthz`: Liveness alias.
 - `GET /ready`: Readiness. Database pool health, per-store lineage and the
   node lifecycle (claims/self-fence, drain), all bounded so the answer

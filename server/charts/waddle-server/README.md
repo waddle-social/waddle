@@ -87,10 +87,12 @@ Primary database wiring is DSN/driver based for sqlx:
   Postgres deployment.
 - `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (no chart value; set through
   `containerExtraEnv`, default: `30`, accepted `1`–`300`) — how long a
-  main-pool caller waits for a connection before failing with a pool timeout.
-  Lowering it turns a stalled acquisition into a client-visible timeout (a
-  stream error for sessions without stream management); measure first. The
-  control-plane pool keeps a fixed 30 s.
+  caller of the global database's main pool waits for a connection before
+  failing with a pool timeout. It applies to that pool only: inbox, pubsub
+  and MAM stores opened by URL, and the clustering control-plane pool, keep
+  a fixed 30 s. Lowering it turns a stalled acquisition into a
+  client-visible timeout (a stream error for sessions without stream
+  management); measure first.
 
 Set DSNs with either:
 
@@ -369,15 +371,19 @@ a ConfigMap. The full procedure is in
 
 - Liveness probe: `GET /health` — fails only when a restart is the fix: a
   stalled runtime heartbeat, or a node that took a clustering fatal fence
-  and finished fencing (`terminally_fenced`). It never checks the database,
-  so a Postgres outage by itself does not restart pods.
+  and whose node-lease loop finished the terminal demotion and exited
+  (`terminally_fenced`), whether the fence hit while serving or while
+  re-registering. It never checks the database, so a Postgres outage by
+  itself does not restart pods. The terminal demotion has no deadline of its
+  own, so a wedged publication guard or actor delays the restart.
 - Readiness probe: `GET /ready` — database, lineage and node lifecycle
   (claims/self-fence, drain), answered within 1.5 s. During a Postgres
   outage every pod goes unready (no Service endpoints) and stays live.
   When Postgres returns, a non-clustered pod, or a clustered pod whose
   outage was shorter than the node-lease TTL, becomes ready again in place.
   A longer outage self-fences first (sockets closed, then re-served); a
-  fatal fence restarts the pod through liveness.
+  fatal fence, on either path, restarts the pod through liveness once the
+  terminal demotion finishes.
 
 Both are configurable via `probes.*`. Keep `probes.readiness.timeoutSeconds`
 at 2 or more: readiness bounds itself at 1.5 s.
