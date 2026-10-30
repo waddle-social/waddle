@@ -27,6 +27,17 @@ class DiscoveryContracts(unittest.TestCase):
     def verify(self):
         return module.verify_project(self.summary, self.metadata, self.root / "chat", "pullRequest")
 
+    def test_cli_paths_and_names_are_validated(self):
+        self.assertEqual(module.validated_project_path("."), str(self.root))
+        for value in ("--help", "x;command", "x\ncommand", "$(command)"):
+            with self.subTest(path=value), self.assertRaises((ValueError, OSError)):
+                module.validated_project_path(value)
+        for value in ("test", "nested.test", "--help", "--dry-run"):
+            self.assertEqual(module.validated_task_name(value), value)
+        for value in ("x --help", "../test", "x;command", "$(command)", "x\ncommand", ""):
+            with self.subTest(task=value), self.assertRaises(ValueError):
+                module.validated_task_name(value)
+
     def test_exact_project_and_nonempty_executable_pipeline(self):
         self.assertEqual(self.verify()["tasks"], 1)
 

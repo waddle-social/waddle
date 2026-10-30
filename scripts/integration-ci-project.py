@@ -3,8 +3,26 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 import subprocess
+
+
+
+def validated_project_path(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", value) or value.startswith("-"):
+        raise ValueError("unsupported project path syntax")
+    target = Path(value).resolve(strict=True)
+    target.relative_to(Path.cwd().resolve())
+    if not target.is_dir():
+        raise ValueError("project path is not a directory")
+    return str(target)
+
+
+def validated_task_name(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", value):
+        raise ValueError("unsupported task name syntax")
+    return value
 
 
 def verify_project(summary, metadata, requested_path, pipeline):
@@ -47,14 +65,16 @@ def verify_project(summary, metadata, requested_path, pipeline):
             binding = binding[part]
         if binding != task:
             raise ValueError("pipeline task differs from its named executable binding")
-        names_to_run.append(references[0]["cuenvTask"])
+        names_to_run.append(validated_task_name(references[0]["cuenvTask"]))
     return {"project": project["name"], "path": project["path"], "pipeline": pipeline, "tasks": len(tasks), "task_names": names_to_run}
 
 
 def read_info(path, metadata=False):
-    command = ["cuenv", "info", path, "--json"]
+    target = validated_project_path(path)
+    command = ["cuenv", "info", "--json"]
     if metadata:
         command.append("--meta")
+    command.extend(["--", target])
     result = subprocess.run(command, check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
 
@@ -70,7 +90,9 @@ def main():
         print(json.dumps(result, sort_keys=True), flush=True)
         if args.run:
             for name in result["task_names"]:
-                subprocess.run(["cuenv", "task", "--path", args.path, "--", name], check=True)
+                target = validated_project_path(args.path)
+                task = validated_task_name(name)
+                subprocess.run(["cuenv", "task", "--path", target, "--", task], check=True)
     except (KeyError, TypeError, ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Integration project discovery failed: {error}") from None
 
