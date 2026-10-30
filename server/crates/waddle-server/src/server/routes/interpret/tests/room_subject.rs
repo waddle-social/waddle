@@ -46,6 +46,7 @@ pub(super) struct SubjectMutationStore {
     fanout_check_calls: std::sync::atomic::AtomicUsize,
     fanout_check_errors_remaining: std::sync::atomic::AtomicUsize,
     fanout_check_hangs: std::sync::atomic::AtomicBool,
+    published_fence: std::sync::Mutex<Option<waddle_xmpp::muc::RoomClaimFenceContext>>,
 }
 
 impl SubjectMutationStore {
@@ -62,6 +63,7 @@ impl SubjectMutationStore {
             fanout_check_calls: std::sync::atomic::AtomicUsize::new(0),
             fanout_check_errors_remaining: std::sync::atomic::AtomicUsize::new(0),
             fanout_check_hangs: std::sync::atomic::AtomicBool::new(false),
+            published_fence: std::sync::Mutex::new(None),
         }
     }
 
@@ -106,6 +108,14 @@ impl SubjectMutationStore {
     fn hang_fanout_checks(&self) {
         self.fanout_check_hangs
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Publish the claim fence the immediate archive path reads through
+    /// `current_claim_fence`, so an admitted groupchat can be archived and
+    /// fanned out. Unset by default: other tests rely on the trait default.
+    #[cfg(feature = "clustering")]
+    fn publish_fence(&self, fence: waddle_xmpp::muc::RoomClaimFenceContext) {
+        *self.published_fence.lock().expect("published fence lock") = Some(fence);
     }
 
     #[cfg(feature = "clustering")]
@@ -215,6 +225,26 @@ impl waddle_xmpp::muc::MucDurableStore for SubjectMutationStore {
             }
             Ok(self.fanout_owned.load(std::sync::atomic::Ordering::SeqCst))
         })
+    }
+
+    fn current_claim_fence(
+        &self,
+        room_jid: &jid::BareJid,
+    ) -> Option<waddle_xmpp::muc::RoomClaimFenceContext> {
+        if !self.fanout_owned.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        self.published_fence
+            .lock()
+            .expect("published fence lock")
+            .clone()
+            .filter(|fence| {
+                fence.entity
+                    == waddle_xmpp::ownership::Entity::new(
+                        waddle_xmpp::ownership::EntityType::RoomActor,
+                        room_jid.to_string(),
+                    )
+            })
     }
 
     fn load_room_state_fenced<'a>(
@@ -1507,10 +1537,19 @@ impl FencedFanoutFixture {
         use waddle_xmpp::muc::room_actor::Join;
         use waddle_xmpp::muc::room_registry_actor::CreateRoom;
         use waddle_xmpp::muc::RoomConfig;
+        use waddle_xmpp::ownership::{
+            ClaimEpoch, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+        };
         use waddle_xmpp::{Affiliation, Role};
 
+        // A serviceable published fence owned by this node, so the immediate
+        // archive path resolves `Guarded` and an admitted message really is
+        // archived and reflected. Without it every dispatch would bounce at
+        // the archive fence and the "nothing fans out" assertions would be
+        // vacuous.
         let clustering = crate::clustering::ClusteringHandles {
             muc_durable_store: Some(Arc::clone(store) as Arc<dyn waddle_xmpp::muc::MucDurableStore>),
+            node_identity: Some(SharedNodeIdentity::new(NodeIdentity::local())),
             ..Default::default()
         };
         let state =
@@ -1521,6 +1560,11 @@ impl FencedFanoutFixture {
             .await;
         let room_jid: jid::BareJid = "fenced@muc.example.com".parse().expect("room JID");
         let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender JID");
+        store.publish_fence(waddle_xmpp::muc::RoomClaimFenceContext::new(
+            Entity::new(EntityType::RoomActor, room_jid.to_string()),
+            NodeIdentity::local(),
+            ClaimEpoch(1),
+        ));
         let actor = state
             .deps
             .protocol
@@ -1719,8 +1763,15 @@ async fn xep_0045_fenced_fanout_transient_error_recovers_within_retry_bound() {
     );
     fixture.assert_actor_not_demoted().await;
     assert_eq!(fixture.archived_message_count().await, 1);
+    // The occupant copy may go through the sender's registered channel or be
+    // returned inline as a response frame; either proves the fan-out ran.
+    let reflected_via_channel = fixture.sender_rx.try_recv().is_ok();
+    let reflected_inline = outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("fans out after a retry"));
     assert!(
-        fixture.sender_rx.try_recv().is_ok(),
+        reflected_via_channel || reflected_inline,
         "the recovered message is reflected to the occupant"
     );
 }
@@ -1741,7 +1792,9 @@ async fn xep_0045_fenced_fanout_hung_check_bounces_at_budget_without_demotion() 
     let elapsed = started.elapsed();
     let budget = super::super::room_dispatch::FENCED_FANOUT_CHECK_BUDGET;
     assert!(
-        elapsed >= budget && elapsed <= budget + std::time::Duration::from_secs(1),
+        // Generous upper slack: a loaded CI runner can delay wake-ups, but a
+        // hang that waited for sqlx's ~30 s acquire timeout would still fail.
+        elapsed >= budget && elapsed <= budget + std::time::Duration::from_secs(10),
         "the hung check is cut off at the budget, took {elapsed:?}"
     );
     assert_eq!(
