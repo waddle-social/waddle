@@ -1,57 +1,201 @@
 {
-  "format": 1,
+  "format": 2,
   "baseline_commit": "db6e5338170d71391b69bc80e57626eb13072365",
   "scope_note": "Selected source anchors and raw lexical matches only; no semantic completeness, reachability or production closure claim. Comments/tests/all cfg branches included. Manual review required before refreshing.",
-  "sources": {
-    "server/crates/waddle-server/src/admin/channels.rs": "aea177a4524b57e636a87a2d9a071145d9f954e7bd54da193bbfc888928301bb",
-    "server/crates/waddle-server/src/admin/spaces.rs": "3e22d1d984da6e86934064117fd7986e92d0468dca5a6ea2e3660f21b09b28ae",
-    "server/crates/waddle-server/src/ingress/commit_room.rs": "2fec0cee200c1e0001d31c522ccf7df752329d1020e23e0d354ac3ebbc27cbe8",
-    "server/crates/waddle-server/src/ingress/room_manifest_replay.rs": "543c85c5f75d9941cab4393abdb4bd1c1398cca22fa397d8264d07ab328cc1d0",
-    "server/crates/waddle-server/src/ingress/xep0045_room_manifest_tests.rs": "dd15c80ae8856ce5ec8e500d8ac9458f2a8e816f9bb10e0fcc46a4d5acb734e0",
-    "server/crates/waddle-server/src/ingress_uow/mod.rs": "5ca41e8eaad1f57725b02121f3803ef345112f84c7cf17cff1387be227b347cf",
-    "server/crates/waddle-server/src/ingress_uow/tests.rs": "581720bcb1284e21cb027db1125bc238177326eadfca844002550f952822ca9f",
-    "server/crates/waddle-server/src/permissions/actor.rs": "e0a51f52049e558819b62a402cf47d3ab415297e303b8fc8e6d5ba1c24376442",
-    "server/crates/waddle-server/src/permissions/actor/tests.rs": "bf2892a3daff1ceadba83213951a01cd9ae92ebc258efda95ddb557c3490d610",
-    "server/crates/waddle-server/src/permissions/schema.rs": "8484222016481f22100ce351831cc3c46b8b708bb87a5b2a4210b746f5fd4e6b",
-    "server/crates/waddle-server/src/permissions/spicedb.rs": "9f80bedbc215e2d61a9738650877d4cde701f0aa54f1978f2c584aa2f130c68f",
-    "server/crates/waddle-server/src/permissions/tuple/store.rs": "fc1a0482c81b77956b24b9b28f25bce87117a3be591ca29054d056c2e114faf5",
-    "server/crates/waddle-server/src/pubsub/implementation.rs": "cfc6367ea5124832079fffeaf30e3936c2190b9fadd5c7f2b09f0673dbe9da96",
-    "server/crates/waddle-server/src/pubsub/node.rs": "e8f90ba96330a64ad000b2763b0edd1e9b488a8b5a3c9205f8e4620925a34256",
-    "server/crates/waddle-server/src/pubsub/tests.rs": "bb0255c208408cd0ff362dd8e30160f92dd9ce7abbd5eb74ca509970ab1e42f3",
-    "server/crates/waddle-server/src/pubsub_authz.rs": "735ffecc5ac3ac31445b2e7e6bb4795a5de55adcbe7fd27fca725fdc29beeff1",
-    "server/crates/waddle-server/src/server/bootstrap_membership.rs": "2286e75746ee1bc94fcb54cde49e66d423a8b53862cf118bbfc6593def18d432",
-    "server/crates/waddle-server/src/server/durable_membership.rs": "f3ecc99365475b1bf57305f99d195665ca2715b84d1f95cb4e0eaae9b6d50227",
-    "server/crates/waddle-server/src/server/durable_membership_tests.rs": "e91fac61d6a4172de298222be396b539fb3e0259ff3c639958c1a8d340d0f5f0",
-    "server/crates/waddle-server/src/server/extension_commands/pubsub.rs": "35a98358acc357fc3aac333e95a3100ae431d7ddf6979614d9f08596bb0cfafa",
-    "server/crates/waddle-server/src/server/extension_host_adapter/implementation.rs": "1ee4a36bac72c05088d536373154c12704f2b92c3e3c4f6268b5ff9a9fd0b531",
-    "server/crates/waddle-server/src/server/fixed_account.rs": "6565c1f587eccda682373d9bc2b2a3df26c703dc0080baeabc1cb4104c9afa59",
-    "server/crates/waddle-server/src/server/http.rs": "c2e4d201637ffe3df046c00bab68545dfdac3a6b9ed68eecc8239ed49fbd70c5",
-    "server/crates/waddle-server/src/server/lifecycle.rs": "1ebf99aec38f79f6f878464df6255e76d3a9fc730bc8b38fcba8bcfe2c56b719",
-    "server/crates/waddle-server/src/server/managed_channel_policy.rs": "59b73f51ca73528eb0df630f42e7853b3739982386fa764e31cf7713b74a2ce3",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs": "e4eceefc4fdcb6c952a0ff92a862dc4171d3b9c000ee9f044747ee71c3a70259",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs": "0f72fc46381f7118e0e41c752acda1ed266711a83f76ca876bf132763c0a0069",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs": "bf84e1fa99fa5852c18eb6902813ccc54d76f8a82296635fadff76657ea8997a",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs": "f4dcb827809ab63a7acf5cb7ae570af8a7f8491b6f51a59f1832cfe171dce1ab",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_items.rs": "7558cde4dd74af3f5f17da4e032c26fd4942e4d85c233f5b38fce88142846a6a",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs": "d31da6351011d050273269fb1e020fe14323a9e13c1e9265cfd34469b43329ae",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs": "fc88c16541cdea2d97a3d1fb7a05de4f4b42920cef3d1a35c6117c69c0724889",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs": "aef5f622cc88ceacae7175640894feda95d4e2749e2a06b5a67eb471be8e6026",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs": "630ce8ccd052c2a93459b6430dd0a4d3db54fb9708bd936f63d4b397ef629bbf",
-    "server/crates/waddle-server/src/server/routes/websocket/handlers/pubsub_fanout/implementation.rs": "bb4fbd2bbe3b651f3b9b77abd2904e9a35aae497a73abcb335b7df4bf8773655",
-    "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs": "c4b77b0752bcf12562fcf03fc00c40d12b323d8cf876bc97d564b144097a87bc",
-    "server/crates/waddle-server/src/server/routes/websocket/tests/muc.rs": "5c73cba596dc68d8b2f521fc61dd63b4fb92110352d3bcc9221fe2464eb18c51",
-    "server/crates/waddle-server/src/server/topology.rs": "d43be293f72fc67c7631ad31658f960ee91991a43bfdc4f4ab6c20c566d86985",
-    "server/crates/waddle-server/src/server/xmpp_permission_state.rs": "b2b505ec885cd76bd9cc5edd096da16b06af57d8ffeb7e77a992abbe283c4a1f",
-    "server/crates/waddle-server/src/server/xmpp_state.rs": "64872683b0a4ba8e4ea57cb8ca83b624448a9b5a23082a82a85963a9ecfcccd7",
-    "server/crates/waddle-server/src/spaces_pubsub_seed.rs": "9418d57878a41b6646c2b4290b7eb7e30335a2abb9e23895cf16c7f0895943ba",
-    "server/crates/waddle-xmpp/src/app_state.rs": "36db0ff5729cfc73eeaeb4cfac3452b05a4218bf3b7e64a68a8de1ae89be030d",
-    "server/crates/waddle-xmpp/src/muc/room_actor/admin_handlers.rs": "cfca32e721f92851851e8b8a9fb828f8b5e0eb958dd94c8c4eda97b5a3d0a252",
-    "server/crates/waddle-xmpp/src/muc/room_actor/implementation.rs": "e07a2c1abaa22c14c7d4e042c7af6a8febed7bf05438839ab053352b143ae9bd",
-    "server/crates/waddle-xmpp/src/muc/room_actor/mediated_invites/authorization.rs": "f223187ee1a529a45f6ac08333bfe777121697717703270829bb7d47b6661afb",
-    "server/crates/waddle-xmpp/src/muc/room_actor/occupancy_handlers.rs": "28941390a836bdc5b0b257297876d9210d6d0dc426d81491eb51f28adea52d4e",
-    "server/crates/waddle-xmpp/src/registry/connection_registry/sending.rs": "38422caf4889a271b46080cee4582f199d64f4e0785858675f454e6450687057",
-    "server/crates/waddle-xmpp/src/stream_management/session_registry/resources.rs": "47b67769ae0f6384a077dcc41ee3fc4b37e3a44b931e9243e2722e60cf824753"
-  },
+  "sources": [
+    {
+      "path": "server/crates/waddle-server/src/admin/channels.rs",
+      "sha256": "aea177a4524b57e636a87a2d9a071145d9f954e7bd54da193bbfc888928301bb"
+    },
+    {
+      "path": "server/crates/waddle-server/src/admin/spaces.rs",
+      "sha256": "3e22d1d984da6e86934064117fd7986e92d0468dca5a6ea2e3660f21b09b28ae"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress/commit_room.rs",
+      "sha256": "2fec0cee200c1e0001d31c522ccf7df752329d1020e23e0d354ac3ebbc27cbe8"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress/room_manifest_replay.rs",
+      "sha256": "543c85c5f75d9941cab4393abdb4bd1c1398cca22fa397d8264d07ab328cc1d0"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress/xep0045_room_manifest_tests.rs",
+      "sha256": "dd15c80ae8856ce5ec8e500d8ac9458f2a8e816f9bb10e0fcc46a4d5acb734e0"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress_uow/mod.rs",
+      "sha256": "5ca41e8eaad1f57725b02121f3803ef345112f84c7cf17cff1387be227b347cf"
+    },
+    {
+      "path": "server/crates/waddle-server/src/ingress_uow/tests.rs",
+      "sha256": "581720bcb1284e21cb027db1125bc238177326eadfca844002550f952822ca9f"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/actor.rs",
+      "sha256": "e0a51f52049e558819b62a402cf47d3ab415297e303b8fc8e6d5ba1c24376442"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/actor/tests.rs",
+      "sha256": "bf2892a3daff1ceadba83213951a01cd9ae92ebc258efda95ddb557c3490d610"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/schema.rs",
+      "sha256": "8484222016481f22100ce351831cc3c46b8b708bb87a5b2a4210b746f5fd4e6b"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/spicedb.rs",
+      "sha256": "9f80bedbc215e2d61a9738650877d4cde701f0aa54f1978f2c584aa2f130c68f"
+    },
+    {
+      "path": "server/crates/waddle-server/src/permissions/tuple/store.rs",
+      "sha256": "fc1a0482c81b77956b24b9b28f25bce87117a3be591ca29054d056c2e114faf5"
+    },
+    {
+      "path": "server/crates/waddle-server/src/pubsub/implementation.rs",
+      "sha256": "cfc6367ea5124832079fffeaf30e3936c2190b9fadd5c7f2b09f0673dbe9da96"
+    },
+    {
+      "path": "server/crates/waddle-server/src/pubsub/node.rs",
+      "sha256": "e8f90ba96330a64ad000b2763b0edd1e9b488a8b5a3c9205f8e4620925a34256"
+    },
+    {
+      "path": "server/crates/waddle-server/src/pubsub/tests.rs",
+      "sha256": "bb0255c208408cd0ff362dd8e30160f92dd9ce7abbd5eb74ca509970ab1e42f3"
+    },
+    {
+      "path": "server/crates/waddle-server/src/pubsub_authz.rs",
+      "sha256": "735ffecc5ac3ac31445b2e7e6bb4795a5de55adcbe7fd27fca725fdc29beeff1"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/bootstrap_membership.rs",
+      "sha256": "2286e75746ee1bc94fcb54cde49e66d423a8b53862cf118bbfc6593def18d432"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/durable_membership.rs",
+      "sha256": "f3ecc99365475b1bf57305f99d195665ca2715b84d1f95cb4e0eaae9b6d50227"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/durable_membership_tests.rs",
+      "sha256": "e91fac61d6a4172de298222be396b539fb3e0259ff3c639958c1a8d340d0f5f0"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/extension_commands/pubsub.rs",
+      "sha256": "35a98358acc357fc3aac333e95a3100ae431d7ddf6979614d9f08596bb0cfafa"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/extension_host_adapter/implementation.rs",
+      "sha256": "1ee4a36bac72c05088d536373154c12704f2b92c3e3c4f6268b5ff9a9fd0b531"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/fixed_account.rs",
+      "sha256": "6565c1f587eccda682373d9bc2b2a3df26c703dc0080baeabc1cb4104c9afa59"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/http.rs",
+      "sha256": "c2e4d201637ffe3df046c00bab68545dfdac3a6b9ed68eecc8239ed49fbd70c5"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/lifecycle.rs",
+      "sha256": "1ebf99aec38f79f6f878464df6255e76d3a9fc730bc8b38fcba8bcfe2c56b719"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/managed_channel_policy.rs",
+      "sha256": "59b73f51ca73528eb0df630f42e7853b3739982386fa764e31cf7713b74a2ce3"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/archive_inbox_upload.rs",
+      "sha256": "e4eceefc4fdcb6c952a0ff92a862dc4171d3b9c000ee9f044747ee71c3a70259"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs",
+      "sha256": "0f72fc46381f7118e0e41c752acda1ed266711a83f76ca876bf132763c0a0069"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/pubsub_admin.rs",
+      "sha256": "bf84e1fa99fa5852c18eb6902813ccc54d76f8a82296635fadff76657ea8997a"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_bookmark_cleanup.rs",
+      "sha256": "f4dcb827809ab63a7acf5cb7ae570af8a7f8491b6f51a59f1832cfe171dce1ab"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_items.rs",
+      "sha256": "7558cde4dd74af3f5f17da4e032c26fd4942e4d85c233f5b38fce88142846a6a"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_publish.rs",
+      "sha256": "d31da6351011d050273269fb1e020fe14323a9e13c1e9265cfd34469b43329ae"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/iq/spaces_retract.rs",
+      "sha256": "fc88c16541cdea2d97a3d1fb7a05de4f4b42920cef3d1a35c6117c69c0724889"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/access.rs",
+      "sha256": "aef5f622cc88ceacae7175640894feda95d4e2749e2a06b5a67eb471be8e6026"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/presence/muc/implementation.rs",
+      "sha256": "630ce8ccd052c2a93459b6430dd0a4d3db54fb9708bd936f63d4b397ef629bbf"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/handlers/pubsub_fanout/implementation.rs",
+      "sha256": "bb4fbd2bbe3b651f3b9b77abd2904e9a35aae497a73abcb335b7df4bf8773655"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/tests/iq.rs",
+      "sha256": "c4b77b0752bcf12562fcf03fc00c40d12b323d8cf876bc97d564b144097a87bc"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/routes/websocket/tests/muc.rs",
+      "sha256": "5c73cba596dc68d8b2f521fc61dd63b4fb92110352d3bcc9221fe2464eb18c51"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/topology.rs",
+      "sha256": "d43be293f72fc67c7631ad31658f960ee91991a43bfdc4f4ab6c20c566d86985"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/xmpp_permission_state.rs",
+      "sha256": "b2b505ec885cd76bd9cc5edd096da16b06af57d8ffeb7e77a992abbe283c4a1f"
+    },
+    {
+      "path": "server/crates/waddle-server/src/server/xmpp_state.rs",
+      "sha256": "64872683b0a4ba8e4ea57cb8ca83b624448a9b5a23082a82a85963a9ecfcccd7"
+    },
+    {
+      "path": "server/crates/waddle-server/src/spaces_pubsub_seed.rs",
+      "sha256": "9418d57878a41b6646c2b4290b7eb7e30335a2abb9e23895cf16c7f0895943ba"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/app_state.rs",
+      "sha256": "36db0ff5729cfc73eeaeb4cfac3452b05a4218bf3b7e64a68a8de1ae89be030d"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/muc/room_actor/admin_handlers.rs",
+      "sha256": "cfca32e721f92851851e8b8a9fb828f8b5e0eb958dd94c8c4eda97b5a3d0a252"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/muc/room_actor/implementation.rs",
+      "sha256": "e07a2c1abaa22c14c7d4e042c7af6a8febed7bf05438839ab053352b143ae9bd"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/muc/room_actor/mediated_invites/authorization.rs",
+      "sha256": "f223187ee1a529a45f6ac08333bfe777121697717703270829bb7d47b6661afb"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/muc/room_actor/occupancy_handlers.rs",
+      "sha256": "28941390a836bdc5b0b257297876d9210d6d0dc426d81491eb51f28adea52d4e"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/registry/connection_registry/sending.rs",
+      "sha256": "38422caf4889a271b46080cee4582f199d64f4e0785858675f454e6450687057"
+    },
+    {
+      "path": "server/crates/waddle-xmpp/src/stream_management/session_registry/resources.rs",
+      "sha256": "47b67769ae0f6384a077dcc41ee3fc4b37e3a44b931e9243e2722e60cf824753"
+    }
+  ],
   "anchors": {
     "backend": {
       "path": "server/crates/waddle-server/src/permissions/spicedb.rs",

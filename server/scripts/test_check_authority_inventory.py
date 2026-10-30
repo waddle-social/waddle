@@ -19,11 +19,14 @@ class InventoryTests(unittest.TestCase):
         self.source = self.root / self.relative
         self.source.write_text("fn write_tuple() {}\n// WriteTuple candidate\n")
         self.manifest = {
-            "format": 1,
+            "format": 2,
             "baseline_commit": "a" * 40,
-            "sources": {
-                self.relative: hashlib.sha256(self.source.read_bytes()).hexdigest(),
-            },
+            "sources": [
+                {
+                    "path": self.relative,
+                    "sha256": hashlib.sha256(self.source.read_bytes()).hexdigest(),
+                },
+            ],
             "anchors": {
                 "writer": {"path": self.relative, "line": 1, "text": "fn write_tuple()"},
             },
@@ -50,7 +53,7 @@ class InventoryTests(unittest.TestCase):
         for prefix in ["// shifted\n", "fn changed() {}\n"]:
             with self.subTest(prefix=prefix):
                 self.source.write_text(prefix + "// WriteTuple candidate\n")
-                self.manifest["sources"][self.relative] = hashlib.sha256(
+                self.manifest["sources"][0]["sha256"] = hashlib.sha256(
                     self.source.read_bytes()
                 ).hexdigest()
                 self.assertIn(
@@ -84,7 +87,13 @@ class InventoryTests(unittest.TestCase):
             inventory.lexical_snapshot(self.root, self.manifest["lexical_tokens"])
 
     def test_invalid_manifest_and_unfingerprinted_anchor_fail_closed(self):
-        for field, value in [("format", 2), ("sources", {}), ("sources", ["wrong shape"]), ("anchors", {})]:
+        for field, value in [
+            ("format", 1),
+            ("sources", {}),
+            ("sources", []),
+            ("sources", ["wrong shape"]),
+            ("anchors", {}),
+        ]:
             candidate = copy.deepcopy(self.manifest)
             candidate[field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
@@ -92,6 +101,20 @@ class InventoryTests(unittest.TestCase):
         self.manifest["anchors"]["writer"]["path"] = inventory.SCOPES[1] + "/unknown.rs"
         with self.assertRaisesRegex(ValueError, "not fingerprinted"):
             inventory.check(self.root, self.manifest)
+
+    def test_duplicate_source_paths_fail_closed(self):
+        self.manifest["sources"].append(copy.deepcopy(self.manifest["sources"][0]))
+        with self.assertRaisesRegex(ValueError, "duplicate source fingerprint"):
+            inventory.check(self.root, self.manifest)
+
+    def test_tokens_remain_ascii_and_distinct(self):
+        for tokens in [[], ["1writer"], ["write-é"], ["writé"], ["writer", "writer"], [1]]:
+            with self.subTest(tokens=tokens), self.assertRaises(ValueError):
+                inventory.lexical_snapshot(self.root, tokens)
+        self.assertEqual(
+            inventory.lexical_snapshot(self.root, ["_writer_2"])["occurrences"],
+            {"_writer_2": 0},
+        )
 
     def test_source_escape_and_symlink_are_rejected(self):
         for relative in ["/etc/passwd", "../outside.rs", "server/other.rs"]:

@@ -34,24 +34,24 @@ def source_path(root: Path, relative: str) -> Path:
     return path
 
 
-def lexical_snapshot(root: Path, tokens: list[str]) -> dict:
-    """Hash raw matched lines, including comments, tests and all cfg branches.
-
-    This deliberately does not parse Rust, classify calls or infer reachability.
-    Unknown vocabulary and changes to unmatched files can escape this scan.
-    """
-    if not tokens or len(set(tokens)) != len(tokens) or any(
-        not isinstance(token, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", token)
+def lexical_pattern(tokens: list[str]) -> re.Pattern:
+    """Require distinct ASCII Rust-style identifiers, then match raw word boundaries."""
+    if not tokens or any(
+        not isinstance(token, str) or not re.fullmatch(r"[A-Za-z_]\w*", token, re.ASCII)
         for token in tokens
     ):
         raise ValueError("invalid lexical token list")
-    pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, tokens)) + r")\b")
-    digest = hashlib.sha256()
-    counts = dict.fromkeys(tokens, 0)
+    if len(set(tokens)) != len(tokens):
+        raise ValueError("invalid lexical token list")
+    return re.compile(r"\b(?:" + "|".join(map(re.escape, tokens)) + r")\b")
 
-    def scan_error(error: OSError) -> None:
-        raise error
 
+def scan_error(error: OSError) -> None:
+    raise error
+
+
+def rust_sources(root: Path):
+    """Visit each scope in order and fail on unreadable or symlinked directories."""
     for scope in SCOPES:
         directory = root / scope
         if directory.is_symlink() or not directory.is_dir():
@@ -63,50 +63,89 @@ def lexical_snapshot(root: Path, tokens: list[str]) -> dict:
             candidates.extend(Path(current) / name for name in files if name.endswith(".rs"))
         for candidate in sorted(candidates):
             relative = candidate.relative_to(root).as_posix()
-            path = source_path(root, relative)
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                for match in pattern.finditer(line):
-                    token = match.group()
-                    counts[token] += 1
-                    record = [relative, number, token, line]
-                    digest.update(json.dumps(record, ensure_ascii=True).encode() + b"\n")
+            yield relative, source_path(root, relative)
+
+
+def lexical_records(root: Path, pattern: re.Pattern):
+    for relative, path in rust_sources(root):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in pattern.finditer(line):
+                yield [relative, number, match.group(), line]
+
+
+def lexical_snapshot(root: Path, tokens: list[str]) -> dict:
+    """Hash raw matched lines, including comments, tests and all cfg branches.
+
+    This deliberately does not parse Rust, classify calls or infer reachability.
+    Unknown vocabulary and changes to unmatched files can escape this scan.
+    """
+    pattern = lexical_pattern(tokens)
+    digest = hashlib.sha256()
+    counts = dict.fromkeys(tokens, 0)
+    for record in lexical_records(root, pattern):
+        counts[record[2]] += 1
+        digest.update(json.dumps(record, ensure_ascii=True).encode() + b"\n")
     return {"sha256": digest.hexdigest(), "occurrences": counts}
+
+
+def source_fingerprints(records: list[dict]) -> dict[str, str]:
+    """Decode explicit source metadata without silently collapsing duplicate paths."""
+    if not isinstance(records, list) or not records:
+        raise ValueError("empty source inventory")
+    sources = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("source fingerprint must be an object")
+        relative, expected = record["path"], record["sha256"]
+        if not isinstance(relative, str) or not isinstance(expected, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected
+        ):
+            raise ValueError("invalid source fingerprint")
+        if relative in sources:
+            raise ValueError("duplicate source fingerprint")
+        sources[relative] = expected
+    return sources
+
+
+def check_sources(root: Path, sources: dict[str, str]) -> list[str]:
+    failures = []
+    for relative, expected in sources.items():
+        path = source_path(root, relative)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            failures.append(f"reviewed file changed: {relative}")
+    return failures
+
+
+def anchor_matches(root: Path, sources: dict[str, str], anchor: dict) -> bool:
+    if not isinstance(anchor, dict):
+        raise ValueError("anchor must be an object")
+    relative = anchor["path"]
+    if relative not in sources:
+        raise ValueError("anchor source is not fingerprinted")
+    lines = source_path(root, relative).read_text(encoding="utf-8").splitlines()
+    number = anchor["line"]
+    if type(number) is not int or number < 1:
+        raise ValueError("invalid anchor line")
+    text = anchor["text"]
+    if not isinstance(text, str) or not text:
+        raise ValueError("empty anchor text")
+    return number <= len(lines) and text in lines[number - 1]
 
 
 def check(root: Path, manifest: dict) -> list[str]:
     if not isinstance(manifest, dict):
         raise ValueError("inventory must be an object")
-    if manifest["format"] != 1 or not re.fullmatch(
+    if manifest["format"] != 2 or not re.fullmatch(
         r"[0-9a-f]{40}", manifest["baseline_commit"]
     ):
         raise ValueError("unsupported inventory format or baseline")
-    sources = manifest["sources"]
+    sources = source_fingerprints(manifest["sources"])
     anchors = manifest["anchors"]
-    if not isinstance(sources, dict) or not isinstance(anchors, dict) or not sources or not anchors:
-        raise ValueError("empty source inventory")
-    failures = []
-    for relative, expected in sources.items():
-        if not isinstance(relative, str) or not isinstance(expected, str) or not re.fullmatch(
-            r"[0-9a-f]{64}", expected
-        ):
-            raise ValueError("invalid source fingerprint")
-        path = source_path(root, relative)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            failures.append(f"reviewed file changed: {relative}")
+    if not isinstance(anchors, dict) or not anchors:
+        raise ValueError("empty anchor inventory")
+    failures = check_sources(root, sources)
     for name, anchor in anchors.items():
-        if not isinstance(anchor, dict):
-            raise ValueError("anchor must be an object")
-        relative = anchor["path"]
-        if relative not in sources:
-            raise ValueError("anchor source is not fingerprinted")
-        lines = source_path(root, relative).read_text(encoding="utf-8").splitlines()
-        number = anchor["line"]
-        if type(number) is not int or number < 1:
-            raise ValueError("invalid anchor line")
-        text = anchor["text"]
-        if not isinstance(text, str) or not text:
-            raise ValueError("empty anchor text")
-        if number > len(lines) or text not in lines[number - 1]:
+        if not anchor_matches(root, sources, anchor):
             failures.append(f"source anchor changed: {name}")
     if lexical_snapshot(root, manifest["lexical_tokens"]) != manifest["lexical_snapshot"]:
         failures.append("raw lexical match inventory changed (not a call graph)")
@@ -117,7 +156,7 @@ def main() -> int:
     try:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         failures = check(ROOT, manifest)
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Authority inventory STALE/INVALID: {type(error).__name__}")
         return 1
     if failures:
