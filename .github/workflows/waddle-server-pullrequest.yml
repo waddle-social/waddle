@@ -45,9 +45,11 @@ on:
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
     - scripts/*cache-benchmark*
-    - scripts/integration-ci*.ts
+    - scripts/integration-ci*
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
+    - scripts/test_integration_ci_project.py
+    - scripts/test_integration_ci_project.py/**
     - server/**/env.cue
     - server/.config/nextest.toml
     - server/.config/nextest.toml/**

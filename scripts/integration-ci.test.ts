@@ -201,7 +201,7 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
     writeFileSync(join(directory, "file"), "head"); git("add", "."); git("commit", "-qm", "head");
     const head = git("rev-parse", "HEAD");
     const marker = join(directory, "cuenv-called");
-    const testCommand = command.replace(/env -u GITHUB_ACTIONS[^\n]+$/, `printf called > '${marker}'`);
+    const testCommand = command.replace(/^python3 scripts\/integration-ci-project\.py[^\n]+\n/m, "").replace(/env -u GITHUB_ACTIONS[^\n]+$/, `printf called > '${marker}'`);
     const env = { WADDLE_CI_BASE_SHA: base, WADDLE_CI_HEAD_SHA: head };
     expect(run(["bash", "-c", testCommand], env).exitCode).toBe(0);
     expect(readFileSync(marker, "utf8")).toBe("called");

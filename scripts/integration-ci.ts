@@ -24,7 +24,7 @@ export function readLanes(directory = workflowDirectory): Lane[] {
 export function applicable(lane: Lane, files: string[]): boolean {
   // A graph or planner change exercises every lane. Source PR branch filters
   // are deliberately ignored: queue validation can conservatively add coverage.
-  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts"].includes(file))) return true;
+  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py"].includes(file))) return true;
   const patterns = lane.workflow.on.pull_request?.paths;
   if (!patterns) return true;
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== "string")) throw new Error(`Invalid paths in ${lane.file}`);
@@ -67,7 +67,7 @@ export function generate(lanes: Lane[]): string {
       permissions: { contents: "read" },
       outputs: Object.fromEntries(["expected", "base", ...lanes.map(lane => lane.id)].map(key => [key, `\${{ steps.plan.outputs.${key} }}`])),
       steps: [...utilitySteps(),
-        { name: "Check graph parity and planner contracts", run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts" },
+        { name: "Check graph parity and planner contracts", run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py" },
         { id: "plan", name: "Select every applicable lane", run: "bun scripts/integration-ci.ts plan" },
       ],
     },
@@ -90,7 +90,8 @@ export function generate(lanes: Lane[]): string {
       let checkouts = 0;
       for (const step of job.steps ?? []) {
         if (step.run?.includes("cuenv ci")) {
-          if (!step.run.startsWith("cuenv ci ")) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
+          const invocation = step.run.match(/^cuenv ci --pipeline ([a-zA-Z0-9_-]+) --path ([a-zA-Z0-9_./-]+)$/);
+          if (!invocation || step["working-directory"]) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
           // cuenv 0.57 ignores --from under GitHub auto-detection and its
           // merge-group fallback only sees HEAD^; force the local provider.
           step.run = [
@@ -99,6 +100,7 @@ export function generate(lanes: Lane[]): string {
             'git cat-file -e "${WADDLE_CI_BASE_SHA}^{commit}"',
             'git merge-base --is-ancestor "$WADDLE_CI_BASE_SHA" "$WADDLE_CI_HEAD_SHA"',
             'git -c diff.renames=false diff --no-renames --name-only -z "$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA" > /dev/null',
+            `python3 scripts/integration-ci-project.py --path ${invocation[2]} --pipeline ${invocation[1]}`,
             `env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false ${step.run} --from "$WADDLE_CI_BASE_SHA"`,
           ].join("\n");
           step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}", WADDLE_CI_HEAD_SHA: "${{ github.sha }}" };

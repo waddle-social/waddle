@@ -57,9 +57,11 @@ on:
     - namespace.cue
     - namespace.cue/**
     - scripts/*cache-benchmark*
-    - scripts/integration-ci*.ts
+    - scripts/integration-ci*
     - scripts/sync-rust-tests.sh
     - scripts/sync-rust-tests.sh/**
+    - scripts/test_integration_ci_project.py
+    - scripts/test_integration_ci_project.py/**
     - server/**/env.cue
     - server/.cargo/**
     - server/.config/nextest.toml

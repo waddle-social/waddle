@@ -34,7 +34,12 @@ and the validated base SHA with full Git history: cuenv 0.57.3 otherwise ignores
 merge groups. Each thin step rechecks its own checkout HEAD, base commit availability,
 base ancestry, and successful full diff before invoking cuenv: the pinned local
 provider otherwise silently accepts Git diff failures as zero affected tasks.
-Their Git diff disables rename collapsing. The outer planner
+Each runner also requires `cuenv info PATH --json` to discover exactly the
+requested project, then checks the exact instance from `--json --meta` has the
+requested pipeline with nonempty executable tasks. Deleted, empty, malformed or
+stale project/pipeline definitions fail before cuenv can report no-op success.
+The info commands evaluate one explicit path, avoiding recursive partial
+discovery. Their Git diff disables rename collapsing. The outer planner
 rejects encoded/non-ASCII filenames when a thin cuenv lane is selected because
 that pinned local provider parses newline-delimited Git paths; it fails visibly
 rather than silently omitting affected tasks. Other lanes retain NUL-safe paths.
@@ -49,6 +54,7 @@ then run:
 bun scripts/integration-ci.ts sync
 bun scripts/integration-ci.ts --check
 bun test scripts/integration-ci.test.ts
+python3 scripts/test_integration_ci_project.py
 ```
 
 The existing server `checkCiDrift` and the integration planner check graph parity.
@@ -79,7 +85,8 @@ A required context protects against accidental failed/missing verification; it
 is not tamper resistant against changes to this repository's own workflow,
 generator, filters or tests. For that threat model, enforce an organization
 required workflow from a separately protected source, or require independent CI
-owner review for all gate and source workflow changes and remove routine bypass
+owner review for all gate, source workflow, env.cue, pipeline and task
+definition changes and remove routine bypass
 actors. A same-repository context rule alone must never be represented as that
 stronger assurance. Original workflows still have existing checks-write tokens
 and OIDC access; their ability to forge a same-name context and their external
