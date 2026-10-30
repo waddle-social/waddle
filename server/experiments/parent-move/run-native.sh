@@ -21,15 +21,21 @@ source_digest() {
 }
 head_before="$(git rev-parse HEAD)"
 digest_before="$(source_digest)"
+source "$experiment/pinned-rust.sh"
 go version
-cargo fmt --manifest-path server/Cargo.toml --all --check
-inventory="$(cargo test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --list)"
+"$CARGO" --version
+"$RUSTC" --version
+"$FENCE_RUST_BIN/cargo-clippy" --version
+"$FENCE_RUST_BIN/clippy-driver" --version
+bash "$experiment/check-toolchain.sh"
+"$FENCE_RUST_BIN/cargo-fmt" fmt --manifest-path server/Cargo.toml --all --check
+inventory="$("$CARGO" test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --list)"
 test "$(printf '%s\n' "$inventory" | grep -c '^permissions::parent_move_native_tests::production_parent_move_.*: test$')" = 2
 # --ignored is mandatory: without native prerequisites these tests fail rather
 # than skip. Capture only typed assertions/test output, never service logs.
-cargo test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --ignored --nocapture --test-threads=1
-cargo test --manifest-path server/experiments/grant-fence/Cargo.toml --locked -p waddle-native-fixture --lib -- --test-threads=1
-cargo clippy --manifest-path server/Cargo.toml --locked -p waddle-server --lib --tests -- -D warnings
+"$CARGO" test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --ignored --nocapture --test-threads=1
+"$CARGO" test --manifest-path server/experiments/grant-fence/Cargo.toml --locked -p waddle-native-fixture --lib -- --test-threads=1
+"$FENCE_RUST_BIN/cargo-clippy" clippy --manifest-path server/Cargo.toml --locked -p waddle-server --lib --tests -- -D warnings
 test "$head_before" = "$(git rev-parse HEAD)"
 test "$digest_before" = "$(source_digest)"
 if [[ "${PARENT_MOVE_DEVELOPMENT:-0}" != 1 ]]; then

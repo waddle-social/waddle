@@ -38,6 +38,16 @@ binary versions, outcome and verified cleanup. The runner requires a clean
 committed tree and compares a digest of all tracked source bytes before/after.
 `PARENT_MOVE_DEVELOPMENT=1` permits explicitly nonformal dirty-tree development.
 
+The runner invokes the Nix-provided Cargo, formatter and Clippy executables by
+absolute path, pins their Rust compiler/documentation/formatting tools, and clears
+host compiler-wrapper configuration before its commands. This bypasses Cargo's
+preference for external subcommands in the retained Cargo home. Clippy then installs
+its own sibling driver wrapper. A mandatory dependency-free probe demonstrates
+host subcommand and compiler-wrapper shadowing, successful pinned compilation and
+formatting/linting despite that hostile home, and rejection of an intentional lint
+with `-D warnings`. The probe does not change the user's Cargo home or repository.
+Other Cargo configuration is outside this targeted tool-selection check.
+
 The shared #2059 fixture owns all service subprocesses. No fixture controller
 is copied here. Its sticky failure/closed spawn gate, normal PostgreSQL shutdown,
 owned descendants, bounded deadlines and retention on uncertainty remain in

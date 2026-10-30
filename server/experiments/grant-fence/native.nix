@@ -33,6 +33,7 @@ pkgs.mkShell {
   GOTOOLCHAIN = "local";
   SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+  FENCE_RUST_BIN = "${rust}/bin";
   FENCE_POSTGRES_BIN = "${pkgs.postgresql_17}/bin";
   FENCE_SPICEDB_BIN = "${pkgs.spicedb}/bin/spicedb";
   FENCE_TEST_SHELL = "${pkgs.bash}/bin/bash";
