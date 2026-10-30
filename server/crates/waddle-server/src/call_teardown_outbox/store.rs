@@ -436,6 +436,14 @@ fn encode_target(target: &TeardownTarget) -> EncodedTarget<'_> {
             participant_sid.as_ref().map(ParticipantSid::as_str),
         ),
         TeardownTarget::Room => EncodedTarget::without_thread("delete_room", None, None, None),
+        TeardownTarget::MujiPresenceClearOnly { room_jid, departed } => {
+            EncodedTarget::without_thread(
+                "muji_presence_clear_only",
+                Some(departed.to_string()),
+                Some(room_jid.to_string()),
+                None,
+            )
+        }
         TeardownTarget::MujiPresenceClear {
             room_jid,
             departed,

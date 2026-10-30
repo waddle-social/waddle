@@ -316,6 +316,7 @@ fn stale_superseded_by_live_participant(
         // Completion-only and room-wide targets carry no participant to
         // supersede (CallThreadEndRetry is additionally non-destructive).
         TeardownTarget::Room
+        | TeardownTarget::MujiPresenceClearOnly { .. }
         | TeardownTarget::DisplacedParticipant { .. }
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => return false,
@@ -430,7 +431,9 @@ fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
             participant_sid, ..
         } => participant_sid.is_some(),
         TeardownTarget::Room => intent.room_sid.is_some(),
-        TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => false,
+        TeardownTarget::MujiPresenceClear { .. }
+        | TeardownTarget::MujiPresenceClearOnly { .. }
+        | TeardownTarget::MujiRoomSweep { .. } => false,
     }
 }
 
@@ -502,6 +505,24 @@ async fn execute_intent(
     executor: Option<&LiveKitTeardownExecutor>,
     intent: &CallTeardownIntent,
 ) -> IntentExecution {
+    if let TeardownTarget::MujiPresenceClearOnly { room_jid, departed } = &intent.target {
+        return match tokio::time::timeout(
+            ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+            crate::server::routes::muc_muji_clear::clear_muji_presence_only(
+                state, room_jid, departed,
+            ),
+        )
+        .await
+        {
+            Ok(WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_)) => {
+                IntentExecution::Done
+            }
+            Ok(WebhookEffectOutcome::Stale) => IntentExecution::Stale,
+            Ok(WebhookEffectOutcome::Retryable(_)) | Err(_) => {
+                IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClearOnly)
+            }
+        };
+    }
     if let TeardownTarget::MujiPresenceClear {
         room_jid,
         departed,
@@ -687,6 +708,7 @@ async fn execute_intent(
         },
         TeardownTarget::Room => TeardownTargetLite::Room,
         TeardownTarget::MujiPresenceClear { .. }
+        | TeardownTarget::MujiPresenceClearOnly { .. }
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => {
             return IntentExecution::Done;

@@ -293,10 +293,35 @@ async fn postgres_upgrade(fixture: &'static str) {
         .enqueue(unresolved_retirement_intent())
         .await
         .expect("retirement");
+    let actor_only = CallTeardownIntent {
+        target: TeardownTarget::MujiPresenceClearOnly {
+            room_jid: "ghost-clear@muc.example.com".parse().expect("room"),
+            departed: "alice@example.com/web".parse().expect("JID"),
+        },
+        call_id: CallId::try_new("ghost-clear@muc.example.com").expect("call"),
+        occupant: None,
+        generation: None,
+        room_sid: None,
+        session: None,
+        ..retirement_intent()
+    };
+    let actor_only_id = store
+        .enqueue(actor_only.clone())
+        .await
+        .expect("actor-only action");
     let reopened = CallTeardownOutboxStore::try_new(database.clone())
         .await
         .expect("idempotent upgrade");
     assert!(reopened.find(&new_id).await.expect("find").is_some());
+    assert_eq!(
+        reopened
+            .find(&actor_only_id)
+            .await
+            .expect("find")
+            .expect("actor-only row")
+            .intent,
+        actor_only
+    );
     drop(reopened);
     drop(store);
     drop(database);
@@ -314,6 +339,11 @@ async fn postgres_legacy_outbox_upgrade_preserves_jobs_and_accepts_retirement() 
 #[tokio::test]
 async fn postgres_mandatory_sid_upgrade_accepts_unresolved_generation() {
     postgres_upgrade(include_str!("fixtures/mandatory_sid_retirement.sql")).await;
+}
+
+#[tokio::test]
+async fn postgres_generation_retirement_upgrade_accepts_actor_only_ghost_cleanup() {
+    postgres_upgrade(include_str!("fixtures/generation_retirement.sql")).await;
 }
 
 #[derive(Clone, Copy)]

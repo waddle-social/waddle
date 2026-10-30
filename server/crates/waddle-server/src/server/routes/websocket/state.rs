@@ -1505,10 +1505,9 @@ pub struct ProtocolServices {
     /// before room-locality checks or cross-node relays fan out work.
     pub muji_pre_dispatch_terminate_rate_limit:
         Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::TerminateRateLimit>,
-    /// WebSocket-layer pre-dispatch limiter for Muji non-initiate actions.
-    /// Kept separate from the handler-side limiter so the effective
-    /// budget remains unchanged while foreign-room and membership-gated
-    /// requests are metered before they trigger expensive checks.
+    /// Muji control-plane budget, including initiate discovery, checked before
+    /// membership/locality lookup or relay. The handler retains its separate
+    /// publication/mutating-terminate budgets.
     pub muji_pre_dispatch_action_rate_limit:
         Arc<waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit>,
     /// Shared PubSub/PEP storage (XEP-0060/XEP-0163).

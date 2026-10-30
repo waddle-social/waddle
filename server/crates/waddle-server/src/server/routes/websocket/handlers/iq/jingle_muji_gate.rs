@@ -117,8 +117,8 @@ fn allow_ungated() -> GateOutcome {
 pub(super) enum GateInvocation {
     /// Directly from the client's connection.
     ClientOrigin,
-    /// Re-run on the room owner for an IQ relayed by another node.
-    #[cfg(feature = "clustering")]
+    /// Re-run on the room owner, or revalidate after asynchronous preparation,
+    /// without recording a second client signaling event.
     RelayedReplay,
 }
 
@@ -264,6 +264,21 @@ pub(super) fn muji_session_terminate_room(iq: &Iq) -> Option<BareJid> {
         return None;
     }
     Some(room_jid)
+}
+
+/// Only typed Muji session-initiate requests may prepare provider state.
+pub(super) fn muji_session_initiate_room(iq: &Iq) -> Option<BareJid> {
+    let Iq::Set { payload, .. } = iq else {
+        return None;
+    };
+    if payload.ns() != NS_JINGLE || payload.name() != "jingle" {
+        return None;
+    }
+    let jingle = Jingle::try_from(payload.clone()).ok()?;
+    if !matches!(jingle.action, Action::SessionInitiate) {
+        return None;
+    }
+    relayed_muji_room(iq)
 }
 
 /// Capture before awaiting room authorization, so a concurrent replacement
@@ -428,6 +443,25 @@ pub(super) async fn relayed_muji_generation_is_current(
         .ok_or(())?;
     let snapshot = actor.ask(GetSnapshot).await.map_err(|_| ())?;
     Ok(snapshot.room.session_generation(sender) == Some(generation))
+}
+
+/// Map the current-generation admission read into the same typed errors on
+/// both adapters, including revalidation after provider preparation.
+pub(super) async fn current_muji_generation_error(
+    state: &WebSocketState,
+    room: &BareJid,
+    sender: &FullJid,
+    generation: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Option<StanzaError> {
+    match relayed_muji_generation_is_current(state, room, sender, generation).await {
+        Ok(true) => None,
+        Ok(false) => Some(forbidden_iq_error(
+            "occupant session was replaced; rejoin before retrying",
+        )),
+        Err(()) => Some(internal_server_error_iq_error(
+            "could not verify the current occupant session; please retry",
+        )),
+    }
 }
 
 pub(super) fn relayed_muji_room(iq: &xmpp_parsers::iq::Iq) -> Option<jid::BareJid> {

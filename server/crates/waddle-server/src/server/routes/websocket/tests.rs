@@ -829,7 +829,7 @@ type CallAdminFuture<'a, T> = std::pin::Pin<
 
 /// Call-signaling fixtures have no connected provider media. Keep discovery
 /// explicit and local while exercising real token signing and registration.
-struct EmptyCallAdmin;
+pub(crate) struct EmptyCallAdmin;
 
 impl waddle_sfu::LiveKitAdmin for EmptyCallAdmin {
     fn list_rooms(&self) -> CallAdminFuture<'_, Vec<waddle_sfu::ListedRoom>> {
