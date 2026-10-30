@@ -175,6 +175,7 @@ schema.#Project & {
 				_t.nixBuildExtensionModules,
 				// Publish evidence: Postgres + all-features shards with the
 				// required-cluster-tests.txt executed-name check (#1796).
+				_t.ciHelperContracts,
 				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
@@ -485,6 +486,7 @@ schema.#Project & {
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
 					"scripts/check_required_tests.py", "scripts/test_check_required_tests.py",
 					"scripts/check-test-postgres-env.py", "scripts/test_check_test_postgres_env.py",
+					"scripts/check-ci-helper-contracts.sh",
 					".config/required-cluster-tests.txt",
 					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
 				tasks.checkCiDrift.inputs,
@@ -494,6 +496,23 @@ schema.#Project & {
 			])
 			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false
+		}
+
+		// Contract tests for the shard lane's helpers (required-test check,
+		// shard planning, archive transfer) and the Postgres test-environment
+		// structure check. The PR rustTests workflow runs the same script.
+		ciHelperContracts: schema.#Task & {
+			// Reads ../tests and ../scripts through ../ inputs, which cuenv
+			// 0.56 rejects under the "dir" sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["scripts/check-ci-helper-contracts.sh"]
+			inputs: list.Concat([_nixInputs, [
+				"scripts/**",
+				".config/required-cluster-tests.txt",
+				"../scripts/ci-timings.py",
+				"../tests/ci-timings-test.py",
+			]])
 		}
 
 		// The immutable archives and four sandboxed shards stay on one
@@ -1255,6 +1274,7 @@ schema.#Project & {
 				tasks.nixBuildExtensionModules,
 				// No image ships unless the Postgres + all-features lane ran
 				// every required cluster test on this exact commit.
+				tasks.ciHelperContracts,
 				tasks.nixTestLocal,
 			]
 		}
