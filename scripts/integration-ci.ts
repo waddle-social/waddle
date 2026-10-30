@@ -92,8 +92,8 @@ export function generate(lanes: Lane[]): string {
         if (step.run?.includes("cuenv ci")) {
           const invocation = step.run.match(/^cuenv ci --pipeline ([a-zA-Z0-9_-]+) --path ([a-zA-Z0-9_./-]+)$/);
           if (!invocation || step["working-directory"]) throw new Error(`Unsupported pipeline invocation in ${lane.file}/${id}`);
-          // cuenv 0.57 ignores --from under GitHub auto-detection and its
-          // merge-group fallback only sees HEAD^; force the local provider.
+          // Pinned cuenv affectedness can skip unresolved inline tasks.
+          // Execute all attested named tasks directly with their dependencies.
           step.run = [
             "set -euo pipefail",
             'test "$(git rev-parse HEAD)" = "$WADDLE_CI_HEAD_SHA"',
@@ -101,8 +101,7 @@ export function generate(lanes: Lane[]): string {
             'git merge-base --is-ancestor "$WADDLE_CI_BASE_SHA" "$WADDLE_CI_HEAD_SHA"',
             'git -c diff.renames=false diff --no-renames --name-only -z "$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA" > /dev/null',
             "WADDLE_TEST_PINNED_CUENV=1 python3 scripts/test_integration_ci_project.py",
-            `python3 scripts/integration-ci-project.py --path ${invocation[2]} --pipeline ${invocation[1]}`,
-            `env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false ${step.run} --from "$WADDLE_CI_BASE_SHA"`,
+            `python3 scripts/integration-ci-project.py --path ${invocation[2]} --pipeline ${invocation[1]} --run`,
           ].join("\n");
           step.env = { ...step.env, WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}", WADDLE_CI_HEAD_SHA: "${{ github.sha }}" };
         }
@@ -196,9 +195,6 @@ if (import.meta.main) {
     const matches = lanes.filter(lane => applicable(lane, files));
     // An unrecognized surface must not silently become a zero-job success.
     const selected = files.some(file => !lanes.some(lane => applicable(lane, [file]))) ? lanes : matches;
-    // cuenv 0.57 parses newline-delimited git output internally. Refuse any
-    // encoded path that its affected-task parser could silently misinterpret.
-    if (selected.some(lane => JSON.stringify(lane.workflow.jobs).includes("cuenv ci")) && files.some(file => /[\x00-\x1f\x7f"\\]|[^\x00-\x7f]/.test(file))) throw new Error("Changed filename cannot be safely parsed by pinned cuenv");
     appendFileSync(process.env.GITHUB_OUTPUT!, `base=${base}\n` + selected.map(lane => `${lane.id}=true\n`).join("") + `expected=${JSON.stringify(selected.flatMap(jobIds))}\n`);
     console.log(JSON.stringify({ candidate: sha, base, changedFiles: files, workflows: selected.map(lane => lane.file) }, null, 2));
   } else if (mode === "gate") {

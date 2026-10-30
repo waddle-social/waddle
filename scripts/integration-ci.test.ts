@@ -85,7 +85,7 @@ describe("graph parity", () => {
         expect(generated.permissions).toEqual(source.steps.some((step: any) => step.uses?.startsWith("actions/checkout@")) ? { contents: "read" } : {});
         expect(JSON.stringify(generated)).not.toContain("secrets.");
         expect(generated.steps.some((step: any) => step.uses?.startsWith("DeterminateSystems/flakehub-cache-action@"))).toBe(false);
-        expect(generated.steps.filter((step: any) => step.run).map((step: any) => (step.env?.WADDLE_CI_BASE_SHA ? step.run.split("\n").at(-1) : step.run).replace(/^env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false /, "").replace(/ --from "\$WADDLE_CI_BASE_SHA"$/, ""))).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
+        expect(generated.steps.filter((step: any) => step.run).map((step: any) => (step.env?.WADDLE_CI_BASE_SHA ? step.run.split("\n").at(-1).replace(/^python3 scripts\/integration-ci-project\.py --path (\S+) --pipeline (\S+) --run$/, "cuenv ci --pipeline $2 --path $1") : step.run))).toEqual(source.steps.filter((step: any) => step.run).map((step: any) => step.run));
       }
     }
   });
@@ -130,8 +130,8 @@ test("planner executes against exact git objects, NUL-safe renames, and missing 
     thin.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
     writeFileSync(join(directory, ".github/workflows/example.yml"), Bun.YAML.stringify(thin.workflow));
     const encodedPath = run([process.execPath, script, "plan"], env);
-    expect(encodedPath.exitCode).not.toBe(0);
-    expect(encodedPath.stderr.toString()).toContain("Changed filename cannot be safely parsed");
+    expect(encodedPath.exitCode).toBe(0);
+    expect(JSON.parse(encodedPath.stdout.toString()).changedFiles).toEqual(["new/a\nfile.rs", "old/a\nfile.rs"]);
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: "f".repeat(40) } }));
     expect(run([process.execPath, script, "plan"], env).exitCode).not.toBe(0);
     writeFileSync(eventPath, JSON.stringify({ action: "checks_requested", merge_group: { head_sha: sha, base_sha: sha } }));
@@ -168,14 +168,14 @@ test("new unreviewed secret use fails generation", () => {
   expect(() => generate([source])).toThrow("Unreviewed secret");
 });
 
-test("thin pipelines use the exact complete base and local provider rather than last-commit fallback", () => {
+test("thin pipelines validate exact revisions and execute all attested named tasks", () => {
   const source = lane(["chat/**"]);
   source.workflow.jobs.build.steps.push({ run: "cuenv ci --pipeline pullRequest --path chat" });
   const workflow = Bun.YAML.parse(generate([source])) as any;
   const job = workflow.jobs.example__build;
   expect(job.steps[0].with["fetch-depth"]).toBe(0);
   const step = job.steps[2];
-  expect(step.run.split("\n").at(-1)).toBe('env -u GITHUB_ACTIONS -u BUILDKITE GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.renames GIT_CONFIG_VALUE_0=false cuenv ci --pipeline pullRequest --path chat --from "$WADDLE_CI_BASE_SHA"');
+  expect(step.run.split("\n").at(-1)).toBe("python3 scripts/integration-ci-project.py --path chat --pipeline pullRequest --run");
   expect(step.env.WADDLE_CI_BASE_SHA).toBe("${{ needs.plan.outputs.base }}");
   expect(step.env.WADDLE_CI_HEAD_SHA).toBe("${{ github.sha }}");
   expect(workflow.jobs.plan.outputs.base).toBe("${{ steps.plan.outputs.base }}");
@@ -201,7 +201,7 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
     writeFileSync(join(directory, "file"), "head"); git("add", "."); git("commit", "-qm", "head");
     const head = git("rev-parse", "HEAD");
     const marker = join(directory, "cuenv-called");
-    const testCommand = command.replace(/^WADDLE_TEST_PINNED_CUENV=1[^\n]+\n/m, "").replace(/^python3 scripts\/integration-ci-project\.py[^\n]+\n/m, "").replace(/env -u GITHUB_ACTIONS[^\n]+$/, `printf called > '${marker}'`);
+    const testCommand = command.replace(/^WADDLE_TEST_PINNED_CUENV=1[^\n]+\n/m, "").replace(/python3 scripts\/integration-ci-project\.py[^\n]+$/, `printf called > '${marker}'`);
     const env = { WADDLE_CI_BASE_SHA: base, WADDLE_CI_HEAD_SHA: head };
     expect(run(["bash", "-c", testCommand], env).exitCode).toBe(0);
     expect(readFileSync(marker, "utf8")).toBe("called");

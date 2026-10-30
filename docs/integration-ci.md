@@ -22,30 +22,38 @@ and addition so both old and new paths participate; filenames stay NUL separated
 
 The planner compares the event's full base SHA with the exact candidate SHA.
 Missing objects, invalid event identity, non-ancestor bases, and empty diffs fail.
-An unrecognized surface selects every lane. Thin pipelines retain their existing
-affected-task semantics from the complete base diff: selecting all lanes does
-not unconditionally execute every task in each lane. Planner or generator changes also
+An unrecognized surface selects every lane. Planner or generator changes also
 select every lane. The aggregate requires planner success, every applicable job
 success, and every nonapplicable job skipped. Missing, cancelled, failed, or
 unexpectedly skipped applicable jobs fail. There is no cross-workflow polling or
-reuse of prior PR results. Thin `cuenv ci` steps explicitly use the local provider
-and the validated base SHA with full Git history: cuenv 0.57.3 otherwise ignores
-`--from` under GitHub provider detection and falls back to the last commit on
-merge groups. Each thin step rechecks its own checkout HEAD, base commit availability,
-base ancestry, and successful full diff before invoking cuenv: the pinned local
-provider otherwise silently accepts Git diff failures as zero affected tasks.
-Each runner also requires `cuenv info PATH --json` to discover exactly the
-requested project, then checks the exact instance from `--json --meta` has the
-requested pipeline with nonempty executable tasks. Every task must carry a
-consistent named output reference and exactly match that binding in the project
-task index; unsupported inline tasks are rejected because pinned cuenv can
-silently treat them as unaffected. Deleted, empty, malformed or
-stale project/pipeline definitions fail before cuenv can report no-op success.
-The info commands evaluate one explicit path, avoiding recursive partial
-discovery. Their Git diff disables rename collapsing. The outer planner
-rejects encoded/non-ASCII filenames when a thin cuenv lane is selected because
-that pinned local provider parses newline-delimited Git paths; it fails visibly
-rather than silently omitting affected tasks. Other lanes retain NUL-safe paths.
+reuse of prior PR results.
+
+Thin source workflows invoke `cuenv ci`, whose pinned affected-task selection can
+silently skip unresolved inline tasks or failed diffs. Integration replaces that
+nested planner with explicit named execution: it discovers the exact project
+using explicit-path `cuenv info --json`, reads its requested pipeline with
+`--json --meta`, and requires a nonempty task inventory. Each executable must
+exactly match a named binding in the project's task index. The runner invokes
+`cuenv task --path PROJECT NAME` for every attested pipeline task, with normal
+runtime and dependency execution, and fails on any nonzero exit. This includes
+all tasks of every selected thin lane, even when its own affectedness would
+have skipped them. Unsupported unnamed tasks, matrix task forms and pipeline
+execution options fail instead of being silently approximated.
+
+Named JSON equality alone does not prove cuenv's original source reference map:
+an inline task can imitate output names. Direct named execution avoids relying
+on that map. The pinned-cuenv regression reproduces both an unnamed inline false
+and an inline false equal to a named binding; the first is rejected and the
+second executes the named false task and fails. Every thin runner runs that
+regression before executing its project.
+
+Each runner rechecks exact HEAD, base commit availability, ancestry and complete
+NUL-safe diff success. Deleted, empty, malformed, stale or empty-pipeline
+configuration fails project discovery. All seven current thin task/dependency
+closures were inspected: they contain build, test, lint, SDK/bindings and token
+checks, with no publication/deployment tasks; production pipelines are excluded.
+Broader execution adds work, and source task/runtime changes still require
+independent review. No product or XMPP behavior is changed.
 A dispatch uses the selected workflow ref as its exact
 candidate and requires an explicit ancestor `base_sha`; it does not certify a
 later merge queue candidate.

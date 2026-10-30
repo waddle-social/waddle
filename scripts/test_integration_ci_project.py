@@ -91,11 +91,24 @@ class PinnedCuenvContracts(unittest.TestCase):
             self.assertEqual(subprocess.run(command, cwd=root, env=environment, capture_output=True).returncode, 0)
             attest = [sys.executable, str(helper), "--path", ".", "--pipeline", "pullRequest"]
             self.assertNotEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
+            bound_inline = inline.replace('hermetic: false}], tasks: unused:', 'hermetic: false, stdout: cuenvTask: "reject", stderr: cuenvTask: "reject", exitCode: cuenvTask: "reject"}], tasks: reject:').replace(true_command, false_command)
+            (root / "env.cue").write_text(bound_inline)
+            self.assertEqual(subprocess.run(command, cwd=root, env=environment, capture_output=True).returncode, 0)
+            self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
+            bound_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(bound_result.returncode, 0)
+            self.assertIn("failed with exit code 1", bound_result.stderr)
             (root / "env.cue").write_text(named)
             self.assertEqual(subprocess.run(attest, cwd=root, capture_output=True).returncode, 0)
             result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Executing reject", result.stdout)
+            shell = json.dumps(shutil.which("sh"))
+            dependent = 'package cuenv\nimport "github.com/cuenv/cuenv/schema"\nschema.#Project & {let _tasks = tasks, name: "fixture", ci: pipelines: pullRequest: tasks: [_tasks.second], tasks: {first: {command: ' + shell + ', args: ["-c", "printf before >> trace"], hermetic: false}, second: {command: ' + shell + ', args: ["-c", "printf after >> trace"], hermetic: false, dependsOn: [_tasks.first]}}}\n'
+            (root / "env.cue").write_text(dependent)
+            dependency_result = subprocess.run(attest + ["--run"], cwd=root, capture_output=True, text=True)
+            self.assertEqual(dependency_result.returncode, 0, dependency_result.stderr)
+            self.assertEqual((root / "trace").read_text(), "beforeafter")
 
 
 if __name__ == "__main__":

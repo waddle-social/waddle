@@ -24,7 +24,11 @@ def verify_project(summary, metadata, requested_path, pipeline):
     config = metadata["instances"][project["path"]]
     if config.get("name") != project["name"]:
         raise ValueError("project summary and definition disagree")
-    tasks = config.get("ci", {}).get("pipelines", {}).get(pipeline, {}).get("tasks")
+    pipeline_config = config.get("ci", {}).get("pipelines", {}).get(pipeline, {})
+    if pipeline_config.get("environment") or pipeline_config.get("continueOnError"):
+        raise ValueError("pipeline execution options require explicit adapter support")
+    tasks = pipeline_config.get("tasks")
+    names_to_run = []
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("requested pipeline is absent or has no tasks")
     for task in tasks:
@@ -43,7 +47,8 @@ def verify_project(summary, metadata, requested_path, pipeline):
             binding = binding[part]
         if binding != task:
             raise ValueError("pipeline task differs from its named executable binding")
-    return {"project": project["name"], "path": project["path"], "pipeline": pipeline, "tasks": len(tasks)}
+        names_to_run.append(references[0]["cuenvTask"])
+    return {"project": project["name"], "path": project["path"], "pipeline": pipeline, "tasks": len(tasks), "task_names": names_to_run}
 
 
 def read_info(path, metadata=False):
@@ -58,12 +63,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", required=True)
     parser.add_argument("--pipeline", required=True)
+    parser.add_argument("--run", action="store_true", help="execute every attested named task with dependencies")
     args = parser.parse_args()
     try:
         result = verify_project(read_info(args.path), read_info(args.path, metadata=True), args.path, args.pipeline)
+        print(json.dumps(result, sort_keys=True), flush=True)
+        if args.run:
+            for name in result["task_names"]:
+                subprocess.run(["cuenv", "task", "--path", args.path, name], check=True)
     except (KeyError, TypeError, ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Integration project discovery failed: {error}") from None
-    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":
