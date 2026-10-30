@@ -14,11 +14,19 @@ the group's filter, or to sit in a module listed in
 uniquely named schema and touch nothing shared).
 
 Coverage is decided per test:
-- a test counts when its body reads the database, or calls (by name) a
-  function that does; calls are traced within the test's own file for
-  library unit tests and across the binary's module tree for integration
-  tests. A library fixture that hides the read in another file is not traced,
-  so keep such fixtures and their callers inside a module the filter covers.
+- a test counts when its body reads the database or calls a function that
+  does. `include!`d files are spliced in. Calls by qualified name
+  (`IngressFixture::postgres(`, `messages_offline::postgres_state(`) are
+  traced across the crate (library) or the binary's module tree
+  (integration tests); calls by bare name are traced within one file for
+  library tests (crate-wide, every `open(` would match some fixture) and
+  across the binary for integration tests. Integration binaries are
+  `tests/*.rs` and `tests/<name>/main.rs`.
+- the allowlist names files whose tests are isolated, or single fixtures
+  (`<file>::<Type>::<fn>`) that always create their own schema; a test
+  whose only route to the database is such a fixture needs no listing.
+
+Requires Python 3.11+ (tomllib).
 
 The filter grammar understood here is what the file uses today:
 `package(P) & (atom | atom | ...)` or `package(P) & atom`, where an atom is
@@ -44,6 +52,12 @@ TEST_ATTR = re.compile(r"#\[\s*(?:[A-Za-z_][A-Za-z_0-9]*::)*test\b[^\]]*\]")
 FN_DECL = re.compile(r"\bfn\s+(r#)?([A-Za-z_][A-Za-z_0-9]*)")
 ATOM = re.compile(r"^(binary|test)\((.+)\)$")
 HELPER_CRATE = "waddle-ws-test-support"
+INCLUDE = re.compile(
+    r'include!\s*\(\s*(?:concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*"([^"]+)"\s*\)'
+    r'|"([^"]+)")\s*\)\s*;?'
+)
+IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+BRACE = re.compile(r"[{}]")
 
 
 class CheckError(Exception):
@@ -78,6 +92,11 @@ def parse_filter(expression: str) -> Filter:
         if not atom or any(char in atom[2] for char in "()&|"):
             raise CheckError(f"unsupported atom {raw.strip()!r} in postgres group filter")
         kind, value = atom[1], atom[2].strip()
+        if value.startswith("~"):
+            value = value[1:]  # nextest's explicit "contains" matcher
+        elif value[:1] in ("=", "/", "#"):
+            raise CheckError(f"unsupported matcher in {raw.strip()!r}: only the default "
+                             "(contains for test, glob for binary) and ~ are understood")
         (result.binaries if kind == "binary" else result.tests).append(value)
     return result
 
@@ -147,9 +166,10 @@ def strip_comments_and_strings(source: str, keep_strings: bool = False) -> str:
     return "".join(out)
 
 
-@dataclass
+@dataclass(eq=False)
 class FnItem:
     name: str
+    qualifier: str  # impl self type, else the enclosing module's name
     reads: bool  # body reads the test database directly
     code: str  # comment- and string-free body, for call references
     test: tuple[str, ...] | None  # full test name when this is a test fn
@@ -162,6 +182,55 @@ class ModuleFile:
     reads: bool
     fns: list[FnItem]
     children: list["ModuleFile"]
+    included: set[Path]  # files spliced in through include!
+
+
+def crate_root(path: Path) -> Path:
+    for parent in path.parents:
+        if (parent / "Cargo.toml").is_file():
+            return parent
+    raise CheckError(f"{path}: no enclosing Cargo.toml")
+
+
+def expand_includes(source: str, path: Path, included: set[Path], depth: int = 0) -> str:
+    """Splice `include!`d files into `source`, like the compiler does."""
+    if depth > 8:
+        raise CheckError(f"{path}: include! nested too deeply")
+    if "include!" not in source:
+        return source
+    readable = strip_comments_and_strings(source, keep_strings=True)
+    pieces, last = [], 0
+    for match in INCLUDE.finditer(readable):
+        target = (crate_root(path) / match[1].lstrip("/")) if match[1] else (path.parent / match[2])
+        target = Path(os.path.normpath(target))
+        if not target.is_file():
+            raise CheckError(f"{path}: include! target {target} does not exist")
+        included.add(target)
+        pieces.append(source[last:match.start()])
+        pieces.append(expand_includes(target.read_text(), target, included, depth + 1))
+        last = match.end()
+    pieces.append(source[last:])
+    return "".join(pieces)
+
+
+def impl_self_type(header: str) -> str:
+    """`impl<T> Trait for path::Type<T> where ...` -> `Type`."""
+    text = header.strip()
+    if text.startswith("<"):
+        depth = 0
+        for index, char in enumerate(text):
+            depth += char == "<"
+            depth -= char == ">"
+            if depth == 0:
+                text = text[index + 1:]
+                break
+    text = re.split(r"\bwhere\b", text)[0]
+    if re.search(r"\bfor\b", text):
+        text = re.split(r"\bfor\b", text)[-1]
+    text = text.split("<")[0]
+    names = IDENT.findall(text.split("::")[-1]) if text.strip() else []
+    names = [name for name in names if name not in ("dyn", "mut", "const")]
+    return names[0] if names else ""
 
 
 _SCANS: dict[tuple[Path, tuple[str, ...], bool], ModuleFile] = {}
@@ -181,7 +250,8 @@ def scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
 
 def _scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
                       seen: set[Path]) -> ModuleFile:
-    source = path.read_text()
+    included: set[Path] = set()
+    source = expand_includes(path.read_text(), path, included)
     # The variable name only appears inside a string literal, so reads are
     # matched on comment-free text that keeps strings; structure and call
     # references come from text without comments or strings.
@@ -193,11 +263,12 @@ def _scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
     fns: list[FnItem] = []
     children: list[ModuleFile] = []
     inline: list[tuple[str, int]] = []  # (module name, brace depth it opened at)
+    impls: list[tuple[str, int]] = []  # (impl self type, brace depth it opened at)
     depth = 0
     pending_test = False
     pending_path: str | None = None
     i = 0
-    tokens = re.compile(r"#\[[^\]]*\]|[{}]|\bmod\s+(?:r#)?[A-Za-z_][A-Za-z_0-9]*\s*[;{]|\bfn\s+(?:r#)?[A-Za-z_][A-Za-z_0-9]*")
+    tokens = re.compile(r"#\[[^\]]*\]|\bimpl\b[^{};]*\{|[{}]|\bmod\s+(?:r#)?[A-Za-z_][A-Za-z_0-9]*\s*[;{]|\bfn\s+(?:r#)?[A-Za-z_][A-Za-z_0-9]*")
     for match in tokens.finditer(code):
         token = match.group(0)
         if token.startswith("#["):
@@ -208,6 +279,10 @@ def _scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
             if path_attr:
                 pending_path = path_attr[1]
             continue
+        if token.startswith("impl"):
+            depth += 1
+            impls.append((impl_self_type(token[4:-1]), depth))
+            continue
         if token == "{":
             depth += 1
             continue
@@ -215,6 +290,8 @@ def _scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
             depth -= 1
             while inline and inline[-1][1] > depth:
                 inline.pop()
+            while impls and impls[-1][1] > depth:
+                impls.pop()
             continue
         if token.startswith("mod"):
             decl = MOD_DECL.match(token)
@@ -243,14 +320,19 @@ def _scan_module_file(path: Path, module: tuple[str, ...], is_mod_rs: bool,
             continue
         # fn declaration: its body is the brace block before any `;`.
         fn_name = FN_DECL.match(token)[2]
-        test = module + tuple(name_ for name_, _ in inline) + (fn_name,) if pending_test else None
+        scope = module + tuple(name_ for name_, _ in inline)
+        test = scope + (fn_name,) if pending_test else None
+        # Methods are called as `Type::name(`, free fns as `module::name(`.
+        qualifier = impls[-1][0] if impls and (not inline or impls[-1][1] > inline[-1][1]) \
+            else (scope[-1] if scope else "")
         body = body_span(code, match.end())
         if body is not None:
             start, end = body
-            fns.append(FnItem(fn_name, bool(READ.search(readable[start:end])), code[start:end], test))
+            fns.append(FnItem(fn_name, qualifier, bool(READ.search(readable[start:end])),
+                              code[start:end], test))
         pending_test = False
         pending_path = None
-    return ModuleFile(path, module, reads, fns, children)
+    return ModuleFile(path, module, reads, fns, children, included)
 
 
 def body_span(code: str, after: int) -> tuple[int, int] | None:
@@ -258,39 +340,78 @@ def body_span(code: str, after: int) -> tuple[int, int] | None:
     semicolon = code.find(";", after)
     if brace == -1 or (semicolon != -1 and semicolon < brace):
         return None
-    depth, i = 0, brace
-    while i < len(code):
-        if code[i] == "{":
-            depth += 1
-        elif code[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return brace, i + 1
-        i += 1
+    depth = 0
+    for match in BRACE.finditer(code, brace):
+        depth += 1 if match.group(0) == "{" else -1
+        if depth == 0:
+            return brace, match.end()
     return brace, len(code)
 
 
-def postgres_tests(files: list[ModuleFile]) -> list[tuple[ModuleFile, tuple[str, ...]]]:
-    """Tests whose body reads the database, directly or through fns in `files`."""
+CALL_SUFFIX = r"\s*(?:::<[^>]*>)?\s*\("
+
+
+def postgres_tests(files: list[ModuleFile], bare_across_files: bool,
+                   isolated: "IsolatedFixtures") -> list[tuple[ModuleFile, tuple[str, ...]]]:
+    """Tests that reach the database: a fn is marked when its body reads it
+    (unless it is a listed schema-isolated fixture), calls a marked fn of the
+    same file by bare name (of any file in `files` if `bare_across_files`),
+    or calls a marked fn of any file in `files` by its qualified form
+    (`Type::name(` or `module::name(`)."""
     items = [(module_file, fn) for module_file in files for fn in module_file.fns]
-    marked = {fn.name for _, fn in items if fn.reads}
+    marked = {id(fn) for module_file, fn in items if fn.reads and not isolated.covers(module_file, fn)}
     changed = True
     while changed:
         changed = False
-        pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(marked))) + r")\s*(?:::<[^>]*>)?\s*\(") if marked else None
-        for _, fn in items:
-            if fn.name not in marked and pattern and pattern.search(fn.code):
-                marked.add(fn.name)
+        qualified = sorted({f"{fn.qualifier}::{fn.name}" for _, fn in items
+                            if id(fn) in marked and fn.qualifier})
+        qualified_call = re.compile(r"\b(?:" + "|".join(map(re.escape, qualified)) + ")" + CALL_SUFFIX) \
+            if qualified else None
+        bare_by_scope: dict[object, set[str]] = {}
+        for module_file, fn in items:
+            if id(fn) in marked:
+                bare_by_scope.setdefault(None if bare_across_files else id(module_file), set()).add(fn.name)
+        bare_calls = {scope: re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(names))) + ")" + CALL_SUFFIX)
+                      for scope, names in bare_by_scope.items()}
+        for module_file, fn in items:
+            if id(fn) in marked or isolated.covers(module_file, fn):
+                continue
+            bare_call = bare_calls.get(None if bare_across_files else id(module_file))
+            if (bare_call and bare_call.search(fn.code)) or (qualified_call and qualified_call.search(fn.code)):
+                marked.add(id(fn))
                 changed = True
     return [(module_file, fn.test) for module_file, fn in items
-            if fn.test is not None and (fn.reads or (fn.name in marked) or
-                                        (marked and pattern.search(fn.code)))]
+            if fn.test is not None and id(fn) in marked]
 
 
 def walk(module_file: ModuleFile):
     yield module_file
     for child in module_file.children:
         yield from walk(child)
+
+
+class IsolatedFixtures:
+    """`<file>::<Qualifier>::<fn>` allowlist entries: fixtures that only ever
+    use their own uniquely named schema."""
+
+    def __init__(self, entries: set[str], rel) -> None:
+        self.entries = {}
+        for entry in entries:
+            file, _, rest = entry.partition(".rs::")
+            qualifier, _, name = rest.rpartition("::")
+            self.entries[entry] = (file + ".rs", qualifier, name)
+        self.rel = rel
+        self.used: set[str] = set()
+
+    def covers(self, module_file: ModuleFile, fn: FnItem) -> bool:
+        if not fn.reads:
+            return False
+        files = {self.rel(module_file.path)} | {self.rel(path) for path in module_file.included}
+        for entry, (file, qualifier, name) in self.entries.items():
+            if fn.reads and fn.name == name and fn.qualifier == qualifier and file in files:
+                self.used.add(entry)
+                return True
+        return False
 
 
 def load_allowlist(path: Path) -> set[str]:
@@ -300,7 +421,7 @@ def load_allowlist(path: Path) -> set[str]:
         if not line:
             continue
         if len(line.split()) != 1:
-            raise CheckError(f"{path}:{number}: expected one file path, got {raw!r}")
+            raise CheckError(f"{path}:{number}: expected one file path or fixture, got {raw!r}")
         entries.add(line)
     return entries
 
@@ -317,9 +438,19 @@ def uncovered(server: Path, filters: list[Filter], allowlist: set[str]) -> tuple
     def rel(path: Path) -> str:
         return Path(os.path.normpath(path)).relative_to(os.path.normpath(server)).as_posix()
 
+    isolated = IsolatedFixtures({entry for entry in allowlist if ".rs::" in entry}, rel)
+    isolated_files = {entry for entry in allowlist if ".rs::" not in entry}
+
     def covered(package: str, binary: str, test: tuple[str, ...]) -> bool:
         name = "::".join(test)
         return any(f.covers(package, binary, name) for f in filters)
+
+    def report(module_file: ModuleFile, label: str, test: tuple[str, ...]) -> None:
+        key = rel(module_file.path)
+        if key in isolated_files:
+            used_allowlist.add(key)
+        else:
+            failures.append(f"{key}: {label} {'::'.join(test)}")
 
     for crate_dir in sorted((server / "crates").iterdir()):
         if not (crate_dir / "Cargo.toml").is_file():
@@ -329,31 +460,26 @@ def uncovered(server: Path, filters: list[Filter], allowlist: set[str]) -> tuple
             continue
         lib = crate_dir / "src" / "lib.rs"
         if lib.is_file():
-            # Library fixtures are traced within their own file: crate-wide
-            # name matching would tie every `open(` call to a fixture.
-            for files in ([m] for m in walk(scan_module_file(lib, (), True, set()))):
-                for module_file, test in postgres_tests(files):
-                    if covered(package, package, test):
-                        continue
-                    key = rel(module_file.path)
-                    if key in allowlist:
-                        used_allowlist.add(key)
-                        continue
-                    failures.append(f"{key}: {package} {'::'.join(test)}")
+            # Bare-name calls are traced within one file only (crate-wide
+            # they would tie every `open(` to some fixture); qualified calls
+            # (`IngressFixture::postgres(`) are traced across the crate.
+            tree = list(walk(scan_module_file(lib, (), True, set())))
+            for module_file, test in postgres_tests(tree, False, isolated):
+                if not covered(package, package, test):
+                    report(module_file, package, test)
         tests_dir = crate_dir / "tests"
         if tests_dir.is_dir():
-            for root in sorted(tests_dir.glob("*.rs")):
-                binary = root.stem
+            # Every tests/*.rs and tests/<name>/main.rs is its own binary,
+            # including support files such as tests/ingress_support.rs, which
+            # simply declare no tests.
+            roots = [(root, root.stem) for root in sorted(tests_dir.glob("*.rs"))]
+            roots += [(root, root.parent.name) for root in sorted(tests_dir.glob("*/main.rs"))]
+            for root, binary in roots:
                 tree = list(walk(scan_module_file(root, (), True, set())))
-                for module_file, test in postgres_tests(tree):
-                    if covered(package, binary, test):
-                        continue
-                    key = rel(module_file.path)
-                    if key in allowlist:
-                        used_allowlist.add(key)
-                        continue
-                    failures.append(f"{key}: {package}::{binary} {'::'.join(test)}")
-    return failures, used_allowlist
+                for module_file, test in postgres_tests(tree, True, isolated):
+                    if not covered(package, binary, test):
+                        report(module_file, f"{package}::{binary}", test)
+    return failures, used_allowlist | isolated.used
 
 
 def main() -> int:
@@ -379,7 +505,7 @@ def main() -> int:
               "or, if every such test uses its own uniquely named schema, list the file in "
               "scripts/postgres-schema-isolated.txt with the reason.", file=sys.stderr)
         return 1
-    print(f"Postgres test group covers every Postgres-backed test ({len(allowlist)} schema-isolated files allowlisted)")
+    print(f"Postgres test group covers every Postgres-backed test ({len(allowlist)} allowlist entries)")
     return 0
 
 

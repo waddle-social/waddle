@@ -31,6 +31,10 @@ test-group = 'postgres'
 LIB = """\
 mod shielded;
 mod exposed;
+mod fixture;
+mod via_include;
+mod offline;
+mod caller;
 #[path = "elsewhere/renamed_tests.rs"]
 mod renamed;
 mod nested {
@@ -73,6 +77,60 @@ pub fn open_db() -> Option<String> {
 }
 """
 
+# Shared by an integration binary and, through include!, by the library.
+FIXTURE_SUPPORT = """\
+pub struct DbFixture;
+
+impl DbFixture {
+    pub async fn isolated(name: &str) -> Option<Self> {
+        Self::isolated_with_pool(name, 1).await
+    }
+
+    pub async fn isolated_with_pool(_name: &str, _pool: u32) -> Option<Self> {
+        let _url = waddle_ws_test_support::require_test_postgres_url()?;
+        Some(Self)
+    }
+}
+"""
+
+LIB_FIXTURE = """\
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixture_support.rs"
+));
+"""
+
+VIA_INCLUDE = """\
+#[tokio::test]
+async fn uses_included_fixture() {
+    let _ = crate::fixture::DbFixture::isolated("x").await;
+}
+"""
+
+OFFLINE = """\
+pub(crate) async fn shared_state() -> Option<String> {
+    waddle_ws_test_support::require_test_postgres_url()
+}
+"""
+
+CALLER = """\
+#[tokio::test]
+async fn calls_module_qualified_fixture() {
+    let _ = crate::offline::shared_state().await;
+}
+"""
+
+DIR_BINARY_MAIN = """\
+mod helpers;
+"""
+
+DIR_BINARY_HELPERS = """\
+#[tokio::test]
+async fn reads_db() {
+    let _ = waddle_ws_test_support::require_test_postgres_url();
+}
+"""
+
 INTEGRATION_BINARY = """\
 mod support;
 
@@ -102,6 +160,13 @@ class PostgresGroupCheckTests(unittest.TestCase):
             "tests/cluster_e2e.rs": INTEGRATION_BINARY,
             "tests/plain_e2e.rs": INTEGRATION_BINARY,
             "tests/support.rs": INTEGRATION_SUPPORT,
+            "tests/fixture_support.rs": FIXTURE_SUPPORT,
+            "src/fixture.rs": LIB_FIXTURE,
+            "src/via_include.rs": VIA_INCLUDE,
+            "src/offline.rs": OFFLINE,
+            "src/caller.rs": CALLER,
+            "tests/dir_e2e/main.rs": DIR_BINARY_MAIN,
+            "tests/dir_e2e/helpers.rs": DIR_BINARY_HELPERS,
         }
         for name, content in files.items():
             path = self.crate / name
@@ -129,24 +194,51 @@ class PostgresGroupCheckTests(unittest.TestCase):
             "crates/demo/src/exposed.rs: demo exposed::tests::postgres_case",
             "crates/demo/src/elsewhere/renamed_tests.rs: demo renamed::direct",
             "crates/demo/tests/plain_e2e.rs: demo::plain_e2e uses_support",
+            # include!d fixture reached by a qualified call from another file
+            "crates/demo/src/via_include.rs: demo via_include::uses_included_fixture",
+            # module-qualified call to a fixture in another file
+            "crates/demo/src/caller.rs: demo caller::calls_module_qualified_fixture",
+            # tests/<name>/main.rs binary
+            "crates/demo/tests/dir_e2e/helpers.rs: demo::dir_e2e helpers::reads_db",
         })
 
     def test_filter_and_allowlist_cover_everything(self):
-        self.write_filter("    | test(exposed::tests::) | test(renamed::)\n")
-        self.allowlist.write_text("crates/demo/tests/plain_e2e.rs  # uuid schema\n")
+        self.write_filter("    | test(exposed::tests::) | test(renamed::) | test(caller::)"
+                          " | binary(dir_e2e)\n")
+        self.allowlist.write_text(
+            "crates/demo/tests/plain_e2e.rs  # uuid schema\n"
+            "crates/demo/tests/fixture_support.rs::DbFixture::isolated_with_pool  # uuid schema\n")
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_isolated_fixture_entry_covers_callers_reached_through_include(self):
+        self.write_filter("    | test(exposed::tests::) | test(renamed::) | test(caller::)"
+                          " | binary(dir_e2e) | binary(plain_e2e)\n")
+        result = self.run_check()
+        self.assertIn("demo via_include::uses_included_fixture", result.stderr)
+        self.allowlist.write_text(
+            "crates/demo/tests/fixture_support.rs::DbFixture::isolated_with_pool\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A fixture entry that matches nothing is stale.
+        self.allowlist.write_text("crates/demo/tests/fixture_support.rs::DbFixture::isolated\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("stale allowlist entry", result.stderr)
+
     def test_stale_allowlist_entry_fails(self):
-        self.write_filter("    | test(exposed::) | test(renamed::) | binary(plain_e2e)\n")
+        self.write_filter("    | test(exposed::) | test(renamed::) | binary(plain_e2e) | test(via_include::)"
+                          " | test(caller::) | binary(dir_e2e)\n")
         self.allowlist.write_text("crates/demo/src/exposed.rs\n")
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("stale allowlist entry", result.stderr)
 
     def test_unsupported_filter_is_rejected(self):
-        self.write_filter("    | not test(x)\n")
-        self.assertEqual(self.run_check().returncode, 2)
+        for extra in ("    | not test(x)\n", "    | test(=exact)\n", "    | test(/re/)\n",
+                      "    | binary(#glob)\n"):
+            self.write_filter(extra)
+            self.assertEqual(self.run_check().returncode, 2, extra)
 
     def test_parse_filter_atoms(self):
         parsed = check.parse_filter("package(p) & (binary(a) | test(b::) )")
