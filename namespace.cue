@@ -27,8 +27,10 @@ let _serverRustInputs = [
 				to:   "infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
 			},
 			{
-				from: "target/cuenv/server-rust-inputs/rules/mimir/waddle-reliability.yaml"
-				to:   "infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+				// Every Mimir rule file, so a second rules file is visible to
+				// the rule-drift tests in this sandbox too.
+				from: "target/cuenv/server-rust-inputs/rules/mimir"
+				to:   "infrastructure/waddle.cloud/rules/mimir"
 			},
 		]
 	},
