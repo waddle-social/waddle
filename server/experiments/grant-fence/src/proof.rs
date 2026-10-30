@@ -229,8 +229,12 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         report.versions = fixture.versions().await?;
         fixture.start().await?;
         exercise(&mut fixture, Path::new(worker_binary), &mut report).await?;
-        report.recovery_cases =
-            crate::recovery::run(&mut fixture, Path::new(worker_binary)).await?;
+        crate::recovery::run(
+            &mut fixture,
+            Path::new(worker_binary),
+            &mut report.recovery_cases,
+        )
+        .await?;
         Ok(())
     }
     .await;

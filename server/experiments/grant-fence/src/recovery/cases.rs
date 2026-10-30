@@ -206,22 +206,25 @@ async fn assert_no_admission(binary: &Path, fixture: &Fixture, identity: &Identi
     Ok(())
 }
 
-pub async fn run(fixture: &mut Fixture, binary: &Path) -> Result<Vec<RecoveryCase>> {
-    let mut cases = Vec::new();
-    outage(fixture, binary, &mut cases).await?;
+pub async fn run(
+    fixture: &mut Fixture,
+    binary: &Path,
+    cases: &mut Vec<RecoveryCase>,
+) -> Result<()> {
+    outage(fixture, binary, cases).await?;
     for candidate in [Candidate::Postgres, Candidate::SpiceDb] {
         for polarity in [Polarity::Grant, Polarity::Revoke] {
             for marker in [false, true] {
-                loss(fixture, binary, candidate, polarity, marker, &mut cases).await?;
+                loss(fixture, binary, candidate, polarity, marker, cases).await?;
             }
-            acknowledged_death(fixture, binary, candidate, polarity, &mut cases).await?;
+            acknowledged_death(fixture, binary, candidate, polarity, cases).await?;
         }
         for order in 0..3 {
-            stale(fixture, binary, candidate, order, &mut cases).await?;
+            stale(fixture, binary, candidate, order, cases).await?;
         }
     }
-    active_loss_control(fixture, binary, &mut cases).await?;
-    Ok(cases)
+    active_loss_control(fixture, binary, cases).await?;
+    Ok(())
 }
 
 async fn outage(fixture: &mut Fixture, binary: &Path, cases: &mut Vec<RecoveryCase>) -> Result<()> {
