@@ -29,8 +29,14 @@ go version
 "$FENCE_RUST_BIN/clippy-driver" --version
 bash "$experiment/check-toolchain.sh"
 "$FENCE_RUST_BIN/cargo-fmt" fmt --manifest-path server/Cargo.toml --all --check
-inventory="$("$CARGO" test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --list)"
-test "$(printf '%s\n' "$inventory" | grep -c '^permissions::parent_move_native_tests::production_parent_move_.*: test$')" = 2
+# Count the tests that the next command will actually run, not all tests in
+# the module: losing an #[ignore] must fail this required native lane.
+inventory="$("$CARGO" test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --ignored --list)"
+selected="$(printf '%s\n' "$inventory" | grep '^permissions::parent_move_native_tests::.*: test$' | sort)"
+expected="$(printf '%s\n' \
+  'permissions::parent_move_native_tests::production_parent_move_revoke_before_cleanup: test' \
+  'permissions::parent_move_native_tests::production_parent_move_revoke_during_cleanup: test')"
+test "$selected" = "$expected"
 # --ignored is mandatory: without native prerequisites these tests fail rather
 # than skip. Capture only typed assertions/test output, never service logs.
 "$CARGO" test --manifest-path server/Cargo.toml --locked -p waddle-server --lib parent_move_native_tests -- --ignored --nocapture --test-threads=1
