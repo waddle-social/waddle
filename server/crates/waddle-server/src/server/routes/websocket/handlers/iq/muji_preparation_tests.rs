@@ -1,14 +1,17 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use jid::{BareJid, FullJid};
 use tokio::sync::Notify;
 use waddle_sfu::{
-    ApiKey, ApiSecret, CallId, Identity, JoinToken, Jti, LiveKitSfu, MediaCapabilities,
-    ObservedCallSids, ParticipantPreparationFuture, ParticipantRegistrationExpectation,
-    SessionBinding, SessionScopedTeardown, SfuConfig, SfuError, SfuService,
-    SidObservationDirection, SidObservationDisposition, TeardownDisposition, TurnCredential,
-    TurnHost, TurnSharedSecret, WebsocketUrl,
+    ApiKey, ApiSecret, CallId, Identity, JoinToken, Jti, ListedRoom, LiveKitAdmin, LiveKitSfu,
+    MediaCapabilities, ObservedCallSids, ParticipantPreparationFuture,
+    ParticipantRegistrationExpectation, PendingMediaRetirement, RoomOccupancy, SessionBinding,
+    SessionScopedTeardown, SfuConfig, SfuError, SfuService, SidObservationDirection,
+    SidObservationDisposition, TeardownDisposition, TurnCredential, TurnHost, TurnSharedSecret,
+    WebsocketUrl,
 };
 use waddle_xmpp::muc::room_actor::{
     ConfigEffectPlan, GetConfig, GetOccupantVoice, GetSnapshot, Join, UpdateConfig,
@@ -29,10 +32,49 @@ use xmpp_parsers::jingle::{
 use xmpp_parsers::minidom::Element;
 
 use super::{IqConnState, IqHandlerContext};
+use crate::call_teardown_outbox::{CallTeardownOutboxStore, TeardownTarget};
+use crate::db::{Database, DatabaseConfig};
 use crate::server::routes::websocket::tests::create_test_websocket_state_with_sfu;
 use crate::server::routes::websocket::WebSocketState;
 
 const SIGNING_SECRET: &str = "preparation-test-secret-at-least-32-bytes";
+
+struct EmptyProviderAdmin;
+
+impl LiveKitAdmin for EmptyProviderAdmin {
+    fn list_rooms(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn remove_participant<'a>(
+        &'a self,
+        _: &'a CallId,
+        _: &'a Identity,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn delete_room<'a>(
+        &'a self,
+        _: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn update_participant<'a>(
+        &'a self,
+        _: &'a CallId,
+        _: &'a Identity,
+        _: MediaCapabilities,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SfuError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn room_occupancy<'a>(
+        &'a self,
+        _: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<RoomOccupancy, SfuError>> + Send + 'a>> {
+        Box::pin(async { Ok(RoomOccupancy::default()) })
+    }
+}
 
 /// Only the asynchronous provider preparation boundary is controlled. Token
 /// construction, publication CAS and registration are the real SFU behavior.
@@ -41,33 +83,53 @@ struct PausedPreparationSfu {
     entered: Notify,
     released: Notify,
     preparation_calls: AtomicUsize,
+    pending_observed: Notify,
+    published: Mutex<Vec<JoinToken>>,
 }
 
 impl PausedPreparationSfu {
     fn new() -> Self {
         Self {
-            inner: LiveKitSfu::try_new(SfuConfig {
-                api_key: ApiKey::new("APIpreparation"),
-                api_secret: ApiSecret::from_text(SIGNING_SECRET).expect("signing secret"),
-                webhook_secret: ApiSecret::from_text(SIGNING_SECRET).expect("webhook secret"),
-                ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().expect("URL"))
-                    .expect("WebSocket URL"),
-                turn_host: TurnHost::new("turn.test"),
-                turn_tls_port: 443,
-                turn_udp_port: 3478,
-                turn_shared_secret: TurnSharedSecret::from_text("preparation-turn-secret"),
-                token_ttl: chrono::Duration::seconds(3600),
-                turn_ttl: chrono::Duration::seconds(3600),
-            })
-            .expect("SFU"),
+            inner: LiveKitSfu::with_admin(
+                SfuConfig {
+                    api_key: ApiKey::new("APIpreparation"),
+                    api_secret: ApiSecret::from_text(SIGNING_SECRET).expect("signing secret"),
+                    webhook_secret: ApiSecret::from_text(SIGNING_SECRET).expect("webhook secret"),
+                    ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().expect("URL"))
+                        .expect("WebSocket URL"),
+                    turn_host: TurnHost::new("turn.test"),
+                    turn_tls_port: 443,
+                    turn_udp_port: 3478,
+                    turn_shared_secret: TurnSharedSecret::from_text("preparation-turn-secret"),
+                    token_ttl: chrono::Duration::seconds(3600),
+                    turn_ttl: chrono::Duration::seconds(3600),
+                },
+                Arc::new(EmptyProviderAdmin),
+            ),
             entered: Notify::new(),
             released: Notify::new(),
             preparation_calls: AtomicUsize::new(0),
+            pending_observed: Notify::new(),
+            published: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl SfuService for PausedPreparationSfu {
+    fn pending_media_retirements(
+        &self,
+        call: &CallId,
+        identity: &Identity,
+    ) -> Vec<PendingMediaRetirement> {
+        let pending = self.inner.pending_media_retirements(call, identity);
+        if !pending.is_empty() {
+            self.pending_observed.notify_one();
+        }
+        pending
+    }
+    fn acknowledge_media_retirement(&self, receipt: &PendingMediaRetirement) {
+        self.inner.acknowledge_media_retirement(receipt);
+    }
     fn issue_join_token(
         &self,
         call: &CallId,
@@ -108,8 +170,16 @@ impl SfuService for PausedPreparationSfu {
         occupant: OccupancySessionGeneration,
         expected: ParticipantRegistrationExpectation,
     ) -> Result<Option<JoinToken>, SfuError> {
-        self.inner
-            .issue_join_token_with_session(call, identity, caps, session, occupant, expected)
+        let token = self
+            .inner
+            .issue_join_token_with_session(call, identity, caps, session, occupant, expected)?;
+        if let Some(token) = &token {
+            self.published
+                .lock()
+                .expect("published tokens")
+                .push(token.clone());
+        }
+        Ok(token)
     }
     fn rollback_participant_registration(
         &self,
@@ -504,4 +574,303 @@ async fn relayed_muji_exhausted_read_budget_cannot_start_provider_preparation() 
 #[tokio::test]
 async fn relayed_muji_preparation_cannot_freeze_voice_grants_before_async_work() {
     assert_voice_is_read_after_preparation(Adapter::Relayed).await;
+}
+
+struct PublicationFixture {
+    sfu: Arc<PausedPreparationSfu>,
+    state: Arc<WebSocketState>,
+    database: Database,
+    outbox: Arc<CallTeardownOutboxStore>,
+    room: BareJid,
+    sender: FullJid,
+    generation: OccupancySessionGeneration,
+    displaced: OccupancySessionGeneration,
+}
+
+impl PublicationFixture {
+    async fn new() -> Self {
+        let sfu = Arc::new(PausedPreparationSfu::new());
+        let mut state = create_test_websocket_state_with_sfu(sfu.clone() as Arc<_>).await;
+        // A separate one-slot pool gives the test an actual blocked SQL
+        // boundary without blocking room actor reads or authorization writes.
+        let database = Database::from_config(
+            "muji-retirement-reply",
+            &DatabaseConfig {
+                pool_size: 1,
+                ..DatabaseConfig::default()
+            },
+        )
+        .await
+        .expect("dedicated outbox database");
+        let outbox = Arc::new(
+            CallTeardownOutboxStore::try_new(database.clone())
+                .await
+                .expect("outbox"),
+        );
+        Arc::get_mut(&mut state)
+            .expect("state not yet shared")
+            .deps
+            .protocol
+            .call_teardown_outbox = outbox.clone();
+        let room: BareJid = "publication-retirement@muc.example.com"
+            .parse()
+            .expect("room");
+        let sender: FullJid = "alice@example.com/web".parse().expect("JID");
+        let generation = OccupancySessionGeneration::mint();
+        let displaced = OccupancySessionGeneration::mint();
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateInstantRoom {
+                room_jid: room.clone(),
+            })
+            .await
+            .expect("create room")
+            .actor_ref;
+        actor
+            .ask(Join {
+                session: generation,
+                nick: "alice".into(),
+                real_jid: sender.clone(),
+                role: Role::Visitor,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+        let call = CallId::try_new(room.to_string()).expect("call");
+        let identity = Identity::from_jid(sender.clone());
+        sfu.inner
+            .issue_join_token_with_session(
+                &call,
+                &identity,
+                MediaCapabilities::direct_call_peer(),
+                &SessionBinding::try_new("displaced-session").expect("session"),
+                displaced,
+                sfu.inner
+                    .participant_registration_expectation(&call, &identity)
+                    .expect("old expectation"),
+            )
+            .expect("old mint")
+            .expect("old publication");
+        Self {
+            sfu,
+            state,
+            database,
+            outbox,
+            room,
+            sender,
+            generation,
+            displaced,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PublicationOutcome {
+    Commit,
+    ClosedDatabase,
+    VoiceRevoked,
+}
+
+async fn assert_retirement_is_durable_before_reply(adapter: Adapter, outcome: PublicationOutcome) {
+    let fixture = PublicationFixture::new().await;
+    let transaction = if matches!(outcome, PublicationOutcome::ClosedDatabase) {
+        fixture
+            .database
+            .sqlite_pool()
+            .expect("SQLite pool")
+            .close()
+            .await;
+        None
+    } else {
+        Some(
+            fixture
+                .database
+                .begin_immediate()
+                .await
+                .expect("hold outbox SQL slot"),
+        )
+    };
+    let iq = initiate_iq(&fixture.room, &fixture.sender);
+    let mut execution = tokio::spawn(execute_adapter(
+        adapter,
+        fixture.state.clone(),
+        iq,
+        fixture.sender.clone(),
+        fixture.generation,
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.sfu.entered.notified(),
+    )
+    .await
+    .expect("preparation reached");
+    fixture.sfu.released.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fixture.sfu.pending_observed.notified(),
+    )
+    .await
+    .expect("publication produced pending displaced-media responsibility");
+    let minted = {
+        let published = fixture.sfu.published.lock().expect("published tokens");
+        assert_eq!(published.len(), 1);
+        published[0].clone()
+    };
+    if transaction.is_some() {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(75), &mut execution)
+                .await
+                .is_err(),
+            "no session-accept may escape while retirement SQL cannot commit"
+        );
+        assert!(!fixture.sfu.is_revoked(&minted.jti));
+    }
+    if matches!(outcome, PublicationOutcome::VoiceRevoked) {
+        let actor = crate::server::routes::websocket::get_room_actor(&fixture.state, &fixture.room)
+            .await
+            .expect("room actor");
+        let config = actor.ask(GetConfig).await.expect("config");
+        actor
+            .ask(UpdateConfig {
+                config: waddle_xmpp::muc::RoomConfig {
+                    moderated: true,
+                    ..config
+                },
+                effect_plan: ConfigEffectPlan::DirectAudience,
+            })
+            .await
+            .expect("revoke voice while SQL blocked");
+        assert_eq!(
+            actor
+                .ask(GetSnapshot)
+                .await
+                .expect("snapshot")
+                .room
+                .session_generation(&fixture.sender),
+            Some(fixture.generation)
+        );
+        assert_eq!(
+            actor
+                .ask(GetOccupantVoice {
+                    jid: fixture.sender.clone()
+                })
+                .await
+                .expect("new voice"),
+            Some(Voice::Muted)
+        );
+    }
+    if let Some(transaction) = transaction {
+        transaction.commit().await.expect("release SQL slot");
+    }
+    let frames = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+        .await
+        .expect("adapter finishes")
+        .expect("adapter task")
+        .expect("IQ handled");
+    let call = CallId::try_new(fixture.room.to_string()).expect("call");
+    let identity = Identity::from_jid(fixture.sender.clone());
+    match outcome {
+        PublicationOutcome::Commit => {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("session-accept") && frame.contains("<token")),
+                "{frames:?}"
+            );
+            assert!(!fixture.sfu.is_revoked(&minted.jti));
+            assert_eq!(
+                fixture.sfu.participant_occupant_session(&call, &identity),
+                Some(fixture.generation)
+            );
+        }
+        PublicationOutcome::ClosedDatabase | PublicationOutcome::VoiceRevoked => {
+            assert!(
+                !frames
+                    .iter()
+                    .any(|frame| frame.contains("session-accept") || frame.contains("<token")),
+                "{frames:?}"
+            );
+            let error = if matches!(outcome, PublicationOutcome::ClosedDatabase) {
+                "internal-server-error"
+            } else {
+                "forbidden"
+            };
+            assert!(
+                frames.iter().any(|frame| frame.contains(error)),
+                "{frames:?}"
+            );
+            assert!(
+                fixture.sfu.is_revoked(&minted.jti),
+                "the exact held publication must be rolled back"
+            );
+            assert_eq!(
+                fixture.sfu.participant_occupant_session(&call, &identity),
+                None
+            );
+        }
+    }
+    if matches!(outcome, PublicationOutcome::ClosedDatabase) {
+        assert!(
+            !fixture
+                .sfu
+                .inner
+                .pending_media_retirements(&call, &identity)
+                .is_empty(),
+            "a failed SQL enqueue cannot acknowledge the old retirement obligation"
+        );
+    } else {
+        let rows = fixture
+            .outbox
+            .claim_due(8)
+            .await
+            .expect("read committed retirement");
+        assert!(rows.iter().any(|job| {
+            job.intent.occupant == Some(fixture.displaced)
+                && matches!(&job.intent.target, TeardownTarget::DisplacedParticipant { identity, .. } if identity == &fixture.sender)
+        }), "retirement must already be committed when the reply is released: {rows:?}");
+        assert!(fixture
+            .sfu
+            .inner
+            .pending_media_retirements(&call, &identity)
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn local_muji_reply_waits_for_retirement_sql_commit() {
+    assert_retirement_is_durable_before_reply(Adapter::Local, PublicationOutcome::Commit).await;
+}
+
+#[tokio::test]
+async fn local_muji_retirement_sql_failure_rolls_back_and_suppresses_credentials() {
+    assert_retirement_is_durable_before_reply(Adapter::Local, PublicationOutcome::ClosedDatabase)
+        .await;
+}
+
+#[tokio::test]
+async fn local_muji_voice_revoked_during_retirement_sql_wait_invalidates_held_credentials() {
+    assert_retirement_is_durable_before_reply(Adapter::Local, PublicationOutcome::VoiceRevoked)
+        .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_reply_waits_for_retirement_sql_commit() {
+    assert_retirement_is_durable_before_reply(Adapter::Relayed, PublicationOutcome::Commit).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_retirement_sql_failure_rolls_back_and_suppresses_credentials() {
+    assert_retirement_is_durable_before_reply(Adapter::Relayed, PublicationOutcome::ClosedDatabase)
+        .await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_voice_revoked_during_retirement_sql_wait_invalidates_held_credentials() {
+    assert_retirement_is_durable_before_reply(Adapter::Relayed, PublicationOutcome::VoiceRevoked)
+        .await;
 }

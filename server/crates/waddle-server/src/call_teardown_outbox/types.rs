@@ -159,6 +159,37 @@ pub struct CallTeardownIntent {
     pub session: Option<SessionBinding>,
 }
 
+impl From<waddle_sfu::CallTeardownIntentLite> for CallTeardownIntent {
+    fn from(intent: waddle_sfu::CallTeardownIntentLite) -> Self {
+        let target = match intent.target {
+            waddle_sfu::TeardownTargetLite::Participant {
+                identity,
+                participant_sid,
+            } => TeardownTarget::Participant {
+                identity: identity.as_jid().clone(),
+                participant_sid,
+            },
+            waddle_sfu::TeardownTargetLite::DisplacedParticipant {
+                identity,
+                participant_sid,
+            } => TeardownTarget::DisplacedParticipant {
+                identity: identity.as_jid().clone(),
+                participant_sid,
+            },
+            waddle_sfu::TeardownTargetLite::Room => TeardownTarget::Room,
+        };
+        Self {
+            call_id: intent.call_id,
+            target,
+            generation: intent.generation,
+            occupant: intent.occupant_session,
+            unbound_occupant: intent.unbound_occupant,
+            room_sid: intent.room_sid,
+            session: intent.session,
+        }
+    }
+}
+
 impl CallTeardownIntent {
     pub(super) fn validate_retirement_evidence(&self) -> Result<(), CallTeardownOutboxError> {
         if matches!(

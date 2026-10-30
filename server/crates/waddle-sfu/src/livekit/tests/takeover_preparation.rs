@@ -351,3 +351,50 @@ async fn preparation_rejects_a_room_rotated_during_its_participant_probe() {
     assert!(fixture.reported.lock().expect("intents").is_empty());
     assert_eq!(fixture.sfu.issued_count(&fixture.call, &fixture.alice), 0);
 }
+
+#[tokio::test]
+async fn retrying_the_same_generation_keeps_its_tokens_while_retiring_older_media() {
+    let fixture = TakeoverFixture::new();
+    let first = fixture_occupancy_session();
+    let second = fixture_occupancy_session();
+    let old_token = fixture.publish(
+        first,
+        captured_registration(&fixture.sfu, &fixture.call, &fixture.alice),
+    );
+    fixture.set_media(first, "PA_old");
+    let first_takeover = fixture
+        .sfu
+        .prepare_participant_registration(&fixture.call, &fixture.alice)
+        .await
+        .expect("old media observation");
+    let first_successor_token = fixture.publish(second, first_takeover);
+    assert!(fixture.sfu.is_revoked(&old_token.jti));
+    assert!(!fixture.sfu.is_revoked(&first_successor_token.jti));
+
+    // g2 retries signaling before it connects media, so LiveKit still
+    // reports g1. Retiring that media must not retire g2's credentials.
+    let repeated_takeover = fixture
+        .sfu
+        .prepare_participant_registration(&fixture.call, &fixture.alice)
+        .await
+        .expect("old media still connected");
+    let second_successor_token = fixture.publish(second, repeated_takeover);
+    assert!(fixture.sfu.is_revoked(&old_token.jti));
+    assert!(!fixture.sfu.is_revoked(&first_successor_token.jti));
+    assert!(!fixture.sfu.is_revoked(&second_successor_token.jti));
+    assert_eq!(
+        fixture
+            .sfu
+            .participant_occupant_session(&fixture.call, &fixture.alice),
+        Some(second)
+    );
+    fixture.wait_for_retirements(2).await;
+    let intents = fixture.reported.lock().expect("intents");
+    assert!(intents
+        .iter()
+        .all(|intent| intent.occupant_session == Some(first)));
+    assert!(
+        intents.iter().any(|intent| intent.session.is_none()),
+        "g2's signaling session must not be attributed to g1's connected media"
+    );
+}

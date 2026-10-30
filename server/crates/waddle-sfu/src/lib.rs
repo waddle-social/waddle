@@ -61,6 +61,7 @@ mod service;
 pub use service::LiveParticipantsFuture;
 pub use service::ParticipantPreparationFuture;
 pub use service::ParticipantRegistrationExpectation;
+pub use service::PendingMediaRetirement;
 pub use service::ReconcileFuture;
 pub use service::ReconcilePassSummary;
 pub use service::SfuReconciler;

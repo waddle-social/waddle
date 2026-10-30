@@ -26,6 +26,12 @@ occupancy generation.
    revision and observation-freshness checks. Retry failed probes or conflicting
    observations. Provider evidence never grants logical occupancy.
 4. Use the returned expectation for the existing synchronous publication CAS.
+   Stage an opaque unpersisted receipt under its call-entry guard, before exposing
+   the successor binding, and dispatch the reporter only after releasing locks.
+   Before releasing a replacement JWT, snapshot pending/in-flight receipts and
+   await confirmed outbox inserts; acknowledge only matching receipt IDs after
+   commit. Revalidate the minted role/capabilities and generation after this
+   database await; failures suppress the token and roll back only that publication.
    Persist retirement only after that authorized publication succeeds. Attribute
    remote retirement to observed media and local JTI revocation to logical
    occupancy; those generations can differ after cached-token recovery.

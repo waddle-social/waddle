@@ -210,12 +210,13 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
     if !is_terminate && !events_contain_iq_error(&events) {
         if let Some(room) = relayed_muji_room(iq) {
-            if !jingle_muji_gate::initiate_still_current(
+            if let Err(error) = jingle_muji_gate::finalize_muji_publication(
                 state,
                 &room,
                 &sender,
                 occupancy_session,
                 participant_registration,
+                media_capabilities,
             )
             .await
             {
@@ -223,7 +224,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
                     id,
                     response_from.as_deref(),
                     Some(response_to.as_str()),
-                    forbidden_iq_error("occupant session was replaced; rejoin before retrying"),
+                    *error,
                 )]);
             }
         }

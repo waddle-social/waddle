@@ -5,6 +5,7 @@
 //! here assert on directly.
 
 mod retirement;
+mod retirement_receipts;
 mod takeover_preparation;
 
 use super::{
