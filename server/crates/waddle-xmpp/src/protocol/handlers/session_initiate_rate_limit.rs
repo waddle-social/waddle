@@ -35,9 +35,9 @@ pub const DEFAULT_MAX_INITIATES: usize = 5;
 /// A first legitimate hangup must not be blocked, so the terminate
 /// budget is deliberately generous.
 pub const DEFAULT_MAX_TERMINATES: usize = 20;
-/// Unsupported Muji actions still receive protocol error replies. This
-/// budget absorbs ordinary client retry bursts while bounding the
-/// room-locality, membership, and relay work performed before rejection.
+/// Muji control-plane work, including unsupported-action error replies and
+/// initiate discovery, has a separate budget from token publication. It bounds
+/// room-locality, membership, provider reads and relay work under retry bursts.
 pub const DEFAULT_MAX_MUJI_ACTIONS: usize = 60;
 /// TURN credentials are request-shaped and should stay comfortably
 /// available during login / reconnect loops.

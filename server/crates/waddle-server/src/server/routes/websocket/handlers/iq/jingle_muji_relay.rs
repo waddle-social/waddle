@@ -46,18 +46,18 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let response_from = iq.to().map(|to| to.to_string());
     let response_to = jid::Jid::from(sender.clone()).to_string();
 
+    // The owner must bound its own control-plane/provider work even when
+    // requests bypass a client-side adapter or are replayed by the relay.
+    if let Some(error) = super::sans_io::pre_dispatch_muji_rate_limit_error(state, &sender, iq) {
+        return Some(vec![build_iq_error_xml_typed(
+            id,
+            response_from.as_deref(),
+            Some(response_to.as_str()),
+            error,
+        )]);
+    }
     let is_terminate = jingle_muji_gate::muji_session_terminate_room(iq).is_some();
-    let participant_registration = if !is_terminate {
-        if let Some(room) = relayed_muji_room(iq) {
-            jingle_muji_gate::participant_registration_expectation(state, &room, &sender).await
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let media_capabilities = match jingle_muji_gate::verify_muji_jingle_request(
+    let mut media_capabilities = match jingle_muji_gate::verify_muji_jingle_request(
         state,
         &sender,
         iq,
@@ -142,6 +142,62 @@ pub(crate) async fn handle_relayed_muji_initiate(
             }
         }
     }
+
+    let prepare_room = jingle_muji_gate::muji_session_initiate_room(iq);
+    let participant_registration = if let Some(room) = prepare_room {
+        let registration =
+            jingle_muji_gate::participant_registration_expectation(state, &room, &sender).await;
+        match jingle_muji_gate::verify_muji_jingle_request(
+            state,
+            &sender,
+            iq,
+            GateInvocation::RelayedReplay,
+        )
+        .await
+        {
+            GateOutcome::Allow {
+                media_capabilities: current_capabilities,
+            } => {
+                media_capabilities = current_capabilities;
+            }
+            GateOutcome::Deny(error) => {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    *error,
+                )]);
+            }
+            GateOutcome::RoomNotLocal { .. } => {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from.as_deref(),
+                    Some(response_to.as_str()),
+                    internal_server_error_iq_error(
+                        "room ownership changed during media preparation; please retry",
+                    ),
+                )]);
+            }
+        }
+        if let Some(error) = jingle_muji_gate::current_muji_generation_error(
+            state,
+            &room,
+            &sender,
+            occupancy_session,
+        )
+        .await
+        {
+            return Some(vec![build_iq_error_xml_typed(
+                id,
+                response_from.as_deref(),
+                Some(response_to.as_str()),
+                error,
+            )]);
+        }
+        registration
+    } else {
+        None
+    };
 
     let ctx = ProtocolStanzaContext {
         participant_registration,

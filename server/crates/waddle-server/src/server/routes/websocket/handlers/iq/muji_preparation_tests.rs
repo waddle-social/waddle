@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use jid::{BareJid, FullJid};
@@ -29,6 +30,7 @@ use xmpp_parsers::minidom::Element;
 
 use super::{IqConnState, IqHandlerContext};
 use crate::server::routes::websocket::tests::create_test_websocket_state_with_sfu;
+use crate::server::routes::websocket::WebSocketState;
 
 const SIGNING_SECRET: &str = "preparation-test-secret-at-least-32-bytes";
 
@@ -38,6 +40,7 @@ struct PausedPreparationSfu {
     inner: LiveKitSfu,
     entered: Notify,
     released: Notify,
+    preparation_calls: AtomicUsize,
 }
 
 impl PausedPreparationSfu {
@@ -59,6 +62,7 @@ impl PausedPreparationSfu {
             .expect("SFU"),
             entered: Notify::new(),
             released: Notify::new(),
+            preparation_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -85,6 +89,7 @@ impl SfuService for PausedPreparationSfu {
         call: &'a CallId,
         identity: &'a Identity,
     ) -> ParticipantPreparationFuture<'a> {
+        self.preparation_calls.fetch_add(1, Ordering::SeqCst);
         let expected = self
             .inner
             .participant_registration_expectation(call, identity);
@@ -225,10 +230,63 @@ fn initiate_iq(room: &BareJid, sender: &FullJid) -> Iq {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Adapter {
     Local,
     #[cfg(feature = "clustering")]
     Relayed,
+}
+
+async fn execute_adapter(
+    adapter: Adapter,
+    state: Arc<WebSocketState>,
+    iq: Iq,
+    sender: FullJid,
+    generation: OccupancySessionGeneration,
+) -> Option<Vec<String>> {
+    match adapter {
+        #[cfg(feature = "clustering")]
+        Adapter::Relayed => {
+            super::jingle_muji_relay::handle_relayed_muji_initiate(&state, &iq, generation).await
+        }
+        Adapter::Local => {
+            let mut carbons = false;
+            let mut roster = false;
+            let mut blocklist = false;
+            let mut conn = IqConnState {
+                carbons_enabled: &mut carbons,
+                roster_interested: &mut roster,
+                blocklist_interested: &mut blocklist,
+                occupancy_session: &generation,
+                registry_owner: None,
+                state_machine: None,
+                ordered_relay_origin: None,
+            };
+            super::sans_io::handle_sans_io_iq(
+                IqHandlerContext {
+                    iq: &iq,
+                    id: iq.id(),
+                    payload_ns: NS_JINGLE,
+                    target_to: Some("calls.example.com"),
+                    has_destroy: false,
+                    domain: "example.com",
+                    muc_domain: "muc.example.com",
+                    upload_domain: "upload.example.com",
+                    spaces_domain: "spaces.example.com",
+                    community_domain: "community.example.com",
+                    extensions_domain: "extensions.example.com",
+                    push_domain: "push.example.com",
+                    response_from: Some("calls.example.com"),
+                    response_to: Some(sender.as_str()),
+                },
+                &state,
+                None,
+                &ConnectionPhase::ready(sender.clone(), false),
+                &mut conn,
+            )
+            .await
+        }
+    }
 }
 
 async fn assert_voice_is_read_after_preparation(adapter: Adapter) {
@@ -267,54 +325,13 @@ async fn assert_voice_is_read_after_preparation(adapter: Adapter) {
         Some(Voice::Voiced)
     );
     let iq = initiate_iq(&room, &sender);
-    let task_state = state.clone();
-    let task_sender = sender.clone();
-    let execution = tokio::spawn(async move {
-        match adapter {
-            #[cfg(feature = "clustering")]
-            Adapter::Relayed => {
-                super::jingle_muji_relay::handle_relayed_muji_initiate(&task_state, &iq, generation)
-                    .await
-            }
-            Adapter::Local => {
-                let mut carbons = false;
-                let mut roster = false;
-                let mut blocklist = false;
-                let mut conn = IqConnState {
-                    carbons_enabled: &mut carbons,
-                    roster_interested: &mut roster,
-                    blocklist_interested: &mut blocklist,
-                    occupancy_session: &generation,
-                    registry_owner: None,
-                    state_machine: None,
-                    ordered_relay_origin: None,
-                };
-                super::sans_io::handle_sans_io_iq(
-                    IqHandlerContext {
-                        iq: &iq,
-                        id: iq.id(),
-                        payload_ns: NS_JINGLE,
-                        target_to: Some("calls.example.com"),
-                        has_destroy: false,
-                        domain: "example.com",
-                        muc_domain: "muc.example.com",
-                        upload_domain: "upload.example.com",
-                        spaces_domain: "spaces.example.com",
-                        community_domain: "community.example.com",
-                        extensions_domain: "extensions.example.com",
-                        push_domain: "push.example.com",
-                        response_from: Some("calls.example.com"),
-                        response_to: Some(task_sender.as_str()),
-                    },
-                    &task_state,
-                    None,
-                    &ConnectionPhase::ready(task_sender.clone(), false),
-                    &mut conn,
-                )
-                .await
-            }
-        }
-    });
+    let execution = tokio::spawn(execute_adapter(
+        adapter,
+        state.clone(),
+        iq,
+        sender.clone(),
+        generation,
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), sfu.entered.notified())
         .await
         .expect("provider preparation must actually pause");
@@ -394,6 +411,93 @@ async fn assert_voice_is_read_after_preparation(adapter: Adapter) {
 #[tokio::test]
 async fn local_muji_preparation_cannot_freeze_voice_grants_before_async_work() {
     assert_voice_is_read_after_preparation(Adapter::Local).await;
+}
+
+async fn assert_admission_denies_before_preparation(adapter: Adapter, exhaust_read_budget: bool) {
+    let sfu = Arc::new(PausedPreparationSfu::new());
+    let state = create_test_websocket_state_with_sfu(sfu.clone() as Arc<_>).await;
+    let room: BareJid = "preparation-admission@muc.example.com"
+        .parse()
+        .expect("room");
+    let sender: FullJid = "alice@example.com/web".parse().expect("JID");
+    let generation = OccupancySessionGeneration::mint();
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateInstantRoom {
+            room_jid: room.clone(),
+        })
+        .await
+        .expect("create room")
+        .actor_ref;
+    if exhaust_read_budget {
+        actor
+            .ask(Join {
+                session: generation,
+                nick: "alice".into(),
+                real_jid: sender.clone(),
+                role: Role::Participant,
+                affiliation: Affiliation::Member,
+            })
+            .await
+            .expect("join");
+        for _ in 0
+            ..waddle_xmpp::protocol::handlers::session_initiate_rate_limit::DEFAULT_MAX_MUJI_ACTIONS
+        {
+            state
+                .deps
+                .protocol
+                .muji_pre_dispatch_action_rate_limit
+                .check_and_record(&sender.to_bare())
+                .expect("fill control-plane read budget");
+        }
+    }
+    let iq = initiate_iq(&room, &sender);
+    let frames = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_adapter(adapter, state, iq, sender, generation),
+    )
+    .await
+    .expect("rejection must not enter paused provider preparation")
+    .expect("IQ handled");
+    assert_eq!(
+        sfu.preparation_calls.load(Ordering::SeqCst),
+        0,
+        "membership/read admission must reject before any provider preparation"
+    );
+    let condition = if exhaust_read_budget {
+        "policy-violation"
+    } else {
+        "forbidden"
+    };
+    assert!(
+        frames.iter().any(|frame| frame.contains(condition)),
+        "{frames:?}"
+    );
+    assert!(!frames.iter().any(|frame| frame.contains("<token")));
+}
+
+#[tokio::test]
+async fn local_muji_nonmember_cannot_start_provider_preparation() {
+    assert_admission_denies_before_preparation(Adapter::Local, false).await;
+}
+
+#[tokio::test]
+async fn local_muji_exhausted_read_budget_cannot_start_provider_preparation() {
+    assert_admission_denies_before_preparation(Adapter::Local, true).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_nonmember_cannot_start_provider_preparation() {
+    assert_admission_denies_before_preparation(Adapter::Relayed, false).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_exhausted_read_budget_cannot_start_provider_preparation() {
+    assert_admission_denies_before_preparation(Adapter::Relayed, true).await;
 }
 
 #[cfg(feature = "clustering")]

@@ -19,7 +19,9 @@ occupancy generation.
    ownerless drain and connected-successor behavior with regression tests.
 2. Remove join/poll retirement production, its inventory API and redundant
    canonical-owner callback machinery.
-3. Prepare provider evidence before room authorization. Check room incarnation
+3. Charge the existing Muji control-plane budget and reject non-members before
+   provider preparation. Recheck current role/occupancy after preparation; retain
+   the separate five-per-window publication limit. Check room incarnation
    around the participant probe, then seed only under the original registration
    revision and observation-freshness checks. Retry failed probes or conflicting
    observations. Provider evidence never grants logical occupancy.
@@ -30,9 +32,12 @@ occupancy generation.
 5. Drain explicit retirement on any node, even after the room owner disappears.
    Resolve generation-only jobs from LiveKit, match captured SIDs/incarnations,
    and let only observations newer than the probe veto it as a successor.
-6. Capture ghost revisions before remote probes. Revoke active-history FIFO
-   evictions until expiry, and preserve signed events with malformed optional
-   generation tags as unattributed observations.
+6. Capture ghost revisions before remote probes. Follow a completed SFU sweep
+   with actor-only Muji cleanup, never a second SFU removal. Guard actor awaits
+   against a new registration and use current actor occupancy for cached media.
+   Preserve actor-only retry responsibility in the existing durable outbox.
+   Revoke active-history FIFO evictions until expiry, and preserve signed events
+   with malformed optional generation tags as unattributed observations.
 7. Verify focused tests, SQLite/Postgres migrations, Muji integrations, strict
    Clippy, formatting, structure and independent adversarial review. Record CI
    and live rollout evidence separately.
@@ -65,8 +70,20 @@ was split into independent PR #2058 and has merged.
   and caller-held occupancy/session fences. Provider tags do not stand in for
   the current XMPP occupancy: cached media can legitimately carry an older tag.
   Ghost registration revisions are captured before provider probes internally.
+  Their remaining actor cleanup never removes SFU state a second time; its
+  actor-only durable retry is superseded by any new registration or live
+  provider media. Provider occupancy also prevents a cold cache from ending a
+  different connected participant's call thread. Completion retry failures keep
+  the actor-only responsibility until they can be handed off durably.
 
 ## Limits and rollout
+
+A same-generation publication inside the room actor's clear mailbox interval
+can still race its advertisement, as in the existing departure path. Actor-only
+ghost cleanup suppresses its broadcast/completion when it sees the new SFU
+registration and never revokes that registration's token. Completion retains
+the existing helper's check-to-inbox/broadcast synchronization window; this
+change does not atomically coordinate provider, actor and inbox state.
 
 LiveKit RemoveParticipant takes room and identity, not an atomic expected SID.
 A successor connecting between the final probe and that request can still be

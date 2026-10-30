@@ -516,6 +516,15 @@ impl LiveKitTeardownExecutor {
         self.calls.get(call_id).map(|entry| entry.generation)
     }
 
+    /// Provider occupancy for actor-only repair on an owner whose local SFU
+    /// cache may be empty after restart. This never changes media authority.
+    pub async fn live_room_occupancy(
+        &self,
+        call_id: &CallId,
+    ) -> Result<crate::RoomOccupancy, SfuError> {
+        self.admin.room_occupancy(call_id).await
+    }
+
     async fn remove_participant(
         &self,
         intent: &CallTeardownIntentLite,

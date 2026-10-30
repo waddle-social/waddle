@@ -41,7 +41,10 @@ use waddle_sfu::{
 use waddle_xmpp::telemetry::attributes::{MetricAttribute, WebhookEventType, WebhookOutcome};
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 
-use super::muc_muji_clear::{clear_muji_presence_for_departure, WebhookEffectOutcome};
+use super::muc_muji_clear::{
+    clear_muji_presence_for_departure, clear_muji_presence_only, enqueue_muji_presence_clear_only,
+    WebhookEffectOutcome,
+};
 use super::webhook_delivery::{
     DatabaseWebhookDeliveryStore, WebhookDeliveryObservation, WebhookDeliveryStore, WebhookEventId,
 };
@@ -527,8 +530,8 @@ pub fn spawn_reconciliation_task(state: Arc<WebSocketState>, reconciler: Arc<dyn
 }
 
 /// One reconciliation pass: sweep registry ghosts via the reconciler,
-/// then clear each swept MUC participant's Muji presence through the
-/// same idempotent path the `participant_left` webhook uses.
+/// then repair each swept MUC advertisement without repeating the already
+/// completed SFU departure or revoking a successor's credentials.
 async fn reconcile_once(
     state: &WebSocketState,
     reconciler: &dyn SfuReconciler,
@@ -549,13 +552,16 @@ async fn reconcile_once(
         );
         for (call_id, identity) in summary.swept {
             if is_muc_call(call_id.as_str()) {
-                process_participant_left_for_identity(
-                    state,
-                    call_id.as_str(),
-                    identity.as_jid().to_string().as_str(),
-                    None,
-                )
-                .await;
+                let Ok(room_jid) = call_id.as_str().parse::<BareJid>() else {
+                    continue;
+                };
+                if let WebhookEffectOutcome::Retryable(reason) =
+                    clear_muji_presence_only(state, &room_jid, identity.as_jid()).await
+                {
+                    warn!(room = %room_jid, reason, "ghost sweep owes actor-only Muji cleanup; queueing its distinct retry");
+                    let _ =
+                        enqueue_muji_presence_clear_only(state, &room_jid, identity.as_jid()).await;
+                }
             }
         }
     }
@@ -751,7 +757,7 @@ mod tests {
     use crate::server::routes::websocket::handlers::iq::handle_iq;
     use crate::server::routes::websocket::tests::{
         create_test_server_owner_session, create_test_websocket_state_with_calls,
-        create_test_websocket_state_with_sfu, snapshot_room, RecordingSfu,
+        create_test_websocket_state_with_sfu, snapshot_room, EmptyCallAdmin, RecordingSfu,
     };
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
@@ -820,6 +826,24 @@ mod tests {
     type AdminFuture<'a, T> = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<T, waddle_sfu::SfuError>> + Send + 'a>,
     >;
+
+    fn webhook_sfu_config() -> waddle_sfu::SfuConfig {
+        waddle_sfu::SfuConfig {
+            api_key: waddle_sfu::ApiKey::new("APItestkey"),
+            api_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("API secret"),
+            webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("webhook secret"),
+            ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("URL"))
+                .expect("WebSocket URL"),
+            turn_host: waddle_sfu::TurnHost::new("turn.test"),
+            turn_tls_port: 443,
+            turn_udp_port: 3478,
+            turn_shared_secret: waddle_sfu::TurnSharedSecret::from_text("turn-secret"),
+            token_ttl: chrono::Duration::seconds(3600),
+            turn_ttl: chrono::Duration::seconds(3600),
+        }
+    }
 
     struct CachedMediaAdmin {
         participant: waddle_sfu::LiveParticipant,
@@ -953,21 +977,7 @@ mod tests {
             probes: std::sync::atomic::AtomicUsize::new(0),
             removals: std::sync::atomic::AtomicUsize::new(0),
         });
-        let config = waddle_sfu::SfuConfig {
-            api_key: waddle_sfu::ApiKey::new("APItestkey"),
-            api_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
-                .expect("API secret"),
-            webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
-                .expect("webhook secret"),
-            ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("URL"))
-                .expect("WebSocket URL"),
-            turn_host: waddle_sfu::TurnHost::new("turn.test"),
-            turn_tls_port: 443,
-            turn_udp_port: 3478,
-            turn_shared_secret: waddle_sfu::TurnSharedSecret::from_text("turn-secret"),
-            token_ttl: chrono::Duration::seconds(3600),
-            turn_ttl: chrono::Duration::seconds(3600),
-        };
+        let config = webhook_sfu_config();
         let sfu = Arc::new(waddle_sfu::LiveKitSfu::with_admin(
             config,
             admin.clone() as Arc<_>,
@@ -1030,6 +1040,246 @@ mod tests {
                 .session_generation(&alice),
             Some(current_generation)
         );
+    }
+
+    #[tokio::test]
+    async fn ghost_summary_clears_a_reloaded_actor_without_repeating_sfu_departure() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let mut state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let probe =
+            waddle_sfu::LiveKitSfu::with_admin(webhook_sfu_config(), Arc::new(EmptyCallAdmin));
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol
+            .call_teardown_executor = Some(probe.teardown_executor());
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "ghost-summary-reload@muc.example.com"
+            .parse()
+            .expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let actor_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: actor_generation,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: active_muji(),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+        // The SFU already removed the old cached media. Its summary names
+        // the identity, not the reloaded actor's current generation.
+        let reconciler = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                swept: vec![(
+                    CallId::try_new(room_jid.to_string()).expect("call"),
+                    Identity::from_jid(alice.clone()),
+                )],
+                ..waddle_sfu::ReconcilePassSummary::default()
+            })),
+        };
+        let mut streaks = super::super::sfu_voice_reconcile::NonOccupantStreaks::default();
+        reconcile_once(
+            state.as_ref(),
+            &reconciler,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+        let room = snapshot_room(state.as_ref(), &room_jid).await.room;
+        assert_eq!(room.session_generation(&alice), Some(actor_generation));
+        assert!(room.muji_for_session("alice", &alice).is_none());
+        assert!(
+            recorder.note_snapshot().is_empty(),
+            "actor-only cleanup must never repeat SFU departure bookkeeping"
+        );
+        assert!(
+            recorder.snapshot().is_empty(),
+            "actor-only cleanup cannot unregister provider media"
+        );
+    }
+
+    async fn assert_cold_owner_provider_media_preserves_the_call_thread(target_is_live: bool) {
+        let recorder = Arc::new(RecordingSfu::default());
+        let mut state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let room_jid: BareJid = "cold-owner-live-media@muc.example.com"
+            .parse()
+            .expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let identity = Identity::from_jid(alice.clone());
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        let admin = Arc::new(CachedMediaAdmin {
+            participant: waddle_sfu::LiveParticipant {
+                identity: if target_is_live {
+                    identity.clone()
+                } else {
+                    Identity::from_jid("bob@example.com/phone".parse().expect("other live JID"))
+                },
+                participant_sid: Some(ParticipantSid::try_new("PA_live_on_provider").expect("SID")),
+                media_generation: Some(generation),
+            },
+            probes: std::sync::atomic::AtomicUsize::new(0),
+            removals: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let probe =
+            waddle_sfu::LiveKitSfu::with_admin(webhook_sfu_config(), admin.clone() as Arc<_>);
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol
+            .call_teardown_executor = Some(probe.teardown_executor());
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        crate::server::routes::websocket::handlers::presence::handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: generation,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        get_room_actor(state.as_ref(), &room_jid)
+            .await
+            .expect("actor")
+            .ask(UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: active_muji(),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+        state.deps.protocol.call_threads.insert(
+            room_jid.clone(),
+            crate::server::routes::websocket::ActiveCallThread {
+                anchor_origin_id: "cold-live-anchor".to_owned(),
+                initiator: alice.to_bare(),
+                media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
+                started: chrono::Utc::now(),
+                thread_id: "cold-live-thread".to_owned(),
+            },
+        );
+        let call = CallId::try_new(room_jid.to_string()).expect("call");
+        assert!(
+            !recorder.has_call_participant(&call, &identity),
+            "the owner cache is cold"
+        );
+        let outcome = clear_muji_presence_only(state.as_ref(), &room_jid, &alice).await;
+        assert_eq!(
+            outcome,
+            if target_is_live {
+                WebhookEffectOutcome::Stale
+            } else {
+                WebhookEffectOutcome::Completed
+            }
+        );
+        assert_eq!(admin.probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(admin.removals.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            snapshot_room(state.as_ref(), &room_jid)
+                .await
+                .room
+                .muji_for_session("alice", &alice)
+                .is_some(),
+            target_is_live
+        );
+        assert!(state.deps.protocol.call_threads.contains_key(&room_jid));
+        assert!(recorder.note_snapshot().is_empty());
+        assert!(recorder.snapshot().is_empty());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .call_teardown_outbox
+                .queue_stats()
+                .await
+                .expect("stats")
+                .queued_count,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_owner_ghost_cleanup_preserves_provider_live_media_and_its_call_thread() {
+        assert_cold_owner_provider_media_preserves_the_call_thread(true).await;
+    }
+
+    #[tokio::test]
+    async fn cold_owner_other_live_identity_keeps_the_thread_while_ghost_muji_is_cleared() {
+        assert_cold_owner_provider_media_preserves_the_call_thread(false).await;
+    }
+
+    #[tokio::test]
+    async fn ghost_summary_without_a_local_actor_queues_only_actor_cleanup() {
+        let recorder = Arc::new(RecordingSfu::default());
+        let mut state = create_test_websocket_state_with_sfu(recorder.clone()).await;
+        let probe =
+            waddle_sfu::LiveKitSfu::with_admin(webhook_sfu_config(), Arc::new(EmptyCallAdmin));
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol
+            .call_teardown_executor = Some(probe.teardown_executor());
+        let room_jid: BareJid = "ghost-summary-foreign@muc.example.com"
+            .parse()
+            .expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let reconciler = FixedSummaryReconciler {
+            summary: Mutex::new(Some(waddle_sfu::ReconcilePassSummary {
+                swept: vec![(
+                    CallId::try_new(room_jid.to_string()).expect("call"),
+                    Identity::from_jid(alice.clone()),
+                )],
+                ..waddle_sfu::ReconcilePassSummary::default()
+            })),
+        };
+        let mut streaks = super::super::sfu_voice_reconcile::NonOccupantStreaks::default();
+        reconcile_once(
+            state.as_ref(),
+            &reconciler,
+            chrono::Duration::zero(),
+            &mut streaks,
+        )
+        .await;
+        let jobs = state
+            .deps
+            .protocol
+            .call_teardown_outbox
+            .claim_due(8)
+            .await
+            .expect("queued cleanup");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].intent.target,
+            TeardownTarget::MujiPresenceClearOnly {
+                room_jid,
+                departed: alice
+            }
+        );
+        assert!(recorder.note_snapshot().is_empty());
+        assert!(recorder.snapshot().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

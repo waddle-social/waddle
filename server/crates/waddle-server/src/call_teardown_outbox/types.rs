@@ -95,6 +95,12 @@ pub enum TeardownTarget {
         /// incarnation SID but still must persist the XEP-0272 leave.
         participant_sid: Option<ParticipantSid>,
     },
+    /// The SFU has already removed its ghost registration. Retry only the
+    /// actor advertisement cleanup, never participant/token bookkeeping.
+    MujiPresenceClearOnly {
+        room_jid: BareJid,
+        departed: FullJid,
+    },
     MujiRoomSweep {
         room_jid: BareJid,
     },
@@ -173,6 +179,7 @@ impl CallTeardownIntent {
     pub(crate) fn room_scope(&self) -> Option<BareJid> {
         match &self.target {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
+            | TeardownTarget::MujiPresenceClearOnly { room_jid, .. }
             | TeardownTarget::MujiRoomSweep { room_jid }
             | TeardownTarget::CallThreadEndRetry { room_jid, .. } => Some(room_jid.clone()),
             TeardownTarget::Participant { .. }
@@ -209,6 +216,7 @@ impl CallTeardownStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallTeardownRetryReason {
     MujiPresenceClear,
+    MujiPresenceClearOnly,
     CallThreadEnd,
     LiveKitExecutorUnavailable,
     LiveKitAdmin,
@@ -229,13 +237,17 @@ impl CallTeardownRetryReason {
     pub(crate) const fn is_infrastructure_transient(self) -> bool {
         matches!(
             self,
-            Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin | Self::CallThreadEnd
+            Self::LiveKitExecutorUnavailable
+                | Self::LiveKitAdmin
+                | Self::CallThreadEnd
+                | Self::MujiPresenceClearOnly
         )
     }
 
     pub(crate) const fn as_db_value(self) -> &'static str {
         match self {
             Self::MujiPresenceClear => "muji_presence_clear_retryable",
+            Self::MujiPresenceClearOnly => "muji_presence_clear_only_retryable",
             Self::CallThreadEnd => "call_thread_end_retryable",
             Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
             Self::LiveKitAdmin => "livekit_admin_retryable",
@@ -247,6 +259,7 @@ impl CallTeardownRetryReason {
     fn from_db_value(value: &str) -> Self {
         match value {
             "muji_presence_clear_retryable" => Self::MujiPresenceClear,
+            "muji_presence_clear_only_retryable" => Self::MujiPresenceClearOnly,
             "call_thread_end_retryable" => Self::CallThreadEnd,
             "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
             "livekit_admin_retryable" => Self::LiveKitAdmin,

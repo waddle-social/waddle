@@ -211,6 +211,7 @@ async fn state_with_executor(
 
 mod displaced;
 mod drain_basics;
+mod ghost_clear;
 mod muji;
 mod retention_fences;
 mod session_fence;

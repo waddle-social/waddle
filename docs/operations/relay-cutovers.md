@@ -9,7 +9,8 @@ there is no requirement to drain LiveKit or rotate signing keys for this scope.
 JWT expiry limits initial admission, not an already-connected participant's
 lifetime. Do not claim strict generation retirement for untagged legacy media.
 
-The new `call_teardown_outbox` action remains incompatible with old readers.
+The new retirement and actor-only `call_teardown_outbox` actions remain
+incompatible with old readers.
 Main auto-deploys, so merge in an explicitly authorized Recreate window. Expect
 an XMPP connection interruption; verify call recovery instead of assuming it.
 

@@ -124,6 +124,19 @@ fn decode_target(
         "delete_room" if identity.is_none() && room_jid.is_none() && participant_sid.is_none() => {
             Ok(TeardownTarget::Room)
         }
+        "muji_presence_clear_only" => match (identity, room_jid, participant_sid) {
+            (Some(departed), Some(room_jid), None) if !departed.is_empty() => {
+                Ok(TeardownTarget::MujiPresenceClearOnly {
+                    departed: FullJid::from_str(&departed)
+                        .map_err(|_| CallTeardownOutboxError::InvalidFullJid(departed))?,
+                    room_jid: BareJid::from_str(&room_jid)
+                        .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
+                })
+            }
+            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
+                action.to_owned(),
+            )),
+        },
         "muji_presence_clear" => match (identity, room_jid) {
             (Some(departed), Some(room_jid)) if !departed.is_empty() => {
                 Ok(TeardownTarget::MujiPresenceClear {
