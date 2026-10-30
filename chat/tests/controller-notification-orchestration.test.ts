@@ -99,6 +99,7 @@ function makeHarness(options: {
       }) as BrowserXmppClient),
       session: computed(() => session()),
       waddles,
+      managedMucDomain: computed(() => "muc.example.test"),
       dmConversations,
       notifications,
       notifySettings,
@@ -173,6 +174,42 @@ describe("useNotificationOrchestration channel activity", () => {
     expect(opts.channelName).toBe("unknown");
     opts.onNavigate?.(roomJid);
     expect(h.selectChannelByRoomJid).toHaveBeenCalledWith(roomJid);
+    h.scope.stop();
+  });
+
+  test.each([
+    ["general@muc.example.test", "General"],
+    ["general@rooms.other.example.test", "unknown"],
+  ])("ID-only entries resolve labels only within the trusted MUC service: %s", async (roomJid, name) => {
+    const h = makeHarness({ channels: [{ id: "general", name: "General" }] });
+    h.pendingNotificationActivities.value = [activityEvent({ roomJid })];
+    await nextTick();
+
+    const opts = h.showChannelMessageNotification.mock.calls[0]?.[0] as unknown as {
+      channelName: string;
+      onNavigate?: (roomJid: string) => void;
+    };
+    expect(opts.channelName).toBe(name);
+    opts.onNavigate?.(roomJid);
+    expect(h.selectChannelByRoomJid).toHaveBeenCalledWith(roomJid);
+    h.scope.stop();
+  });
+
+  test("trusted ID-only entries cannot bypass persistent client quarantine", async () => {
+    const h = makeHarness({
+      channels: [{ id: "general", name: "General" }],
+      ambiguousRoomIds: ["general"],
+    });
+    h.pendingNotificationActivities.value = [activityEvent()];
+    await nextTick();
+
+    const opts = h.showChannelMessageNotification.mock.calls[0]?.[0] as unknown as {
+      channelName: string;
+      onNavigate?: (roomJid: string) => void;
+    };
+    expect(opts.channelName).toBe("unknown");
+    opts.onNavigate?.("general@muc.example.test");
+    expect(h.selectChannelByRoomJid).not.toHaveBeenCalled();
     h.scope.stop();
   });
 

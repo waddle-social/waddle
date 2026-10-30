@@ -18,6 +18,7 @@ interface NotificationOrchestrationDeps {
   xmppClient: ComputedRef<BrowserXmppClient | null>;
   session: ComputedRef<WaddleSession | null>;
   waddles: ReturnType<typeof useWaddleDirectory>;
+  managedMucDomain: ComputedRef<string>;
   dmConversations: ReturnType<typeof useDirectMessageConversations>;
   notifications: ReturnType<typeof usePushNotifications>;
   notifySettings: NotifySettingsStore;
@@ -40,6 +41,7 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
     xmppClient,
     session,
     waddles,
+    managedMucDomain,
     dmConversations,
     notifications,
     notifySettings,
@@ -52,9 +54,9 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
   } = deps;
 
   function resolveChannelNameFromJid(roomJid: string): string | null {
-    const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value);
+    const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value, managedMucDomain.value);
     if (!channelId || xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return null;
-    return waddles.channels.value.find((channel) => channel.id === channelId && channel.jid)?.name ?? null;
+    return waddles.channels.value.find((channel) => channel.id === channelId)?.name ?? null;
   }
 
   watch(() => pendingNotificationActivities.value, (events) => {
@@ -71,7 +73,7 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
       sessionJid: session.value?.jid,
       resolveChannelNameFromJid,
       onNavigate: (roomJid) => {
-        const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value);
+        const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value, managedMucDomain.value);
         if (channelId && xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
         void selectChannelByRoomJid(roomJid);
       },

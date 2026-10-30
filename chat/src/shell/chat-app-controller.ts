@@ -361,6 +361,7 @@ export function useChatAppController() {
     xmppClient,
     session,
     waddles,
+    managedMucDomain,
     dmConversations,
     notifications,
     notifySettings,
