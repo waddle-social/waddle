@@ -15,7 +15,7 @@
 //! fenced here; #1685 stays open for that.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
@@ -52,6 +52,10 @@ pub(in super::super) enum RemoteResourceUpdateOrderFull {
     /// [`MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION`] admitted
     /// updates.
     RegistrationQueue,
+    /// A panic during a map edit poisoned the order lock. The queue then
+    /// fails closed for the rest of the process: every later update is
+    /// refused instead of being admitted into state of unknown shape.
+    Poisoned,
 }
 
 struct Slot {
@@ -81,7 +85,9 @@ impl RemoteResourceUpdateOrder {
         key: RemoteResourceUpdateKey,
     ) -> Result<RemoteResourceUpdateTurn, RemoteResourceUpdateOrderFull> {
         let (release, tail) = oneshot::channel();
-        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(mut slots) = self.slots.lock() else {
+            return Err(RemoteResourceUpdateOrderFull::Poisoned);
+        };
         let predecessor = match slots.get_mut(&key) {
             Some(slot) => {
                 if slot.admitted >= MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION {
@@ -109,10 +115,7 @@ impl RemoteResourceUpdateOrder {
 
     #[cfg(test)]
     pub(in super::super) fn tracked_registrations(&self) -> usize {
-        self.slots
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.slots.lock().expect("order lock").len()
     }
 }
 
@@ -141,7 +144,12 @@ impl RemoteResourceUpdateTurn {
 
 impl Drop for RemoteResourceUpdateTurn {
     fn drop(&mut self) {
-        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        // A poisoned lock means `admit` already refuses every new update,
+        // so the slot bookkeeping no longer matters. Successors still
+        // wake: `_release` drops after this body whatever it does.
+        let Ok(mut slots) = self.slots.lock() else {
+            return;
+        };
         let idle = match slots.get_mut(&self.key) {
             Some(slot) => {
                 slot.admitted = slot.admitted.saturating_sub(1);
@@ -355,5 +363,35 @@ mod tests {
                 RemoteResourceRegistrationId::fresh(),
             ))
             .expect("capacity returns once registrations go idle");
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_order_lock_refuses_new_updates_and_still_releases_successors() {
+        let order = RemoteResourceUpdateOrder::default();
+        let registration = key(
+            "juliet@example.test/phone",
+            RemoteResourceRegistrationId::fresh(),
+        );
+        let first = order.admit(registration.clone()).expect("admit first");
+        let mut second = order.admit(registration.clone()).expect("admit second");
+
+        let slots = Arc::clone(&order.slots);
+        let poisoner = std::thread::spawn(move || {
+            let _guard = slots.lock().expect("order lock");
+            panic!("poison the order lock");
+        });
+        assert!(poisoner.join().is_err(), "the poisoning thread must panic");
+        assert!(order.slots.is_poisoned());
+
+        assert_eq!(
+            order.admit(registration).err(),
+            Some(RemoteResourceUpdateOrderFull::Poisoned),
+            "a poisoned queue must fail closed, not admit into unknown state"
+        );
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), second.wait_for_predecessors())
+            .await
+            .expect("an admitted successor still runs once its predecessor ends");
     }
 }
