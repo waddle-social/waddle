@@ -122,7 +122,13 @@ impl From<PoolHealth> for DatabaseHealthStatus {
 /// - the node took a clustering fatal fence and its node-lease loop finished
 ///   the terminal demotion ([`NodeLifecycle::is_terminally_fenced`]): it
 ///   stays `FencedRecovering` with no re-registration loop left, so only a
-///   new incarnation can serve.
+///   new incarnation can serve;
+/// - the clustering scope stopped while the process keeps running and the
+///   node-lease loop has exited
+///   ([`NodeLifecycle::is_clustering_stopped_while_process_runs`]), e.g. after
+///   the swarm's keypair-slot lease self-fenced during a Postgres outage
+///   longer than its TTL: the same unrecoverable state, reached without a
+///   fatal fence.
 pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     liveness_response(&state.runtime_progress, &state.node_lifecycle)
 }
@@ -131,13 +137,20 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LivenessFailure {
     TerminallyFenced,
-    RuntimeStalled { stalled_ms: u64 },
+    /// Distinct from `TerminallyFenced` so operators can tell a fatal fence
+    /// from a clustering-scope stop (no fatal fence, e.g. keypair-slot lease
+    /// loss); both mean only a restart recovers the node.
+    ClusteringStopped,
+    RuntimeStalled {
+        stalled_ms: u64,
+    },
 }
 
 impl LivenessFailure {
     fn as_str(self) -> &'static str {
         match self {
             Self::TerminallyFenced => "terminally_fenced",
+            Self::ClusteringStopped => "clustering_stopped",
             Self::RuntimeStalled { .. } => "runtime_stalled",
         }
     }
@@ -149,6 +162,9 @@ fn liveness_failure(
 ) -> Option<LivenessFailure> {
     if lifecycle.is_terminally_fenced() {
         return Some(LivenessFailure::TerminallyFenced);
+    }
+    if lifecycle.is_clustering_stopped_while_process_runs() {
+        return Some(LivenessFailure::ClusteringStopped);
     }
     let stalled_for = progress.stalled_for();
     (stalled_for > RUNTIME_PROGRESS_STALL_LIMIT).then(|| LivenessFailure::RuntimeStalled {
@@ -1054,15 +1070,59 @@ mod readiness_generation_tests {
     async fn liveness_stays_up_after_an_ordinary_clustering_stop() {
         // `TerminalFenceContext::finish` also runs when clustering stops
         // without a fatal fence (process shutdown): that must not read as
-        // terminally fenced. Exception, harmless: a shutdown that finds the
-        // lease unavailable cancels the fatal fence before `finish`
-        // (`TerminalFenceContext::shutdown`), so `/health` returns 503 while
-        // the pod is already terminating.
+        // terminally fenced. Exception: a shutdown that finds the lease
+        // unavailable cancels the fatal fence before `finish`
+        // (`TerminalFenceContext::shutdown`), so `/health` returns 503 —
+        // harmless during a process stop, and the intended restart when only
+        // the clustering scope stopped.
         let progress = RuntimeProgress::new();
         let lifecycle = crate::clustering::NodeLifecycle::new();
         lifecycle.begin_fenced_recovery();
         lifecycle.mark_terminal_fence_finished();
         assert!(!lifecycle.is_terminally_fenced());
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_fails_when_clustering_stopped_while_the_process_runs() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let process_stop = tokio_util::sync::CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        lifecycle.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+
+        // Clustering stopped but the node-lease loop is still draining.
+        clustering_stop.cancel();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+
+        lifecycle.mark_node_lease_exited();
+        let (status, Json(body)) = liveness_response(&progress, &lifecycle);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "unhealthy");
+        assert_eq!(body["error"], "clustering_stopped");
+    }
+
+    #[tokio::test]
+    async fn liveness_stays_up_when_the_process_itself_is_stopping() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let process_stop = tokio_util::sync::CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        lifecycle.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+
+        process_stop.cancel();
+        lifecycle.mark_node_lease_exited();
+        assert!(clustering_stop.is_cancelled());
+        assert!(!lifecycle.is_clustering_stopped_while_process_runs());
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_ignores_a_node_lease_exit_without_clustering() {
+        // No clustering scope bound (non-clustered deployment).
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        lifecycle.mark_node_lease_exited();
         assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
     }
 

@@ -1074,6 +1074,16 @@ where
     }
 }
 
+/// Marks [`NodeLifecycle::mark_node_lease_exited`] when `run_node_lease`
+/// returns or its task is dropped.
+struct NodeLeaseExitLatch(NodeLifecycle);
+
+impl Drop for NodeLeaseExitLatch {
+    fn drop(&mut self) {
+        self.0.mark_node_lease_exited();
+    }
+}
+
 async fn run_pre_ready_heartbeat<L>(
     lease: Arc<L>,
     identity: NodeIdentity,
@@ -1138,6 +1148,9 @@ pub async fn run_node_lease<L>(
         claim_release_budget,
         shutdown_sm_drain,
     } = run_config;
+    // Records that this loop has exited, on every return path and if the
+    // task is dropped. Read-only signal for liveness.
+    let _exit_latch = NodeLeaseExitLatch(readiness.clone());
     let lease = Arc::new(lease);
     let fatal_fence = readiness.fatal_fence_token();
     let terminal_fence_context = TerminalFenceContext {
@@ -3470,6 +3483,94 @@ mod tests {
         assert!(
             readiness.is_terminally_fenced(),
             "a finished fatal fence must be visible to liveness so the pod restarts"
+        );
+    }
+
+    /// Drive `run_node_lease` through a non-fatal self-fence (heartbeat CAS
+    /// miss) into re-registration, park the registration, then stop either
+    /// the clustering scope alone (as the swarm's keypair-slot self-fence
+    /// does) or the whole process, and return the lifecycle after the loop
+    /// has exited.
+    async fn stop_during_reregistration(stop_process: bool) -> NodeLifecycle {
+        let interval = Duration::from_millis(50);
+        let mut lease = FakeLease::new(Box::new(|| Ok(false)));
+        let registration_entered = Arc::new(tokio::sync::Notify::new());
+        let registration_release = Arc::new(tokio::sync::Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+
+        let readiness = NodeLifecycle::new();
+        let process_stop = CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        readiness.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            clustering_stop.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        assert!(
+            !readiness.is_clustering_stopped_while_process_runs(),
+            "the loop is still re-registering"
+        );
+        if stop_process {
+            process_stop.cancel();
+        } else {
+            clustering_stop.cancel();
+        }
+        registration_release.notify_one();
+        task.await
+            .expect("node lease exits after the stop during re-registration");
+
+        assert!(!readiness.is_ready());
+        assert!(clustering_stop.is_cancelled());
+        assert!(
+            !readiness.fatal_fence_token().is_cancelled(),
+            "neither stop takes a fatal fence"
+        );
+        assert!(!readiness.is_terminally_fenced());
+        readiness
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clustering_only_stop_during_reregistration_leaves_a_restartable_state() {
+        let readiness = stop_during_reregistration(false).await;
+        assert!(
+            readiness.is_clustering_stopped_while_process_runs(),
+            "clustering stopped without a process stop: nothing re-serves, liveness must restart"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_stop_during_reregistration_is_not_reported_to_liveness() {
+        let readiness = stop_during_reregistration(true).await;
+        assert!(
+            !readiness.is_clustering_stopped_while_process_runs(),
+            "an ordinary process stop must not fail liveness"
         );
     }
 
