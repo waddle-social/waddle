@@ -39,12 +39,17 @@ def run(prometheus):
     cluster_contract = json.loads((repo / "server/crates/waddle-server/src/clustering/alert_metric_contract.json").read_text())
     with tempfile.TemporaryDirectory(prefix="waddle-push-otlp-") as directory:
         work = pathlib.Path(directory)
-        rules = (repo / "infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml").read_text()
-        (work / "rules.yaml").write_text("\n".join(line for line in rules.splitlines() if not line.startswith("namespace:")))
+        # Every Mimir rule file, like run.sh; an empty set is a failure.
+        rule_paths = sorted((repo / "infrastructure/waddle.cloud/rules/mimir").glob("*.yaml"))
+        if not rule_paths:
+            raise RuntimeError("no Mimir rule files under infrastructure/waddle.cloud/rules/mimir")
+        for rule_path in rule_paths:
+            rules = rule_path.read_text()
+            (work / rule_path.name).write_text("\n".join(line for line in rules.splitlines() if not line.startswith("namespace:")))
         (work / "prometheus.yaml").write_text(
             "global:\n  evaluation_interval: 1s\n"
             "otlp:\n  translation_strategy: UnderscoreEscapingWithSuffixes\n"
-            "rule_files:\n  - rules.yaml\n"
+            "rule_files:\n" + "".join(f"  - {rule_path.name}\n" for rule_path in rule_paths)
         )
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))

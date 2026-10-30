@@ -18,13 +18,22 @@ issue #1324):
 - **Every PR** touching `rules/**` runs `mimirtool rules lint` and
   `lokitool rules lint` (the `pullRequest` pipeline in `../env.cue`).
   A broken rule file fails the PR, not the pager. The same pipeline's
-  `rulesTest` task runs `tests/run.sh` with `PROMETHEUS_BIN` set: the
-  promtool rule unit tests plus the real-translator OTLP name contract
-  below (promtool and prometheus come from the root dev shell).
+  `rulesTest` task runs `tests/run.sh` with `PROMETHEUS_BIN` set: promtool
+  checks and unit tests for every `mimir/*.yaml` and `tests/*.test.yaml`,
+  plus the real-translator OTLP name contract below (promtool and
+  prometheus come from the root dev shell).
 - **Every main push** syncs the trees to the Grafana Cloud rulers via
   `mimirtool rules sync` / `lokitool rules sync` (the `rulesSync` task
-  in the `default` pipeline). Sync is authoritative: rules deleted
-  here are deleted from the ruler (scoped to the `waddle` namespace).
+  in the `default` pipeline). The sync depends on `rulesLint` and
+  `rulesTest`, so rules that fail lint or their tests are never
+  published. Sync is authoritative: rules deleted here are deleted from
+  the ruler (scoped to the `waddle` namespace).
+- **Server PRs and main pushes** run the same `tests/run.sh` as
+  `checkAlertRules` in `server/env.cue`, which gates the server image
+  publish. It is what runs the contract when only a name fixture, an
+  instrument unit or the Prometheus version (`flake.nix`/`flake.lock`)
+  changes: the cloud pipelines select tasks by project-local inputs and
+  do not see those paths.
 
 ## Required credentials (operator setup, once)
 
@@ -107,8 +116,8 @@ docker run --rm --network none --entrypoint /bin/sh \
 
 The suite covers normal live unresolved attempts, flat aged obligations, the
 age threshold and hold/reset/resolution, primary failover, missing age telemetry,
-and independent per-kind backlog growth. The PR pipeline runs it (`rulesTest`);
-run it locally when changing ingress alerts.
+and independent per-kind backlog growth. CI runs it (cloud `rulesTest`, server
+`checkAlertRules`); run it locally when changing ingress alerts.
 
 The runner also evaluates `tests/push.test.yaml`. To verify the Rust-exported
 push gauge units through a real OTLP receiver and the same recording rules,
