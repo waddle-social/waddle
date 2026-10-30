@@ -7,7 +7,7 @@ import type { ChatShellState } from "@/shell/state";
 import type { NotifySettingsStore } from "@/lib/notify-settings";
 import type { BrowserXmppClient, LiveDmMessage, RoomActivityEvent } from "@/lib/xmpp-client";
 import type { WaddleSession } from "@/lib/server-auth";
-import { parseManagedRoomBareJid } from "@/lib/xmpp-client";
+import { knownChannelIdForRoomJid } from "@/lib/channel-room";
 import {
   showForegroundNotificationForDmActivity,
   showForegroundNotificationsForChannelActivities,
@@ -25,7 +25,7 @@ interface NotificationOrchestrationDeps {
   isWindowFocused: Readonly<Ref<boolean>>;
   isSelfDoNotDisturb: () => boolean;
   pendingNotificationActivities: Ref<RoomActivityEvent[]>;
-  selectChannel: (channelId: string) => Promise<void>;
+  selectChannelByRoomJid: (roomJid: string) => Promise<void>;
   openDm: (peerJid: string) => Promise<void>;
 }
 
@@ -47,14 +47,14 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
     isWindowFocused,
     isSelfDoNotDisturb,
     pendingNotificationActivities,
-    selectChannel,
+    selectChannelByRoomJid,
     openDm,
   } = deps;
 
   function resolveChannelNameFromJid(roomJid: string): string | null {
-    const managedRoom = parseManagedRoomBareJid(roomJid);
-    if (!managedRoom) return null;
-    return waddles.channels.value.find((c) => c.id === managedRoom.channelId)?.name ?? null;
+    const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value);
+    if (!channelId || xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return null;
+    return waddles.channels.value.find((channel) => channel.id === channelId && channel.jid)?.name ?? null;
   }
 
   watch(() => pendingNotificationActivities.value, (events) => {
@@ -71,9 +71,9 @@ export function useNotificationOrchestration(deps: NotificationOrchestrationDeps
       sessionJid: session.value?.jid,
       resolveChannelNameFromJid,
       onNavigate: (roomJid) => {
-        const managedRoom = parseManagedRoomBareJid(roomJid);
-        if (!managedRoom) return;
-        void selectChannel(managedRoom.channelId);
+        const channelId = knownChannelIdForRoomJid(roomJid, waddles.channels.value);
+        if (channelId && xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
+        void selectChannelByRoomJid(roomJid);
       },
     });
 

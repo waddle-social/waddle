@@ -368,7 +368,7 @@ export function useChatAppController() {
     isWindowFocused,
     isSelfDoNotDisturb: presence.isSelfDoNotDisturb,
     pendingNotificationActivities: messaging.pendingNotificationActivities,
-    selectChannel: roomSync.selectChannel,
+    selectChannelByRoomJid: roomSync.selectChannelByRoomJid,
     openDm: dmSync.handleOpenDm,
   });
 
