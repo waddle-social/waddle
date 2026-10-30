@@ -68,6 +68,7 @@ mod registration;
 mod send;
 mod stream_features;
 mod xep0045_reconnect_contract;
+mod xep0199_ping;
 
 /// One stable `OccupancySessionGeneration` per simulated connection, keyed by
 /// the test's `WebSocketState` and full JID, so test joins, presence updates
