@@ -928,13 +928,6 @@ enum TerminalCause {
     Fatal,
 }
 
-async fn sleep_until_or_pending(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
-}
-
 impl<L> TerminalFenceContext<'_, L>
 where
     L: NodeLeaseStore + Send + Sync,
@@ -967,6 +960,24 @@ where
             Some(deadline) => tokio::time::timeout_at(deadline.deadline_before(reserve), step)
                 .await
                 .ok(),
+        }
+    }
+
+    /// Resolves at the end of the drain phase of the enclosing deadline, once
+    /// the process itself is stopping — including when process stop arrives
+    /// after a clustering-only stop. Never resolves without a process stop.
+    async fn drain_phase_bound(&self) {
+        match self.shutdown_sm_drain {
+            Some(sm) => {
+                sm.process_stop.cancelled().await;
+                tokio::time::sleep_until(
+                    sm.deadline
+                        .start()
+                        .drain_phase_deadline(SM_DRAIN_WAIT_MARGIN),
+                )
+                .await;
+            }
+            None => std::future::pending().await,
         }
     }
 
@@ -1022,14 +1033,13 @@ where
         // latched by whichever task observes process stop first, and run in
         // parallel: their combined authority window is the later of the two
         // stages, never their sum, even if Q6 starts later (#2046 W1.10).
+        // "Process stopping" is re-checked lazily below, as before W1.10: a
+        // clustering-only stop followed by SIGTERM while the room drain runs
+        // still waits for Q6 before disable(), and is still bounded by the
+        // same deadline (its start is latched at SIGTERM).
         let stopping_sm = self
             .shutdown_sm_drain
             .filter(|sm| sm.process_stop.is_cancelled());
-        let phase_deadline = stopping_sm.map(|sm| {
-            sm.deadline
-                .start()
-                .drain_phase_deadline(SM_DRAIN_WAIT_MARGIN)
-        });
         self.readiness.begin_fenced_recovery();
         if self.fatal_fence.is_cancelled() {
             self.finish(identity, identity, TerminalCause::Fatal).await;
@@ -1047,7 +1057,14 @@ where
         });
 
         let after_rooms = async {
-            if let (Some(sm), Some(phase_deadline)) = (stopping_sm, phase_deadline) {
+            if let Some(sm) = self
+                .shutdown_sm_drain
+                .filter(|sm| sm.process_stop.is_cancelled())
+            {
+                let phase_deadline = sm
+                    .deadline
+                    .start()
+                    .drain_phase_deadline(SM_DRAIN_WAIT_MARGIN);
                 if tokio::time::timeout_at(phase_deadline, sm.complete.cancelled())
                     .await
                     .is_err()
@@ -1078,7 +1095,7 @@ where
                 return;
             }
             outcome = drain => outcome,
-            _ = sleep_until_or_pending(phase_deadline) => {
+            _ = self.drain_phase_bound() => {
                 // The room drain's inventory read or batch release overran
                 // its stage. Dropping it is safe: unreleased claims stay
                 // fenced under this identity, which retirement below hands
@@ -1116,6 +1133,9 @@ where
                 "clustering: identity publication barrier did not close before the shutdown \
                  deadline; leaving the identity to lease expiry"
             );
+            // The sweep and retire_if_drained are skipped too: this branch
+            // only runs while the process is stopping, and lifecycle exits
+            // at the deadline anyway, so local cleanup buys nothing.
             return;
         }
         if self
@@ -1131,6 +1151,8 @@ where
                 "clustering: exact-owner demotion did not finish before the shutdown deadline; \
                  leaving the identity to lease expiry"
             );
+            // Skips the sweep and retire_if_drained for the same reason as
+            // the barrier cut-off above.
             return;
         }
         // #1295: disable() is the authority barrier — no guard, claim-store
