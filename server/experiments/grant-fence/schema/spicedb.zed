@@ -27,6 +27,8 @@ definition multi_parent {
 definition multi_channel {
     relation parent: multi_parent
     relation direct: multi_user
-    permission inherited = parent->inherited
+    // Used only by a negative control; ordinary proof worlds leave it empty.
+    relation control_denied: multi_user
+    permission inherited = parent->inherited - control_denied
     permission direct_access = direct
 }

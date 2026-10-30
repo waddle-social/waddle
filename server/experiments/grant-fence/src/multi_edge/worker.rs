@@ -121,8 +121,8 @@ async fn admit(
         return Ok(Outcome::DeniedGraph);
     };
     pause_at(work, pause, Pause::Anchored, "anchored", pid).await?;
-    let checked = graph::witness(&graph_client, &effect.witness, revision).await;
-    if !matches!(checked, Ok(true)) {
+    let checked = graph::witness(&graph_client, &effect.witness, revision).await?;
+    if !checked {
         tx.rollback().await?;
         return Ok(Outcome::DeniedGraph);
     }

@@ -269,10 +269,33 @@ pub(super) async fn alternatives(
         .done(Outcome::Admitted)
         .await?;
     count(fixture, &direct, 1).await?;
-    let forged_inherited = world.effect(Branch::Inherited);
-    // Keep a structurally positive witness but use the actual denied version.
-    let mut denied = forged_inherited;
-    denied.witness.guards[2].payload = Payload::Ancestor(true);
+    // A separate synthetic world retains all positive inherited markers and
+    // edges. The fixture-only denial overlay makes the selected permission
+    // deny while direct access remains allowed.
+    let mut control = World::new(fixture).await?;
+    control.direct = change(
+        fixture,
+        binary,
+        &control.direct,
+        Payload::Direct(true),
+        control.user,
+    )
+    .await?;
+    let graph_client = client(&fixture.settings).await?;
+    graph::deny_inherited_control(&graph_client, control.lifecycle.id, control.user).await?;
+    let denied = control.effect(Branch::Inherited);
+    let revision = graph::anchor(&graph_client, &control.lifecycle)
+        .await?
+        .expect("control anchor");
+    ensure!(
+        graph::guards_match(&graph_client, &denied.witness, &revision).await?,
+        "control markers and edges must match"
+    );
+    ensure!(
+        graph::current_permissions(&graph_client, &control.lifecycle, control.user).await?
+            == (false, true),
+        "selected permission must deny while direct permission allows"
+    );
     admit(fixture, binary, &denied, None, Pause::None, 3000)?
         .done(Outcome::DeniedGraph)
         .await?;
@@ -283,6 +306,47 @@ pub(super) async fn alternatives(
     );
     Ok(())
 }
+pub(super) async fn graph_error(
+    fixture: &Fixture,
+    binary: &Path,
+    cases: &mut Vec<Case>,
+) -> Result<()> {
+    let world = World::new(fixture).await?;
+    let effect = world.effect(Branch::Inherited);
+    let graph_client = client(&fixture.settings).await?;
+    graph::overflow_marker_control(&graph_client, &world.binding).await?;
+    let revision = graph::anchor(&graph_client, &world.lifecycle)
+        .await?
+        .expect("error control anchor");
+    let error = graph::witness(&graph_client, &effect.witness, revision)
+        .await
+        .expect_err("overflow must be an error");
+    ensure!(
+        format!("{error:#}").contains("bounded graph relationship overflow"),
+        "unexpected graph error: {error:#}"
+    );
+    let mut worker = admit(fixture, binary, &effect, None, Pause::None, 3000)?;
+    worker.wait("anchored").await?;
+    let status = tokio::time::timeout(crate::model::BARRIER_BUDGET, async {
+        loop {
+            if let Some(status) = worker.process.status()? {
+                return Ok::<_, anyhow::Error>(status);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    worker.process.stop()?;
+    ensure!(!status.success(), "graph error must fail the worker");
+    ensure!(
+        !worker.work.barriers.join("done").exists(),
+        "graph error must not produce a denial outcome"
+    );
+    count(fixture, &effect, 0).await?;
+    passed(cases, "graph_error_is_not_denial");
+    Ok(())
+}
+
 pub(super) async fn snapshot(
     fixture: &Fixture,
     binary: &Path,

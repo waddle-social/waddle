@@ -19,11 +19,12 @@ async fn run_bounded(fixture: &Fixture, binary: &Path) -> Result<Vec<Case>> {
     stale::stale_vectors(fixture, binary, &mut cases).await?;
     stale::aba(fixture, binary, &mut cases).await?;
     stale::alternatives(fixture, binary, &mut cases).await?;
+    stale::graph_error(fixture, binary, &mut cases).await?;
     stale::snapshot(fixture, binary, &mut cases).await?;
     races::run(fixture, binary, &mut cases).await?;
     retries::run(fixture, binary, &mut cases).await?;
     ensure!(
-        cases.len() == 30,
+        cases.len() == 31,
         "multi-edge inventory changed: {}",
         cases.len()
     );

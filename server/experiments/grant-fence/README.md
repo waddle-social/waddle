@@ -292,11 +292,15 @@ outstanding child is now an explicit sticky failure that retains private data.
 
 ## Finite synthetic multi-edge admission
 
-Thirty additional schedules test one channel, two possible parents, one subject
+Thirty-one additional schedules test one channel, two possible parents, one subject
 and a direct alternative, using the extracted native fixture. This is a fixed
 experimental policy, not existing MUC admission: `direct OR (parent AND member)`.
-The graph exposes separate `direct_access` and `inherited` checks. No generic OR
-allow is accepted as evidence for either selected dependency branch.
+The graph exposes separate `direct_access` and `inherited` checks. A fixture-only
+denial relation is empty in ordinary schedules; one negative control sets it to
+prove that matching markers and edges do not allow a denied selected branch to
+borrow direct access. A separate malformed-marker control verifies graph errors
+fail the worker rather than becoming denials. No generic OR allow is accepted as
+evidence for either selected dependency branch.
 
 Every scope pre-creates retained current lifecycle, binding, ancestor-membership
 and direct-grant rows. The stable lifecycle row is keyed by logical channel ID
@@ -313,8 +317,9 @@ Every dependency marker/edge read and the selected branch permission check uses
 that same `AtExactSnapshot`; row tokens must match. Unexpected edges or markers
 reject. A deterministic barrier after anchoring proves that a concurrent revoke
 still allows the historical graph check, followed by rejection at the current
-SQL fence. The schema is fixed for the entire fixture; schema mutation and
-uncoordinated graph corruption are excluded.
+SQL fence. The schema is fixed for the entire fixture. Schema mutation and uncoordinated
+graph corruption are excluded from the authority proof; the explicitly injected
+malformed-marker case tests error handling only.
 
 Admission first reserves a unique durable effect key inside its SQL transaction.
 A conflicting insert waits for the previous transaction to resolve, then compares
@@ -367,7 +372,7 @@ queue/socket delivery or federation activation is established.
 
 The existing pinned workspace runner and nonpublishing CI lanes execute these
 schedules together with all previous proofs and shared cleanup tests. The report
-requires the exact 30-case inventory and records their asserted outcomes. Source
+requires the exact 31-case inventory and records their asserted outcomes. Source
 provenance recursively includes the new modules and schemas; credentials and
 cleanup use the unchanged shared supervisor. Any scenario error fails the full
 run; there is no prerequisite skip or separate opt-in for these cases.

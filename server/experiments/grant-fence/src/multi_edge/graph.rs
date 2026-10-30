@@ -176,10 +176,8 @@ pub async fn verify_mutation(client: &Client, guard: &Guard, principal: Uuid) ->
 pub async fn witness(client: &Client, witness: &Witness, revision: ZedToken) -> Result<bool> {
     tokio::time::timeout(RPC_BUDGET, async {
         validate(witness)?;
-        for guard in &witness.guards {
-            if !verify_guard(client, guard, witness.principal, &revision).await? {
-                return Ok(false);
-            }
+        if !guards_match(client, witness, &revision).await? {
+            return Ok(false);
         }
         let permission = match witness.branch {
             Branch::Inherited => "inherited",
@@ -203,6 +201,47 @@ pub async fn witness(client: &Client, witness: &Witness, revision: ZedToken) -> 
     .await
     .context("witness graph deadline")?
 }
+/// Verify every marker and edge at the same revision before checking permission.
+pub async fn guards_match(client: &Client, witness: &Witness, revision: &ZedToken) -> Result<bool> {
+    validate(witness)?;
+    for guard in &witness.guards {
+        if !verify_guard(client, guard, witness.principal, revision).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Fixture-only denial overlay for the selected-branch negative control.
+pub async fn deny_inherited_control(client: &Client, channel: Uuid, principal: Uuid) -> Result<()> {
+    let denied = relation(
+        object("multi_channel", channel)?,
+        "control_denied",
+        object("multi_user", principal)?,
+    );
+    tokio::time::timeout(
+        RPC_BUDGET,
+        client.write_relationships(vec![RelationshipUpdate::touch(denied)]),
+    )
+    .await??;
+    Ok(())
+}
+
+/// Fixture-only corruption makes a graph read fail instead of returning denial.
+pub async fn overflow_marker_control(client: &Client, guard: &Guard) -> Result<()> {
+    let marker = marker(guard)?;
+    let mut updates = Vec::new();
+    for _ in 0..4 {
+        updates.push(RelationshipUpdate::touch(relation(
+            marker.resource.clone(),
+            "version",
+            object("multi_stamp", Uuid::new_v4())?,
+        )));
+    }
+    tokio::time::timeout(RPC_BUDGET, client.write_relationships(updates)).await??;
+    Ok(())
+}
+
 pub fn validate(witness: &Witness) -> Result<()> {
     let expected: &[Kind] = match witness.branch {
         Branch::Inherited => &[Kind::Lifecycle, Kind::Binding, Kind::Ancestor],
