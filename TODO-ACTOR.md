@@ -1,13 +1,13 @@
 # Distributed-actors implementation TODO
 
-Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903 and "What to tackle next" reconciled **2026-10-18** against `main@44ae8a8`. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
+Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903 and "What to tackle next" reconciled **2026-10-18** against `main@44ae8a8`. The #1985 status lines, the production rollout-strategy line and the #2046 pointers were reconciled **2026-10-30** against `main@db6e533`. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
 
-The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing.
+The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. [#2046](https://github.com/waddle-social/waddle/issues/2046) (addressable room, account and connection actors) is the cutover umbrella for the actor spine; its slice index (Wave 1 W1.1–W1.13 through Wave 5 G1–G4) will be indexed on #1664 once the slices are filed, and the feature/config wiring status against #1661/#1662/#1986/#1948 is in [2046-wiring-reconciliation.md](docs/planning/2046-wiring-reconciliation.md). Native blocked-by edges remain canonical for sequencing.
 
 ## What to tackle next
 
 - **P1 effect executors are complete:** #1660 closed on October 11 (PR #1939) and #1659 closed on October 14 (PR #1945, local/dark). The remote-origin pre-`h` guarantee moved to #1948 under P2.
-- **User-visible clustering bugs, in PR #1985:** #1298 forwards muc#admin list GETs to the room owner over the new `muc_admin_query.v1` relay message, a new message ID that needs no Recreate cutover. #1295 makes a gracefully shut down node retire its disabled identity, so survivors reclaim its UserActor claims at once.
+- **User-visible clustering bugs, merged in PR #1985 (`fe547218`, 2026-10-19):** #1298 forwards muc#admin list GETs to the room owner over the new `muc_admin_query.v1` relay message, a new message ID that needs no Recreate cutover. #1295 makes a gracefully shut down node retire its disabled identity, so survivors reclaim its UserActor claims at once. The code is on `main`; the post-deploy checks listed in the closure audit below are not recorded.
 - **P2 sharpening:** #1661 now has its first substrate slice, [#1986 — P2.2 durable mailbox core](https://github.com/waddle-social/waddle/issues/1986), scoped in [p2-2-durable-mailbox-core.md](docs/planning/p2-2-durable-mailbox-core.md). It blocks #1948. P2.1 (main-pool transaction authority) is its prerequisite and still needs its own slice issue.
 - **Immediate reliability:** #1938 — PR #1949 (merged October 15) targets it, but the issue is still open; verify its acceptance and close or narrow it.
 - **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
@@ -48,7 +48,7 @@ Every issue in this table is closed. Historical constraints are retained where t
 | #1655 | Transaction-taking MAM/inbox repositories | PR #1691 merged 2026-08-12. |
 | #1656 | Shadow atomic ingress transaction | PR #1693 merged 2026-08-14; issue closed with the authority cutover on 2026-09-08. |
 | #1695 | Shadow soak disposition | Window ended early by operator decision on 2026-09-05; issue closed 2026-09-08. Evaluable criteria passed; retention-horizon criteria were not evaluated, not declared passed. Finding #1735 was fixed by #1736. |
-| #1657 | Ingress authority cutover and canonical identity | PR #1738 merged 2026-09-08; removed shadow scaffolding. Operations: [ingress authority](server/docs/operations/ingress-authority.md). Current rollout strategy is governed by the newer #1869 cutover below. |
+| #1657 | Ingress authority cutover and canonical identity | PR #1738 merged 2026-09-08; removed shadow scaffolding. Operations: [ingress authority](server/docs/operations/ingress-authority.md). Rollout strategy is tracked in the cutover section below. |
 
 ## Effect executors (former waves 6–7)
 
@@ -96,7 +96,7 @@ Other useful open reliability tasks: #1787 reconnect/offline-message loss (not r
 
 ## Cutover, activation and operational verification
 
-- [ ] **Current #1869 cutover:** committed GitOps strategy is `Recreate` for V0013 occupancy authority and register/force-detach protocol changes. Verify the new fleet and the runbook checks, then restore `RollingUpdate` in a **separate** change through the #1841 cutover guard. Neither the earlier #1657 instruction nor #1841 authorizes skipping this cutover. See [relay cutovers](docs/operations/relay-cutovers.md#occupancy-authority-cutover-1733-pr-1869). No live completion is asserted by this audit.
+- [x] **Production rollout strategy:** the committed GitOps strategy at `main@db6e533` is `RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`) with the cutover guard enabled. It was restored by PR #1979 (`e3a08248`, 2026-10-17) after the #1976 ACK-journal `Recreate` cutover, so the earlier #1869 occupancy-authority `Recreate` (V0013, register/force-detach v3) is no longer pending in the manifest. That a given cutover reached every replica is a live fact this audit does not assert. Future incompatible changes still need their own guarded `Recreate` and a separate flip-back change through the #1841 guard. See [relay cutovers](docs/operations/relay-cutovers.md#occupancy-authority-cutover-1733-pr-1869).
 - [x] **Database lineage enrollment:** #1674 provisioned the UUID; #1675 recorded ready/attested replicas and removed one-shot enrollment. This is no longer owed rollout work.
 - [ ] **#1688:** durable-database render-time UUID requirement, as scoped above.
 - [ ] **#1689:** provision the migration-owner/runtime-role split; #1653 is complete, so implementation is unblocked. Runtime must not own/alter protected tables or assume the owner role.
@@ -129,8 +129,8 @@ Recommendations below are based on source/test inspection and merged PR evidence
 | #1658 | Closed October 6 with the final closure record. Retain #1899's explicit unknown-outcome duplicate policy. |
 | #1709 | The stack-size mitigation does not establish that the remaining oversized-future work is complete. |
 | #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
-| #1295 | Addressed in PR #1985: the drain still cannot seal UserActor claims, so a completed graceful shutdown retires the disabled node identity and survivors reclaim them through `OwnerStale`. Close on merge plus a post-deploy check that the `ClaimHeldByAnotherNode` storm is gone. |
-| #1298 | Addressed in PR #1985: list GETs for a remotely owned room are answered by the owner over `muc_admin_query.v1`. Close on merge plus a post-deploy check that Faro `member-query-item-not-found` drops to near zero. |
+| #1295 | Addressed in PR #1985 (merged, `fe547218`): the drain still cannot seal UserActor claims, so a completed graceful shutdown retires the disabled node identity and survivors reclaim them through `OwnerStale`. Confirm the issue state, and record a post-deploy check that the `ClaimHeldByAnotherNode` storm is gone; no such check is recorded here. The #1985 follow-ups (user claims stay fresh during drain; SIGTERM during re-registration takes the fatal path) are planned as part of #2046 W1.10. |
+| #1298 | Addressed in PR #1985 (merged, `fe547218`): list GETs for a remotely owned room are answered by the owner over `muc_admin_query.v1`. Confirm the issue state, and record a post-deploy check that Faro `member-query-item-not-found` drops to near zero; no such check is recorded here. |
 | #1670 | Cancellation/custody improvements do not establish durable promotion inventory for every failure/restart path; some retry queues remain memory-only. |
 | #1427 | Some retention/age-out work exists, but the missing-target quota-bounce path still needs disposition. |
 

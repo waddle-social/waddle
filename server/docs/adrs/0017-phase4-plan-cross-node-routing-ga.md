@@ -2,11 +2,13 @@
 
 Companion execution note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md),
 the [Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md), and the
-[Phase 3 plan](./0017-phase3-plan-ownership-claims.md). Status: **ratified;
-implementation started with Slice 1**.
+[Phase 3 plan](./0017-phase3-plan-ownership-claims.md). Status: **implemented**
+(Phase 4 GA merged as `b50f62da`, #1218, 2026-07-09; later clustering work is tracked
+under the distributed-actors roadmap #1664).
 
-Tracking: issue #1195 (ADR-0017 horizontal-scaling epic). Phase 4 is the final
-unchecked section: cross-node stanza routing over the ordered relay channel, then
+Tracking: issue #1195 (ADR-0017 horizontal-scaling epic, since superseded by roadmap
+#1664). At planning time Phase 4 was the final
+unchecked section of that epic: cross-node stanza routing over the ordered relay channel, then
 chart/operational unlock for `clustering.enabled` and `replicaCount > 1`.
 
 > **Superseded (2026-08-07):** The ISR (XEP-0397) design and

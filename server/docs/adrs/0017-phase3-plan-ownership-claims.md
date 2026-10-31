@@ -8,8 +8,12 @@
 
 Companion execution note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md), the
 [Phase 1 completion note](./0017-phase1-completion-authoritative-registration.md), and the
-[Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md). Status: **planned, not yet implemented**.
-Tracking: issue #1195 (ADR-0017 horizontal-scaling epic), which lists this phase's
+[Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md). Status:
+**Phase 3 implemented** (landed on `main` ahead of the Phase 4 GA merge `b50f62da`,
+#1218, 2026-07-09; the as-landed notes and numbered deviations below are the record, and
+the XEP-0397 ISR item was later removed, see the banner above).
+Tracking: issue #1195 (ADR-0017 horizontal-scaling epic, since superseded by the
+distributed-actors roadmap #1664), which lists this phase's
 checkboxes verbatim as:
 
 - [ ] Epoch-fenced Postgres ownership claims
