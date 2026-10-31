@@ -333,7 +333,7 @@ schema.#Project & {
 				packages:        "read"
 				"pull-requests": "none"
 			}
-			tasks: [_t.checkRootSyncDrift]
+			tasks: [_t.checkAllCiDrift, _t.checkRootSyncDrift]
 		}
 		xmppCompliance: {
 			mode: "expanded"
@@ -488,6 +488,22 @@ schema.#Project & {
 				"../.github/workflows/waddle-server-*.yml",
 				"../cue.mod/module.cue",
 			]
+		}
+
+		// checkCiDrift's inputs derive to server-relative triggers, so a PR that
+		// changes only another project's CUE or generated workflow (for example
+		// infrastructure/waddle.cloud) was never drift-checked before merge. Run
+		// the same all-projects check from the cheap rootSync pipeline, triggered
+		// by every project's env.cue and every generated waddle workflow, without
+		// starting the server's publish pipeline.
+		checkAllCiDrift: schema.#Task & {
+			hermetic: false
+			command:  tasks.checkCiDrift.command
+			args:     tasks.checkCiDrift.args
+			inputs: list.Concat([tasks.checkCiDrift.inputs, [
+				"../**/env.cue",
+				"../.github/workflows/waddle-*.yml",
+			]])
 		}
 
 		checkRootSyncDrift: schema.#Task & {
