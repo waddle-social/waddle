@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
     - .cargo/**
+    - .github/actions/android-preview-signing/**
     - .github/workflows/waddle-android-devicetests.yml
     - apps/android/**/build.gradle.kts
     - apps/android/**/src
@@ -39,6 +40,8 @@ on:
     - cue.mod/**
     - scripts/android-ci-gradle.sh
     - scripts/android-ci-gradle.sh/**
+    - scripts/android-preview-signing.sh
+    - scripts/android-preview-signing.sh/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
