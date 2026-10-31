@@ -314,8 +314,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      ANDROID_HOME: "${{ runner.temp }}/waddle-flutter-sdk"
-      ANDROID_SDK_ROOT: "${{ runner.temp }}/waddle-flutter-sdk"
       CARGO_BUILD_JOBS: 2
       WADDLE_NATIVE_BASE_SHA: "${{ github.event.pull_request.base.sha || inputs.native_base_sha || '12fd7aa01dbef427c383fd16fed00b83badbb84f' }}"
     steps:
@@ -325,6 +323,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: "${{ github.sha }}"
+      - name: Configure independent Android SDK paths
+        run: "printf 'ANDROID_HOME=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\nprintf 'ANDROID_SDK_ROOT=%s/waddle-flutter-sdk\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"\n"
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -344,7 +344,7 @@ jobs:
           version: v2.0.0
       - id: tools
         name: Verify pinned Flutter and Rust toolchains
-        run: "nix develop . --command flutter --version\nnix develop . --command rustc --version\nnix develop . --command wasm-pack --version\nnix develop . --command cmake --version\nnix develop . --command ninja --version\n"
+        run: "nix develop . --command flutter --version\nnix develop . --command rustc --version\nnix develop . --command wasm-pack --version\nnix develop . --command actionlint -shellcheck= -pyflakes= .github/workflows/waddle-flutter-apk.yml\nnix develop . --command cmake --version\nnix develop . --command ninja --version\n"
       - id: sdk
         name: Provision standalone Android SDK
         run: nix develop . --command bash scripts/setup-flutter-android.sh

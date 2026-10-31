@@ -990,6 +990,7 @@
               # Flutter's WebCrypto native-asset hook uses CMake and Ninja.
               pkgs.cmake
               pkgs.ninja
+              pkgs.actionlint
               pkgs.gh
             ];
 
