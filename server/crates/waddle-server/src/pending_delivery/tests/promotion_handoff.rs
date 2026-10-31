@@ -105,7 +105,7 @@ async fn sqlite_portable_promotion_retry_survives_restart_and_delivery() {
 
 #[tokio::test]
 async fn postgres_portable_promotion_retry_survives_restart_and_delivery() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (portable promotion)");
         return;
     };
@@ -226,7 +226,7 @@ async fn sqlite_receipt_schema_migration_and_confirmation() {
 
 #[tokio::test]
 async fn postgres_receipt_schema_migration_and_confirmation() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let (schema, scoped_url) = create_postgres_test_schema(&database_url, "receipt_schema").await;

@@ -102,6 +102,9 @@ mockito = "1.7"
 aws-lc-rs = "1.17"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
+# `require_test_postgres_url`, the one reader of the Postgres test-database
+# environment (shared with waddle-server; this crate has no waddle deps).
+waddle-ws-test-support = { path = "../waddle-ws-test-support" }
 
 [features]
 # Exposes `insert_raw_*_for_test` storage helpers (and other test-only

@@ -171,7 +171,7 @@ async fn xep0359_tx_archive_outcome_keeps_archive_as_stanza_id_authority() {
     };
     use waddle_xmpp_core::mam::ArchivedMessage;
 
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping XEP-0359 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
         return;
     };

@@ -787,7 +787,7 @@ async fn pubsub_database_hosts_notification_settings_projection_schema() {
 
 #[tokio::test]
 async fn pubsub_postgres_projection_schema_uses_bigint_revision_columns() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed PubSub projection schema regression)"

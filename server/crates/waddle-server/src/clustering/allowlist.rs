@@ -230,7 +230,7 @@ mod tests {
             .lock()
             .await;
         let _allowlist = crate::clustering::allowlist_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let db = Database::from_config(
@@ -353,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn enrolled_peers_reads_rows_and_skips_invalid() {
         let _guard = crate::clustering::allowlist_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let db = Database::from_config(
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn all_rows_invalid_is_an_error_not_an_empty_set() {
         let _guard = crate::clustering::allowlist_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let db = Database::from_config(

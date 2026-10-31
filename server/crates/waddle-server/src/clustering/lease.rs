@@ -283,7 +283,7 @@ mod tests {
     }
 
     async fn clean_store() -> Option<PostgresKeypairSlotLease> {
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         // `heartbeat` now renews through the control-plane pool, so the test
         // database needs one provisioned exactly like production's global
         // database does.

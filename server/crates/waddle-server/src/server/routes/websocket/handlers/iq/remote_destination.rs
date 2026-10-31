@@ -1,4 +1,5 @@
 use jid::{BareJid, FullJid, Jid};
+use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::protocol::handlers::jingle::calls_mixer_jid;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -8,7 +9,7 @@ use super::{
 };
 use crate::server::routes::websocket::XmppServiceDomains;
 
-/// Reject unsupported remote targets before local ping or Carbons handling.
+/// Reject unsupported remote targets before local ping, Carbons, or Session handling.
 pub(super) async fn handle_sans_io_iq_with_remote_preflight(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
@@ -18,7 +19,9 @@ pub(super) async fn handle_sans_io_iq_with_remote_preflight(
 ) -> Option<Vec<String>> {
     if matches!(
         ctx.payload_ns,
-        waddle_xmpp::xep::xep0199::NS_PING | waddle_xmpp::carbons::CARBONS_NS
+        waddle_xmpp::xep::xep0199::NS_PING
+            | waddle_xmpp::carbons::CARBONS_NS
+            | waddle_xmpp::ns::SESSION
     ) && state
         .deps
         .protocol
@@ -67,10 +70,13 @@ pub(super) fn remote_iq_error(
         return None;
     }
 
-    let description = if payload.ns() == waddle_xmpp::carbons::CARBONS_NS {
-        "Remote Carbons routing is not allowed by this server."
-    } else {
-        "Remote ping routing is not allowed by this server."
+    let description = match payload.ns().as_str() {
+        waddle_xmpp::ns::SESSION => "Remote Session routing is not allowed by this server.",
+        waddle_xmpp::carbons::CARBONS_NS => "Remote Carbons routing is not allowed by this server.",
+        DISCO_INFO_NS | DISCO_ITEMS_NS => {
+            "Remote service discovery routing is not allowed by this server."
+        }
+        _ => "Remote ping routing is not allowed by this server.",
     };
     let mut error = StanzaError::new(
         ErrorType::Cancel,

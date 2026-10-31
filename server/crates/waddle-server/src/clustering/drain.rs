@@ -655,7 +655,7 @@ mod tests {
         crate::db::Database,
     )> {
         use crate::db::{Database, DatabaseConfig, DatabaseDriver};
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let db = Database::from_config(
             "clustering-drain-test",
             &DatabaseConfig::new(DatabaseDriver::Postgres, url)

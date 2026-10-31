@@ -13,12 +13,13 @@
 //! is restarted rather than re-served; that path is not exercised here.
 //!
 //! PostgreSQL is optional in local development, so the test skips unless
-//! `WADDLE_TEST_POSTGRES_URL` is configured.
+//! `WADDLE_TEST_POSTGRES_URL` is configured. Publish-gating lanes require
+//! PostgreSQL through `WADDLE_TEST_REQUIRE_POSTGRES=1` and fail if it is missing.
 
 use std::time::Duration;
 
 use tokio::sync::watch;
-use waddle_ws_test_support::TestServer;
+use waddle_ws_test_support::{require_test_postgres_url, TestServer};
 
 /// Kubelet probe timeout in the chart (`probes.*.timeoutSeconds`).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -219,7 +220,7 @@ async fn assert_live(client: &reqwest::Client, server: &TestServer) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_outage_leaves_server_live_and_unready_then_recovers() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

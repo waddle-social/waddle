@@ -3,12 +3,16 @@
 //! - `TestServer` spawns the `waddle-server` binary with test env vars and
 //!   waits for it to become ready.
 //! - `WsXmppClient` connects via WebSocket and authenticates with SCRAM-SHA-256.
+//! - `require_test_postgres_url` is the one reader of the Postgres test-database
+//!   environment for every test crate in the workspace.
 //!
 //! This lives in its own crate (rather than a `tests/ws_common/mod.rs`
 //! shared module) so that every integration-test binary links the same
 //! compiled library: helpers unused by one particular test binary are
 //! still reachable public API of this crate, so per-binary `dead_code`
 //! warnings cannot fire and no lint suppressions are needed.
+
+pub mod iq;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -21,6 +25,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite};
+
+mod test_postgres;
+
+pub use test_postgres::require_test_postgres_url;
 
 /// Re-exported so suites can match on raw frames from
 /// [`WsXmppClient::recv_raw_timeout`] without a direct dependency.

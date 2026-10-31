@@ -9,6 +9,8 @@ name: waddle-server-rustTests
       - .github/workflows/hestia-cache-gc.yml/**
       - .github/workflows/waddle-ci-cache-benchmark.yml
       - .github/workflows/waddle-ci-cache-benchmark.yml/**
+      - .github/workflows/waddle-integration.yml
+      - .github/workflows/waddle-integration.yml/**
       - .github/workflows/waddle-server-*.yml
       - .github/workflows/waddle-server-rusttests.yml
       - apps/apple/**/Tests/**
@@ -45,11 +47,18 @@ name: waddle-server-rustTests
       - scripts/*cache-benchmark*
       - scripts/ci-timings.py
       - scripts/ci-timings.py/**
+      - scripts/integration-ci*
       - scripts/sync-rust-tests.sh
       - scripts/sync-rust-tests.sh/**
+      - scripts/test_cuenv_bootstrap.py
+      - scripts/test_cuenv_bootstrap.py/**
+      - scripts/test_integration_ci_project.py
+      - scripts/test_integration_ci_project.py/**
       - server/**/env.cue
       - server/.config/nextest.toml
       - server/.config/nextest.toml/**
+      - server/.config/required-cluster-tests.txt
+      - server/.config/required-cluster-tests.txt/**
       - server/Cargo.lock
       - server/Cargo.lock/**
       - server/Cargo.toml
@@ -77,8 +86,14 @@ name: waddle-server-rustTests
       - server/scripts/*publish_chart.py
       - server/scripts/build-nextest-archive.sh
       - server/scripts/build-nextest-archive.sh/**
+      - server/scripts/check-ci-helper-contracts.sh
+      - server/scripts/check-ci-helper-contracts.sh/**
+      - server/scripts/check-test-postgres-env.py
+      - server/scripts/check-test-postgres-env.py/**
       - server/scripts/check_nextest_shards.py
       - server/scripts/check_nextest_shards.py/**
+      - server/scripts/check_required_tests.py
+      - server/scripts/check_required_tests.py/**
       - server/scripts/nextest-archive-transfer.sh
       - server/scripts/nextest-archive-transfer.sh/**
       - server/scripts/observer_release.py
@@ -93,6 +108,12 @@ name: waddle-server-rustTests
       - server/scripts/test_build_nextest_archive.py/**
       - server/scripts/test_check_nextest_shards.py
       - server/scripts/test_check_nextest_shards.py/**
+      - server/scripts/test_check_required_tests.py
+      - server/scripts/test_check_required_tests.py/**
+      - server/scripts/test_check_test_postgres_env.py
+      - server/scripts/test_check_test_postgres_env.py/**
+      - server/scripts/test_default_publish_graph.py
+      - server/scripts/test_default_publish_graph.py/**
       - server/scripts/test_nextest_archive_transfer.py
       - server/scripts/test_nextest_archive_transfer.py/**
       - server/scripts/test_observer_release.py
@@ -144,17 +165,10 @@ jobs:
           drain-timeout: "900"
       - name: Validate CI helper contracts
         shell: bash
-        run: |-
-          python3 tests/ci-timings-test.py
-          python3 server/scripts/test_check_nextest_shards.py
-          python3 server/scripts/test_nextest_archive_transfer.py
-          python3 server/scripts/test_build_nextest_archive.py
-          python3 server/scripts/test_plan_nextest_binary_shards.py
-          python3 server/scripts/test_pin_nextest_shard.py
-          python3 server/scripts/test_run_nextest_shards.py
+        run: bash server/scripts/check-ci-helper-contracts.sh
       - name: Compile and run four isolated test shards
         shell: bash
-        run: bash scripts/run-nextest-shards.sh
+        run: timeout --kill-after=2m 55m bash scripts/run-nextest-shards.sh
         working-directory: server
       - name: Upload compiler and coverage diagnostics
         if: ${{ !cancelled() }}
