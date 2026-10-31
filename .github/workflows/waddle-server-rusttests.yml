@@ -50,6 +50,8 @@ name: waddle-server-rustTests
       - scripts/integration-ci*
       - scripts/sync-rust-tests.sh
       - scripts/sync-rust-tests.sh/**
+      - scripts/test_cuenv_bootstrap.py
+      - scripts/test_cuenv_bootstrap.py/**
       - scripts/test_integration_ci_project.py
       - scripts/test_integration_ci_project.py/**
       - server/**/env.cue

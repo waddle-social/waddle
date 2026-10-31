@@ -447,6 +447,7 @@ schema.#Project & {
 				"../ci/contributors/*.cue",
 				"../scripts/integration-ci*",
 				"../scripts/test_integration_ci_project.py",
+				"../scripts/test_cuenv_bootstrap.py",
 				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",

@@ -36,11 +36,14 @@ jobs:
       waddle_cloud_pullrequest: "${{ steps.plan.outputs.waddle_cloud_pullrequest }}"
       waddle_colony_pullrequest: "${{ steps.plan.outputs.waddle_colony_pullrequest }}"
       waddle_linux_pullrequest: "${{ steps.plan.outputs.waddle_linux_pullrequest }}"
+      waddle_server_authzidcodec: "${{ steps.plan.outputs.waddle_server_authzidcodec }}"
       waddle_server_federationgrantfence: "${{ steps.plan.outputs.waddle_server_federationgrantfence }}"
       waddle_server_namespacerustchecks: "${{ steps.plan.outputs.waddle_server_namespacerustchecks }}"
       waddle_server_pullrequest: "${{ steps.plan.outputs.waddle_server_pullrequest }}"
+      waddle_server_roomchildcontract: "${{ steps.plan.outputs.waddle_server_roomchildcontract }}"
       waddle_server_rootsync: "${{ steps.plan.outputs.waddle_server_rootsync }}"
       waddle_server_rusttests: "${{ steps.plan.outputs.waddle_server_rusttests }}"
+      waddle_server_spacefanoutcontract: "${{ steps.plan.outputs.waddle_server_spacefanoutcontract }}"
       waddle_server_xmppcompliance: "${{ steps.plan.outputs.waddle_server_xmppcompliance }}"
       waddle_server_xmppservercompliance: "${{ steps.plan.outputs.waddle_server_xmppservercompliance }}"
       waddle_website_pullrequest: "${{ steps.plan.outputs.waddle_website_pullrequest }}"
@@ -56,7 +59,7 @@ jobs:
         with:
           bun-version: 1.4.2
       - name: Check graph parity and planner contracts
-        run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py"
+        run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py\npython3 scripts/test_cuenv_bootstrap.py"
       - id: plan
         name: Select every applicable lane
         run: bun scripts/integration-ci.ts plan
@@ -67,7 +70,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -89,7 +92,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: "Run pipeline: deviceTests"
         run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path apps/android --pipeline deviceTests --run"
         env:
@@ -116,7 +119,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -138,7 +141,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: "Run pipeline: pullRequest"
         run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path apps/android --pipeline pullRequest --run"
         env:
@@ -198,7 +201,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -214,7 +217,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: cuenv:contributor:bun.workspace.setup
         run: "true"
       - name: Install Bun dependencies
@@ -237,7 +240,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -253,7 +256,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: "Run pipeline: pullRequest"
         run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path infrastructure/waddle.cloud --pipeline pullRequest --run"
         env:
@@ -272,7 +275,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -288,7 +291,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: cuenv:contributor:bun.workspace.setup
         run: "true"
       - name: Install Bun dependencies
@@ -311,7 +314,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -327,7 +330,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: "Run pipeline: pullRequest"
         run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path apps/linux --pipeline pullRequest --run"
         env:
@@ -339,14 +342,14 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_linux_pullrequest == 'true' }}"
-  waddle_server_federationgrantfence__federationgrantfenceproof:
+  waddle_server_authzidcodec__checkauthzidcodec:
     permissions:
       contents: read
-    name: waddle-server-federationGrantFence / federationGrantFenceProof
+    name: waddle-server-authzIdCodec / checkAuthzIdCodec
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -362,7 +365,41 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
+      - name: checkAuthzIdCodec
+        run: cuenv task checkAuthzIdCodec --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_authzidcodec == 'true' }}"
+  waddle_server_federationgrantfence__federationgrantfenceproof:
+    permissions:
+      contents: read
+    name: waddle-server-federationGrantFence / federationGrantFenceProof
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: federationGrantFenceProof
         run: cuenv task federationGrantFenceProof --skip-dependencies
         working-directory: server
@@ -380,7 +417,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -396,7 +433,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: clippy
         run: cuenv task clippy --skip-dependencies
         working-directory: server
@@ -414,7 +451,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -430,7 +467,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: doctest
         run: cuenv task doctest --skip-dependencies
         working-directory: server
@@ -448,7 +485,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -464,7 +501,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: test
         run: cuenv task test --skip-dependencies
         working-directory: server
@@ -482,7 +519,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -498,7 +535,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: checkCiDrift
         run: cuenv task checkCiDrift --skip-dependencies
         working-directory: server
@@ -516,7 +553,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -532,7 +569,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: checkSwitchableAlternativeProgram
         run: cuenv task checkSwitchableAlternativeProgram --skip-dependencies
         working-directory: server
@@ -550,7 +587,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -566,7 +603,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: checkXmppClientFfiBindings
         run: cuenv task checkXmppClientFfiBindings --skip-dependencies
         working-directory: server
@@ -584,7 +621,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -616,7 +653,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -648,7 +685,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -680,7 +717,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -712,7 +749,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -744,7 +781,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -776,7 +813,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -792,7 +829,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: renderDeployment
         run: cuenv task renderDeployment --skip-dependencies
         working-directory: server
@@ -803,14 +840,14 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_pullrequest == 'true' }}"
-  waddle_server_rootsync__checkrootsyncdrift:
+  waddle_server_roomchildcontract__roomchildcontractpostgres:
     permissions:
       contents: read
-    name: waddle-server-rootSync / checkRootSyncDrift
-    runs-on: ubuntu-24.04
+    name: waddle-server-roomChildContract / roomChildContractPostgres
+    runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -826,7 +863,41 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
+      - name: roomChildContractPostgres
+        run: cuenv task roomChildContractPostgres --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_roomchildcontract == 'true' }}"
+  waddle_server_rootsync__checkrootsyncdrift:
+    permissions:
+      contents: read
+    name: waddle-server-rootSync / checkRootSyncDrift
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: checkRootSyncDrift
         run: cuenv task checkRootSyncDrift --skip-dependencies
         working-directory: server
@@ -896,6 +967,40 @@ jobs:
         run: "set -euo pipefail\nif [[ \"$TEST_RESULT\" != success ]]; then\n  echo \"Compilation and all four shards must succeed; received: ${TEST_RESULT:-missing}\" >&2\n  exit 1\nfi\necho \"All four test shards and inventory checks passed.\""
     permissions:
       {}
+  waddle_server_spacefanoutcontract__spacefanoutcontractpostgres:
+    permissions:
+      contents: read
+    name: waddle-server-spaceFanoutContract / spaceFanoutContractPostgres
+    runs-on: namespace-profile-linux-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - name: Setup cuenv (release)
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
+      - name: spaceFanoutContractPostgres
+        run: cuenv task spaceFanoutContractPostgres --skip-dependencies
+        working-directory: server
+        env:
+          GITHUB_ACTOR: "${{ github.actor }}"
+          GITHUB_REF_TYPE: "${{ github.ref_type }}"
+          GITHUB_REF_NAME: "${{ github.ref_name }}"
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_spacefanoutcontract == 'true' }}"
   waddle_server_xmppcompliance__nixxmppunittests:
     permissions:
       contents: read
@@ -903,7 +1008,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -935,7 +1040,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -967,7 +1072,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -999,7 +1104,7 @@ jobs:
     runs-on: namespace-profile-linux-x86
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: "${{ github.sha }}"
@@ -1015,7 +1120,7 @@ jobs:
           upstream-cache-filter: "true"
           version: v2.0.0
       - name: Setup cuenv (release)
-        run: "arch=\"$(uname -m)\"\ncase \"$arch\" in\n  x86_64|amd64) cuenv_asset=\"cuenv-linux-x64\" ;;\n  aarch64|arm64) cuenv_asset=\"cuenv-linux-arm64\" ;;\n  *) echo \"Unsupported Linux architecture: $arch\" >&2; exit 1 ;;\nesac\ncuenv_version=\"0.57.3\"\nif [ -z \"$cuenv_version\" ]; then\n  cuenv_version=\"latest\"\nfi\nif [ \"$cuenv_version\" = \"latest\" ]; then\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/latest/download/${cuenv_asset}\"\nelse\n  cuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\nfi\ncurl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv \"$cuenv_url\" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p ."
+        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
       - name: cuenv:contributor:bun.workspace.setup
         run: "true"
       - name: Install Bun dependencies
@@ -1045,6 +1150,7 @@ jobs:
       - waddle_cloud_pullrequest__waddle-cloud-pullrequest
       - waddle_colony_pullrequest__waddle-colony-pullrequest
       - waddle_linux_pullrequest__waddle-linux-pullrequest
+      - waddle_server_authzidcodec__checkauthzidcodec
       - waddle_server_federationgrantfence__federationgrantfenceproof
       - waddle_server_namespacerustchecks__clippy
       - waddle_server_namespacerustchecks__doctest
@@ -1059,9 +1165,11 @@ jobs:
       - waddle_server_pullrequest__nixdoctest
       - waddle_server_pullrequest__nixfmt
       - waddle_server_pullrequest__renderdeployment
+      - waddle_server_roomchildcontract__roomchildcontractpostgres
       - waddle_server_rootsync__checkrootsyncdrift
       - waddle_server_rusttests__nixtest-builder
       - waddle_server_rusttests__nixtest
+      - waddle_server_spacefanoutcontract__spacefanoutcontractpostgres
       - waddle_server_xmppcompliance__nixxmppunittests
       - waddle_server_xmppcompliance__nixxmppxepintegration
       - waddle_server_xmppservercompliance__nixxmppservertests

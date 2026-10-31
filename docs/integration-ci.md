@@ -8,7 +8,7 @@ definitions and manufacture success. Action SHA pins, read-only permissions,
 report validation and green checks do not establish an independent trust boundary.
 This draft prepares verification machinery; the trusted external/organization
 boundary and protected task contract remain open design blockers. No repository
-rules, release pins or runner settings are changed by this addition.
+rules or runner settings are changed by this addition.
 
 ## Coverage and candidate identity
 
@@ -18,18 +18,20 @@ dependencies, and internal failure checks. Generated verification jobs are cappe
 at `contents: read` (or no permissions for a pure result check). They omit
 FlakeHub cache setup, which requires cloud OIDC, retain Hestia, remove explicit
 run-step GitHub tokens, and disable persisted checkout credentials. Original
-workflow permissions and behavior are unchanged. It namespaces job and
+workflow permissions are retained; the CLI/checkout emission changes are disclosed below. It namespaces job and
 artifact names, explicitly checks out `github.sha`, and selects lanes from their
 original path filters. Branch filters are conservatively ignored. Unknown glob
 syntax selects coverage rather than excluding it. Renames are diffed as deletion
 and addition so both old and new paths participate; filenames stay NUL separated.
 
 Every generated `uses:` reference must identify a full 40-character Git commit.
-The generator translates only these reviewed mutable source aliases, resolved
-with `git ls-remote` against their official upstream repositories on 2026-10-30:
+The generator translates only the explicitly selected mutable source aliases
+below. The v4/Python refs were resolved from official upstream repositories on
+2026-10-30; v7 is the accepted 0.63.2 emitter alias pinned on 2026-10-31:
 
 | Source alias | Fixed generated reference |
 | --- | --- |
+| `actions/checkout@v7` | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/commit/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 | `actions/checkout@v4` | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262) |
 | `actions/setup-python@v5` | [`a26af69be951a213d495a4c3e4e4022e16d87065`](https://github.com/actions/setup-python/commit/a26af69be951a213d495a4c3e4e4022e16d87065) |
 
@@ -72,20 +74,51 @@ so real dependency ordering and failure propagation are covered by CLI fixtures.
 Reports establish completion under trusted task definitions; they are not
 cryptographic evidence against arbitrary candidate code forging its own files.
 
-**Release blocker:** the repository still downloads cuenv 0.57.3, which lacks
-`ci --all`. No nonexistent release or schema version is pinned here. The adapter
-and its CLI regressions fail with that old binary. Downstream behavior is tested
-only with the local binary built from reviewed
-[cuenv #559](https://github.com/cuenv/cuenv/pull/559), exact commit
-`65538df73b5b56dde0b7fb3f6d555e978efd6d97`; its version label is 0.63.0 and does
-not mean that the published 0.63.0 release contains the patch. Keep this PR draft.
-After upstream review/merge and an actual supported release, explicitly set
-`ci.cuenv.version` to that existing release in the source configuration, regenerate
-setup/source/integration workflows, test compatibility with the separately pinned
-0.57.3 CUE schema, and repeat actual hosted lane execution and exact-head review.
-That resolves only the CLI/hosted-execution blocker; it does not make the
-candidate-controlled aggregate eligible as a trusted required gate. Do not publish or merge upstream as part
-of this draft's local validation.
+## Verified release bootstrap
+
+The CLI is explicitly pinned to **cuenv 0.63.2** through the shared
+`#CuenvVersion` in `ci/contributors/cuenv.cue` and root
+`config.ci.cuenv.version`. Each of the seven projects is checked separately for
+that resolved configuration. The separately pinned CUE schema remains 0.57.3;
+cuenv prints a version-mismatch warning. Configuration, inventory and drift
+checks exercise this deliberately retained schema rather than claiming blanket
+cross-version compatibility.
+
+[Release 0.63.2](https://github.com/cuenv/cuenv/releases/tag/0.63.2) contains the
+supported `ci --all` fix. The downloaded release artifacts have these SHA-256 pins:
+
+| Asset | SHA-256 |
+| --- | --- |
+| `cuenv-darwin-arm64` | `8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba` |
+| `cuenv-linux-arm64` | `0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519` |
+| `cuenv-linux-x64` | `5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa` |
+
+The CUE-owned contributor checks OS/architecture, rejects any other version or
+missing digest, downloads to a temporary file, verifies SHA-256 before chmod or
+execution, then requires exact `cuenv 0.63.2` version output. Only then does it
+install into a private `RUNNER_TEMP` directory, append that directory to
+`GITHUB_PATH`, and run that installed binary for VCS materialization. There is no
+`latest` or unverified fallback and no `/usr/local` installation. The integration
+planner runs executable bootstrap acceptance/negative tests; all generated release
+steps must be identical. Platform mapping is simulated in those Linux-hosted
+fixtures; native Darwin/arm64 execution remains a hosted qualification.
+
+Regeneration with 0.63.2 intentionally accepts its automatic `actions/checkout@v7`
+emission, mapped to the full SHA above in integration jobs; v4 remains supported
+and unknown future aliases such as v8 fail. The selected v7 action uses Node24,
+which requires Actions Runner >=2.327.1; authenticated Git from container actions
+requires >=2.329.0 according to its
+[pinned README](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/README.md).
+Current Namespace/Apple runner execution must establish that qualification;
+local YAML/actionlint checks do not prove it.
+
+The same regeneration now emits the source-declared FlakeHub tag push trigger
+(`v?[0-9]+.[0-9]+.[0-9]+*`) which the older generator omitted. That newly effective
+trigger is intentionally preserved alongside manual dispatch; publication itself
+is not run as local verification. No trigger suppression or implicit version
+fallback is used. Checksums provide release-integrity hardening, not the missing
+independent trusted-verifier boundary. Keep this PR draft until hosted exact-head
+execution and the remaining architecture/authority work are resolved.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
 NUL-safe diff success. Deleted, empty, malformed, stale or empty-pipeline
@@ -106,6 +139,7 @@ bun scripts/integration-ci.ts sync
 bun scripts/integration-ci.ts --check
 bun test scripts/integration-ci.test.ts
 python3 scripts/test_integration_ci_project.py
+python3 scripts/test_cuenv_bootstrap.py
 # Requires the reviewed --all CLI in PATH; every selected thin job runs this too.
 WADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py
 ```
@@ -124,7 +158,7 @@ runner provisioning must be repaired before any separately trusted gate is enabl
 FlakeHub cache can increase compile and download time; no verification commands,
 runner resources, or assertions are removed. The original cuenv reporter only uses
 check/PR write permissions for optional notifications; notification failures are
-warnings in `crates/ci/src/executor/reporting.rs` of cuenv v0.57.3. Generated
+warnings in `crates/ci/src/executor/reporting.rs` of cuenv (now CLI 0.63.2). Generated
 integration jobs rely on Actions job results rather than those notifications.
 
 ## Open trusted-gate boundary

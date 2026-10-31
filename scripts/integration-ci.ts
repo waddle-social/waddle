@@ -5,8 +5,9 @@ const workflowDirectory = ".github/workflows";
 export const outputFile = `${workflowDirectory}/waddle-integration.yml`;
 const checkout = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5";
 const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
-// Resolved from the official upstream tag refs on 2026-10-30; see docs/integration-ci.md.
+// Explicitly reviewed source aliases; see docs/integration-ci.md for provenance/runtime requirements.
 const reviewedActionPins: Record<string, string> = {
+  "actions/checkout@v7": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   "actions/checkout@v4": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
   "actions/setup-python@v5": "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
 };
@@ -42,7 +43,7 @@ export function readLanes(directory = workflowDirectory): Lane[] {
 export function applicable(lane: Lane, files: string[]): boolean {
   // A graph or planner change exercises every lane. Source PR branch filters
   // are deliberately ignored: queue validation can conservatively add coverage.
-  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py"].includes(file))) return true;
+  if (files.some(file => [outputFile, "scripts/integration-ci.ts", "scripts/integration-ci.test.ts", "scripts/integration-ci-project.py", "scripts/test_integration_ci_project.py", "scripts/test_cuenv_bootstrap.py"].includes(file))) return true;
   const patterns = lane.workflow.on.pull_request?.paths;
   if (!patterns) return true;
   if (!Array.isArray(patterns) || patterns.some(pattern => typeof pattern !== "string")) throw new Error(`Invalid paths in ${lane.file}`);
@@ -85,7 +86,7 @@ export function generate(lanes: Lane[]): string {
       permissions: { contents: "read" },
       outputs: Object.fromEntries(["expected", "base", ...lanes.map(lane => lane.id)].map(key => [key, `\${{ steps.plan.outputs.${key} }}`])),
       steps: [...utilitySteps(),
-        { name: "Check graph parity and planner contracts", run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py" },
+        { name: "Check graph parity and planner contracts", run: "bun scripts/integration-ci.ts --check\nbun test scripts/integration-ci.test.ts\npython3 scripts/test_integration_ci_project.py\npython3 scripts/test_cuenv_bootstrap.py" },
         { id: "plan", name: "Select every applicable lane", run: "bun scripts/integration-ci.ts plan" },
       ],
     },

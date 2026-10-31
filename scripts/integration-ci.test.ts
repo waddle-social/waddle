@@ -23,6 +23,7 @@ describe("path coverage", () => {
   test("unfiltered lanes and graph changes are always selected", () => {
     expect(applicable(lane(), ["docs/a.md"])).toBe(true);
     expect(applicable(lane(["server/**"]), ["scripts/integration-ci.ts"])).toBe(true);
+    expect(applicable(lane(["server/**"]), ["scripts/test_cuenv_bootstrap.py"])).toBe(true);
   });
 });
 
@@ -106,6 +107,9 @@ describe("immutable generated action references", () => {
     expect(workflow.jobs.example__build.steps[0].uses).toBe("actions/checkout@11d5960a326750d5838078e36cf38b85af677262");
     expect(workflow.jobs.example__build.steps[2].uses).toBe("actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065");
     expect(workflow.jobs.example__build.steps[3].uses).toBe(preserved);
+    source.workflow.jobs.build.steps[0].uses = "actions/checkout@v7";
+    const next = Bun.YAML.parse(generate([source])) as any;
+    expect(next.jobs.example__build.steps[0].uses).toBe("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
   });
   test("every action in the complete generated graph uses a full commit SHA", () => {
     const lanes = readLanes();
@@ -115,7 +119,7 @@ describe("immutable generated action references", () => {
     for (const reference of collect(lanes).filter(reference => /@[0-9a-fA-F]{40}$/.test(reference) && !reference.startsWith("DeterminateSystems/flakehub-cache-action@"))) expect(references).toContain(reference);
   });
   test("rejects unknown mutable, shortened, local, container and expression references", () => {
-    for (const reference of ["actions/checkout@v5", "actions/setup-python@main", "unknown/action@v1", "unknown/action@abcdef0", "./candidate-action", "./candidate-action@" + "a".repeat(40), "docker://example:latest", "${{ inputs.action }}"]) {
+    for (const reference of ["actions/checkout@v8", "actions/checkout@v5", "actions/setup-python@main", "unknown/action@v1", "unknown/action@abcdef0", "./candidate-action", "./candidate-action@" + "a".repeat(40), "docker://example:latest", "${{ inputs.action }}"]) {
       const source = lane();
       source.workflow.jobs.build.steps.push({ uses: reference });
       expect(() => generate([source])).toThrow("Unreviewed mutable action reference");
@@ -250,4 +254,12 @@ test("each thin runner fails before cuenv on a missing base, changed HEAD or fai
     expect(run(["bash", "-c", testCommand], env).exitCode).not.toBe(0);
     expect(() => readFileSync(marker, "utf8")).toThrow();
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("0.63.2 retains source-declared manual and tag FlakeHub triggers", () => {
+  const workflow = Bun.YAML.parse(readFileSync(".github/workflows/waddle-server-publish-tags-to-flakehub.yml", "utf8")) as any;
+  expect(workflow.on.push.tags).toEqual(["v?[0-9]+.[0-9]+.[0-9]+*"]);
+  expect(workflow.on.workflow_dispatch.inputs.tag.required).toBe(true);
+  expect(workflow.on.workflow_dispatch.inputs.tag.type).toBe("string");
 });
