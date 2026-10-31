@@ -14,5 +14,8 @@ android_run_url="${GITHUB_SERVER_URL:?missing GITHUB_SERVER_URL}/${GITHUB_REPOSI
   printf '%s\n\n' '### Android APK'
   printf '[Download **waddle-android-apk** from this run](%s#artifacts).\n\n' "$android_run_url"
   printf '%s\n\n' 'Open the artifact, extract app-foss-debug.apk, and install it on Android 14 or later. GitHub sign-in is required to download Actions artifacts.'
+  if [[ -d apps/android/flutter/build/design-previews ]]; then
+    printf '[Review **waddle-android-design-previews** from this run](%s#artifacts). These are real Flutter widget renders with synthetic fixtures.\n\n' "$android_run_url"
+  fi
   printf '%s\n' 'This is the FOSS debug build signed with the repository debug key. An APK download does not mean every check passed; review this run’s check results and upload step.'
 } >> "${GITHUB_STEP_SUMMARY:?missing GITHUB_STEP_SUMMARY}"

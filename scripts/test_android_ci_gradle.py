@@ -193,6 +193,7 @@ class AndroidCiGradleTests(unittest.TestCase):
     def test_apk_upload_finalizers_only_emit_for_build_pipeline(self):
         workflow = (REPO_ROOT / ".github/workflows/waddle-android-pullrequest.yml").read_text()
         pipeline = workflow.index("Run pipeline: pullRequest")
+        self.assertIn("--dart-define=WADDLE_PREVIEW_DIR=build/design-previews", self.tasks["flutterCheck"]["args"][-1])
         for outcome, condition in (("success", "success()"), ("failure", "failure()")):
             label = f"Upload Android APK ({outcome})"
             start = workflow.index(f"    - name: {label}")
@@ -205,6 +206,13 @@ class AndroidCiGradleTests(unittest.TestCase):
             self.assertIn("if-no-files-found: error", step)
             self.assertIn("path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk", step)
             self.assertIn("retention-days: 7", step)
+            preview = workflow.index(f"    - name: Upload Flutter design previews ({outcome})")
+            preview_end = workflow.find("\n    - name:", preview + 1)
+            preview_step = workflow[preview:preview_end if preview_end != -1 else None]
+            self.assertGreater(preview, start)
+            self.assertIn(f"if: {condition}", preview_step)
+            self.assertIn("name: waddle-android-design-previews", preview_step)
+            self.assertIn("path: apps/android/flutter/build/design-previews/", preview_step)
             summary = workflow.index(f"    - name: Link Android APK download ({outcome})")
             self.assertGreater(summary, start)
         self.assertNotIn("continue-on-error: true", workflow)
@@ -232,10 +240,14 @@ class AndroidCiGradleTests(unittest.TestCase):
             apk = root / "apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk"
             apk.parent.mkdir(parents=True)
             apk.write_bytes(b"apk-fixture")
+            previews = root / "apps/android/flutter/build/design-previews"
+            previews.mkdir(parents=True)
+            (previews / "home.png").write_bytes(b"preview-fixture")
             produced = subprocess.run(["bash", str(script)], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(produced.returncode, 0, produced.stderr)
             self.assertIn("https://github.com/waddle-social/waddle/actions/runs/12345#artifacts", summary.read_text())
             self.assertIn("does not mean every check passed", summary.read_text())
+            self.assertIn("waddle-android-design-previews", summary.read_text())
             self.assertTrue(summary.read_text().startswith("Existing check results\n"))
 
     def test_gradle_failure_status_is_preserved_and_gmd_stops_before_device(self):

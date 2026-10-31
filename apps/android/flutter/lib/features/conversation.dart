@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../bridge.dart';
+import '../design.dart';
 
 /// Presentation only. Native conversation view models retain ownership of
 /// delivery, encryption, history cursors, read markers and XMPP action IDs.
@@ -505,31 +506,27 @@ class _ConversationScreenState extends State<ConversationScreen>
           .toList();
       return Scaffold(
         appBar: AppBar(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                widget.threadId == null ? widget.title : 'Thread',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              Text(
-                widget.threadId == null
-                    ? (widget.group ? 'Community conversation' : widget.jid)
-                    : widget.title,
-                style: Theme.of(context).textTheme.labelSmall,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
+          toolbarHeight: MediaQuery.textScalerOf(context).scale(18) > 26
+              ? 100
+              : 88,
+          titleSpacing: 4,
+          title: _header(),
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(1),
+            child: Divider(
+              height: 1,
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
           ),
           actions: [
             IconButton(
               tooltip: 'Search messages',
-              icon: const Icon(Icons.search),
+              icon: const Icon(Icons.search_rounded),
               onPressed: _search,
             ),
-            if (widget.threadId == null)
+            if (widget.threadId == null &&
+                MediaQuery.sizeOf(context).width >= 390 &&
+                MediaQuery.textScalerOf(context).scale(16) < 25)
               IconButton(
                 tooltip: callHere
                     ? 'Return to call'
@@ -560,6 +557,7 @@ class _ConversationScreenState extends State<ConversationScreen>
               ),
             PopupMenuButton<String>(
               tooltip: 'Conversation options',
+              icon: const Icon(Icons.more_horiz_rounded),
               onOpened: () {
                 if (widget.group) {
                   unawaited(_refreshRoomCallState());
@@ -567,281 +565,394 @@ class _ConversationScreenState extends State<ConversationScreen>
               },
               onSelected: _menu,
               itemBuilder: (context) => [
-                const PopupMenuItem(
-                  value: 'video',
-                  child: Text('Start video call'),
-                ),
+                _menuItem('audio', 'Start audio call', Icons.call_outlined),
+                _menuItem('video', 'Start video call', Icons.videocam_outlined),
                 if (widget.group)
-                  const PopupMenuItem(value: 'members', child: Text('Members')),
-                const PopupMenuItem(value: 'threads', child: Text('Threads')),
-                const PopupMenuItem(
-                  value: 'pins',
-                  child: Text('Pinned messages'),
-                ),
-                const PopupMenuItem(
-                  value: 'notifications',
-                  child: Text('Notifications'),
+                  _menuItem('members', 'Members', Icons.people_outline_rounded),
+                _menuItem('threads', 'Threads', Icons.forum_outlined),
+                _menuItem('pins', 'Pinned messages', Icons.push_pin_outlined),
+                _menuItem(
+                  'notifications',
+                  'Notifications',
+                  Icons.notifications_none_rounded,
                 ),
                 if (widget.group && !_isGroupDm && data['canConfigure'] == true)
-                  const PopupMenuItem(
-                    value: 'settings',
-                    child: Text('Room settings'),
+                  _menuItem('settings', 'Room settings', Icons.tune_rounded),
+                if (_isGroupDm)
+                  _menuItem('rename', 'Rename group', Icons.edit_outlined),
+                if (_isGroupDm)
+                  _menuItem(
+                    'invite',
+                    'Invite to group',
+                    Icons.person_add_alt_1_outlined,
                   ),
                 if (_isGroupDm)
-                  const PopupMenuItem(
-                    value: 'rename',
-                    child: Text('Rename group'),
-                  ),
-                if (_isGroupDm)
-                  const PopupMenuItem(
-                    value: 'invite',
-                    child: Text('Invite to group'),
-                  ),
-                if (_isGroupDm)
-                  const PopupMenuItem(
-                    value: 'leave',
-                    child: Text('Leave group'),
-                  ),
+                  _menuItem('leave', 'Leave group', Icons.logout_rounded),
                 if (_roomCallState['canLeaveRetained'] == true)
-                  const PopupMenuItem(
-                    value: 'leaveRoomCall',
-                    child: Text('Leave room call'),
+                  _menuItem(
+                    'leaveRoomCall',
+                    'Leave room call',
+                    Icons.call_end_outlined,
                   ),
               ],
             ),
+            const SizedBox(width: 8),
           ],
         ),
         body: SafeArea(
           top: false,
-          child: Column(
-            children: [
-              if (_error != null)
-                MaterialBanner(
-                  content: Text(_error!),
-                  leading: const Icon(Icons.error_outline),
-                  actions: [
-                    TextButton(
-                      onPressed: () => setState(() => _error = null),
-                      child: const Text('Dismiss'),
-                    ),
-                  ],
-                ),
-              if (data['uploadState'] == 'uploading')
-                const LinearProgressIndicator(
-                  semanticsLabel: 'Encrypting and uploading attachment',
-                ),
-              if (data['uploadState'] == 'failed' ||
-                  data['uploadState'] == 'toolarge')
-                Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Text(
-                    data['uploadState'] == 'toolarge'
-                        ? 'This file exceeds the server upload limit.'
-                        : 'The attachment could not be uploaded. Please try again.',
-                  ),
-                ),
-              if (_roomCallState['controls'] == 'join' &&
-                  widget.threadId == null)
-                Material(
-                  color: Theme.of(context).colorScheme.secondaryContainer,
-                  child: ListTile(
-                    leading: Icon(
-                      _roomCallState['video'] == true
-                          ? Icons.videocam_outlined
-                          : Icons.call_outlined,
-                    ),
-                    title: Text(
-                      '${_roomCallState['participantCount'] ?? 0} in the room call',
-                    ),
-                    trailing: TextButton(
-                      onPressed: _startingCall
-                          ? null
-                          : () => _startCall(_roomCallState['video'] == true),
-                      child: const Text('Join'),
-                    ),
-                  ),
-                ),
-              if (social) _composer(),
-              Expanded(
-                child: Stack(
-                  children: [
-                    if ((_opening || data['loading'] == true) && rows.isEmpty)
-                      const Center(
-                        child: CircularProgressIndicator(
-                          semanticsLabel: 'Loading messages',
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 800),
+              child: Column(
+                children: [
+                  if (_error != null)
+                    MaterialBanner(
+                      content: Text(_error!),
+                      leading: const Icon(Icons.error_outline),
+                      actions: [
+                        TextButton(
+                          onPressed: () => setState(() => _error = null),
+                          child: const Text('Dismiss'),
                         ),
-                      )
-                    else if (rows.isEmpty)
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(32),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.forum_outlined,
-                                size: 48,
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                'Start the conversation',
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Send a message, share a file, or say hello.',
-                                textAlign: TextAlign.center,
-                              ),
-                            ],
-                          ),
-                        ),
-                      )
-                    else
-                      ListView.builder(
-                        restorationId: 'timeline:$social',
-                        key: PageStorageKey(
-                          '${widget.jid}/${widget.threadId ?? ''}/$social',
-                        ),
-                        controller: _scroll,
-                        reverse: !social,
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 12,
-                        ),
-                        itemCount: rows.length + 1,
-                        itemBuilder: (context, index) {
-                          if (index == rows.length) {
-                            return Center(
-                              child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: data['loadingOlder'] == true
-                                    ? const SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : data['reachedStart'] == true
-                                    ? Text(
-                                        'Beginning of conversation',
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.labelSmall,
-                                      )
-                                    : TextButton(
-                                        onPressed: () =>
-                                            _command('conversation.history'),
-                                        child: const Text(
-                                          'Load earlier messages',
-                                        ),
-                                      ),
-                              ),
-                            );
-                          }
-                          final message = rows[index];
-                          final older = index + 1 < rows.length
-                              ? rows[index + 1]
-                              : null;
-                          final date = _date(message);
-                          final olderDate = older == null ? null : _date(older);
-                          final sameDay =
-                              date != null &&
-                              olderDate != null &&
-                              date.year == olderDate.year &&
-                              date.month == olderDate.month &&
-                              date.day == olderDate.day;
-                          final grouped =
-                              older != null &&
-                              older['author'] == message['author'] &&
-                              sameDay &&
-                              date.difference(olderDate).inMinutes.abs() < 5;
-                          final newerDate = index > 0
-                              ? _date(rows[index - 1])
-                              : null;
-                          final startsSocialDay =
-                              date != null &&
-                              (newerDate == null ||
-                                  date.year != newerDate.year ||
-                                  date.month != newerDate.month ||
-                                  date.day != newerDate.day);
-                          final separator = message.containsKey('daySeparator')
-                              ? DateTime.tryParse(_str(message['daySeparator']))
-                              : (social ? startsSocialDay : !sameDay)
-                              ? date
-                              : null;
-                          return Column(
-                            children: [
-                              if (separator != null) _dayLabel(separator),
-                              if (message['unreadDivider'] == true)
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Row(
-                                    children: [
-                                      Expanded(child: Divider()),
-                                      Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                        ),
-                                        child: Text('New messages'),
-                                      ),
-                                      Expanded(child: Divider()),
-                                    ],
-                                  ),
-                                ),
-                              _message(
-                                message,
-                                message.containsKey('startsGroup')
-                                    ? message['startsGroup'] != true
-                                    : grouped,
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                    if (!_atNewest)
-                      Positioned(
-                        right: 12,
-                        bottom: 12,
-                        child: FloatingActionButton.small(
-                          heroTag: 'latest-${widget.jid}-${widget.threadId}',
-                          tooltip: 'Jump to latest message',
-                          onPressed: _jumpToNewest,
-                          child: Icon(
-                            social ? Icons.arrow_upward : Icons.arrow_downward,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              if (typing.isNotEmpty)
-                Semantics(
-                  liveRegion: true,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 4,
+                      ],
                     ),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
+                  if (data['uploadState'] == 'uploading')
+                    const LinearProgressIndicator(
+                      semanticsLabel: 'Encrypting and uploading attachment',
+                    ),
+                  if (data['uploadState'] == 'failed' ||
+                      data['uploadState'] == 'toolarge')
+                    Padding(
+                      padding: const EdgeInsets.all(8),
                       child: Text(
-                        '${typing.join(', ')} ${typing.length == 1 ? 'is' : 'are'} typing…',
-                        style: Theme.of(context).textTheme.labelSmall,
+                        data['uploadState'] == 'toolarge'
+                            ? 'This file exceeds the server upload limit.'
+                            : 'The attachment could not be uploaded. Please try again.',
                       ),
                     ),
+                  if (_roomCallState['controls'] == 'join' &&
+                      widget.threadId == null)
+                    Material(
+                      color: Theme.of(context).colorScheme.secondaryContainer,
+                      child: ListTile(
+                        iconColor: Theme.of(
+                          context,
+                        ).colorScheme.onSecondaryContainer,
+                        textColor: Theme.of(
+                          context,
+                        ).colorScheme.onSecondaryContainer,
+                        leading: Icon(
+                          _roomCallState['video'] == true
+                              ? Icons.videocam_outlined
+                              : Icons.call_outlined,
+                        ),
+                        title: Text(
+                          '${_roomCallState['participantCount'] ?? 0} in the room call',
+                        ),
+                        trailing: TextButton(
+                          onPressed: _startingCall
+                              ? null
+                              : () =>
+                                    _startCall(_roomCallState['video'] == true),
+                          child: const Text('Join'),
+                        ),
+                      ),
+                    ),
+                  if (social) _composer(),
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        if ((_opening || data['loading'] == true) &&
+                            rows.isEmpty)
+                          const Center(
+                            child: CircularProgressIndicator(
+                              semanticsLabel: 'Loading messages',
+                            ),
+                          )
+                        else if (rows.isEmpty)
+                          Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(32),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.forum_outlined,
+                                    size: 48,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'Start the conversation',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleLarge,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    'Send a message, share a file, or say hello.',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        else
+                          ListView.builder(
+                            restorationId: 'timeline:$social',
+                            key: PageStorageKey(
+                              '${widget.jid}/${widget.threadId ?? ''}/$social',
+                            ),
+                            controller: _scroll,
+                            reverse: !social,
+                            keyboardDismissBehavior:
+                                ScrollViewKeyboardDismissBehavior.onDrag,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: MediaQuery.sizeOf(context).width < 420
+                                  ? 12
+                                  : 24,
+                              vertical: 12,
+                            ),
+                            itemCount: rows.length + 1,
+                            itemBuilder: (context, index) {
+                              if (index == rows.length) {
+                                return Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: data['loadingOlder'] == true
+                                        ? const SizedBox(
+                                            width: 20,
+                                            height: 20,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : data['reachedStart'] == true
+                                        ? Text(
+                                            'Beginning of conversation',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelSmall,
+                                          )
+                                        : TextButton(
+                                            onPressed: () => _command(
+                                              'conversation.history',
+                                            ),
+                                            child: const Text(
+                                              'Load earlier messages',
+                                            ),
+                                          ),
+                                  ),
+                                );
+                              }
+                              final message = rows[index];
+                              final older = index + 1 < rows.length
+                                  ? rows[index + 1]
+                                  : null;
+                              final date = _date(message);
+                              final olderDate = older == null
+                                  ? null
+                                  : _date(older);
+                              final sameDay =
+                                  date != null &&
+                                  olderDate != null &&
+                                  date.year == olderDate.year &&
+                                  date.month == olderDate.month &&
+                                  date.day == olderDate.day;
+                              final grouped =
+                                  older != null &&
+                                  older['author'] == message['author'] &&
+                                  sameDay &&
+                                  date.difference(olderDate).inMinutes.abs() <
+                                      5;
+                              final newerDate = index > 0
+                                  ? _date(rows[index - 1])
+                                  : null;
+                              final startsSocialDay =
+                                  date != null &&
+                                  (newerDate == null ||
+                                      date.year != newerDate.year ||
+                                      date.month != newerDate.month ||
+                                      date.day != newerDate.day);
+                              final separator =
+                                  message.containsKey('daySeparator')
+                                  ? DateTime.tryParse(
+                                      _str(message['daySeparator']),
+                                    )
+                                  : (social ? startsSocialDay : !sameDay)
+                                  ? date
+                                  : null;
+                              return Column(
+                                children: [
+                                  if (separator != null) _dayLabel(separator),
+                                  if (message['unreadDivider'] == true)
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(
+                                        vertical: 8,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Expanded(child: Divider()),
+                                          Padding(
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                            ),
+                                            child: Text('New messages'),
+                                          ),
+                                          Expanded(child: Divider()),
+                                        ],
+                                      ),
+                                    ),
+                                  _message(
+                                    message,
+                                    message.containsKey('startsGroup')
+                                        ? message['startsGroup'] != true
+                                        : grouped,
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                        if (!_atNewest)
+                          Positioned(
+                            right: 12,
+                            bottom: 12,
+                            child: FloatingActionButton.small(
+                              heroTag:
+                                  'latest-${widget.jid}-${widget.threadId}',
+                              tooltip: 'Jump to latest message',
+                              onPressed: _jumpToNewest,
+                              child: Icon(
+                                social
+                                    ? Icons.arrow_upward
+                                    : Icons.arrow_downward,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-              if (!social) _composer(),
-            ],
+                  if (typing.isNotEmpty)
+                    Semantics(
+                      liveRegion: true,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 4,
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            '${typing.join(', ')} ${typing.length == 1 ? 'is' : 'are'} typing…',
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                        ),
+                      ),
+                    ),
+                  if (!social) _composer(),
+                ],
+              ),
+            ),
           ),
         ),
       );
     },
   );
+
+  PopupMenuItem<String> _menuItem(String value, String label, IconData icon) =>
+      PopupMenuItem(
+        value: value,
+        child: Row(
+          children: [
+            Icon(icon, size: 20),
+            const SizedBox(width: 14),
+            Expanded(child: Text(label)),
+          ],
+        ),
+      );
+
+  Widget _header() {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final room = _maps(
+      widget.bridge.home['rooms'],
+    ).where((room) => room['jid'] == widget.jid).toList();
+    final person = _maps(
+      widget.bridge.home['people'],
+    ).where((person) => person['jid'] == widget.jid).toList();
+    final here = room.isEmpty ? null : room.first['here'];
+    final online =
+        person.isNotEmpty &&
+        ['available', 'chat'].contains(person.first['show']);
+    final subline = widget.threadId != null
+        ? widget.title
+        : widget.group
+        ? '${here == null ? 'A place to catch up' : '$here here'}${_isGroupDm ? ' · Private group' : ' · Community'}'
+        : online
+        ? 'Online now'
+        : 'Direct message';
+    return LayoutBuilder(
+      builder: (context, constraints) => Row(
+        children: [
+          if (constraints.maxWidth > 200 &&
+              MediaQuery.textScalerOf(context).scale(16) < 25) ...[
+            if (!widget.group && widget.threadId == null)
+              WaddleAvatar(name: widget.title, size: 42, online: online)
+            else
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: colors.primaryContainer,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Icon(
+                  widget.threadId != null
+                      ? Icons.forum_outlined
+                      : _isGroupDm
+                      ? Icons.group_outlined
+                      : Icons.tag_rounded,
+                  color: colors.onPrimaryContainer,
+                  size: 25,
+                ),
+              ),
+            const SizedBox(width: 12),
+          ],
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.threadId == null ? widget.title : 'Thread',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: -.6,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subline,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: online ? colors.primary : colors.onSurfaceVariant,
+                    letterSpacing: .1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _dayLabel(DateTime date) {
     final now = DateTime.now();
@@ -852,127 +963,180 @@ class _ConversationScreenState extends State<ConversationScreen>
         : day == today.subtract(const Duration(days: 1))
         ? 'Yesterday'
         : MaterialLocalizations.of(context).formatMediumDate(date);
+    final colors = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      child: Text(label, style: Theme.of(context).textTheme.labelMedium),
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: colors.outlineVariant)),
+          Flexible(
+            flex: 3,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+              decoration: BoxDecoration(
+                color: colors.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: .4,
+                ),
+              ),
+            ),
+          ),
+          Expanded(child: Divider(color: colors.outlineVariant)),
+        ],
+      ),
     );
   }
 
   Widget _message(Map<String, dynamic> message, bool grouped) {
-    final colors = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
     final mine = message['mine'] == true;
     final deleted = message['deleted'] == true;
     final actionable = !deleted && message['pending'] != true;
     final author = _str(message['author'], mine ? 'You' : 'Unknown');
     final date = _date(message);
     final reactions = _maps(message['reactions']);
-    final files = _maps(message['files']);
     final thread = _str(
       message['threadTargetId'],
       _str(message['threadId'], _str(message['id'])),
     );
-    final replies = _maps(
+    final threads = _maps(
       _data['threads'],
     ).where((value) => value['threadId'] == thread).toList();
     final replyCount =
         (message['replyCount'] as num?)?.toInt() ??
-        (replies.isEmpty
+        (threads.isEmpty
             ? 0
-            : (replies.first['replyCount'] as num? ?? 0).toInt());
+            : (threads.first['replyCount'] as num? ?? 0).toInt());
     final pinned =
         message['pinned'] == true ||
         (_data['pinnedIds'] as List? ?? const []).contains(message['id']);
     return Padding(
       key: ValueKey(message['presentationId'] ?? message['id']),
-      padding: EdgeInsets.only(top: grouped ? 2 : 12, bottom: 2),
+      padding: EdgeInsets.only(top: grouped ? 4 : 20, bottom: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 40,
+            width: 48,
+            height: 48,
             child: grouped
                 ? null
                 : Semantics(
                     label: 'Profile of $author',
                     button: true,
                     child: InkWell(
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(16),
                       onTap: () => _profile(message),
-                      child: _authorAvatar(message, author, mine),
+                      child: Center(
+                        child: _authorAvatar(message, author, mine),
+                      ),
                     ),
                   ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onLongPress: actionable ? () => _actions(message) : null,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
+              child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: mine
-                      ? colors.primaryContainer.withValues(alpha: .45)
-                      : colors.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(16),
-                  border: pinned
-                      ? Border.all(color: colors.primary.withValues(alpha: .4))
+                  border: mine
+                      ? Border(
+                          left: BorderSide(color: colors.primary, width: 2),
+                        )
                       : null,
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (!grouped)
-                      Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8,
-                        children: [
-                          InkWell(
-                            onTap: () => _profile(message),
-                            child: Text(
-                              author,
-                              style: Theme.of(context).textTheme.labelLarge,
+                child: Padding(
+                  padding: EdgeInsets.only(left: mine ? 12 : 0, right: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (!grouped)
+                        Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 8,
+                          runSpacing: 0,
+                          children: [
+                            InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () => _profile(message),
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  minHeight: 48,
+                                ),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  widthFactor: 1,
+                                  child: Text(
+                                    author,
+                                    style: theme.textTheme.labelLarge?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                      color: mine
+                                          ? colors.primary
+                                          : colors.onSurface,
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
+                            if (date != null)
+                              Text(
+                                MaterialLocalizations.of(
+                                  context,
+                                ).formatTimeOfDay(TimeOfDay.fromDateTime(date)),
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            if (message['edited'] == true)
+                              Text(
+                                'edited',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                            if (pinned)
+                              Tooltip(
+                                message: 'Pinned message',
+                                child: Icon(
+                                  Icons.push_pin_rounded,
+                                  size: 13,
+                                  color: colors.primary,
+                                ),
+                              ),
+                          ],
+                        ),
+                      if (message['replyTo'] != null && !deleted)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 9,
                           ),
-                          if (date != null)
-                            Text(
-                              MaterialLocalizations.of(
-                                context,
-                              ).formatTimeOfDay(TimeOfDay.fromDateTime(date)),
-                              style: Theme.of(context).textTheme.labelSmall
-                                  ?.copyWith(color: colors.onSurfaceVariant),
-                            ),
-                          if (message['edited'] == true)
-                            Text(
-                              'edited',
-                              style: Theme.of(context).textTheme.labelSmall,
-                            ),
-                          if (pinned)
-                            Icon(
-                              Icons.push_pin,
-                              size: 14,
-                              color: colors.primary,
-                            ),
-                        ],
-                      ),
-                    if (message['replyTo'] != null && !deleted)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4, bottom: 6),
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: colors.surfaceContainerHighest,
-                            borderRadius: BorderRadius.circular(8),
+                            color: colors.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(12),
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 '↳ ${_str((message['replyPreview'] as Map?)?['author'], 'Reply')}',
-                                style: Theme.of(context).textTheme.labelSmall
-                                    ?.copyWith(color: colors.primary),
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                               if (message['replyPreview'] is Map)
                                 Text(
@@ -981,147 +1145,164 @@ class _ConversationScreenState extends State<ConversationScreen>
                                   ),
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.bodySmall,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: colors.onSurface,
+                                  ),
                                 ),
                             ],
                           ),
                         ),
-                      ),
-                    if (deleted)
-                      Text(
-                        'Message removed',
-                        style: TextStyle(
-                          fontStyle: FontStyle.italic,
-                          color: colors.onSurfaceVariant,
-                        ),
-                      )
-                    else ...[
-                      if (message['isCallRow'] == true)
-                        _callRow(message)
-                      else if (_str(message['body']).isNotEmpty)
-                        _richBody(message),
-                      for (final file in files) _attachment(message, file),
-                      for (final preview in _maps(message['linkPreviews']))
-                        _linkPreview(preview),
-                    ],
-                    if (message['pending'] == true ||
-                        message['failed'] == true ||
-                        message['rejected'] == true ||
-                        message['queued'] == true)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              message['failed'] == true ||
-                                      message['rejected'] == true
-                                  ? Icons.error_outline
-                                  : Icons.schedule,
-                              size: 14,
-                              color: colors.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              message['queued'] == true
-                                  ? 'Queued · waiting for connection'
-                                  : message['failed'] == true ||
+                      if (deleted)
+                        Text(
+                          'Message removed',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            fontStyle: FontStyle.italic,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        )
+                      else ...[
+                        if (message['isCallRow'] == true)
+                          _callRow(message)
+                        else if (_str(message['body']).isNotEmpty)
+                          _richBody(message),
+                        for (final file in _maps(message['files']))
+                          _attachment(message, file),
+                        for (final preview in _maps(message['linkPreviews']))
+                          _linkPreview(preview),
+                      ],
+                      if (message['pending'] == true ||
+                          message['failed'] == true ||
+                          message['rejected'] == true ||
+                          message['queued'] == true)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            spacing: 5,
+                            children: [
+                              Icon(
+                                message['failed'] == true ||
                                         message['rejected'] == true
-                                  ? 'Not sent'
-                                  : 'Sending…',
-                              style: Theme.of(context).textTheme.labelSmall,
+                                    ? Icons.error_outline
+                                    : Icons.schedule_rounded,
+                                size: 13,
+                                color: colors.onSurfaceVariant,
+                              ),
+                              Text(
+                                message['queued'] == true
+                                    ? 'Queued · waiting for connection'
+                                    : message['failed'] == true ||
+                                          message['rejected'] == true
+                                    ? 'Not sent'
+                                    : 'Sending…',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                              if (message['failed'] == true)
+                                TextButton(
+                                  onPressed: () => _command(
+                                    'conversation.retry',
+                                    {'localId': message['localId']},
+                                  ),
+                                  child: const Text('Retry'),
+                                ),
+                            ],
+                          ),
+                        ),
+                      if (!deleted && reactions.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Wrap(
+                            spacing: 7,
+                            runSpacing: 4,
+                            children: [
+                              for (final reaction in reactions)
+                                FilterChip(
+                                  selected: reaction['mine'] == true,
+                                  showCheckmark: false,
+                                  backgroundColor:
+                                      colors.surfaceContainerLowest,
+                                  selectedColor: colors.primaryContainer,
+                                  side: BorderSide(
+                                    color: reaction['mine'] == true
+                                        ? colors.primary
+                                        : colors.outlineVariant,
+                                  ),
+                                  shape: const StadiumBorder(),
+                                  label: Text(
+                                    '${_str(reaction['emoji'])}  ${reaction['count'] ?? 0}',
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: reaction['mine'] == true
+                                              ? colors.onPrimaryContainer
+                                              : colors.onSurface,
+                                        ),
+                                  ),
+                                  onSelected: (_) =>
+                                      _command('conversation.reaction', {
+                                        'targetId': message['id'],
+                                        'emoji': reaction['emoji'],
+                                      }),
+                                ),
+                            ],
+                          ),
+                        ),
+                      if (!deleted && widget.threadId == null && replyCount > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
+                              backgroundColor: colors.primaryContainer,
+                              foregroundColor: colors.onPrimaryContainer,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
                             ),
-                            if (message['failed'] == true)
-                              TextButton(
-                                onPressed: () => _command(
-                                  'conversation.retry',
-                                  {'localId': message['localId']},
-                                ),
-                                child: const Text('Retry'),
-                              ),
-                          ],
+                            onPressed: () => _thread(thread),
+                            icon: const Icon(
+                              Icons.subdirectory_arrow_right_rounded,
+                              size: 17,
+                            ),
+                            label: Text(
+                              '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
+                            ),
+                          ),
                         ),
-                      ),
-                    if (!deleted && reactions.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: [
-                            for (final reaction in reactions)
-                              FilterChip(
-                                visualDensity: VisualDensity.compact,
-                                selected: reaction['mine'] == true,
-                                showCheckmark: false,
-                                label: Text(
-                                  '${_str(reaction['emoji'])} ${reaction['count'] ?? 0}',
-                                ),
-                                onSelected: (_) =>
-                                    _command('conversation.reaction', {
-                                      'targetId': message['id'],
-                                      'emoji': reaction['emoji'],
-                                    }),
-                              ),
-                          ],
+                      if (message['safetyScores'] != null)
+                        TextButton.icon(
+                          onPressed: () =>
+                              _safetyScores(message['safetyScores']),
+                          icon: const Icon(Icons.shield_outlined, size: 15),
+                          label: const Text('Safety scores'),
                         ),
-                      ),
-                    if (!deleted && widget.threadId == null && replyCount > 0)
-                      TextButton.icon(
-                        onPressed: () => _thread(thread),
-                        icon: const Icon(Icons.forum_outlined, size: 16),
-                        label: Text(
-                          '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
-                        ),
-                      ),
-                    if (message['safetyScores'] != null)
-                      TextButton.icon(
-                        onPressed: () => _safetyScores(message['safetyScores']),
-                        icon: const Icon(Icons.shield_outlined, size: 16),
-                        label: const Text('Safety scores'),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-          SizedBox(
-            width: 32,
-            child: !actionable
-                ? null
-                : IconButton(
-                    tooltip: 'Message actions',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.more_horiz, size: 18),
-                    onPressed: () => _actions(message),
-                  ),
-          ),
+          if (actionable)
+            SizedBox(
+              width: 48,
+              height: 48,
+              child: IconButton(
+                tooltip: 'Message actions',
+                icon: const Icon(Icons.more_horiz_rounded, size: 18),
+                onPressed: () => _actions(message),
+              ),
+            ),
         ],
       ),
     );
   }
 
   Widget _authorAvatar(Map<String, dynamic> message, String author, bool mine) {
-    final colors = Theme.of(context).colorScheme;
-    Widget avatar(Uint8List? bytes) => CircleAvatar(
-      radius: 18,
-      backgroundColor: mine
-          ? colors.primaryContainer
-          : colors.secondaryContainer,
-      backgroundImage: bytes == null ? null : MemoryImage(bytes),
-      child: bytes != null
-          ? null
-          : Text(
-              author.isEmpty
-                  ? '?'
-                  : String.fromCharCode(author.runes.first).toUpperCase(),
-              style: TextStyle(
-                color: mine
-                    ? colors.onPrimaryContainer
-                    : colors.onSecondaryContainer,
-              ),
-            ),
-    );
+    Widget avatar(Uint8List? bytes) =>
+        WaddleAvatar(name: author, bytes: bytes, size: 36);
     final jid = _str(message['authorJid']);
     if (jid.isEmpty) {
       return avatar(null);
@@ -1526,187 +1707,252 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Widget _composer() {
-    final colors = Theme.of(context).colorScheme;
-    return Material(
-      color: colors.surfaceContainerLow,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_reply != null || _edit != null)
-              Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Icon(
-                      _edit == null ? Icons.reply : Icons.edit_outlined,
-                      size: 18,
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return LayoutBuilder(
+      builder: (context, constraints) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          constraints.maxWidth < 420 ? 12 : 24,
+          12,
+          constraints.maxWidth < 420 ? 12 : 24,
+          16,
+        ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: colors.outlineVariant),
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: .035),
+                blurRadius: 24,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_reply != null || _edit != null)
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                    padding: const EdgeInsets.only(left: 12),
+                    decoration: BoxDecoration(
+                      color: colors.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(14),
                     ),
-                  ),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
                       children: [
-                        Text(
+                        Icon(
                           _edit == null
-                              ? 'Replying to ${_str(_reply?['author'])}'
-                              : 'Editing message',
-                          style: Theme.of(context).textTheme.labelLarge,
+                              ? Icons.reply_rounded
+                              : Icons.edit_outlined,
+                          size: 18,
+                          color: colors.onSurfaceVariant,
                         ),
-                        Text(
-                          _str((_edit ?? _reply)?['body']),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall,
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _edit == null
+                                    ? 'Replying to ${_str(_reply?['author'])}'
+                                    : 'Editing message',
+                                style: theme.textTheme.labelLarge?.copyWith(
+                                  color: colors.onSurface,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                _str((_edit ?? _reply)?['body']),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Cancel ${_edit == null ? 'reply' : 'edit'}',
+                          onPressed: () => setState(() {
+                            _reply = null;
+                            _edit = null;
+                          }),
+                          icon: const Icon(Icons.close_rounded, size: 18),
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Cancel ${_edit == null ? 'reply' : 'edit'}',
-                    onPressed: () => setState(() {
-                      _reply = null;
-                      _edit = null;
-                    }),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
-              ),
-            if (_mentions.isNotEmpty)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 180),
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final person in _mentions)
-                      ListTile(
-                        dense: true,
-                        leading: const Icon(Icons.alternate_email),
-                        title: Text(_str(person['name'], _str(person['jid']))),
-                        subtitle: Text(_str(person['jid'])),
-                        onTap: () => _insertMention(person),
-                      ),
-                  ],
-                ),
-              ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                IconButton(
-                  tooltip: 'Attach encrypted file',
-                  icon: const Icon(Icons.add_circle_outline),
-                  onPressed: () => _command('conversation.attach'),
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _draft,
-                    focusNode: _focus,
-                    minLines: 1,
-                    maxLines: 6,
-                    textCapitalization: TextCapitalization.sentences,
-                    keyboardType: TextInputType.multiline,
-                    contentInsertionConfiguration:
-                        ContentInsertionConfiguration(
-                          allowedMimeTypes: const ['image/*'],
-                          onContentInserted: (content) =>
-                              _command('conversation.insertContent', {
-                                'uri': content.uri,
-                                'mimeType': content.mimeType,
-                                if (content.data != null) 'data': content.data,
-                              }),
-                        ),
-                    decoration: InputDecoration(
-                      hintText: widget.threadId == null
-                          ? 'Message ${widget.title}'
-                          : 'Reply in thread',
-                      filled: true,
-                      fillColor: colors.surfaceContainerHighest,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
+                if (_mentions.isNotEmpty)
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 180),
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final person in _mentions)
+                          ListTile(
+                            leading: WaddleAvatar(
+                              name: _str(person['name'], _str(person['jid'])),
+                              size: 32,
+                            ),
+                            title: Text(
+                              _str(person['name'], _str(person['jid'])),
+                            ),
+                            subtitle: Text(_str(person['jid'])),
+                            onTap: () => _insertMention(person),
+                          ),
+                      ],
                     ),
                   ),
+                TextField(
+                  controller: _draft,
+                  focusNode: _focus,
+                  minLines: 1,
+                  maxLines: 5,
+                  textCapitalization: TextCapitalization.sentences,
+                  keyboardType: TextInputType.multiline,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    color: colors.onSurface,
+                    height: 1.5,
+                  ),
+                  contentInsertionConfiguration: ContentInsertionConfiguration(
+                    allowedMimeTypes: const ['image/*'],
+                    onContentInserted: (content) =>
+                        _command('conversation.insertContent', {
+                          'uri': content.uri,
+                          'mimeType': content.mimeType,
+                          if (content.data != null) 'data': content.data,
+                        }),
+                  ),
+                  decoration: InputDecoration(
+                    hintText: widget.threadId == null
+                        ? 'Message ${widget.title}'
+                        : 'Reply in thread',
+                    hintStyle: theme.textTheme.bodyLarge?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                    filled: false,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    contentPadding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+                  ),
                 ),
-                const SizedBox(width: 4),
-                IconButton.filled(
-                  tooltip: _edit == null ? 'Send message' : 'Save edit',
-                  onPressed: _sending ? null : _send,
-                  icon: _sending
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: colors.onPrimary,
-                          ),
-                        )
-                      : Icon(_edit == null ? Icons.send : Icons.check),
-                ),
-              ],
-            ),
-            Wrap(
-              children: [
-                IconButton(
-                  tooltip: 'Bold',
-                  icon: const Icon(Icons.format_bold, size: 20),
-                  onPressed: () => _format('**'),
-                ),
-                IconButton(
-                  tooltip: 'Italic',
-                  icon: const Icon(Icons.format_italic, size: 20),
-                  onPressed: () => _format('*'),
-                ),
-                IconButton(
-                  tooltip: 'Code',
-                  icon: const Icon(Icons.code, size: 20),
-                  onPressed: () => _format('`'),
-                ),
-                IconButton(
-                  tooltip: 'Strikethrough',
-                  icon: const Icon(Icons.strikethrough_s, size: 20),
-                  onPressed: () => _format('~~'),
-                ),
-                IconButton(
-                  tooltip: 'Paste image',
-                  icon: const Icon(Icons.content_paste),
-                  onPressed: () async {
-                    final pasted = await _command('conversation.pasteImage');
-                    if (mounted && pasted == false) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Clipboard has no image.'),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 0, 8, 8),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'Attach encrypted file',
+                        icon: const Icon(Icons.add_rounded),
+                        onPressed: () => _command('conversation.attach'),
+                      ),
+                      IconButton(
+                        tooltip: 'Stickers',
+                        icon: const Icon(Icons.emoji_emotions_outlined),
+                        onPressed: _stickerPicker,
+                      ),
+                      if (constraints.maxWidth >= 420)
+                        IconButton(
+                          tooltip: 'GIFs',
+                          icon: const Icon(Icons.gif_box_outlined),
+                          onPressed: _gifPicker,
                         ),
-                      );
-                    }
-                  },
-                ),
-                IconButton(
-                  tooltip: 'GIFs',
-                  icon: const Icon(Icons.gif_box_outlined),
-                  onPressed: _gifPicker,
-                ),
-                IconButton(
-                  tooltip: 'Stickers',
-                  icon: const Icon(Icons.emoji_emotions_outlined),
-                  onPressed: _stickerPicker,
-                ),
-                IconButton(
-                  tooltip: 'Slash commands',
-                  icon: const Icon(Icons.terminal),
-                  onPressed: _slashCommands,
+                      PopupMenuButton<String>(
+                        tooltip: 'More message options',
+                        icon: const Icon(Icons.tune_rounded, size: 21),
+                        onSelected: _composerAction,
+                        itemBuilder: (context) => [
+                          _menuItem('bold', 'Bold', Icons.format_bold),
+                          _menuItem('italic', 'Italic', Icons.format_italic),
+                          _menuItem('code', 'Code', Icons.code_rounded),
+                          _menuItem(
+                            'strike',
+                            'Strikethrough',
+                            Icons.strikethrough_s,
+                          ),
+                          _menuItem('gifs', 'GIFs', Icons.gif_box_outlined),
+                          _menuItem(
+                            'paste',
+                            'Paste image',
+                            Icons.content_paste_rounded,
+                          ),
+                          _menuItem(
+                            'slash',
+                            'Slash commands',
+                            Icons.terminal_rounded,
+                          ),
+                        ],
+                      ),
+                      const Spacer(),
+                      ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: _draft,
+                        builder: (context, value, _) => IconButton.filled(
+                          tooltip: _edit == null ? 'Send message' : 'Save edit',
+                          onPressed: _sending || value.text.trim().isEmpty
+                              ? null
+                              : _send,
+                          style: IconButton.styleFrom(
+                            minimumSize: const Size(48, 48),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                          icon: _sending
+                              ? SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: colors.onPrimary,
+                                  ),
+                                )
+                              : Icon(
+                                  _edit == null
+                                      ? Icons.arrow_upward_rounded
+                                      : Icons.check_rounded,
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
+  }
+
+  Future<void> _composerAction(String action) async {
+    switch (action) {
+      case 'bold':
+        _format('**');
+      case 'italic':
+        _format('*');
+      case 'code':
+        _format('`');
+      case 'strike':
+        _format('~~');
+      case 'gifs':
+        await _gifPicker();
+      case 'slash':
+        await _slashCommands();
+      case 'paste':
+        final pasted = await _command('conversation.pasteImage');
+        if (mounted && pasted == false) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Clipboard has no image.')),
+          );
+        }
+    }
   }
 
   void _format(String marker) {
@@ -1928,6 +2174,8 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   Future<void> _menu(String value) async {
     switch (value) {
+      case 'audio':
+        await _startCall(false);
       case 'video':
         await _startCall(true);
       case 'members':

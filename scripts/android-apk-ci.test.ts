@@ -25,6 +25,9 @@ test("both check outcomes upload the exact signed FOSS APK and reject missing fi
     expect(upload.with.name).toBe("waddle-android-apk");
     expect(upload.with.path).toBe("apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk");
     expect(upload.with["if-no-files-found"]).toBe("error");
+    const previews = steps.find((step: any) => step.name.startsWith("Upload Flutter design previews") && step.if === condition);
+    expect(previews.with.name).toBe("waddle-android-design-previews");
+    expect(previews.with.path).toBe("apps/android/flutter/build/design-previews/");
   }
 });
 

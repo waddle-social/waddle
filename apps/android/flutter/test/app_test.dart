@@ -185,6 +185,8 @@ void main() {
       },
     });
     await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
+    await tester.ensureVisible(find.text('Continue with Community'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Continue with Community'));
     await tester.pump();
     expect(
@@ -232,10 +234,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(NavigationRail), findsOneWidget);
       expect(find.byType(NavigationBar), findsNothing);
-      expect(
-        find.text('Choose a conversation to get started.'),
-        findsOneWidget,
-      );
+      expect(find.text('General'), findsOneWidget);
+      expect(find.byType(SearchBar), findsOneWidget);
     },
   );
 

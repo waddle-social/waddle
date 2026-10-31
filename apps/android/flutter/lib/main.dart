@@ -1,12 +1,23 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'app.dart';
 import 'bridge.dart';
+import 'design.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks([
+      'Manrope',
+    ], await rootBundle.loadString('assets/fonts/manrope-OFL.txt'));
+    yield LicenseEntryWithLineBreaks([
+      'Fredoka',
+    ], await rootBundle.loadString('assets/fonts/fredoka-OFL.txt'));
+  });
   runApp(WaddleApp(bridge: WaddleBridge()));
 }
 
@@ -38,39 +49,14 @@ class _WaddleAppState extends State<WaddleApp> {
       final prefs = widget.bridge.preferences;
       final dynamicColors = prefs['wallpaperColors'] == true;
       ThemeData theme(Brightness brightness) {
-        final seedScheme = ColorScheme.fromSeed(
-          seedColor: const Color(0xFF006B60),
-          brightness: brightness,
-        );
+        final seedScheme = waddleScheme(brightness);
         final palette = widget.bridge.topic(
           'palette',
         )[brightness == Brightness.light ? 'light' : 'dark'];
         final scheme = dynamicColors && palette is Map
             ? wallpaperScheme(seedScheme, Map<String, dynamic>.from(palette))
             : seedScheme;
-        return ThemeData(
-          useMaterial3: true,
-          colorScheme: scheme,
-          scaffoldBackgroundColor: scheme.surface,
-          appBarTheme: AppBarTheme(
-            centerTitle: false,
-            backgroundColor: scheme.surface,
-            foregroundColor: scheme.onSurface,
-          ),
-          inputDecorationTheme: InputDecorationTheme(
-            filled: true,
-            fillColor: scheme.surfaceContainerHighest,
-            border: const OutlineInputBorder(
-              borderRadius: BorderRadius.all(Radius.circular(20)),
-              borderSide: BorderSide.none,
-            ),
-          ),
-          pageTransitionsTheme: const PageTransitionsTheme(
-            builders: {
-              TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
-            },
-          ),
-        );
+        return waddleTheme(scheme);
       }
 
       return MaterialApp(

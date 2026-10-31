@@ -33,6 +33,7 @@ class _ConversationHarness {
   late final WaddleBridge bridge;
   final commands = <(String, Map<String, dynamic>)>[];
   final responses = <String, dynamic>{};
+  double textScale = 1;
   final navigator = GlobalKey<NavigatorState>();
 
   void snapshot({
@@ -83,6 +84,12 @@ class _ConversationHarness {
     navigatorKey: navigator,
     navigatorObservers: [waddleRoutes],
     theme: ThemeData(useMaterial3: true),
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(
+        context,
+      ).copyWith(textScaler: TextScaler.linear(textScale)),
+      child: child!,
+    ),
     onGenerateRoute: (settings) {
       if (settings.name != 'conversation') {
         return null;
@@ -129,6 +136,42 @@ Finder _body(String text) => find.byWidgetPredicate(
 );
 
 void main() {
+  testWidgets(
+    'compact conversation keeps its tools reachable at double text size',
+    (tester) async {
+      final harness = _ConversationHarness()
+        ..snapshot(messages: true)
+        ..textScale = 2;
+      await _mount(tester, harness);
+      tester.view.physicalSize = const Size(320, 900);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextField),
+        'A message at larger size',
+      );
+      expect(find.byTooltip('Attach encrypted file'), findsOneWidget);
+      expect(find.byTooltip('Send message'), findsOneWidget);
+      await tester.tap(find.byTooltip('More message options'));
+      await tester.pumpAndSettle();
+      expect(find.text('Paste image'), findsOneWidget);
+      expect(find.text('Slash commands'), findsOneWidget);
+      await tester.ensureVisible(find.text('Paste image'));
+      await tester.tap(find.text('Paste image'));
+      await tester.pumpAndSettle();
+      expect(harness.calls('conversation.pasteImage'), hasLength(1));
+      await tester.tap(find.byTooltip('Send message'));
+      await tester.pump();
+      expect(
+        harness.calls('conversation.send').single['body'],
+        'A message at larger size',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('chat and social timelines keep the correct live edge', (
     tester,
   ) async {
@@ -420,7 +463,9 @@ void main() {
       harness.calls('conversation.insertContent').single['mimeType'],
       'image/png',
     );
-    await tester.tap(find.byTooltip('Paste image'));
+    await tester.tap(find.byTooltip('More message options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Paste image'));
     await tester.pump();
     expect(harness.calls('conversation.pasteImage'), hasLength(1));
     expect(harness.calls('conversation.send'), isEmpty);

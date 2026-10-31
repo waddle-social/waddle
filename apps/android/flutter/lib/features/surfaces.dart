@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../bridge.dart';
+import '../design.dart';
 import 'surfaces_vocabulary.dart';
 
 Map<String, dynamic> _map(dynamic value) => value is Map
@@ -46,25 +47,176 @@ class _Section extends StatelessWidget {
   final List<Widget> children;
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: 24),
+    padding: const EdgeInsets.fromLTRB(20, 26, 20, 0),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-          child: Semantics(
-            header: true,
-            child: Text(
-              title,
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: Theme.of(context).colorScheme.primary,
+        WaddleSectionHeading(title: title),
+        const SizedBox(height: 12),
+        WaddlePanel(
+          padding: EdgeInsets.zero,
+          child: ListTileTheme(
+            data: ListTileThemeData(
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
               ),
+              minVerticalPadding: 12,
+              minLeadingWidth: 40,
+              horizontalTitleGap: 14,
+              iconColor: Theme.of(context).colorScheme.primary,
+            ),
+            child: Column(
+              children: [
+                for (var i = 0; i < children.length; i++) ...[
+                  if (i != 0)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 18),
+                      child: Divider(
+                        height: 1,
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.outlineVariant.withValues(alpha: .55),
+                      ),
+                    ),
+                  children[i],
+                ],
+              ],
             ),
           ),
         ),
-        Card.filled(
-          margin: const EdgeInsets.symmetric(horizontal: 12),
-          child: Column(children: children),
+      ],
+    ),
+  );
+}
+
+class _PageIntro extends StatelessWidget {
+  const _PageIntro(this.title, this.detail, {this.eyebrow});
+  final String title, detail;
+  final String? eyebrow;
+  @override
+  Widget build(BuildContext context) {
+    final compact =
+        MediaQuery.sizeOf(context).width <= 360 &&
+        MediaQuery.textScalerOf(context).scale(16) > 24;
+    final type = Theme.of(context).textTheme;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(24, compact ? 4 : 14, 24, compact ? 16 : 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (eyebrow != null) ...[
+            Text(
+              eyebrow!.toUpperCase(),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                letterSpacing: 1.6,
+                fontWeight: FontWeight.w800,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          Text(
+            compact ? title.replaceAll('\n', ' ') : title,
+            style: (compact ? type.headlineSmall : type.headlineLarge)
+                ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -1.2),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            detail,
+            style: (compact ? type.bodyMedium : type.bodyLarge)?.copyWith(
+              height: 1.5,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingIcon extends StatelessWidget {
+  const _SettingIcon(this.icon);
+  final IconData icon;
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 40,
+    height: 40,
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.primaryContainer,
+      borderRadius: BorderRadius.circular(13),
+    ),
+    child: Icon(
+      icon,
+      size: 21,
+      color: Theme.of(context).colorScheme.onPrimaryContainer,
+    ),
+  );
+}
+
+class _SettingChoice extends StatelessWidget {
+  const _SettingChoice({
+    required this.title,
+    required this.icon,
+    required this.value,
+    required this.choices,
+    required this.onChanged,
+    this.detail,
+  });
+  final String title, value;
+  final String? detail;
+  final IconData icon;
+  final Map<String, String> choices;
+  final ValueChanged<String> onChanged;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.all(18),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _SettingIcon(icon),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: Theme.of(context).textTheme.titleMedium),
+                  if (detail != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      detail!,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: choices.entries
+              .map(
+                (entry) => ChoiceChip(
+                  selected: value == entry.key,
+                  label: Text(entry.value),
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.standard,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  onSelected: (_) => onChanged(entry.key),
+                ),
+              )
+              .toList(),
         ),
       ],
     ),
@@ -74,31 +226,69 @@ class _Section extends StatelessWidget {
 class _Empty extends StatelessWidget {
   const _Empty(this.icon, this.title, this.detail);
   final IconData icon;
-  final String title;
-  final String detail;
+  final String title, detail;
   @override
   Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 56, color: Theme.of(context).colorScheme.primary),
-          const SizedBox(height: 20),
-          Text(
-            title,
-            style: Theme.of(context).textTheme.titleLarge,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            detail,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+    child: SingleChildScrollView(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 132,
+              height: 120,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Positioned.fill(
+                    child: WaddleMotif(
+                      color: Theme.of(context).colorScheme.primaryContainer,
+                    ),
+                  ),
+                  Container(
+                    width: 68,
+                    height: 68,
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerLowest,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: Icon(
+                      icon,
+                      size: 30,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 24),
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 320),
+              child: Text(
+                detail,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                  height: 1.5,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -115,14 +305,58 @@ class PersonAvatar extends StatelessWidget {
   final double radius;
   final Uint8List? bytes;
   @override
-  Widget build(BuildContext context) => CircleAvatar(
-    radius: radius,
-    backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-    foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
-    foregroundImage: bytes == null ? null : MemoryImage(bytes!),
-    onForegroundImageError: bytes == null ? null : (error, stackTrace) {},
-    child: Text(
-      name.trim().isEmpty ? '?' : name.trim().characters.first.toUpperCase(),
+  Widget build(BuildContext context) =>
+      WaddleAvatar(name: name, bytes: bytes, size: radius * 2);
+}
+
+class _DirectoryRow extends StatelessWidget {
+  const _DirectoryRow({
+    required this.name,
+    required this.detail,
+    this.trailing,
+    this.onTap,
+    this.online = false,
+  });
+  final String name, detail;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  final bool online;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+    child: WaddlePanel(
+      padding: const EdgeInsets.all(16),
+      onTap: onTap,
+      child: Row(
+        children: [
+          WaddleAvatar(name: name, size: 46, online: online),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                if (detail.isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    detail,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+        ],
+      ),
     ),
   );
 }
@@ -149,35 +383,38 @@ class SettingsScreen extends StatelessWidget {
         String key, {
         bool fallback = true,
       }) => SwitchListTile(
+        secondary: _SettingIcon(switch (key) {
+          'wallpaperColors' => Icons.color_lens_outlined,
+          'notificationsEnabled' => Icons.notifications_none_rounded,
+          'messageSoundsEnabled' => Icons.volume_up_outlined,
+          _ => Icons.done_all_rounded,
+        }),
         title: Text(title),
         subtitle: Text(detail),
         value: prefs[key] as bool? ?? fallback,
         onChanged: (value) => set(key, value),
       );
       return Scaffold(
-        appBar: AppBar(title: const Text('Settings')),
+        appBar: AppBar(title: const WaddleBrand(compact: true)),
         body: ListView(
           padding: const EdgeInsets.only(bottom: 32),
           children: [
+            const _PageIntro(
+              'Make yourself\nat home.',
+              'A little more you. A little less noise.',
+              eyebrow: 'Your preferences',
+            ),
             _Section('Appearance', [
-              ListTile(
-                leading: const Icon(Icons.palette_outlined),
-                title: const Text('Theme'),
-                trailing: DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: _text(prefs['theme'], 'system'),
-                    items: const [
-                      DropdownMenuItem(value: 'system', child: Text('System')),
-                      DropdownMenuItem(value: 'light', child: Text('Light')),
-                      DropdownMenuItem(value: 'dark', child: Text('Dark')),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) {
-                        set('theme', value);
-                      }
-                    },
-                  ),
-                ),
+              _SettingChoice(
+                title: 'Theme',
+                icon: Icons.contrast_rounded,
+                value: _text(prefs['theme'], 'system'),
+                choices: const {
+                  'system': 'System',
+                  'light': 'Light',
+                  'dark': 'Dark',
+                },
+                onChanged: (value) => set('theme', value),
               ),
               toggle(
                 'Wallpaper colors',
@@ -185,24 +422,16 @@ class SettingsScreen extends StatelessWidget {
                 'wallpaperColors',
                 fallback: false,
               ),
-              ListTile(
-                leading: const Icon(Icons.swap_vert_rounded),
-                title: const Text('Timeline'),
-                subtitle: const Text('Choose where new messages appear.'),
-                trailing: DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: _text(prefs['timeline'], 'chat'),
-                    items: const [
-                      DropdownMenuItem(value: 'chat', child: Text('Chat')),
-                      DropdownMenuItem(value: 'social', child: Text('Social')),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) {
-                        set('timeline', value);
-                      }
-                    },
-                  ),
-                ),
+              _SettingChoice(
+                title: 'Timeline',
+                icon: Icons.swap_vert_rounded,
+                detail: 'Choose where new messages appear.',
+                value: _text(prefs['timeline'], 'chat'),
+                choices: const {
+                  'chat': 'Chat · newest last',
+                  'social': 'Social · newest first',
+                },
+                onChanged: (value) => set('timeline', value),
               ),
             ]),
             _Section('Notifications & privacy', [
@@ -491,63 +720,130 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
               children: [
-                Center(
-                  child: AnimatedBuilder(
-                    animation: widget.bridge,
-                    builder: (context, _) {
-                      final bytes = (_self
-                          ? widget.bridge.topic('profile')['avatar']
-                          : _profile['avatar']);
-                      return PersonAvatar(
-                        name: _fields['fullName']!.text.isNotEmpty
-                            ? _fields['fullName']!.text
-                            : _text(
-                                widget.jid ?? widget.bridge.session['username'],
-                                'You',
-                              ),
-                        radius: 48,
-                        bytes: bytes is Uint8List
-                            ? bytes
-                            : bytes is List
-                            ? Uint8List.fromList(bytes.cast<int>())
-                            : null,
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Center(
-                  child: SelectableText(
-                    _text(widget.jid ?? widget.bridge.session['jid']),
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ),
-                if (_self)
-                  Wrap(
-                    alignment: WrapAlignment.center,
+                WaddlePanel(
+                  color: Theme.of(context).colorScheme.primaryContainer,
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      TextButton.icon(
-                        onPressed: () => _command(
-                          context,
-                          widget.bridge,
-                          'profile.avatar',
-                          {'remove': false},
-                        ),
-                        icon: const Icon(Icons.add_a_photo_outlined),
-                        label: const Text('Change photo'),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          AnimatedBuilder(
+                            animation: widget.bridge,
+                            builder: (context, _) {
+                              final bytes = _self
+                                  ? widget.bridge.topic('profile')['avatar']
+                                  : _profile['avatar'];
+                              return PersonAvatar(
+                                name: _fields['fullName']!.text.isNotEmpty
+                                    ? _fields['fullName']!.text
+                                    : _text(
+                                        widget.jid ??
+                                            widget.bridge.session['username'],
+                                        'You',
+                                      ),
+                                radius: 42,
+                                bytes: bytes is Uint8List
+                                    ? bytes
+                                    : bytes is List
+                                    ? Uint8List.fromList(bytes.cast<int>())
+                                    : null,
+                              );
+                            },
+                          ),
+                          const Spacer(),
+                          WaddleMark(size: 30),
+                        ],
                       ),
-                      TextButton(
-                        onPressed: () => _command(
-                          context,
-                          widget.bridge,
-                          'profile.avatar',
-                          {'remove': true},
+                      const SizedBox(height: 24),
+                      Text(
+                        _self ? 'YOUR CORNER OF WADDLE' : 'A FAMILIAR FACE',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          letterSpacing: 1.3,
+                          fontWeight: FontWeight.w800,
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onPrimaryContainer,
                         ),
-                        child: const Text('Remove'),
                       ),
+                      const SizedBox(height: 10),
+                      ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: _fields['fullName']!,
+                        builder: (context, value, _) => Text(
+                          value.text.isNotEmpty
+                              ? value.text
+                              : _text(
+                                  _profile['nickname'] ??
+                                      (_self
+                                          ? widget.bridge.session['username']
+                                          : widget.jid?.split('@').first),
+                                  'Your profile',
+                                ),
+                          style: Theme.of(context).textTheme.headlineMedium
+                              ?.copyWith(
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -1,
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onPrimaryContainer,
+                              ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SelectableText(
+                        _text(widget.jid ?? widget.bridge.session['jid']),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onPrimaryContainer,
+                        ),
+                      ),
+                      if (_self) ...[
+                        const SizedBox(height: 18),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            FilledButton.tonalIcon(
+                              onPressed: () => _command(
+                                context,
+                                widget.bridge,
+                                'profile.avatar',
+                                {'remove': false},
+                              ),
+                              icon: const Icon(
+                                Icons.add_a_photo_outlined,
+                                size: 18,
+                              ),
+                              label: const Text('Change photo'),
+                            ),
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                foregroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onPrimaryContainer,
+                              ),
+                              onPressed: () => _command(
+                                context,
+                                widget.bridge,
+                                'profile.avatar',
+                                {'remove': true},
+                              ),
+                              child: const Text('Remove'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
-                const SizedBox(height: 24),
+                ),
+                const SizedBox(height: 30),
+                WaddleSectionHeading(
+                  title: _self ? 'Introduce yourself' : 'About',
+                  eyebrow: 'THE DETAILS',
+                ),
+                const SizedBox(height: 18),
                 for (final spec in const [
                   ('fullName', 'Full name', 160),
                   ('nickname', 'Nickname', 80),
@@ -567,7 +863,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           : TextInputType.text,
                       decoration: InputDecoration(
                         labelText: spec.$2,
-                        border: const OutlineInputBorder(),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
                         counterText: '',
                       ),
                       validator: (value) {
@@ -586,12 +884,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                   ),
                 if (_self) ...[
-                  const Divider(height: 32),
-                  Text(
-                    'Share your status',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
                   const SizedBox(height: 12),
+                  WaddleSectionHeading(
+                    title: 'In your world',
+                    eyebrow: 'A LITTLE UPDATE',
+                  ),
+                  const SizedBox(height: 14),
                   _StatusEditor(
                     bridge: widget.bridge,
                     kind: 'mood',
@@ -733,76 +1031,84 @@ class _StatusEditorState extends State<_StatusEditor> {
   }
 
   @override
-  Widget build(BuildContext context) => Card.filled(
-    margin: const EdgeInsets.only(bottom: 12),
-    child: ExpansionTile(
-      leading: Icon(widget.icon),
-      title: Text(widget.title),
-      childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      children: [
-        for (final entry in widget.fields.entries)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: entry.key == 'kind' || entry.key == 'general'
-                ? DropdownButtonFormField<String>(
-                    initialValue: _controllers[entry.key]!.text.isEmpty
-                        ? null
-                        : _controllers[entry.key]!.text,
-                    isExpanded: true,
-                    menuMaxHeight: 360,
-                    decoration: InputDecoration(
-                      labelText: entry.value,
-                      border: const OutlineInputBorder(),
-                    ),
-                    items: (entry.key == 'kind' ? moodKinds : generalActivities)
-                        .map(
-                          (value) => DropdownMenuItem(
-                            value: value,
-                            child: Text(
-                              value
-                                  .split('_')
-                                  .map(
-                                    (word) =>
-                                        '${word[0].toUpperCase()}${word.substring(1)}',
-                                  )
-                                  .join(' '),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: WaddlePanel(
+      padding: EdgeInsets.zero,
+      child: ExpansionTile(
+        leading: _SettingIcon(widget.icon),
+        title: Text(widget.title),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        children: [
+          for (final entry in widget.fields.entries)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: entry.key == 'kind' || entry.key == 'general'
+                  ? DropdownButtonFormField<String>(
+                      initialValue: _controllers[entry.key]!.text.isEmpty
+                          ? null
+                          : _controllers[entry.key]!.text,
+                      isExpanded: true,
+                      menuMaxHeight: 360,
+                      decoration: InputDecoration(
+                        labelText: entry.value,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                      ),
+                      items: (entry.key == 'kind' ? moodKinds : generalActivities)
+                          .map(
+                            (value) => DropdownMenuItem(
+                              value: value,
+                              child: Text(
+                                value
+                                    .split('_')
+                                    .map(
+                                      (word) =>
+                                          '${word[0].toUpperCase()}${word.substring(1)}',
+                                    )
+                                    .join(' '),
+                              ),
                             ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: _busy
-                        ? null
-                        : (value) => setState(
-                            () => _controllers[entry.key]!.text = value ?? '',
-                          ),
-                  )
-                : TextField(
-                    controller: _controllers[entry.key],
-                    keyboardType:
-                        ['lengthSeconds', 'rating'].contains(entry.key)
-                        ? TextInputType.number
-                        : TextInputType.text,
-                    decoration: InputDecoration(
-                      labelText: entry.value,
-                      border: const OutlineInputBorder(),
+                          )
+                          .toList(),
+                      onChanged: _busy
+                          ? null
+                          : (value) => setState(
+                              () => _controllers[entry.key]!.text = value ?? '',
+                            ),
+                    )
+                  : TextField(
+                      controller: _controllers[entry.key],
+                      keyboardType:
+                          ['lengthSeconds', 'rating'].contains(entry.key)
+                          ? TextInputType.number
+                          : TextInputType.text,
+                      decoration: InputDecoration(
+                        labelText: entry.value,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                      ),
                     ),
-                  ),
+            ),
+          Wrap(
+            alignment: WrapAlignment.end,
+            runSpacing: 8,
+            children: [
+              TextButton(
+                onPressed: _busy ? null : () => _submit(true),
+                child: const Text('Clear'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonal(
+                onPressed: _busy ? null : () => _submit(false),
+                child: Text(_busy ? 'Publishing…' : 'Publish'),
+              ),
+            ],
           ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            TextButton(
-              onPressed: _busy ? null : () => _submit(true),
-              child: const Text('Clear'),
-            ),
-            const SizedBox(width: 8),
-            FilledButton.tonal(
-              onPressed: _busy ? null : () => _submit(false),
-              child: Text(_busy ? 'Publishing…' : 'Publish'),
-            ),
-          ],
-        ),
-      ],
+        ],
+      ),
     ),
   );
 }
@@ -924,7 +1230,7 @@ class _PeopleScreenState extends State<PeopleScreen> {
           : _results;
       return Scaffold(
         appBar: AppBar(
-          title: Text(_groupMode ? 'New group message' : 'People'),
+          title: const WaddleBrand(compact: true),
           actions: [
             if (!_groupMode)
               IconButton(
@@ -950,8 +1256,15 @@ class _PeopleScreenState extends State<PeopleScreen> {
             : null,
         body: Column(
           children: [
+            _PageIntro(
+              _groupMode ? 'Bring people\ntogether.' : 'Good company.',
+              _groupMode
+                  ? 'Choose the people for your next conversation.'
+                  : 'Find a familiar face. Start something new.',
+              eyebrow: _groupMode ? 'New group message' : 'The directory',
+            ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
               child: SearchBar(
                 controller: _search,
                 hintText: 'Find someone',
@@ -1004,14 +1317,15 @@ class _PeopleScreenState extends State<PeopleScreen> {
                               person['username'],
                           jid,
                         );
-                        return ListTile(
-                          leading: PersonAvatar(name: name),
-                          title: Text(name),
-                          subtitle: Text(
-                            person['inHuddle'] == true
-                                ? 'In a call'
-                                : _text(person['show'], jid),
-                          ),
+                        return _DirectoryRow(
+                          name: name,
+                          detail: person['inHuddle'] == true
+                              ? 'In a call'
+                              : _text(person['show'], jid),
+                          online: [
+                            'available',
+                            'chat',
+                          ].contains(person['show']),
                           trailing: _groupMode
                               ? Checkbox(
                                   value: _selection.contains(jid),
@@ -1021,7 +1335,11 @@ class _PeopleScreenState extends State<PeopleScreen> {
                                     }
                                   }),
                                 )
-                              : const Icon(Icons.chat_bubble_outline_rounded),
+                              : Icon(
+                                  Icons.arrow_outward_rounded,
+                                  size: 20,
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
                           onTap: () {
                             if (_groupMode) {
                               setState(() {
@@ -1150,11 +1468,16 @@ class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Community users')),
+    appBar: AppBar(title: const WaddleBrand(compact: true)),
     body: Column(
       children: [
+        const _PageIntro(
+          'The people\nbehind it all.',
+          'Your community, thoughtfully looked after.',
+          eyebrow: 'Community users',
+        ),
         Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
           child: SearchBar(
             controller: _query,
             leading: const Icon(Icons.search_rounded),
@@ -1194,11 +1517,33 @@ class _CommunityAdminScreenState extends State<CommunityAdminScreen> {
                     final user = _users[index];
                     final jid = _text(user['jid']);
                     final name = _text(user['username'] ?? user['name'], jid);
-                    return ListTile(
-                      leading: PersonAvatar(name: name),
-                      title: Text(name),
-                      subtitle: Text(jid),
-                      trailing: Text(_text(user['role'])),
+                    return _DirectoryRow(
+                      name: name,
+                      detail: jid,
+                      trailing: _text(user['role']).isEmpty
+                          ? null
+                          : Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 7,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.secondaryContainer,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                _text(user['role']),
+                                style: Theme.of(context).textTheme.labelSmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSecondaryContainer,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ),
                     );
                   },
                 ),
@@ -1353,9 +1698,10 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
       final state = _text(call['state'], 'idle');
       final incoming = state == 'incoming';
       final ended = state == 'ended' || state == 'idle';
+      final address = _text(call['peer'] ?? call['peerJid']);
       final name = _text(
-        call['peerName'] ?? call['peer'] ?? call['peerJid'],
-        'Call',
+        call['peerName'],
+        address.isEmpty ? 'Call' : address.split('@').first,
       );
       final roster = _rows(call['participants'] ?? call['roster']);
       final video = call['video'] == true;
@@ -1373,246 +1719,350 @@ class _ActiveCallScreenState extends State<ActiveCallScreen> {
         'ended' => 'Call ended',
         _ => 'Connecting…',
       };
+      final colors = Theme.of(context).colorScheme;
+      final showVideo =
+          video &&
+          !incoming &&
+          !ended &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.android;
       Widget control(
         String label,
         IconData icon,
         String command, {
         bool selected = false,
-      }) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton.filledTonal(
-            isSelected: selected,
-            onPressed: () => _command(context, bridge, 'call.$command'),
-            icon: Icon(icon),
-            tooltip: label,
-            iconSize: 28,
-            padding: const EdgeInsets.all(20),
-          ),
-          const SizedBox(height: 8),
-          Text(label, style: Theme.of(context).textTheme.labelMedium),
-        ],
+      }) => SizedBox(
+        width: 84,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton.filledTonal(
+              style: IconButton.styleFrom(
+                minimumSize: const Size(60, 60),
+                backgroundColor: selected
+                    ? colors.primary
+                    : colors.surfaceContainer,
+                foregroundColor: selected ? colors.onPrimary : colors.onSurface,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
+                ),
+              ),
+              isSelected: selected,
+              onPressed: () => _command(context, bridge, 'call.$command'),
+              icon: Icon(icon),
+              tooltip: label,
+              iconSize: 25,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ],
+        ),
       );
       return Scaffold(
-        appBar: AppBar(title: Text(incoming ? 'Incoming call' : 'Call')),
+        appBar: AppBar(title: const WaddleBrand(compact: true)),
         body: SafeArea(
-          child: Column(
-            children: [
-              Expanded(
-                child:
-                    video &&
-                        !incoming &&
-                        !ended &&
-                        !kIsWeb &&
-                        defaultTargetPlatform == TargetPlatform.android
-                    ? Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Stack(
-                          children: [
-                            const Positioned.fill(
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.all(
-                                  Radius.circular(28),
-                                ),
-                                child: AndroidView(
-                                  viewType: 'social.waddle.android/call-video',
-                                  creationParamsCodec: StandardMessageCodec(),
-                                ),
-                              ),
-                            ),
-                            if (call['cameraEnabled'] == true)
-                              const Positioned(
-                                bottom: 16,
-                                right: 16,
-                                width: 104,
-                                height: 144,
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.all(
-                                    Radius.circular(20),
+          child: LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              call['group'] == true
+                                  ? 'TOGETHER, IN REAL TIME'
+                                  : 'A LITTLE CLOSER',
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(
+                                    letterSpacing: 1.5,
+                                    fontWeight: FontWeight.w800,
+                                    color: colors.primary,
                                   ),
+                            ),
+                          ),
+                          Icon(
+                            video
+                                ? Icons.videocam_outlined
+                                : Icons.graphic_eq_rounded,
+                            color: colors.primary,
+                            size: 24,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      if (showVideo)
+                        AspectRatio(
+                          aspectRatio: 4 / 5,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(28),
+                            child: Stack(
+                              children: [
+                                const Positioned.fill(
                                   child: AndroidView(
                                     viewType:
                                         'social.waddle.android/call-video',
-                                    creationParams: {'local': true},
                                     creationParamsCodec: StandardMessageCodec(),
                                   ),
                                 ),
-                              ),
-                            Positioned(
-                              top: 16,
-                              left: 16,
-                              right: 16,
-                              child: Material(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.surfaceContainer,
-                                borderRadius: BorderRadius.circular(20),
-                                child: Padding(
-                                  padding: const EdgeInsets.all(12),
-                                  child: Text(
-                                    '$name · $subtitle',
-                                    textAlign: TextAlign.center,
+                                if (call['cameraEnabled'] == true)
+                                  Positioned(
+                                    bottom: 16,
+                                    right: 16,
+                                    width: 96,
+                                    height: 136,
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(18),
+                                      child: const AndroidView(
+                                        viewType:
+                                            'social.waddle.android/call-video',
+                                        creationParams: {'local': true},
+                                        creationParamsCodec:
+                                            StandardMessageCodec(),
+                                      ),
+                                    ),
                                   ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            PersonAvatar(name: name, radius: 64),
-                            const SizedBox(height: 24),
-                            Text(
-                              name,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.headlineMedium,
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              subtitle,
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          ],
-                        ),
-                      ),
-              ),
-              if (call['error'] != null)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    _text(call['error']),
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ),
-              if (roster.isNotEmpty)
-                SizedBox(
-                  height: 92,
-                  child: ListView.separated(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    scrollDirection: Axis.horizontal,
-                    itemCount: roster.length,
-                    separatorBuilder: (_, _) => const SizedBox(width: 16),
-                    itemBuilder: (context, index) {
-                      final person = roster[index];
-                      return Column(
-                        children: [
-                          Badge(
-                            isLabelVisible: person['handRaised'] == true,
-                            label: const Icon(
-                              Icons.back_hand_rounded,
-                              size: 12,
-                            ),
-                            child: PersonAvatar(
-                              name: _text(
-                                person['name'] ?? person['nick'],
-                                '?',
-                              ),
+                              ],
                             ),
                           ),
-                          const SizedBox(height: 6),
-                          Text(_text(person['name'] ?? person['nick'])),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              if (incoming)
-                Padding(
-                  padding: const EdgeInsets.all(32),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      control('Decline', Icons.call_end_rounded, 'decline'),
-                      control(
-                        'Answer',
-                        video ? Icons.videocam_rounded : Icons.call_rounded,
-                        'accept',
-                      ),
+                        )
+                      else
+                        WaddlePanel(
+                          color: colors.primaryContainer,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 24),
+                            child: Column(
+                              children: [
+                                SizedBox(
+                                  height: 152,
+                                  child: Stack(
+                                    alignment: Alignment.center,
+                                    children: [
+                                      Positioned.fill(
+                                        child: WaddleMotif(
+                                          color: colors.onPrimaryContainer
+                                              .withValues(alpha: .12),
+                                        ),
+                                      ),
+                                      WaddleAvatar(name: name, size: 104),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                Text(
+                                  name,
+                                  textAlign: TextAlign.center,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .headlineLarge
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: -1.1,
+                                        color: colors.onPrimaryContainer,
+                                      ),
+                                ),
+                                const SizedBox(height: 14),
+                                Text(
+                                  subtitle,
+                                  textAlign: TextAlign.center,
+                                  style: Theme.of(context).textTheme.titleMedium
+                                      ?.copyWith(
+                                        color: colors.onPrimaryContainer,
+                                        fontFeatures: const [
+                                          FontFeature.tabularFigures(),
+                                        ],
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      if (showVideo) ...[
+                        const SizedBox(height: 20),
+                        Text(
+                          name,
+                          style: Theme.of(context).textTheme.headlineMedium
+                              ?.copyWith(fontWeight: FontWeight.w800),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          subtitle,
+                          style: Theme.of(context).textTheme.bodyLarge
+                              ?.copyWith(color: colors.onSurfaceVariant),
+                        ),
+                      ],
+                      if (call['error'] != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 18),
+                          child: Text(
+                            _text(call['error']),
+                            style: TextStyle(color: colors.error),
+                          ),
+                        ),
+                      if (roster.isNotEmpty) ...[
+                        const SizedBox(height: 26),
+                        WaddleSectionHeading(title: 'With you'),
+                        const SizedBox(height: 14),
+                        WaddlePanel(
+                          child: Wrap(
+                            spacing: 20,
+                            runSpacing: 20,
+                            children: roster
+                                .map(
+                                  (person) => SizedBox(
+                                    width: 88,
+                                    child: Column(
+                                      children: [
+                                        Badge(
+                                          isLabelVisible:
+                                              person['handRaised'] == true,
+                                          label: const Icon(
+                                            Icons.back_hand_rounded,
+                                            size: 12,
+                                          ),
+                                          child: WaddleAvatar(
+                                            name: _text(
+                                              person['name'] ?? person['nick'],
+                                              '?',
+                                            ),
+                                            size: 44,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          _text(
+                                            person['name'] ?? person['nick'],
+                                          ),
+                                          textAlign: TextAlign.center,
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.labelMedium,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 24),
+                      if (incoming)
+                        WaddlePanel(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              FilledButton.icon(
+                                onPressed: () =>
+                                    _command(context, bridge, 'call.accept'),
+                                icon: Icon(
+                                  video
+                                      ? Icons.videocam_rounded
+                                      : Icons.call_rounded,
+                                ),
+                                label: const Text('Answer call'),
+                              ),
+                              const SizedBox(height: 10),
+                              OutlinedButton.icon(
+                                onPressed: () =>
+                                    _command(context, bridge, 'call.decline'),
+                                icon: Icon(
+                                  Icons.call_end_rounded,
+                                  color: colors.error,
+                                ),
+                                label: const Text('Decline'),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (ended)
+                        FilledButton(
+                          onPressed: () async {
+                            await _command(context, bridge, 'call.dismiss');
+                            if (context.mounted) Navigator.maybePop(context);
+                          },
+                          child: const Text('Done'),
+                        )
+                      else ...[
+                        WaddlePanel(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 20,
+                          ),
+                          child: Wrap(
+                            spacing: 10,
+                            runSpacing: 20,
+                            alignment: WrapAlignment.center,
+                            children: [
+                              control(
+                                call['microphoneEnabled'] == false
+                                    ? 'Unmute'
+                                    : 'Mute',
+                                call['microphoneEnabled'] == false
+                                    ? Icons.mic_off_rounded
+                                    : Icons.mic_rounded,
+                                'microphone',
+                                selected: call['microphoneEnabled'] == false,
+                              ),
+                              control(
+                                'Speaker',
+                                Icons.volume_up_rounded,
+                                'speaker',
+                                selected: call['speakerEnabled'] == true,
+                              ),
+                              if (video)
+                                control(
+                                  'Camera',
+                                  call['cameraEnabled'] == false
+                                      ? Icons.videocam_off_rounded
+                                      : Icons.videocam_rounded,
+                                  'camera',
+                                  selected: call['cameraEnabled'] != false,
+                                ),
+                              if (video)
+                                control(
+                                  'Flip camera',
+                                  Icons.cameraswitch_rounded,
+                                  'flipCamera',
+                                ),
+                              if (call['group'] == true)
+                                control(
+                                  call['handRaised'] == true
+                                      ? 'Lower hand'
+                                      : 'Raise hand',
+                                  Icons.back_hand_outlined,
+                                  'hand',
+                                  selected: call['handRaised'] == true,
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: colors.error,
+                            foregroundColor: colors.onError,
+                            minimumSize: const Size(160, 56),
+                          ),
+                          onPressed: () =>
+                              _command(context, bridge, 'call.hangup'),
+                          icon: const Icon(Icons.call_end_rounded),
+                          label: const Text('End call'),
+                        ),
+                      ],
                     ],
                   ),
-                )
-              else if (ended)
-                Padding(
-                  padding: const EdgeInsets.all(32),
-                  child: FilledButton(
-                    onPressed: () async {
-                      await _command(context, bridge, 'call.dismiss');
-                      if (context.mounted) {
-                        Navigator.maybePop(context);
-                      }
-                    },
-                    child: const Text('Done'),
-                  ),
-                )
-              else ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                  child: Wrap(
-                    spacing: 20,
-                    runSpacing: 20,
-                    alignment: WrapAlignment.center,
-                    children: [
-                      control(
-                        call['microphoneEnabled'] == false ? 'Unmute' : 'Mute',
-                        call['microphoneEnabled'] == false
-                            ? Icons.mic_off_rounded
-                            : Icons.mic_rounded,
-                        'microphone',
-                        selected: call['microphoneEnabled'] == false,
-                      ),
-                      control(
-                        'Speaker',
-                        Icons.volume_up_rounded,
-                        'speaker',
-                        selected: call['speakerEnabled'] == true,
-                      ),
-                      if (video)
-                        control(
-                          'Camera',
-                          call['cameraEnabled'] == false
-                              ? Icons.videocam_off_rounded
-                              : Icons.videocam_rounded,
-                          'camera',
-                          selected: call['cameraEnabled'] != false,
-                        ),
-                      if (video)
-                        control(
-                          'Flip camera',
-                          Icons.cameraswitch_rounded,
-                          'flipCamera',
-                        ),
-                      if (call['group'] == true)
-                        control(
-                          call['handRaised'] == true
-                              ? 'Lower hand'
-                              : 'Raise hand',
-                          Icons.back_hand_outlined,
-                          'hand',
-                          selected: call['handRaised'] == true,
-                        ),
-                    ],
-                  ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 32),
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Theme.of(context).colorScheme.error,
-                      foregroundColor: Theme.of(context).colorScheme.onError,
-                      minimumSize: const Size(160, 56),
-                    ),
-                    onPressed: () => _command(context, bridge, 'call.hangup'),
-                    icon: const Icon(Icons.call_end_rounded),
-                    label: const Text('End call'),
-                  ),
-                ),
-              ],
-            ],
+              ),
+            ),
           ),
         ),
       );

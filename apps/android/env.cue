@@ -91,6 +91,23 @@ let _AndroidApkArtifact = schema.#Contributor & {
 			}
 		},
 		for outcome in ["success", "failure"] {
+			id:        "android.designPreviews.\(outcome)"
+			label:     "Upload Flutter design previews (\(outcome))"
+			priority:  105
+			condition: "on_\(outcome)"
+			ci: github: tasks: ["build"]
+			provider: github: {
+				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+				with: {
+					name: "waddle-android-design-previews"
+					path: "apps/android/flutter/build/design-previews/"
+					"if-no-files-found": "warn"
+					"retention-days":    7
+					"compression-level": 0
+				}
+			}
+		},
+		for outcome in ["success", "failure"] {
 			id:        "android.apkSummary.\(outcome)"
 			label:     "Link Android APK download (\(outcome))"
 			priority:  110
@@ -234,7 +251,7 @@ schema.#Project & {
 
 		flutterCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "cd flutter && flutter --suppress-analytics analyze && flutter --suppress-analytics test"]
+			args: ["-c", "cd flutter && flutter --suppress-analytics analyze && flutter --suppress-analytics test --dart-define=WADDLE_PREVIEW_DIR=build/design-previews"]
 			dependsOn: [setupFlutter]
 			inputs: _gradleInputs
 		}

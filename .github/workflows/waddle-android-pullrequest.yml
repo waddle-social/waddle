@@ -192,6 +192,15 @@ jobs:
         name: waddle-android-apk
         path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
         retention-days: 7
+    - name: Upload Flutter design previews (success)
+      if: success()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        compression-level: 0
+        if-no-files-found: warn
+        name: waddle-android-design-previews
+        path: apps/android/flutter/build/design-previews/
+        retention-days: 7
     - name: Link Android APK download (success)
       if: success()
       run: bash scripts/android-apk-summary.sh
@@ -215,6 +224,15 @@ jobs:
         if-no-files-found: error
         name: waddle-android-apk
         path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
+        retention-days: 7
+    - name: Upload Flutter design previews (failure)
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        compression-level: 0
+        if-no-files-found: warn
+        name: waddle-android-design-previews
+        path: apps/android/flutter/build/design-previews/
         retention-days: 7
     - name: Link Android APK download (failure)
       if: failure()
