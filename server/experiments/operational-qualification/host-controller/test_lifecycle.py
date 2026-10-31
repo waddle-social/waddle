@@ -25,6 +25,9 @@ class MemoryRoot:
     def __init__(self, *_args, **_kwargs):
         self.path = "/fixture/run"
         self.identity = IDENTITY
+        self.parents = dict.fromkeys(
+            ("/", "/run", "/run/user", "/run/user/1000"), IDENTITY
+        )
         self.files = {}
         self.cleaned = 0
         self.owned = dict.fromkeys(policy.INVENTORY, IDENTITY)
@@ -308,6 +311,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_unexpected_host_sentinel_connection_fails(self):
         sentinel = object.__new__(runtime.Sentinels)
+        sentinel.root = Mock()
         listener = Mock()
         listener.accept.return_value = (Mock(), None)
         sentinel.listeners = [listener]
@@ -336,6 +340,9 @@ class PartialRoot:
     def __init__(self, fail_after=None):
         self.path = "/fixture/run"
         self.identity = IDENTITY
+        self.parents = dict.fromkeys(
+            ("/", "/run", "/run/user", "/run/user/1000"), IDENTITY
+        )
         self.owned = {}
         self.current = {}
         self.files = {}
@@ -389,10 +396,11 @@ class PartialCleanupTests(unittest.TestCase):
         root.write(
             "state.json",
             {
-                "version": 2,
+                "version": 3,
                 "nonce": TOKEN,
                 "uid": 1000,
                 "gid": 1000,
+                "parents": root.parents,
                 "root": root.identity,
                 "inventory": root.inventory(),
             },

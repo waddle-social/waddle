@@ -90,6 +90,10 @@ def run_name(uid, nonce):
     return f"waddle-host-{uid}-{token(nonce)}"
 
 
+def run_path(uid, nonce):
+    return f"/run/user/{uid}/" + run_name(uid, nonce)
+
+
 def unit(nonce):
     return f"waddle-host-{token(nonce)}.service"
 
@@ -144,6 +148,12 @@ def identity(value):
     require(all(type(n) is int and n >= 0 for n in value.values()), "file-identity")
     require(value["inode"] > 0, "file-identity")
     return value
+
+
+def parent_identities(recorded, current):
+    fields(recorded, current.keys())
+    for path, actual in current.items():
+        require(identity(recorded[path]) == actual, "runtime-parent-identity")
 
 
 def cleanup_inventory(recorded, current, partial=False):

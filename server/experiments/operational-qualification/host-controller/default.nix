@@ -83,7 +83,7 @@ pkgs.stdenvNoCC.mkDerivation {
     install -m755 build/bootstrap "$out/bin/host-confinement-canary"
     install -m755 build/witness "$out/libexec/host-controller/witness"
     install -m644 controller.py runtime.py policy.py observe.py \
-      bootstrap.c witness.c filter.c filter.h "$out/libexec/host-controller/"
+      bootstrap.c witness.c filter.c filter.h sentinel_paths.h "$out/libexec/host-controller/"
     python3 -B build_manifest.py
     runHook postInstall
   '';

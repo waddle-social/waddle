@@ -1,5 +1,13 @@
 # Bounded no-VM host canary controller
 
+The separate [fixed benign resource inspection candidate](RESOURCE-GUARD.md)
+uses a narrower trusted-manager model for a resource-only prerequisite probe.
+Its first local observation failed. After independently reviewed fixes, a
+separate local activation observed the configured limits for one fixed benign
+guard; kernel reclamation remains unverified. The implementation in this tree
+remains gated. That observation does not unblock or replace this confinement
+controller or establish workload isolation.
+
 This directory implements the controller for #2106/#2046. It is **not yet live
 evidence**: only builds, pure models, a pure cBPF interpreter and integration
 fakes have run. The combined controller and controlled inspection probe require
@@ -35,12 +43,30 @@ store artifacts; the running user manager is a separate external dependency. Loc
 are checked against the frozen build manifest; this assumes the trusted checkout
 and manifest have not been deliberately replaced by their same-UID owner.
 
-The controller exclusively creates `/dev/shm/waddle-host-<uid>-<nonce>` with mode
-0700. It creates an exact seven-entry inventory: five bounded JSON evidence files,
+The controller exclusively creates
+`/run/user/<actual-uid>/waddle-host-<uid>-<nonce>` with mode 0700. It opens `/`,
+`run`, `user` and the decimal UID component individually using anchored directory
+FDs with O_DIRECTORY, O_NOFOLLOW and O_CLOEXEC. The `/`, `/run` and `/run/user` components must
+be root-owned and not group/world writable; the UID directory must belong to the
+actual caller with exactly mode 0700. No XDG/TMP environment path, fallback,
+runtime-directory creation or permission repair is accepted. Every parent FD and
+pathname identity is retained, rechecked, and recorded in state version 3 so
+persisted cleanup also rejects parent replacement. It creates an exact seven-entry inventory: five bounded JSON evidence files,
 `host-file`, and `host.sock`. It also binds a distinct run-named abstract UNIX
 listener. It refuses directory, file, socket and service collisions. It never
 unlinks an existing path to make a bind succeed. Host positive controls verify
-the nonce and listener `SO_PEERCRED` before and after the sandbox.
+the nonce and listener `SO_PEERCRED` before and after the sandbox, while checking
+the retained parent chain. The witness derives the same fixed path: file/pathname
+negatives still require ENOENT only, abstract UNIX requires ECONNREFUSED, and its
+local positive control is unchanged. Runtime directories may disappear on logout;
+missing or recreated components fail closed and retained evidence can be lost.
+
+This path change is defense in depth following security review, not a claim of a
+demonstrated exploit in the previous path or its negative reads. The bootstrap's
+restrictive mask is expressed as `S_IRWXG | S_IRWXO`; a compile-time assertion
+checks all six group/other bits and excludes owner bits, preserving the original
+0077 mask without repeating that numeric literal in C. No analyzer suppression or weaker permission
+mask is introduced. Hosted Sonar results for this unpublished change are pending.
 
 The fixed transient user service requests and reads back Type=exec, Restart=no,
 control-group termination, 5-second start/2-second stop/30-second runtime limits,
@@ -83,8 +109,9 @@ NUL. `clearenv()` does not erase `/proc/PID/environ`; the observer checks that e
 initial environment for the witness and the truly empty exec environment for the
 subsequent probe.
 
-Bubblewrap's ordinary tmpfs root does not add noexec, and this host's /dev/shm
-does not supply it. Therefore a fixed trusted setup finisher has only
+Bubblewrap's ordinary tmpfs root does not add noexec. The private runtime
+directory is only a sentinel/evidence location, not the sandbox root or a source
+of mount flags. Therefore a fixed trusted setup finisher has only
 namespace-scoped CAP_SYS_ADMIN, CAP_SETFCAP and CAP_SETPCAP during setup. It sets
 `user.max_user_namespaces=1`, creates a nested user and mount namespace together,
 writes exact `0 0 1` UID/GID maps through a held proc directory FD, then closes
@@ -155,7 +182,7 @@ qualification still required after review.
 
 ## Cleanup and offline checks
 
-Cleanup revalidates run-directory device/inode, every retained/transient entry,
+Cleanup revalidates every anchored parent and run-directory device/inode, every retained/transient entry,
 service invocation/cgroup/process identity and cgroup emptiness. It unlinks only
 the two exact transient file/socket names through anchored directory FDs. It
 never recursively deletes or prunes, and never signals an unrelated reused PID.
@@ -206,17 +233,24 @@ pass-through with `--as-pid-1`, optional-only `seccomp_programs_apply`, and
 `bind_mount` adding restrictions while preserving existing mount flags. The
 controller's finisher establishes and observes its own final flags and filters.
 
-The current locked fix-tranche build passed 1,567 pure BPF assertions, 44 Python
-fake/model tests, static PIE/RELRO/NOW/non-executable-stack checks, GCC analyzer
-with warnings as errors, and Ruff. Its changed probe dependency separately passed
-562 parser/frame C assertions, 1,720 pure barrier assertions and eight Python tests.
-Build output: `/nix/store/6ifa8w31x1qscxk2hn9kmb4wc3lq6f2i-waddle-host-confinement-canary-1`.
+The current locked runtime-directory hardening build passed 1,567 pure BPF
+assertions, the pure C path-format fixture, 53 Python fake/model tests, static
+PIE/RELRO/NOW/non-executable-stack checks, GCC analyzer with warnings as errors,
+and Ruff. The unchanged cached probe dependency previously passed 562 parser/frame
+C assertions, 1,720 pure barrier assertions and eight Python tests.
+Build output: `/nix/store/g4n2azxsgvlr8nlbp1v1wxh7vzy5m4l5-waddle-host-confinement-canary-1`.
 Its frozen manifest resolves Bubblewrap to
 `/nix/store/v6a6s4aqw7l6n74x72wblvl3994bksw3-bubblewrap-0.12.0/bin/bwrap` and contains
 no manager-image artifact. These are offline results; no canary executable ran.
 
-`check` runs only `filter_test.c` (pure cBPF interpretation; no filter installation)
-and Python fake/model tests. The bootstrap, witness, probe, systemd, Bubblewrap,
+`check` runs only `filter_test.c` (pure cBPF interpretation; no filter installation),
+`path_fixture_test.c` (pure formatting, including maximum-length paths) and Python
+fake/model tests. The C/Python path agreement and each parent component's ownership,
+mode, symlink, absence and replacement rejection are exercised without opening
+the real runtime tree. Negative cases require precise rejection types/messages;
+unexpected dup/listdir/fsync calls raise AssertionError. A mutation check bypassing
+identity validation failed all 20 replacement cases through these guards, without
+real descriptor errors. The bootstrap, witness, probe, systemd, Bubblewrap,
 namespaces and sockets are never executed by builds or tests. The intended runtime entrypoint
 is the output package's `bin/host-confinement-canary run`, currently blocked in code;
 interrupted cleanup is `bin/host-confinement-canary cleanup <nonce>`. No extra
@@ -229,3 +263,7 @@ Design references: [Bubblewrap v0.12.0 source](https://github.com/containers/bub
 [Linux user namespace mappings](https://man7.org/linux/man-pages/man7/user_namespaces.7.html),
 [systemd resource controls](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html)
 and [execution settings](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html).
+
+The separate [external bounded reader](RESOURCE-READER.md) is gated, with no
+artifact pin set. Its offline fake-child package is `resource-reader.nix`; it
+does not authorize or run a benign observation.

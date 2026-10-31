@@ -25,6 +25,7 @@ from policy import (
     decode,
     fields,
     limits,
+    parent_identities,
     require,
     same_service,
     sandbox_argv,
@@ -90,6 +91,7 @@ def configuration():
         "witness.c",
         "filter.c",
         "filter.h",
+        "sentinel_paths.h",
     }
     require(config["sources"].keys() == expected_sources, "configuration-sources")
     for name, digest in config["sources"].items():
@@ -105,15 +107,16 @@ def configuration():
 
 def state_for(root, nonce):
     state = decode(root.read("state.json"))
-    fields(state, {"version", "nonce", "uid", "gid", "root", "inventory"})
+    fields(state, {"version", "nonce", "uid", "gid", "parents", "root", "inventory"})
     require(
         type(state["version"]) is int
-        and state["version"] == 2
+        and state["version"] == 3
         and state["nonce"] == nonce
         and state["uid"] == os.getuid()
         and state["gid"] == os.getgid(),
         "run-owner",
     )
+    parent_identities(state["parents"], root.parents)
     require(
         state["root"] == root.identity and state["inventory"].keys() == INVENTORY,
         "run-identity",
@@ -444,15 +447,18 @@ def cleanup(paths, nonce):
     root = RunRoot(os.getuid(), nonce)
     try:
         state = decode(root.read("state.json"))
-        fields(state, {"version", "nonce", "uid", "gid", "root", "inventory"})
+        fields(
+            state, {"version", "nonce", "uid", "gid", "parents", "root", "inventory"}
+        )
         require(
-            state["version"] == 2
+            state["version"] == 3
             and state["nonce"] == nonce
             and state["root"] == root.identity
             and state["uid"] == os.getuid()
             and state["gid"] == os.getgid(),
             "cleanup-run-identity",
         )
+        parent_identities(state["parents"], root.parents)
         # Sentinels are independently owned files. Their anchored cleanup must
         # not depend on whether a service record was ever completely written.
         root.cleanup(state["inventory"])
@@ -497,10 +503,11 @@ def run(paths):
             "initial-inventory",
         )
         state = {
-            "version": 2,
+            "version": 3,
             "nonce": nonce,
             "uid": os.getuid(),
             "gid": os.getgid(),
+            "parents": root.parents,
             "root": root.identity,
             "inventory": inventory,
         }

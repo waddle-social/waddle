@@ -14,6 +14,7 @@ SOURCES = (
     "witness.c",
     "filter.c",
     "filter.h",
+    "sentinel_paths.h",
 )
 
 

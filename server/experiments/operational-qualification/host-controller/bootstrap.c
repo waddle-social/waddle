@@ -10,6 +10,12 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+_Static_assert(
+    (S_IRWXG | S_IRWXO) ==
+            (S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH) &&
+        ((S_IRWXG | S_IRWXO) & S_IRWXU) == 0,
+    "Mask every group/other permission and preserve owner permissions");
+
 static int nonce(const char *s) {
   return strlen(s) == 32 && strspn(s, "0123456789abcdef") == 32;
 }
@@ -22,7 +28,9 @@ int main(int argc, char **argv) {
   if (clearenv() != 0 || getuid() == 0 || getuid() != geteuid() ||
       getgid() != getegid())
     return 64;
-  (void)umask(0077);
+  /* Deny every group/other permission on subsequently created
+   * files/directories. */
+  (void)umask(S_IRWXG | S_IRWXO);
   if (chdir("/") != 0)
     return 74;
   if (!((argc == 2 && strcmp(argv[1], "run") == 0) ||

@@ -13,7 +13,7 @@ all: build/bootstrap build/witness
 build/bootstrap: bootstrap.c build/paths.h
 	$(STATIC_CC) $(CFLAGS) -Ibuild $< $(LDFLAGS) -o $@
 
-build/witness: witness.c filter.c filter.h
+build/witness: witness.c filter.c filter.h sentinel_paths.h
 	mkdir -p build
 	$(STATIC_CC) $(CFLAGS) witness.c filter.c $(LDFLAGS) -o $@
 
@@ -21,14 +21,20 @@ build/filter-test: filter_test.c filter.c filter.h
 	mkdir -p build
 	$(STATIC_CC) $(CFLAGS) filter_test.c filter.c $(LDFLAGS) -o $@
 
-check: build/filter-test
+build/path-fixture-test: path_fixture_test.c sentinel_paths.h
+	mkdir -p build
+	$(STATIC_CC) $(CFLAGS) path_fixture_test.c $(LDFLAGS) -o $@
+
+check: build/filter-test build/path-fixture-test
 	./build/filter-test
-	python3 -B -m unittest -v test_policy.py test_lifecycle.py
+	./build/path-fixture-test > build/synthetic-paths
+	python3 -B -m unittest -v test_policy.py test_lifecycle.py test_runtime_root.py
 
 check-analysis: build/paths.h
 	$(STATIC_CC) $(CFLAGS) -Ibuild -fanalyzer -c bootstrap.c -o build/analyze-bootstrap.o
 	$(STATIC_CC) $(CFLAGS) -fanalyzer -c witness.c -o build/analyze-witness.o
 	$(STATIC_CC) $(CFLAGS) -fanalyzer -c filter.c -o build/analyze-filter.o
+	$(STATIC_CC) $(CFLAGS) -fanalyzer -c path_fixture_test.c -o build/analyze-path-fixture.o
 
 check-static: all
 	sh check-static.sh

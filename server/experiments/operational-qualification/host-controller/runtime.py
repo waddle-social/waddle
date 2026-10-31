@@ -26,6 +26,7 @@ from policy import (
     identity,
     require,
     run_name,
+    run_path,
     unit,
 )
 
@@ -262,12 +263,40 @@ class RunRoot:
     """Anchored exact tree. Evidence is retained; cleanup removes only transients."""
 
     def __init__(self, uid, nonce, create=False):
+        require(uid == os.getuid(), "runtime-actual-owner")
         self.name = run_name(uid, nonce)
-        self.path = "/dev/shm/" + self.name
-        self.parent = os.open("/dev/shm", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+        self.path = run_path(uid, nonce)
+        self.parent_fds = []
+        self.parents = {}
         self.fd = -1
         self.owned = {}
         try:
+            # Every existing component is opened without following symlinks.
+            # Never create, chmod or substitute a missing runtime directory.
+            parts = ("/", "run", "user", str(uid))
+            path = ""
+            for index, part in enumerate(parts):
+                parent = self.parent_fds[-1] if self.parent_fds else None
+                fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=parent
+                )
+                self.parent_fds.append(fd)
+                st = os.fstat(fd)
+                private = index == len(parts) - 1
+                require(
+                    stat.S_ISDIR(st.st_mode)
+                    and st.st_uid == (uid if private else 0)
+                    and (
+                        stat.S_IMODE(st.st_mode) == 0o700
+                        if private
+                        else not st.st_mode & 0o022
+                    ),
+                    "runtime-parent-owner-mode",
+                )
+                path = "/" if index == 0 else path.rstrip("/") + "/" + part
+                self.parents[path] = file_identity(st)
+            self.parent = self.parent_fds[-1]
+            self.check_parents()
             if create:
                 os.mkdir(
                     self.name, 0o700, dir_fd=self.parent
@@ -277,18 +306,35 @@ class RunRoot:
             )
             st = os.fstat(self.fd)
             require(
-                st.st_uid == uid and stat.S_IMODE(st.st_mode) == 0o700, "run-root-owner"
+                stat.S_ISDIR(st.st_mode)
+                and st.st_uid == uid
+                and stat.S_IMODE(st.st_mode) == 0o700,
+                "run-root-owner",
             )
             self.identity = file_identity(st)
+            self.check()
         except BaseException:
-            if self.fd >= 0:
-                os.close(self.fd)
-            os.close(self.parent)
+            self.close()
             raise
 
+    def check_parents(self):
+        for index, (path, expected) in enumerate(self.parents.items()):
+            parent = self.parent_fds[index - 1] if index else None
+            leaf = path.rsplit("/", 1)[-1] if index else "/"
+            require(
+                file_identity(os.fstat(self.parent_fds[index])) == expected
+                and file_identity(os.stat(leaf, dir_fd=parent, follow_symlinks=False))
+                == expected,
+                "replaced-runtime-parent",
+            )
+
     def check(self):
+        self.check_parents()
         require(
-            file_identity(os.stat(self.name, dir_fd=self.parent, follow_symlinks=False))
+            file_identity(os.fstat(self.fd)) == self.identity
+            and file_identity(
+                os.stat(self.name, dir_fd=self.parent, follow_symlinks=False)
+            )
             == self.identity,
             "replaced-root",
         )
@@ -403,8 +449,12 @@ class RunRoot:
         os.fsync(self.fd)
 
     def close(self):
-        os.close(self.fd)
-        os.close(self.parent)
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+        for fd in reversed(self.parent_fds):
+            os.close(fd)
+        self.parent_fds.clear()
 
 
 class Sentinels:
@@ -420,6 +470,7 @@ class Sentinels:
                 )
                 self.listeners.append(sock)
                 sock.settimeout(0.5)
+                root.check()
                 sock.bind(address)  # EADDRINUSE is a collision; never unlink and retry.
                 if isinstance(address, str):
                     root.check()
@@ -438,7 +489,9 @@ class Sentinels:
         for listener in self.listeners:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(0.5)
+                self.root.check()
                 client.connect(listener.getsockname())
+                self.root.check()
                 peer = struct.unpack(
                     "3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 )
@@ -454,6 +507,7 @@ class Sentinels:
                     require(client.recv(33) == self.nonce, "socket-positive")
 
     def negative_queue(self):
+        self.root.check()
         for listener in self.listeners:
             listener.setblocking(False)
             try:

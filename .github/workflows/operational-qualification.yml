@@ -104,3 +104,8 @@ jobs:
           extra-conf: experimental-features = nix-command flakes
       - name: Build controller and run only pure models and integration fakes
         run: nix-build server/experiments/operational-qualification/host-controller/default.nix --no-out-link
+      - name: Build gated resource inspection and capture tools
+        run: |
+          set -euo pipefail
+          nix-build server/experiments/operational-qualification/host-controller/resource-guard.nix --no-out-link
+          nix-build server/experiments/operational-qualification/host-controller/resource-reader.nix --no-out-link

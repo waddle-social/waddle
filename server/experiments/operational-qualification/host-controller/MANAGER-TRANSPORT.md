@@ -59,7 +59,7 @@ across every operation, including uncertain launch outcomes.
   inspection is unavailable here. Establish an authenticated generation marker or
   prove from the pinned/host protocol contract that reexec always invalidates the
   held private connection. Do not treat a stable PID/start tuple as reexec proof.
-* **Interrupted ownership publication.** The current state-v2 model fsyncs a
+* **Interrupted ownership publication.** The current state-v3 model fsyncs a
   launch-attempt marker before sending, never retries an unknown result, and
   removes only identity-recorded sentinels. It does not safely recover every
   hard-kill prefix before inode identities are persisted, nor reconcile an

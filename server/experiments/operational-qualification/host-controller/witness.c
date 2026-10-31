@@ -3,6 +3,7 @@
  */
 #define _GNU_SOURCE
 #include "filter.h"
+#include "sentinel_paths.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
@@ -206,15 +207,11 @@ int main(int argc, char **argv) {
     return 74;
   if (gate_byte(gate, 'G') != 0)
     return 74;
-  char file[108], path[108], abstract[64], local[64];
-  int count = snprintf(file, sizeof(file),
-                       "/dev/shm/waddle-host-%lu-%s/host-file", uid, argv[1]);
-  if (count <= 0 || (size_t)count >= sizeof(file))
+  char file[SENTINEL_PATH_BYTES], path[SENTINEL_PATH_BYTES];
+  char abstract[64], local[64];
+  if (sentinel_paths(file, sizeof(file), path, sizeof(path), uid, argv[1]) != 0)
     return 74;
-  count = snprintf(path, sizeof(path), "/dev/shm/waddle-host-%lu-%s/host.sock",
-                   uid, argv[1]);
-  if (count <= 0 || (size_t)count >= sizeof(path))
-    return 74;
+  int count;
   count = snprintf(abstract, sizeof(abstract), "waddle-host-%s", argv[1]);
   if (count <= 0 || (size_t)count >= sizeof(abstract))
     return 74;
