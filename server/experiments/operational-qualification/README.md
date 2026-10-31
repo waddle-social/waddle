@@ -115,9 +115,9 @@ of synthetic data; it supplies no evidence about Waddle delivery behavior.
 
 ## Gates before any execution adapter or operational run
 
-The environment is an unresolved user choice. No manifest here selects or
-authorizes an environment. Before implementing or running an adapter, review and
-enforce all of these gates:
+The owner selected a local isolated environment for later qualification. No
+manifest here selects or authorizes a target. Before implementing or running an
+adapter, review and enforce all of these gates:
 
 1. **Isolation and authority:** choose the environment, ownership, allowed
    endpoints/processes and fault scope; provision dedicated accounts, rooms,
@@ -172,8 +172,9 @@ censoring, missing/not-sent/lagged generator observations, warmup exclusion,
 invalid observation correlations and timestamps, and observation-order stability.
 These tests prove local contract/accounting behavior only.
 
-The existing server-workspace and dedicated experiment CI lanes do not discover
-this standalone crate. These checks have been run locally; hosted CI coverage
-is an explicit gap. A dedicated non-publishing lane must be reviewed separately,
-including its path triggers and interactions with the deployment publication
-graph. This slice does not modify CI, publish triggers, or `server/env.cue`.
+The standalone `operational-qualification` workflow runs these checks on
+matching pushes and on merge-group candidates without publishing. It is not part
+of the required integration aggregate: fork pull requests do not receive this
+push check in the base repository, and merge-group execution depends on the
+workflow being present in the candidate. Hosted execution remains separate
+evidence from the local results.
