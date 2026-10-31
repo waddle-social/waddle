@@ -42,6 +42,16 @@ android {
 
 }
 
+// UnifiedPush uses desktop Tink; secure storage needs its Android implementation.
+// Both artifacts contain the same classes, so the APK must package only Android Tink.
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("com.google.crypto.tink:tink"))
+            .using(module("com.google.crypto.tink:tink-android:1.23.0"))
+            .because("Use one Android Tink implementation for push and secure storage")
+    }
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }
