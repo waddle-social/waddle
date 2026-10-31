@@ -87,6 +87,8 @@ on:
     - server/scripts/*publish_chart.py
     - server/scripts/observer_release.py
     - server/scripts/observer_release.py/**
+    - server/scripts/test_default_publish_graph.py
+    - server/scripts/test_default_publish_graph.py/**
     - server/scripts/test_observer_release.py
     - server/scripts/test_observer_release.py/**
     - server/vendor/**

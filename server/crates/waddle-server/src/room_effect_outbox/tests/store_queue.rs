@@ -869,7 +869,7 @@ async fn pure_104_successor_coalesces_empty_104_but_preserves_voice_changes() {
 
 #[tokio::test]
 async fn postgres_schema_has_required_room_effect_columns() {
-    let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let db = Database::from_config(

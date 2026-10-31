@@ -1185,7 +1185,7 @@ async fn poison_session_rows_do_not_leak_into_preceding_sessions_queue() {
 /// timestamps with values that do not fit in Postgres int4.
 #[tokio::test]
 async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed regression for sm persistence BIGINT)"
@@ -1240,7 +1240,7 @@ async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
 
 #[tokio::test]
 async fn postgres_store_session_atomic_with_principal_round_trips() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed SM principal persistence)"
@@ -1283,7 +1283,7 @@ async fn postgres_store_session_atomic_with_principal_round_trips() {
 
 #[tokio::test]
 async fn postgres_round_trip_session_preserves_occupancy_generation() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed occupancy_session persistence)"
@@ -1413,7 +1413,7 @@ async fn sqlite_schema_drops_shadow_ordinal_and_preserves_session() {
 
 #[tokio::test]
 async fn postgres_schema_has_no_shadow_ordinal() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (Postgres shadow column removal)");
         return;
     };
@@ -1514,7 +1514,7 @@ async fn sqlite_lists_sessions_for_one_full_jid() {
 
 #[tokio::test]
 async fn postgres_lists_sessions_for_one_full_jid() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed full-JID scoped session listing)"
@@ -1651,7 +1651,7 @@ async fn memory_promotion_append_distinguishes_retries_retirement_and_conflicts(
 
 #[tokio::test]
 async fn postgres_promotion_append_distinguishes_retries_retirement_and_conflicts() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (promotion append outcomes)");
         return;
     };
@@ -1979,7 +1979,7 @@ async fn sqlite_claimed_ack_journal_preserves_custody_until_exact_confirmation()
 
 #[tokio::test]
 async fn postgres_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     #[cfg(feature = "clustering")]

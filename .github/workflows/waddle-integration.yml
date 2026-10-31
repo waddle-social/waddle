@@ -37,7 +37,7 @@ jobs:
       waddle_colony_pullrequest: "${{ steps.plan.outputs.waddle_colony_pullrequest }}"
       waddle_linux_pullrequest: "${{ steps.plan.outputs.waddle_linux_pullrequest }}"
       waddle_server_authzidcodec: "${{ steps.plan.outputs.waddle_server_authzidcodec }}"
-      waddle_server_federationgrantfence: "${{ steps.plan.outputs.waddle_server_federationgrantfence }}"
+      waddle_server_federationgrantfencepullrequest: "${{ steps.plan.outputs.waddle_server_federationgrantfencepullrequest }}"
       waddle_server_namespacerustchecks: "${{ steps.plan.outputs.waddle_server_namespacerustchecks }}"
       waddle_server_pullrequest: "${{ steps.plan.outputs.waddle_server_pullrequest }}"
       waddle_server_roomchildcontract: "${{ steps.plan.outputs.waddle_server_roomchildcontract }}"
@@ -376,10 +376,10 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_authzidcodec == 'true' }}"
-  waddle_server_federationgrantfence__federationgrantfenceproof:
+  waddle_server_federationgrantfencepullrequest__federationgrantfenceproof:
     permissions:
       contents: read
-    name: waddle-server-federationGrantFence / federationGrantFenceProof
+    name: waddle-server-federationGrantFencePullRequest / federationGrantFenceProof
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -409,7 +409,7 @@ jobs:
           GITHUB_REF_NAME: "${{ github.ref_name }}"
     needs:
       - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_federationgrantfence == 'true' }}"
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_server_federationgrantfencepullrequest == 'true' }}"
   waddle_server_namespacerustchecks__clippy:
     permissions:
       contents: read
@@ -969,10 +969,10 @@ jobs:
           drain-timeout: "900"
       - name: Validate CI helper contracts
         shell: bash
-        run: "python3 tests/ci-timings-test.py\npython3 server/scripts/test_check_nextest_shards.py\npython3 server/scripts/test_nextest_archive_transfer.py\npython3 server/scripts/test_build_nextest_archive.py\npython3 server/scripts/test_plan_nextest_binary_shards.py\npython3 server/scripts/test_pin_nextest_shard.py\npython3 server/scripts/test_run_nextest_shards.py"
+        run: bash server/scripts/check-ci-helper-contracts.sh
       - name: Compile and run four isolated test shards
         shell: bash
-        run: bash scripts/run-nextest-shards.sh
+        run: timeout --kill-after=2m 55m bash scripts/run-nextest-shards.sh
         working-directory: server
       - name: Upload compiler and coverage diagnostics
         if: "${{ !cancelled() }}"
@@ -1185,7 +1185,7 @@ jobs:
       - waddle_colony_pullrequest__waddle-colony-pullrequest
       - waddle_linux_pullrequest__waddle-linux-pullrequest
       - waddle_server_authzidcodec__checkauthzidcodec
-      - waddle_server_federationgrantfence__federationgrantfenceproof
+      - waddle_server_federationgrantfencepullrequest__federationgrantfenceproof
       - waddle_server_namespacerustchecks__clippy
       - waddle_server_namespacerustchecks__doctest
       - waddle_server_namespacerustchecks__test

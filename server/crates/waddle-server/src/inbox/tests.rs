@@ -179,7 +179,7 @@ async fn groupchat_notification_recovery_in_transaction_rolls_back_or_commits() 
 
 #[tokio::test]
 async fn transaction_taking_inbox_helpers_work_on_postgres() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed transaction-taking inbox helpers)"
@@ -891,7 +891,7 @@ async fn sqlx_inbox_storage_persists_file_backing() {
 /// Postgres tables must expose this column as BIGINT.
 #[tokio::test]
 async fn sqlx_inbox_postgres_handles_i32_overflow_last_updated() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed regression for inbox_entries.last_updated BIGINT)"
@@ -1101,7 +1101,7 @@ async fn sqlite_migration_replaces_legacy_recoveries_with_required_message_keys(
 
 #[tokio::test]
 async fn postgres_migration_replaces_legacy_recoveries_with_required_message_keys() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (recovery message-key migration)");
         return;
     };
@@ -1367,7 +1367,7 @@ async fn inbox_upsert_a_b_retry_a_preserves_latest_sqlite() {
 
 #[tokio::test]
 async fn inbox_upsert_a_b_retry_a_preserves_latest_postgres() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (monotonic inbox upsert)");
         return;
     };

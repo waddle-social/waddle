@@ -25,7 +25,7 @@ async fn capture_bounded(root: &Path, limit: u64) -> Result<StatusCapture> {
         .env_clear()
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(root);
-    let mut process = Process::spawn(&mut command, None, true)?;
+    let mut process = Process::spawn_probe(&mut command, None, true)?;
     let mut output = process.async_output()?;
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut hash = Sha256::new();
@@ -62,7 +62,7 @@ mod tests {
         init.env_clear()
             .args(["init", "--quiet", "--template="])
             .current_dir(root.path());
-        Process::spawn(&mut init, None, false)?
+        Process::spawn_probe(&mut init, None, false)?
             .finish(Duration::from_secs(5))
             .await?;
         let clean = capture(root.path()).await?;

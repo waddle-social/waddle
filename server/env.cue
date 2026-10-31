@@ -165,6 +165,12 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
+				// cuenv has no per-task runner. nixTestLocal depends on the
+				// helper but not on itself, so it alone selects the privileged
+				// 32-core builder. Publish depends on both and keeps its normal
+				// profile. The JSON round trip permits optional needs lookups;
+				// CI checks the generated graph and its default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -183,6 +189,10 @@ schema.#Project & {
 				_t.renderDeployment,
 				_t.nixBuildImageStream,
 				_t.nixBuildExtensionModules,
+				// Publish evidence: Postgres + all-features shards with the
+				// required-cluster-tests.txt executed-name check (#1796).
+				_t.ciHelperContracts,
+				_t.nixTestLocal,
 				_t.publishContainerImage,
 			]
 		}
@@ -249,9 +259,21 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		federationGrantFencePullRequest: {
+			mode: "expanded"
+			when: pullRequest: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
@@ -365,6 +387,7 @@ schema.#Project & {
 			args: ["experiments/grant-fence/run-native.sh"]
 			inputs: [
 				"experiments/grant-fence/**",
+				"experiments/native-fixture/**",
 				"../flake.lock",
 				"../flake.nix",
 				"rust-toolchain.toml",
@@ -439,6 +462,12 @@ schema.#Project & {
 					if ! bun scripts/integration-ci.ts --check; then
 					  overall_status=1
 					fi
+					# checkCiDrift is itself a direct publication gate. Verify the
+					# generated runner selector and both other direct gates here,
+					# independently of the helper job whose edge is under test.
+					if ! python3 server/scripts/test_default_publish_graph.py; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -452,6 +481,7 @@ schema.#Project & {
 				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
+				"scripts/test_default_publish_graph.py",
 				"../ci/cache-benchmark/**",
 				"../scripts/*cache-benchmark*",
 				"../.github/workflows/waddle-ci-cache-benchmark.yml",
@@ -638,6 +668,10 @@ schema.#Project & {
 					"scripts/plan_nextest_binary_shards.py", "scripts/test_plan_nextest_binary_shards.py",
 					"scripts/nextest-archive-transfer.sh", "scripts/check_nextest_shards.py",
 					"scripts/test_nextest_archive_transfer.py", "scripts/test_check_nextest_shards.py",
+					"scripts/check_required_tests.py", "scripts/test_check_required_tests.py",
+					"scripts/check-test-postgres-env.py", "scripts/test_check_test_postgres_env.py",
+					"scripts/check-ci-helper-contracts.sh",
+					".config/required-cluster-tests.txt",
 					"../scripts/ci-timings.py", "../tests/ci-timings-test.py"],
 				tasks.checkCiDrift.inputs,
 				tasks.checkSwitchableAlternativeProgram.inputs,
@@ -648,11 +682,33 @@ schema.#Project & {
 			hermetic: false
 		}
 
+		// Contract tests for the shard lane's helpers (required-test check,
+		// shard planning, archive transfer) and the Postgres test-environment
+		// structure check. The PR rustTests workflow runs the same script.
+		ciHelperContracts: schema.#Task & {
+			// Reads ../tests and ../scripts through ../ inputs, which cuenv
+			// 0.56 rejects under the "dir" sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["scripts/check-ci-helper-contracts.sh"]
+			inputs: list.Concat([_nixInputs, [
+				"scripts/**",
+				".config/required-cluster-tests.txt",
+				"../scripts/ci-timings.py",
+				"../tests/ci-timings-test.py",
+			]])
+		}
+
 		// The immutable archives and four sandboxed shards stay on one
 		// 32-core builder. The runner enforces eight disjoint CPUs per shard.
+		// cuenv 0.57.3 emits no timeout-minutes for the main-pipeline job (it
+		// gates publish), so the lane bounds itself inside the PR job's 60
+		// minutes; a timeout fails the lane with diagnostics instead of
+		// holding publish for GitHub's six-hour default.
 		nixTestLocal: schema.#Task & {
-			command: "bash"
-			args: ["scripts/run-nextest-shards.sh"]
+			command: "timeout"
+			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
+			dependsOn: [tasks.ciHelperContracts]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false
@@ -1406,6 +1462,11 @@ schema.#Project & {
 				tasks.renderDeployment,
 				tasks.nixBuildImageStream,
 				tasks.nixBuildExtensionModules,
+				// No image ships unless the Postgres + all-features lane ran
+				// every required cluster test on this exact commit. Keep both
+				// direct gates, even though the shard lane also needs helpers.
+				tasks.ciHelperContracts,
+				tasks.nixTestLocal,
 			]
 		}
 

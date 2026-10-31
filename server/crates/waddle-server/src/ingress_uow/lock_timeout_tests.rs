@@ -96,7 +96,7 @@ async fn sqlite_ingress_begin_with_timeouts_maps_pool_checkout_expiry_to_timeout
 
 #[tokio::test]
 async fn postgres_ingress_begin_with_timeouts_bounds_pool_checkout() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping postgres_ingress_begin_with_timeouts_bounds_pool_checkout: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

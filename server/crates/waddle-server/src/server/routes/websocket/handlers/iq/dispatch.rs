@@ -114,6 +114,25 @@ pub async fn handle_iq_with_conn_state(
         xmpp_parsers::iq::Iq::Result { .. } | xmpp_parsers::iq::Iq::Error { .. }
     ) {
         if let Some(full) = phase.bound_jid() {
+            // A peer reply belongs to the addressed resource, even if its ID
+            // collides with a server-issued CAPS query. Route it before the
+            // CAPS matcher can consume an unrelated pending request.
+            if let Some(target) = iq.to().and_then(|jid| {
+                (jid.node().is_some() && jid.domain().as_str() == domain)
+                    .then(|| jid.clone().try_into_full().ok())
+                    .flatten()
+            }) {
+                return route_full_jid_iq(
+                    iq,
+                    state,
+                    Some(full),
+                    target,
+                    response_from,
+                    conn_state.ordered_relay_origin.clone(),
+                )
+                .await
+                .into();
+            }
             handle_caps_disco_info_result(&iq, full, state);
         }
         debug!(id = %id, "Ignoring IQ result/error stanza");

@@ -14,6 +14,9 @@ pub use crate::server::routes::websocket::muc_invites::{
     claim_invite, list_invites, record_invite_at, InviteStorageError, OutstandingInvite,
     RecordOutcome,
 };
+/// The production `/ws` RFC 7395 router, so suites can serve a test state
+/// over a real loopback WebSocket and drive the live connection loop.
+pub use crate::server::routes::websocket::router;
 pub use crate::server::routes::websocket::test_state::{
     create_test_session, register_test_connection, seed_local_account,
 };
@@ -21,6 +24,20 @@ use crate::server::routes::websocket::test_state::{
     create_test_websocket_state_with_ingress_factory, empty_extension_manager, TestStateOverrides,
 };
 pub use crate::server::routes::websocket::WebSocketState;
+
+/// Build the default in-memory WebSocket state the in-crate suites use
+/// (SQLite in memory, single-node registries, the test ingress authority).
+///
+/// # Panics
+/// Panics if database schema or WebSocket fixture construction fails.
+pub async fn websocket_state() -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides::default(),
+        || std::future::ready(None),
+    )
+    .await
+}
 
 /// Build a minimal WebSocket state over a caller-owned database pool and ingress authority.
 ///

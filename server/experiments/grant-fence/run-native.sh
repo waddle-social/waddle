@@ -14,6 +14,6 @@ cd -- "$FENCE_EXPERIMENT_ROOT"
 # Formal evidence requires a clean committed source tree; the Rust test also
 # checks its source digest and Git state again after services have stopped.
 export FENCE_REQUIRE_PINNED=1
-cargo fmt --check
-cargo test --locked -- --nocapture
-cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --all --check
+cargo test --workspace --locked -- --nocapture
+cargo clippy --workspace --all-targets --locked -- -D warnings

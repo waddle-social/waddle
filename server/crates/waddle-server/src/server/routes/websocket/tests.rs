@@ -67,6 +67,7 @@ mod misc;
 mod muc;
 mod registration;
 mod rfc3921_session_destination;
+mod rfc6121_iq_reply;
 mod send;
 mod space_fanout_postgres;
 mod stream_features;

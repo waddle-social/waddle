@@ -161,7 +161,7 @@ async fn sqlite_repair_preserves_position_and_tail_high_water_mark() {
 
 #[tokio::test]
 async fn postgres_repair_preserves_position_and_tail_high_water_mark() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping Postgres MAM ordinal test: WADDLE_TEST_POSTGRES_URL is unset");
         return;
     };
@@ -170,7 +170,7 @@ async fn postgres_repair_preserves_position_and_tail_high_water_mark() {
 
 #[tokio::test]
 async fn postgres_allocation_serializes_commit_and_rollback_leaves_no_phantom_row() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping Postgres MAM ordinal concurrency test: WADDLE_TEST_POSTGRES_URL is unset"
         );
@@ -468,7 +468,7 @@ async fn sqlite_existing_archive_rejects_changed_projection() {
 
 #[tokio::test]
 async fn postgres_existing_archive_rejects_changed_projection() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     projection_conflict(SqlxMamStorage::open(&url).await.expect("schema")).await;

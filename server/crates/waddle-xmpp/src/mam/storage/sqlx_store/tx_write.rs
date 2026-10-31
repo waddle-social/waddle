@@ -418,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_tx_write_preserves_canonical_identity_and_repairs_recorded_timestamp() {
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping Postgres MAM tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
             return;
         };

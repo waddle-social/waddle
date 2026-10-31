@@ -301,7 +301,7 @@ async fn spawn_expecting_startup_refusal(envs: Vec<(String, String)>) {
 
 #[tokio::test]
 async fn two_replicas_same_database_both_ready() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -372,7 +372,7 @@ async fn sqlite_unenrolled_database_stays_unready() {
 
 #[tokio::test]
 async fn unenrolled_database_stays_unready() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -409,7 +409,7 @@ async fn unenrolled_database_stays_unready() {
 
 #[tokio::test]
 async fn split_deployment_rejected() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };
@@ -455,7 +455,7 @@ async fn split_deployment_rejected() {
 
 #[tokio::test]
 async fn enroll_action_is_one_shot_and_idempotent() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

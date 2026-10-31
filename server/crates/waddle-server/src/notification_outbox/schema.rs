@@ -1356,7 +1356,7 @@ mod tests {
     /// CREATE-TABLE-rebuild migration path).
     #[tokio::test]
     async fn store_initialization_drops_anonymous_postgres_class_check_constraint() {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!(
                 "skipping: WADDLE_TEST_POSTGRES_URL not set \
                  (postgres-only regression for anonymous CHECK drop)"

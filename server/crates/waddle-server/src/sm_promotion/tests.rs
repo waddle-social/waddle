@@ -4003,7 +4003,7 @@ async fn postgres_fenced_offline_sender_bounce_retires_exact_source_once() {
     use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
     use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
     use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
-    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let _guard = clustering_control_plane_table_lock().lock().await;
