@@ -492,10 +492,27 @@ open class ConversationViewModel(
      */
     fun sendAttachment(uri: android.net.Uri) {
         val up = uploader ?: return
+        uploadAttachment { up.upload(uri) }
+    }
+
+    /** IME content is already copied by Flutter; use the same encrypted upload/send path. */
+    fun sendAttachmentImageBytes(data: ByteArray, mediaType: String) {
+        val up = uploader ?: return
+        uploadAttachment { up.uploadImageBytes(data, mediaType) }
+    }
+
+    private fun uploadAttachment(upload: suspend () -> UploadResult) {
         if (_uploadState.value == UploadState.Uploading) return
         _uploadState.value = UploadState.Uploading
         viewModelScope.launch {
-            when (val result = runCatching { up.upload(uri) }.getOrElse { UploadResult.Failed }) {
+            val result = try {
+                upload()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                UploadResult.Failed
+            }
+            when (result) {
                 is UploadResult.Done -> dispatchUploaded(result.file)
                 UploadResult.TooLarge -> _uploadState.value = UploadState.TooLarge
                 UploadResult.Failed -> _uploadState.value = UploadState.Failed

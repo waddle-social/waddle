@@ -986,6 +986,7 @@
               # scripts/setup-android-sdk.sh, not nix.
               pkgs.temurin-bin-21
               pkgs.cargo-ndk
+              pkgs.flutter
               pkgs.gh
             ];
 

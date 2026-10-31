@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Compose draws everything; this is only the pre-Compose window,
-         grounded in the same background token as the first frame. -->
+    <!-- Flutter draws the UI; this is the host window before its first frame. -->
     <style name="Theme.Waddle" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowBackground">@color/window_background</item>
     </style>
 
-    <!-- core-splashscreen theme; MainActivity holds the splash until the
-         app state leaves Loading, then swaps to Theme.Waddle. A calm ground
+    <!-- core-splashscreen theme; MainActivity holds the splash during local
+         session initialization, then swaps to Theme.Waddle. A calm ground
          in the system's theme, not a full-bleed accent flash. -->
     <style name="Theme.Waddle.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/window_background</item>

@@ -53,8 +53,17 @@ def verify_project(summary, metadata, requested_path, pipeline):
     if config.get("name") != project["name"]:
         raise ValueError("project summary and definition disagree")
     pipeline_config = config.get("ci", {}).get("pipelines", {}).get(pipeline, {})
-    if pipeline_config.get("environment") or pipeline_config.get("continueOnError"):
+    if pipeline_config.get("environment"):
         raise ValueError("pipeline execution options require explicit adapter support")
+    continue_on_error = pipeline_config.get("continueOnError", False)
+    if type(continue_on_error) is not bool:
+        raise ValueError("continueOnError must be boolean")
+    # Reviewed Android PR builds keep producing an APK after an independent
+    # check fails. execute_pipeline still delegates the original cuenv ci and
+    # requires a successful fresh report with every named task successful.
+    # Continuing work never turns a failed check into a passing integration.
+    if continue_on_error and (project["path"], project["name"], pipeline) != ("apps/android", "waddle-android", "pullRequest"):
+        raise ValueError("continuing after errors is supported only for Android PR builds")
     tasks = pipeline_config.get("tasks")
     names_to_run = []
     if not isinstance(tasks, list) or not tasks:
