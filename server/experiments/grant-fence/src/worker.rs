@@ -15,6 +15,7 @@ pub async fn run_worker() -> Result<()> {
     let work = match request {
         WorkerRequest::Guard(work) => work,
         WorkerRequest::Recovery(work) => return crate::recovery::execute(&work).await,
+        WorkerRequest::WriteProxy(work) => return crate::recovery::execute_proxy(&work).await,
     };
     work.settings.validate()?;
     ensure!(

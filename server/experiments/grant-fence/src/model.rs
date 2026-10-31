@@ -163,6 +163,7 @@ pub struct Work {
 pub enum WorkerRequest {
     Guard(Work),
     Recovery(crate::recovery::RecoveryWork),
+    WriteProxy(crate::recovery::ProxyWork),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2154,6 +2154,7 @@ name = "waddle-grant-fence-experiment"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "hex",
  "libc",
  "prescience",
@@ -2164,6 +2165,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tonic",
  "url",
  "uuid",
 ]

@@ -35,6 +35,7 @@ struct Report {
     outcome: String,
     cases: Vec<Case>,
     recovery_cases: Vec<crate::recovery::RecoveryCase>,
+    lost_response_cases: Vec<crate::recovery::LostResponseCase>,
     pending: Vec<&'static str>,
 }
 
@@ -51,6 +52,7 @@ struct EvidenceSummary<'a> {
     authority: &'static str,
     cases: &'a [Case],
     recovery_cases: &'a [crate::recovery::RecoveryCase],
+    lost_response_cases: &'a [crate::recovery::LostResponseCase],
     pending: &'a [&'static str],
 }
 
@@ -209,10 +211,10 @@ pub async fn run(worker_binary: &str) -> Result<()> {
     let mut report = Report {
         formal_evidence: provenance.clean && !measure_shutdown, provenance: provenance.clone(), cleanup_verified: false, cleanup_failure: None, versions: Vec::new(),
         authority: "Bounded PostgreSQL/SpiceDB canonical leaf recovery comparison plus original PostgreSQL guard proof",
-        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(),
+        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(), lost_response_cases: Vec::new(),
         pending: vec![
             "production canonical authority selection and complete P/S recovery comparison",
-            "unknown accepted external-write outcomes and durable recovery protocol",
+            "production unknown-write recovery beyond bounded leaf response-loss scenarios",
             "PostgreSQL process restart and physical/logical restore",
             "physical/logical graph loss, restore and multi-edge dependency closure",
             "schema/dependency drift and immutable schema enforcement",
@@ -233,6 +235,12 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             &mut fixture,
             Path::new(worker_binary),
             &mut report.recovery_cases,
+        )
+        .await?;
+        crate::recovery::run_lost_responses(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.lost_response_cases,
         )
         .await?;
         Ok(())
@@ -285,6 +293,7 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         authority: report.authority,
         cases: &report.cases,
         recovery_cases: &report.recovery_cases,
+        lost_response_cases: &report.lost_response_cases,
         pending: &report.pending,
     };
     let summary = serde_json::to_vec(&summary)?;
