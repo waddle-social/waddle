@@ -8,24 +8,26 @@ use super::{
 };
 use crate::server::routes::websocket::XmppServiceDomains;
 
-/// Check the remote ping target before entering the shared IQ dispatcher.
-pub(super) async fn handle_sans_io_iq_with_ping_preflight(
+/// Reject unsupported remote targets before local ping or Carbons handling.
+pub(super) async fn handle_sans_io_iq_with_remote_preflight(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> Option<Vec<String>> {
-    if ctx.payload_ns == waddle_xmpp::xep::xep0199::NS_PING
-        && state
-            .deps
-            .protocol
-            .dispatcher
-            .has_iq_handler(ctx.payload_ns)
+    if matches!(
+        ctx.payload_ns,
+        waddle_xmpp::xep::xep0199::NS_PING | waddle_xmpp::carbons::CARBONS_NS
+    ) && state
+        .deps
+        .protocol
+        .dispatcher
+        .has_iq_handler(ctx.payload_ns)
     {
         if let Some(full_jid) = phase.bound_jid() {
             if let Some(reply) =
-                remote_ping_error(ctx.iq, ctx.domain, &state.deps.service_domains, full_jid)
+                remote_iq_error(ctx.iq, ctx.domain, &state.deps.service_domains, full_jid)
             {
                 return Some(vec![stanza_to_xml(&Stanza::Iq(Box::new(reply)))]);
             }
@@ -34,9 +36,10 @@ pub(super) async fn handle_sans_io_iq_with_ping_preflight(
     super::sans_io::handle_sans_io_iq(ctx, state, authenticated_session, phase, conn_state).await
 }
 
-/// Reject an unsupported remote ping before the local namespace handler can
-/// answer it. Local full-JID forwarding and MUC self-ping run before this gate.
-pub(super) fn remote_ping_error(
+/// Reject an unsupported remote request before a local handler can acknowledge
+/// it or change connection state. Local full-JID forwarding and MUC self-ping
+/// run before this gate.
+pub(super) fn remote_iq_error(
     iq: &Iq,
     domain: &str,
     services: &XmppServiceDomains,
@@ -64,15 +67,20 @@ pub(super) fn remote_ping_error(
         return None;
     }
 
+    let description = if payload.ns() == waddle_xmpp::carbons::CARBONS_NS {
+        "Remote Carbons routing is not allowed by this server."
+    } else {
+        "Remote ping routing is not allowed by this server."
+    };
     let mut error = StanzaError::new(
         ErrorType::Cancel,
         DefinedCondition::NotAllowed,
         "en",
-        "Remote ping routing is not allowed by this server.",
+        description,
     );
     // RFC 6120 §8.3.1: swap the request addresses and identify the local
-    // error generator with `by`. An error from the intended target is not a
-    // remote pong. Always address it to the bound origin, never client `from`.
+    // error generator with `by`. Always address it to the bound origin,
+    // never client `from`.
     error.by = Some(Jid::from(BareJid::from_parts(None, sender.domain())));
     Some(Iq::Error {
         from: Some(target.clone()),
