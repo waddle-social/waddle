@@ -32,7 +32,7 @@ export FENCE_TEST_SHELL=/absolute/bash/bin/bash
 export FENCE_TEST_SLEEP=/absolute/coreutils/bin/sleep
 ```
 
-`src/binaries.rs` requires absolute existing paths and attests the exact versions
+`../native-fixture/src/binaries.rs` requires absolute existing paths and attests the exact versions
 of `postgres`, `initdb`, and `spicedb` before starting a fixture. The process
 cleanup regression also requires explicit shell/sleep executable paths; the Nix
 runner supplies pinned Bash and coreutils paths. A missing path,
@@ -43,15 +43,15 @@ All database settings are generated internally; these binary-path variables do
 not permit supplying a DSN, database directory, or credential.
 
 ```sh
-cargo test --locked -- --nocapture
-cargo clippy --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --nocapture
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 The explicit CI/formal-evidence invocation additionally rejects dirty or
 untracked source:
 
 ```sh
-FENCE_REQUIRE_PINNED=1 cargo test --locked -- --nocapture
+FENCE_REQUIRE_PINNED=1 cargo test --workspace --locked -- --nocapture
 ```
 
 Development runs record their exact Git HEAD, byte count and full SHA-256 digest of dirty/untracked status, and a
@@ -128,7 +128,7 @@ bytes occur. They contain nonsecret barrier observations and the following expli
 | PostgreSQL lock timeout | Implemented, explicit SQLSTATE and no effect |
 | SpiceDB outage and same-database process restart | Implemented; checks fail closed, graph persistence checked |
 | Bounded canonical leaf P/S comparison | Implemented in #2051; full production authority selection/recovery remains **PENDING** |
-| Unknown accepted external writes and durable recovery | **PENDING** |
+| Lost external write response | Bounded leaf caller-deadline scenarios below; production unknown-write recovery remains **PENDING** |
 | PostgreSQL restart, restore, full graph loss/rebuild | **PENDING**; controlled closed leaf/marker removal is covered separately |
 | Moves, all lifecycle writers, schema/dependency drift | **PENDING** |
 | Multi-edge graphs, actor/claim fences, codec migration | **PENDING** |
@@ -204,9 +204,88 @@ The subsequent permission check uses that same exact snapshot.
 
 Loss injection always observes an exact committed closed fence first, except
 the explicitly labeled ACTIVE negative control. The test does not establish
-arbitrary active-corruption detection, lost-response recovery, multi-edge
+arbitrary active-corruption detection, production lost-response recovery, multi-edge
 closure, schema immutability, restore safety, production writer/actor closure,
 accepted room-child behavior, final byte draining or federation readiness.
 The accepted-child contract needs separate tests through actual ingress/replay
 code. Global SpiceDB outage denies protected reads for both candidates;
 independent-scope progress is demonstrated only with healthy SpiceDB.
+
+
+## Lost write response and caller deadline
+
+The same native runner adds twelve leaf scenarios and one inverted-order negative control to the original 32. Each uses
+an owned, supervised proxy process listening only on an ephemeral loopback port.
+It accepts one authenticated `WriteRelationships` request, forwards its exact
+bounded protobuf bytes, and lets tonic validate the actual backend unary body
+and final successful gRPC status. Only then does the proxy record
+`BackendAcknowledged`; it withholds that success from the mutation worker.
+The control records `RequestNotForwarded` without invoking the backend write.
+An independent real read verifies presence or absence of the exact marker/leaf.
+Unauthenticated, unsupported-method and oversized requests are rejected before
+the one accepted write; all twelve positive schedules exercise those receiving boundaries.
+
+The writer captures an absolute two-second `CLOCK_MONOTONIC` deadline before
+starting the write and arms that exact deadline using Linux timerfd with
+`TFD_TIMER_ABSTIME`; recording a barrier never restarts the duration. The
+prescience endpoint timeout is ten seconds. Clock reads, arithmetic and timer
+setup fail closed. Evidence requires
+`CallerDeadlineExceeded`, not merely an unavailable service or a worker killed
+after acknowledgement. This is a local elapsed deadline, **not** a claimed
+remote gRPC `DeadlineExceeded` status: pinned tonic 0.12.3 maps its own transport
+timeout to `Cancelled`. Unexpected gRPC statuses are recorded separately and
+fail these scenarios. The controller releases the proxy only after the worker
+has exited with that local deadline and without acknowledgement, verification
+or activation. The proxy's eventual error is not the caller's observed result.
+The independently timestamped proxy fault observation must fall between the
+writer's armed time and its exact absolute deadline, strictly before expiry.
+The writer records actual timerfd expiration on the same shared monotonic clock.
+Checking absence of a completion file is not accepted as ordering evidence. The proxy's own waits,
+wire messages (8KiB), readbacks and native process cleanup are bounded; raw
+requests, metadata, credentials and responses never enter files or reports.
+It uses the existing stdin-only credential transfer, process-group ownership,
+cleanup latch and report secret scan. This is a fault fixture, not a production
+proxy or an external-write recovery service.
+
+Both candidates are tested for grant and revoke with committed-write response
+loss and never-forwarded controls. The SQL guard stays closed throughout the
+uncertainty. A separate healthy scope mutates and admits while the successful
+response remains withheld. Fresh recovery processes receive only identity and
+digest. PostgreSQL reconstructs from its canonical SQL intent in either control;
+SpiceDB recovers committed marker/leaf data after response loss and stays closed
+when the request never arrived. Neither candidate derives success from timeout.
+
+Four additional schedules commit a newer revoke while the old reply is withheld,
+then deliberately republish the exact older marker/leaf and run fresh recovery.
+The old operation remains stale and cannot admit; the newer revoked guard stays
+closed. This demonstrates bounded operation identity and activation fencing,
+not a production retry protocol. Reports distinguish proxy evidence, caller
+failure, historical canonical facts, recovery outcome and the newer identity.
+No production writer closure, arbitrary corruption recovery, PostgreSQL restart,
+restore safety, inherited/multi-edge policy, accepted-child contract change,
+byte draining or federation readiness is established by these cases.
+
+
+The inverted-order control deliberately pauses a real worker after its local
+absolute deadline but before its `done` observation. Only then is the proxy's
+one owned request task allowed to forward the write. The real backend commits,
+the marker/leaf is independently read back, and `done` is still absent, yet the
+monotonic ordering check must reject that schedule. The controller later releases
+the worker and recovers the actual committed state in a fresh process. The report
+labels this `AfterCallerDeadline` with `ordering_accepted: false`; it is not a
+passing pre-deadline response-loss observation. The bounded upstream task belongs
+to the supervised proxy process and survives downstream cancellation for this
+control. Explicit process-group stop and the sticky cleanup latch cover that
+runtime and all its tasks; no detached task can outlive verified process cleanup.
+
+
+## Shared native supervisor
+
+The standalone workspace now includes `../native-fixture`. The existing proof
+uses that single implementation for native services, worker supervision, settings,
+credential scans and cleanup; its SQL/Zed schemas remain here. See the sibling
+README for the live-permit and trusted process-group boundaries. The runner uses
+`--workspace`, so moved native cleanup regressions remain mandatory. Source
+provenance includes both source trees/manifests, the single workspace lock, schemas,
+runner and repository Nix/toolchain inputs. Early fixture shutdown with an
+outstanding child is now an explicit sticky failure that retains private data.

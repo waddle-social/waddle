@@ -35,6 +35,7 @@ struct Report {
     outcome: String,
     cases: Vec<Case>,
     recovery_cases: Vec<crate::recovery::RecoveryCase>,
+    lost_response_cases: Vec<crate::recovery::LostResponseCase>,
     pending: Vec<&'static str>,
 }
 
@@ -51,6 +52,7 @@ struct EvidenceSummary<'a> {
     authority: &'static str,
     cases: &'a [Case],
     recovery_cases: &'a [crate::recovery::RecoveryCase],
+    lost_response_cases: &'a [crate::recovery::LostResponseCase],
     pending: &'a [&'static str],
 }
 
@@ -74,12 +76,9 @@ impl Worker {
         };
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn_tracked(
+        let process = fixture.spawn_worker(
             &mut command,
             Some(&serde_json::to_vec(&WorkerRequest::Guard(work.clone()))?),
-            false,
-            fixture.cleanup_latch(),
-            crate::cleanup::CleanupService::Worker,
         )?;
         Ok(Self { process, work })
     }
@@ -209,10 +208,10 @@ pub async fn run(worker_binary: &str) -> Result<()> {
     let mut report = Report {
         formal_evidence: provenance.clean && !measure_shutdown, provenance: provenance.clone(), cleanup_verified: false, cleanup_failure: None, versions: Vec::new(),
         authority: "Bounded PostgreSQL/SpiceDB canonical leaf recovery comparison plus original PostgreSQL guard proof",
-        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(),
+        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(), lost_response_cases: Vec::new(),
         pending: vec![
             "production canonical authority selection and complete P/S recovery comparison",
-            "unknown accepted external-write outcomes and durable recovery protocol",
+            "production unknown-write recovery beyond bounded leaf response-loss scenarios",
             "PostgreSQL process restart and physical/logical restore",
             "physical/logical graph loss, restore and multi-edge dependency closure",
             "schema/dependency drift and immutable schema enforcement",
@@ -227,12 +226,20 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             "formal evidence requires a clean committed experiment source"
         );
         report.versions = fixture.versions().await?;
-        fixture.start().await?;
+        fixture
+            .start(crate::model::APP_SCHEMA, crate::model::SPICE_SCHEMA)
+            .await?;
         exercise(&mut fixture, Path::new(worker_binary), &mut report).await?;
         crate::recovery::run(
             &mut fixture,
             Path::new(worker_binary),
             &mut report.recovery_cases,
+        )
+        .await?;
+        crate::recovery::run_lost_responses(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.lost_response_cases,
         )
         .await?;
         Ok(())
@@ -285,6 +292,7 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         authority: report.authority,
         cases: &report.cases,
         recovery_cases: &report.recovery_cases,
+        lost_response_cases: &report.lost_response_cases,
         pending: &report.pending,
     };
     let summary = serde_json::to_vec(&summary)?;

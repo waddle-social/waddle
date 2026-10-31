@@ -11,10 +11,10 @@ use sqlx::{Executor, Row};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use crate::authority::client;
 use crate::binaries::Binaries;
 use crate::cleanup::{CleanupFailure, CleanupLatch, CleanupService};
-use crate::model::{write_private, Settings, APP_SCHEMA, SPICE_SCHEMA};
+use crate::client::client;
+use crate::model::{write_private, Settings};
 use crate::process::{Process, POSTGRES_SHUTDOWN_BUDGET};
 
 pub struct Fixture {
@@ -24,10 +24,15 @@ pub struct Fixture {
     pub evidence: PathBuf,
     postgres: Option<Process>,
     spice: Option<Process>,
-    spice_run: u32,
     cleanup: CleanupLatch,
     #[cfg(test)]
     inject_shutdown_failure: bool,
+    #[cfg(test)]
+    startup_probe: Option<(
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+        bool,
+    )>,
     #[cfg(test)]
     postgres_shutdown_budget: Duration,
 }
@@ -35,9 +40,10 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Result<Self> {
         let binaries = Binaries::from_env()?;
-        let root = tempfile::Builder::new()
+        let mut root = tempfile::Builder::new()
             .prefix("waddle-fence-private-")
             .tempdir_in("/tmp")?;
+        root.disable_cleanup(true);
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
         let fixture = Uuid::new_v4();
         write_private(
@@ -63,16 +69,17 @@ impl Fixture {
             evidence,
             postgres: None,
             spice: None,
-            spice_run: 0,
             cleanup: CleanupLatch::default(),
             #[cfg(test)]
             inject_shutdown_failure: false,
+            #[cfg(test)]
+            startup_probe: None,
             #[cfg(test)]
             postgres_shutdown_budget: POSTGRES_SHUTDOWN_BUDGET,
         })
     }
 
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self, app_schema: &str, spice_schema: &str) -> Result<()> {
         self.binaries.attest(&self.cleanup).await?;
         let listener = TcpListener::bind("127.0.0.1:0").context("reserve loopback SpiceDB port")?;
         self.settings.grpc_port = listener.local_addr()?.port();
@@ -163,6 +170,12 @@ impl Fixture {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
+        #[cfg(test)]
+        if let Some((reached, resume, fail)) = &self.startup_probe {
+            reached.notify_one();
+            resume.notified().await;
+            ensure!(!fail, "injected partial startup failure");
+        }
         // Only generated lowercase UUID hex enters these constant DDL templates.
         admin
             .execute(
@@ -225,7 +238,7 @@ impl Fixture {
             .settings
             .connect("fence_app", "fence_app", "fixture-schema", 3000)
             .await?;
-        sqlx::raw_sql(APP_SCHEMA).execute(&mut app).await?;
+        sqlx::raw_sql(app_schema).execute(&mut app).await?;
         let mut migrate = self.spice_command()?;
         migrate
             .arg("migrate")
@@ -240,11 +253,7 @@ impl Fixture {
         )?
         .finish(Duration::from_secs(40))
         .await?;
-        self.start_spice().await?;
-        client(&self.settings)
-            .await?
-            .write_schema(SPICE_SCHEMA)
-            .await?;
+        self.start_spice_with_schema(Some(spice_schema)).await?;
         Ok(())
     }
 
@@ -262,8 +271,11 @@ impl Fixture {
     }
 
     pub async fn start_spice(&mut self) -> Result<()> {
+        self.start_spice_with_schema(None).await
+    }
+
+    async fn start_spice_with_schema(&mut self, initial_schema: Option<&str>) -> Result<()> {
         ensure!(self.spice.is_none(), "SpiceDB already running");
-        self.spice_run += 1;
         let mut command = self.spice_command()?;
         command
             .arg("serve")
@@ -288,8 +300,8 @@ impl Fixture {
             if let Ok(client) = client(&self.settings).await {
                 // A real authenticated schema RPC establishes ready service,
                 // including empty schema before the initial test-only install.
-                let ready = if self.spice_run == 1 {
-                    client.write_schema(SPICE_SCHEMA).await.map(|_| ())
+                let ready = if let Some(schema) = initial_schema {
+                    client.write_schema(schema).await.map(|_| ())
                 } else {
                     client.read_schema().await.map(|_| ())
                 };
@@ -343,6 +355,12 @@ impl Fixture {
         })
     }
 
+    /// Only trusted native test workers: descendants must stay in the process
+    /// group. PostgreSQL has its separate coordinated shutdown path.
+    pub fn spawn_worker(&self, command: &mut Command, input: Option<&[u8]>) -> Result<Process> {
+        Process::spawn_tracked(command, input, false, &self.cleanup, CleanupService::Worker)
+    }
+
     pub fn cleanup_failure(&self) -> Option<CleanupFailure> {
         self.cleanup.failure()
     }
@@ -352,18 +370,19 @@ impl Fixture {
         self.postgres.is_none() && self.spice.is_none()
     }
 
-    pub fn cleanup_latch(&self) -> &CleanupLatch {
+    #[cfg(test)]
+    pub(crate) fn cleanup_latch(&self) -> &CleanupLatch {
         &self.cleanup
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
+        // Root cleanup is disabled from creation, including unwind/early error.
+        self.cleanup.close();
         if let Err(failure) = self.stop_services() {
             self.cleanup.record(failure);
         }
+        self.cleanup.require_no_children();
         if let Some(failure) = self.cleanup.failure() {
-            if let Some(root) = self.root.as_mut() {
-                root.disable_cleanup(true);
-            }
             return Err(anyhow::Error::new(failure.clone())).with_context(|| {
                 format!(
                     "process cleanup unverified; private fixture retained at {}",
@@ -376,10 +395,19 @@ impl Fixture {
         } else {
             Ok(())
         };
-        if let Some(root) = self.root.take() {
-            root.close().context("remove private fixture data")?;
+        if let Err(error) = credential_check {
+            self.cleanup
+                .record(CleanupFailure::capture(CleanupService::Fixture, &error));
+            return Err(error);
         }
-        credential_check
+        if let Some(root) = self.root.take() {
+            if let Err(error) = root.close().context("remove private fixture data") {
+                self.cleanup
+                    .record(CleanupFailure::capture(CleanupService::Fixture, &error));
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn stop_services(&mut self) -> std::result::Result<(), CleanupFailure> {
@@ -532,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn stopped_postgres_backend_prevents_data_cleanup() -> Result<()> {
         let mut fixture = Fixture::new()?;
-        fixture.start().await?;
+        fixture.start("", crate::TEST_SCHEMA).await?;
         let root = fixture.settings.root.clone();
         let mut backend = fixture
             .settings
@@ -610,6 +638,82 @@ mod tests {
         // Both services have now completed verified shutdown; only this test's
         // marked, private root is removed after checking the retention contract.
         tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+    #[test]
+    fn poisoned_gate_shutdown_and_drop_retain_private_root() -> Result<()> {
+        let mut fixture = Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        fixture.cleanup.poison();
+        ensure!(
+            fixture.shutdown().is_err(),
+            "poison must forbid root cleanup"
+        );
+        drop(fixture);
+        ensure!(
+            root.join("fixture-id").is_file(),
+            "poison removed private root"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_startup_failure_and_cancellation_keep_postgres_owned() -> Result<()> {
+        for fail in [false, true] {
+            let mut fixture = Fixture::new()?;
+            let root = fixture.settings.root.clone();
+            let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+            let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+            fixture.startup_probe = Some((reached.clone(), resume.clone(), fail));
+            {
+                let start = fixture.start("", crate::TEST_SCHEMA);
+                tokio::pin!(start);
+                tokio::time::timeout(std::time::Duration::from_secs(45), async {
+                    tokio::select! {
+                        result = &mut start => anyhow::bail!("startup completed before probe: {}", result.is_ok()),
+                        () = reached.notified() => Ok(()),
+                    }
+                }).await??;
+                if fail {
+                    resume.notify_one();
+                    ensure!(start.await.is_err(), "partial startup must fail");
+                }
+                // Otherwise cancellation drops the pending start future here.
+            }
+            ensure!(
+                fixture.postgres.is_some() && fixture.cleanup.outstanding() == 1,
+                "partial startup lost its live postmaster registration"
+            );
+            fixture.shutdown()?;
+            ensure!(
+                fixture.cleanup.outstanding() == 0 && !root.exists(),
+                "verified partial-start shutdown did not discharge ownership"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn failed_credential_scan_retains_root_even_after_fault_is_removed() -> Result<()> {
+        let mut fixture = Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        std::os::unix::fs::symlink(root.join("fixture-id"), root.join("unexpected-link"))?;
+        ensure!(
+            fixture.shutdown().is_err(),
+            "unscannable root must fail closed"
+        );
+        ensure!(
+            root.join("fixture-id").is_file(),
+            "early scan failure removed data"
+        );
+        std::fs::remove_file(root.join("unexpected-link"))?;
+        ensure!(
+            fixture.shutdown().is_err(),
+            "scan failure must remain sticky"
+        );
+        drop(fixture);
+        ensure!(root.exists(), "Drop deleted failed scan evidence");
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

@@ -2154,6 +2154,26 @@ name = "waddle-grant-fence-experiment"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "hex",
+ "libc",
+ "prescience",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+ "waddle-native-fixture",
+]
+
+[[package]]
+name = "waddle-native-fixture"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
  "hex",
  "libc",
  "prescience",
@@ -2163,7 +2183,6 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "tokio-stream",
  "url",
  "uuid",
 ]
