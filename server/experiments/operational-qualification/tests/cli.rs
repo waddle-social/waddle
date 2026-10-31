@@ -293,6 +293,90 @@ fn local_isolation_executable_rejects_positional_records_zero_digests_and_additi
 }
 
 #[test]
+fn local_isolation_executable_requires_string_enums_at_every_input_boundary() {
+    let valid: Value =
+        serde_json::from_str(include_str!("../examples/local-isolation.json")).expect("fixture");
+    for target in [
+        "purpose",
+        "architecture",
+        "artifact_role",
+        "artifact_architecture",
+        "artifact_type",
+        "additional_role",
+        "additional_architecture",
+        "additional_type",
+    ] {
+        for object_alias in [true, false] {
+            let mut value = valid.clone();
+            let field = match target {
+                "purpose" => &mut value["purpose"],
+                "architecture" => &mut value["architecture"],
+                "artifact_role" => &mut value["artifacts"][0]["role"],
+                "artifact_architecture" => &mut value["artifacts"][0]["architecture"],
+                "artifact_type" => &mut value["artifacts"][0]["content"]["type"],
+                "additional_role" => &mut value["additional_artifacts"][0]["role"],
+                "additional_architecture" => &mut value["additional_artifacts"][0]["architecture"],
+                "additional_type" => &mut value["additional_artifacts"][0]["content"]["type"],
+                _ => unreachable!("fixed test targets"),
+            };
+            let canonical = field.as_str().expect("canonical string").to_owned();
+            *field = if object_alias {
+                Value::Object([(canonical, Value::Null)].into_iter().collect())
+            } else {
+                json!([canonical])
+            };
+            let output = local_isolation(&serde_json::to_vec(&value).expect("alias JSON"));
+            assert!(!output.status.success(), "alias accepted at {target}");
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "input is not valid contract JSON\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_isolation_executable_retains_canonical_architecture_and_additional_role_strings() {
+    let mut value: Value =
+        serde_json::from_str(include_str!("../examples/local-isolation.json")).expect("fixture");
+    value["architecture"] = json!("aarch64");
+    for inventory in ["artifacts", "additional_artifacts"] {
+        for artifact in value[inventory].as_array_mut().expect("inventory") {
+            artifact["architecture"] = json!("aarch64");
+        }
+    }
+    let file = value["additional_artifacts"][0]["content"].clone();
+    let image = value["additional_artifacts"][1]["content"].clone();
+    value["additional_artifacts"] = Value::Array(
+        [
+            "host_runtime_file",
+            "guest_runtime_file",
+            "operator_image",
+            "service_image",
+            "oci_blob",
+            "offline_configuration",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, role)| {
+            json!({
+                "id": index + 1,
+                "role": role,
+                "architecture": "aarch64",
+                "content": if matches!(role, "operator_image" | "service_image") { &image } else { &file }
+            })
+        })
+        .collect(),
+    );
+    let output = local_isolation(&serde_json::to_vec(&value).expect("canonical JSON"));
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let proposal: Value = serde_json::from_slice(&output.stdout).expect("proposal JSON");
+    assert_eq!(proposal["manifest"], value);
+}
+
+#[test]
 fn executable_examples_produce_stable_plans_and_explicit_accounting() {
     let plan = || {
         Command::new(BINARY)

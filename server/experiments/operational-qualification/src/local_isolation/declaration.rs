@@ -1,28 +1,53 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
+use serde::de::value::StrDeserializer;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ContractError;
 
 use super::object::deserialize_object;
 
+// Keep each variant list in one place while limiting unit enums to string input.
+macro_rules! string_enum {
+    ($(#[$attribute:meta])* pub enum $name:ident { $($variant:ident),* $(,)? }) => {
+        $(#[$attribute])*
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),* }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                enum Variants { $($variant),* }
+
+                let value = String::deserialize(deserializer)?;
+                match Variants::deserialize(StrDeserializer::<D::Error>::new(&value))? {
+                    $(Variants::$variant => Ok(Self::$variant)),*
+                }
+            }
+        }
+    };
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct LocalRunId(pub u32);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GuestArchitecture {
-    X86_64,
-    Aarch64,
+string_enum! {
+    #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+    pub enum GuestArchitecture {
+        X86_64,
+        Aarch64,
+    }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalPurpose {
-    IsolationProbe,
-    Qualification,
+string_enum! {
+    #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+    pub enum LocalPurpose {
+        IsolationProbe,
+        Qualification,
+    }
 }
 
 impl LocalPurpose {
@@ -125,26 +150,27 @@ impl<'de> Deserialize<'de> for ArtifactContent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactRole {
-    HostQemuBinary,
-    GuestKernel,
-    GuestInitrd,
-    GuestDisk,
-    KindBinary,
-    KindNode,
-    Cni,
-    CnpgOperator,
-    Postgres,
-    Spicedb,
-    ObjectStore,
-    Colony,
-    Oidc,
-    TelemetryCollector,
-    TelemetryStore,
-    Waddle,
-    Generator,
+string_enum! {
+    #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum ArtifactRole {
+        HostQemuBinary,
+        GuestKernel,
+        GuestInitrd,
+        GuestDisk,
+        KindBinary,
+        KindNode,
+        Cni,
+        CnpgOperator,
+        Postgres,
+        Spicedb,
+        ObjectStore,
+        Colony,
+        Oidc,
+        TelemetryCollector,
+        TelemetryStore,
+        Waddle,
+        Generator,
+    }
 }
 
 impl ArtifactRole {
@@ -228,15 +254,16 @@ impl<'de> Deserialize<'de> for DeclaredArtifact {
 #[serde(transparent)]
 pub struct AdditionalArtifactId(pub u16);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AdditionalArtifactRole {
-    HostRuntimeFile,
-    GuestRuntimeFile,
-    OperatorImage,
-    ServiceImage,
-    OciBlob,
-    OfflineConfiguration,
+string_enum! {
+    #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+    pub enum AdditionalArtifactRole {
+        HostRuntimeFile,
+        GuestRuntimeFile,
+        OperatorImage,
+        ServiceImage,
+        OciBlob,
+        OfflineConfiguration,
+    }
 }
 
 impl AdditionalArtifactRole {
