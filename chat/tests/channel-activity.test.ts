@@ -155,6 +155,23 @@ describe("channel activity", () => {
       expect(messaging.mentionedChannelCounts.value).toEqual({
         "random@conference.example.com": 2,
       });
+
+      // A different room may legitimately assign the same stanza ID.
+      const otherRoomMention = {
+        ...missedMention,
+        roomJid: "random@conference.other.example.test",
+      };
+      onActivity?.(otherRoomMention);
+      onActivity?.(otherRoomMention);
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 2,
+        "random@conference.other.example.test": 1,
+      });
+      onActivity?.({ ...missedMention, roomJid: "random@CONFERENCE.EXAMPLE.COM" });
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "random@conference.example.com": 2,
+        "random@conference.other.example.test": 1,
+      });
       expect(messaging.pendingNotificationActivities.value).toHaveLength(1);
       onActivity?.({
         roomJid: "random@conference.example.com",
@@ -166,6 +183,7 @@ describe("channel activity", () => {
       });
       expect(messaging.mentionedChannelCounts.value).toEqual({
         "random@conference.example.com": 2,
+        "random@conference.other.example.test": 1,
       });
       expect(messaging.pendingNotificationActivities.value).toHaveLength(1);
 
@@ -180,6 +198,7 @@ describe("channel activity", () => {
       });
       expect(messaging.mentionedChannelCounts.value).toEqual({
         "random@conference.example.com": 2,
+        "random@conference.other.example.test": 1,
       });
     } finally {
       cleanupDocument?.();
@@ -315,6 +334,19 @@ describe("channel activity", () => {
       });
       expect(messaging.mentionedChannelCounts.value).toEqual({});
 
+      // Seeing an ID in one room cannot account for another room's ID.
+      onActivity?.({
+        roomJid: "general@conference.other.example.test",
+        nick: "bob",
+        body: "different room, same id",
+        mentions: ["xmpp:alice@example.com"],
+        stanzaId: "sid-seen",
+        fromArchive: true,
+      });
+      expect(messaging.mentionedChannelCounts.value).toEqual({
+        "general@conference.other.example.test": 1,
+      });
+
       // A genuinely-missed focused-room mention (archive-only, never seen
       // live) still records exactly once, without a banner.
       onMessage?.(roomMessage({
@@ -326,6 +358,7 @@ describe("channel activity", () => {
       }));
       expect(messaging.mentionedChannelCounts.value).toEqual({
         "general@conference.example.com": 1,
+        "general@conference.other.example.test": 1,
       });
       expect(messaging.pendingNotificationActivities.value).toHaveLength(0);
     } finally {

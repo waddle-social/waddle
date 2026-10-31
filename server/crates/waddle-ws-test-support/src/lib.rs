@@ -12,10 +12,14 @@
 //! still reachable public API of this crate, so per-binary `dead_code`
 //! warnings cannot fire and no lint suppressions are needed.
 
+pub mod iq;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -669,6 +673,16 @@ impl WsXmppClient {
                         ));
                     }
                     Ok(tungstenite::Message::Text(text))
+                        if is_in_flight_sm_request(&text) =>
+                    {
+                        // An SM request queued before the peer received our
+                        // close can still arrive on its open outbound stream.
+                        // RFC 6120 section 4.4 forbids sending more XML after
+                        // our close, so drain it without replying with an ack.
+                        // The overall close deadline still bounds this wait.
+                        continue;
+                    }
+                    Ok(tungstenite::Message::Text(text))
                         if text.starts_with("<message")
                             || text.starts_with("<presence")
                             || text.starts_with("<iq") =>
@@ -743,6 +757,34 @@ impl WsXmppClient {
         .await
         .map_err(|_| "Timed out waiting for WebSocket close".to_string())?
     }
+}
+
+fn is_in_flight_sm_request(text: &str) -> bool {
+    // minidom overwrites duplicate namespace declarations. Check the raw
+    // attributes first, before those malformed declarations can be lost.
+    let mut reader = Reader::from_str(text);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element))
+                if element.attributes().any(|attribute| attribute.is_err()) =>
+            {
+                return false;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return false,
+            Ok(_) => {}
+        }
+    }
+    let mut remaining = text.as_bytes();
+    let Ok(element) = xmpp_parsers::minidom::Element::from_reader(&mut remaining) else {
+        return false;
+    };
+    // minidom stops at the first root element. Reject trailing data as well
+    // as attributes or content, which XEP-0198's empty <r/> does not permit.
+    remaining.is_empty()
+        && element.is("r", xmpp_parsers::ns::SM)
+        && element.attrs().is_empty()
+        && element.nodes().next().is_none()
 }
 
 pub async fn disco_info_query(

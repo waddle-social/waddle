@@ -2482,9 +2482,15 @@ impl MucDurableStore for PostgresMucRoomStore {
     }
 
     /// Cache-backed legacy pre-fanout backstop: a fenced,
-    /// standalone-autocommit `SELECT ... FOR SHARE` on the main pool. This
-    /// remains in production for groupchat dispatch/MAM until #1283 replaces
-    /// it; actor-owned durable operations use their immutable fence instead.
+    /// standalone-autocommit `SELECT ... FOR SHARE` on the main pool. Only
+    /// `dispatch_to_room` on the immediate (non-planning) interpreter path
+    /// calls it, which in production means the non-ingress
+    /// `handlers::message::handle_message` fallback. Authenticated client
+    /// groupchat and relayed room submissions are planned instead, and their
+    /// room fence is asserted inside the ingress transaction
+    /// (`ingress/commit_room.rs`, `ClaimRepository::assert_room_claim`).
+    /// Actor-owned durable operations use their immutable fence. #1283 owns
+    /// this boundary's replacement.
     fn check_fenced_fanout<'a>(&'a self, room_jid: &'a BareJid) -> MucDurableFuture<'a, bool> {
         Box::pin(async move {
             let Some(fence) = self
@@ -2496,14 +2502,15 @@ impl MucDurableStore for PostgresMucRoomStore {
                 // registry exposes their actor. Absence therefore means this
                 // process cannot serve the retained room incarnation. It is
                 // local state, not backend uncertainty, and must not enter
-                // dispatch's legacy fail-open error branch.
+                // dispatch's retry-then-bounce error branch.
                 return Ok(false);
             };
-            // Legacy dispatch treats backend errors as fail-open until #1283
-            // replaces this cache-backed boundary. The exact check keeps
-            // backend uncertainty typed while classifying local identity
-            // rotation as definitively non-serving, without holding the
-            // rotation gate across database I/O.
+            // Dispatch retries a backend error a bounded number of times and
+            // then bounces the sender without demoting (#2046 W1.4), so `Err`
+            // must mean uncertainty only, never a definitive answer. The
+            // exact check keeps backend uncertainty typed while classifying
+            // local identity rotation as definitively non-serving, without
+            // holding the rotation gate across database I/O.
             self.exact_claim_is_held(room_jid, &fence).await
         })
     }

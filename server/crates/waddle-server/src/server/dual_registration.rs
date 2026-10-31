@@ -46,7 +46,7 @@ use kameo::error::SendError;
 use tracing::warn;
 use waddle_xmpp::registry::user_registry::CHILD_ACTOR_TIMEOUT;
 use waddle_xmpp::registry::{
-    ConnectionEntry, RegisterUserResource, UnregisterUserResource, UserRegistryActor,
+    ConnectionEntry, EnqueueUserResourceUnregister, RegisterUserResource, UserRegistryActor,
     UserRegistryError,
 };
 
@@ -192,7 +192,7 @@ pub(crate) async fn mirror_unregister(
     owner: Option<Arc<AtomicBool>>,
 ) -> MirrorUnregisterOutcome {
     match user_registry
-        .tell(UnregisterUserResource {
+        .tell(EnqueueUserResourceUnregister {
             jid: jid.clone(),
             owner,
         })
@@ -212,6 +212,9 @@ pub(crate) async fn mirror_unregister(
         }
     }
 }
+
+#[cfg(test)]
+mod unregister_tests;
 
 #[cfg(test)]
 mod tests {

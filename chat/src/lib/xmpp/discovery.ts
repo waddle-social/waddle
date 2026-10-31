@@ -468,7 +468,7 @@ export async function discoverChannels(xmpp: HybridClient, jid: string): Promise
       ? entry.value.room
       : channelFromRoom({ jid: items[index]!.jid ?? "", name: items[index]!.name }, index),
   );
-  return hydrated.map((room, position) => ({ id: room.id, name: room.name, channelType: room.channelType, position }));
+  return hydrated.map((room, position) => ({ id: room.id, jid: room.jid, name: room.name, channelType: room.channelType, position }));
 }
 
 export async function discoverTopology(xmpp: HybridClient, jid: string): Promise<DiscoveredTopology> {

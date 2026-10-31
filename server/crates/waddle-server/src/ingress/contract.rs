@@ -48,6 +48,12 @@ pub enum IngressRetirementOutcome {
 
 pub(in crate::ingress) const RETIREMENT_BATCH_SIZE: u32 = 256;
 
+// SQLite resume still needs BEGIN IMMEDIATE to observe prior checkpoint writes
+// and retirement. Give this single acquisition more room under writer contention;
+// this mitigates starvation without guaranteeing fairness. The resume claim and
+// authority admission remain held during this wait.
+const SQLITE_RESUME_CHECKPOINT_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Boot-owned handle. Shutdown blocks new work and joins admitted operations and GC.
 pub struct IngressAuthority {
     pub(in crate::ingress) observers:
@@ -576,9 +582,13 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return Err(IngressUowError::AuthorityStopped);
         }
+        let acquisition_timeout = match self.uow.database().driver() {
+            DatabaseDriver::Sqlite => SQLITE_RESUME_CHECKPOINT_ACQUISITION_TIMEOUT,
+            DatabaseDriver::Postgres => Duration::from_millis(100),
+        };
         let mut transaction = self
             .uow
-            .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+            .begin_with_timeouts(acquisition_timeout, Duration::from_millis(250))
             .await?;
         let checkpoint =
             match SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await? {

@@ -2,6 +2,8 @@ use super::{ConnectionEntry, ConnectionRegistry};
 use dashmap::DashMap;
 use jid::FullJid;
 use std::collections::HashSet;
+#[cfg(feature = "test-utils")]
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, OwnedMutexGuard};
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -176,6 +178,20 @@ fn prune(slots: &BindSlots, jid: &FullJid) {
 }
 
 impl ConnectionRegistry {
+    /// Observe actual contention on the next bind lock for this JID. The
+    /// signal is sent only after polling its lock future returns `Pending`.
+    #[cfg(feature = "test-utils")]
+    pub fn observe_next_pending_bind(&self, jid: &FullJid) -> tokio::sync::oneshot::Receiver<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        assert!(
+            self.bind_pending_probes
+                .insert(jid.clone(), sender)
+                .is_none(),
+            "a pending-bind observer is already armed for {jid}"
+        );
+        receiver
+    }
+
     /// Never wait for a local binder while holding a remote registration or
     /// durable generation lock: that binder may be waiting for those locks.
     pub fn try_lock_bind(&self, jid: &FullJid) -> Option<ConnectionBindGuard> {
@@ -221,10 +237,26 @@ impl ConnectionRegistry {
             .entry(jid.clone())
             .or_insert_with(|| Arc::new(Mutex::new(BindState::default())))
             .clone();
+        #[cfg(feature = "test-utils")]
+        let guard = {
+            let mut lock = std::pin::pin!(slot.lock_owned());
+            std::future::poll_fn(|cx| {
+                let result = lock.as_mut().poll(cx);
+                if result.is_pending() {
+                    if let Some((_, sender)) = self.bind_pending_probes.remove(jid) {
+                        let _ = sender.send(());
+                    }
+                }
+                result
+            })
+            .await
+        };
+        #[cfg(not(feature = "test-utils"))]
+        let guard = slot.lock_owned().await;
         ConnectionBindGuard {
             slots: self.bind_slots.clone(),
             jid: jid.clone(),
-            guard: Some(slot.lock_owned().await),
+            guard: Some(guard),
         }
     }
 
@@ -236,6 +268,24 @@ impl ConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn bind_contention_probe_requires_a_pending_lock_poll() {
+        let registry = ConnectionRegistry::new();
+        let jid: FullJid = "alice@example.com/phone".parse().expect("JID");
+        let mut pending = registry.observe_next_pending_bind(&jid);
+        let first = registry.lock_bind(&jid).await;
+        assert!(matches!(
+            pending.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let mut second = std::pin::pin!(registry.lock_bind(&jid));
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        pending.try_recv().expect("actual contention was observed");
+        drop(first);
+        let _second = second.await;
+    }
 
     #[tokio::test]
     async fn failed_successor_publication_cannot_discard_prior_actor_retirement() {

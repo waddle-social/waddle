@@ -1367,11 +1367,11 @@ async fn managed_registration_required_denial_increments_admission_counter() {
     // point indefinitely (#1479). Field records happen synchronously on
     // the denial call path, so the observer sees them deterministically.
     // The record→OTel-attribute export fidelity, and the Unset-vs-Error
-    // status split, stay pinned by `managed_internal_admission_failure_
-    // exports_error_dispatch_span` below and the frame-backstop span
-    // tests, whose narrower scopes export deterministically. (A denial
-    // never calls `mark_span_error` unless the condition is
-    // internal-server-error, which the condition assertion excludes.)
+    // status split, stay pinned by `internal_join_denial_exports_error_
+    // dispatch_span` and the frame-backstop span tests, whose narrower
+    // scopes export deterministically. (A denial never calls
+    // `mark_span_error` unless the condition is internal-server-error,
+    // which the condition assertion excludes.)
     assert_eq!(
         spans.recorded_field("xmpp.stanza.dispatch", "condition"),
         Some("registration-required".to_string()),
@@ -1561,37 +1561,9 @@ async fn managed_internal_server_error_denial_emits_admission_telemetry() {
     );
 }
 
-use std::time::Duration as StdDuration;
-
-/// Poll until at least one span named `name` has been exported, or the
-/// deadline elapses; returns whatever was exported at that point.
-///
-/// Needed because a span exports on close, and the join paths under test
-/// leave background work holding the dispatch span open. On a
-/// `current_thread` runtime that work only advances while the test
-/// awaits, so a straight read after the call under test races it.
-async fn await_exported_spans(
-    spans: &waddle_xmpp::telemetry::test_support::SpanTestGuard,
-    name: &str,
-    within: StdDuration,
-) -> Vec<opentelemetry_sdk::trace::SpanData> {
-    let deadline = tokio::time::Instant::now() + within;
-    loop {
-        let matching: Vec<_> = spans
-            .exported()
-            .into_iter()
-            .filter(|span| span.name == name)
-            .collect();
-        if !matching.is_empty() || tokio::time::Instant::now() >= deadline {
-            return matching;
-        }
-        tokio::time::sleep(StdDuration::from_millis(10)).await;
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
-async fn managed_internal_admission_failure_exports_error_dispatch_span() {
-    let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+async fn managed_internal_admission_failure_records_condition_on_dispatch_span() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
     let state = create_test_websocket_state().await;
     let malformed_session = crate::auth::Session::new("not a jid", "alice", "alice");
@@ -1640,83 +1612,26 @@ async fn managed_internal_admission_failure_exports_error_dispatch_span() {
         "malformed identity must fail closed: {denied:?}"
     );
 
-    // Kameo messages and SQLite worker commands retain the current span.
-    // Close the fixture resources that handled the join before checking its
-    // export; flushing alone cannot close spans those resources still own.
-    tokio::time::timeout(StdDuration::from_secs(5), async {
-        state
-            .deps
-            .protocol
-            .room_registry
-            .stop_gracefully()
-            .await
-            .expect("fixture room registry must stop");
-        state
-            .deps
-            .protocol
-            .room_registry
-            .wait_for_shutdown_result()
-            .await
-            .expect("fixture room registry must finish shutdown");
-
-        let db_actor = state.deps.app_state.db_pool.global_actor();
-        db_actor
-            .stop_gracefully()
-            .await
-            .expect("fixture database actor must stop");
-        db_actor
-            .wait_for_shutdown_result()
-            .await
-            .expect("fixture database actor must finish shutdown");
-        state
-            .deps
-            .app_state
-            .db_pool
-            .global()
-            .sqlite_pool()
-            .expect("fixture must use SQLite")
-            .close()
-            .await;
-    })
-    .await
-    .expect("fixture shutdown must release the dispatch span within five seconds");
-
-    // Allow the final span-close callbacks to reach the exporter after teardown.
-    let dispatch_spans =
-        await_exported_spans(&spans, "xmpp.stanza.dispatch", StdDuration::from_secs(5)).await;
-    let rendered = dispatch_spans
-        .iter()
-        .map(|span| {
-            let attributes: Vec<String> = span
-                .attributes
-                .iter()
-                .map(|attribute| format!("{}={}", attribute.key.as_str(), attribute.value))
-                .collect();
-            format!(
-                "{{status={:?} attrs=[{}]}}",
-                span.status,
-                attributes.join(", ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let condition = dispatch_spans.iter().find_map(|span| {
-        span.attributes
-            .iter()
-            .find(|attribute| attribute.key.as_str() == "condition")
-            .map(|attribute| attribute.value.to_string())
-    });
+    // Assert on the RECORDED field, not the exported span: permission actors
+    // started inside this scope can hold the dispatch span open for their
+    // whole life, and fixture teardown cannot reach all of them (#1479, #1744).
+    // The counter shares the denial choke point with `mark_span_error`, whose
+    // export is pinned by `internal_join_denial_exports_error_dispatch_span`.
     assert_eq!(
-        condition,
+        spans.recorded_field("xmpp.stanza.dispatch", "condition"),
         Some("internal-server-error".to_string()),
-        "exported xmpp.stanza.dispatch spans: [{rendered}]",
+        "the dispatch span must carry the internal failure condition"
     );
-    assert!(
-        dispatch_spans
-            .iter()
-            .any(|span| matches!(span.status, opentelemetry::trace::Status::Error { .. })),
-        "exported xmpp.stanza.dispatch spans: [{rendered}]",
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.muc.admission.denied",
+            &[
+                ("condition", "internal-server-error"),
+                ("deny_reason", "session_identity_malformed"),
+            ]
+        ),
+        Some(1),
+        "the internal failure must pass through the denial choke point once"
     );
 }
 

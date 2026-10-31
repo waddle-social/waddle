@@ -26,6 +26,21 @@ postgres = { max-threads = 1 }
 filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume))'
 threads-required = 'num-cpus'
 
+# These local full-server tests require each Pending observation within 1 s
+# to bound the work before the observed send against the real 15 s backstop.
+# Keep unrelated nextest jobs from starving that correctness precondition.
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & binary(characterization_routing) & test(cycle::)'
+threads-required = 'num-cpus'
+
+# The liveness/readiness split test asserts that a spawned server answers
+# its probes inside the kubelet's 2 s timeout during a PostgreSQL outage.
+# Co-scheduled CPU-heavy tests would turn that budget into a scheduling
+# race, so it gets the machine too (and joins the postgres group below).
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & binary(liveness_readiness_split)'
+threads-required = 'num-cpus'
+
 [[profile.default.overrides]]
 filter = '''
 package(waddle-server) & (
@@ -48,6 +63,7 @@ package(waddle-server) & (
     | binary(xep0045_ingress_occupant_progress)
     | binary(xep0421_ingress_occupant_copies)
     | binary(xep0313_ingress_archive)
+    | binary(liveness_readiness_split)
     | test(clustering::)
     | test(db::)
     | test(inbox::)
@@ -59,6 +75,7 @@ package(waddle-server) & (
     | test(committed_inbox_push)
     | test(websocket::tests::ingress_authority::)
     | test(websocket::tests::keyed_detach_drain::)
+    | test(websocket::tests::space_fanout_postgres::)
     | test(paused_local_mirror_releases_the_only_main_pool_connection)
     | test(ingress_uow::)
     | test(extension_host_adapter::tests::room_results::)

@@ -8,6 +8,12 @@
 
 ## Status
 
+> **Tracking note (2026-10-30):** the horizontal-scaling epic #1195 that tracked this ADR's
+> phases is superseded by the distributed-actors roadmap #1664. Phases 1-4 are recorded
+> as implemented in their companion notes; remaining and follow-on work (durable
+> mailbox, connection and account actors) will be indexed from #1664 and #2046 as slices are filed. This note
+> changes no decision below.
+
 Accepted (consensus of the adversarial review council: six domain reviewers —
 XMPP/XEP conformance, distributed systems, Rust/kameo/libp2p, SRE/Kubernetes,
 storage, security — approve with no blocking or major findings remaining)
