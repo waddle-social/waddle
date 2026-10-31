@@ -80,6 +80,12 @@ Keep that gate unchanged and unverified until its own evidence exists.
 
 ## Decision: host policy and effect boundary
 
+A [candidate PostgreSQL authority and admission design](../planning/host-grant-authority-2047.md)
+records a proposal, counterexamples, implementation prerequisites and a first
+vertical slice for review. Its blocking ledger remains unresolved. This ADR
+stays Proposed; linking the candidate does not select an approved authority or
+authorize implementation or activation.
+
 Community, room and deployment authority are distinct. A Space subscription
 does not grant access to its children. The host must consistently authorize
 discovery, room joins, sends, history, fanout and administration; a community
