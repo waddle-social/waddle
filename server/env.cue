@@ -204,6 +204,25 @@ schema.#Project & {
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
 		}
+		// Native PostgreSQL characterization is independent of image publishing.
+		roomChildContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.roomChildContractPostgres]
+		}
 		// Test-only native experiment: do not add these inputs to the image
 		// publishing pipeline or its deployment-revision authority.
 		federationGrantFence: {
@@ -294,6 +313,14 @@ schema.#Project & {
 	}
 
 	tasks: {
+		roomChildContractPostgres: schema.#Task & {
+			// Provision an isolated native database and require the dedicated
+			// tests; an absent prerequisite must fail this lane.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/room-child/run-native.sh"]
+			inputs: list.Concat([_nixInputs, ["experiments/room-child/**"]])
+		}
 		federationGrantFenceProof: schema.#Task & {
 			// This native experiment needs a live checkout, Nix, /proc and
 			// isolated local PostgreSQL and SpiceDB processes; it cannot run
