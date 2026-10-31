@@ -1,0 +1,110 @@
+{
+  "artifact_derivation": "/nix/store/icc1xhj49x1vagkjxnwnvljpa3f9nfd5-waddle-isolation-probe-artifact-1.drv",
+  "artifact_files_and_current_source_hashes": "matched_manifest",
+  "artifact_path": "/nix/store/4zk5yjqnxnjixm2ny1w6qf7vkkq0wmn7-waddle-isolation-probe-artifact-1",
+  "ci": {
+    "configured_artifact_job": "build_inspect_and_nix_check_with_all_static_fixtures",
+    "determinate_action_pin": "021c8a1bd3570eb21f5c20a054812b0c4d9ca614",
+    "hosted_execution": "not_performed",
+    "root_flake_and_lock_changes": false,
+    "server_publication_path_matches": [],
+    "workflow": ".github/workflows/operational-qualification.yml",
+    "workflow_sha256": "92714c910a4a3ff2b2512f21c7ab0d498f09181d59c13e549352d90bbdc38140"
+  },
+  "credentials_or_production_access": "not_performed",
+  "date": "2026-10-31",
+  "guest_execution": "not_performed",
+  "host_isolation": "unverified",
+  "host_network_probes": "not_performed",
+  "independent_archive_inspection": "matched_inspection_json",
+  "nix_build": "passed",
+  "nix_check_repeat_same_derivation": "passed_all_output_bytes_equal",
+  "nix_recursive_content_and_trust_verification": {
+    "result": "passed",
+    "roots": [
+      "/nix/store/cn1drziywixrw4x47hv3wxrz0pgjyrmb-x86_64-unknown-linux-musl-gcc-wrapper-15.3.0",
+      "/nix/store/8j2c3cwd0fkmry81hgir8n2bm852a01j-linux-6.18.50",
+      "/nix/store/fmyxz26z2c4f23gigjdpmbnv24961ndm-linux-config-6.18.50"
+    ]
+  },
+  "qualification": "not_assessed",
+  "reproducibility_scope": {
+    "archive_repacks_order_timestamps_umasks_paths": "equal",
+    "artifact_derivation_repeat_with_cached_inputs": "equal",
+    "different_host_reproduction": "not_performed",
+    "independent_kernel_rebuild": "not_performed",
+    "independent_toolchain_rebuild": "not_performed",
+    "separate_source_paths_metadata_and_output_paths": "perturbed",
+    "two_independent_probe_compiler_linker_invocations": "equal"
+  },
+  "review_delta": {
+    "basis_commit": "5b48806632bac75da87ce34b544989e6b020b3cf",
+    "build_command": "nix build --offline --impure --option builders '' --no-link --print-out-paths --expr 'import ./server/experiments/operational-qualification/probe-artifact/default.nix {}'",
+    "finding": "PT_LOAD virtual address plus memory size lacked user-range and overflow validation",
+    "guest_execution": "not_performed",
+    "network_access": "not_performed",
+    "policy": {
+      "LA57_required": false,
+      "kernel_config_reference": [
+        "CONFIG_PAGE_SIZE_4KB=y",
+        "CONFIG_DEFAULT_MMAP_MIN_ADDR=65536",
+        "CONFIG_LSM_MMAP_MIN_ADDR=65536"
+      ],
+      "kernel_source_reference": "Linux 6.18.50 arch/x86/include/asm/page_64_types.h DEFAULT_MAP_WINDOW",
+      "overflow_check": "memsz <= user_limit - virtual, after validating virtual",
+      "segment_endpoint_may_equal_limit": true,
+      "user_limit_exclusive": 140737488351232,
+      "user_min_inclusive": 65536
+    },
+    "prior_unaffected_checks": "remaining verification tests were performed for the basis implementation",
+    "repeat_command": "nix build --rebuild --offline --impure --option builders '' --no-link --print-out-paths --expr 'import ./server/experiments/operational-qualification/probe-artifact/default.nix {}'",
+    "repeat_mode": "modern --rebuild performs the same deterministic-output check as legacy nix-build --check; legacy command does not accept --offline",
+    "rerun_checks": [
+      "14 pinned-compiler Python tests, including two new in-memory ELF range tests",
+      "13 native Python tests, one static-compiler test explicitly skipped",
+      "pure C model fixtures with warnings as errors",
+      "offline Nix build",
+      "offline Nix deterministic-output rebuild",
+      "current source and artifact hashes against manifest",
+      "independent archive inspection against inspection.json",
+      "Ruff lint and formatting",
+      "Nixfmt check",
+      "diff whitespace"
+    ]
+  },
+  "runtime_bootability_and_socket_results": "unverified",
+  "schema_version": 1,
+  "signed_plan_commit": "7b704e7f",
+  "tests": {
+    "actionlint_1_7_12": "passed",
+    "diff_whitespace": "passed",
+    "integration_graph_parity": "passed",
+    "integration_graph_tests": {
+      "passed": 19
+    },
+    "integration_projector_tests": {
+      "passed": 10,
+      "skipped_existing_environment_gates": 3
+    },
+    "leak_sanitizer": "disabled_because_sandbox_ptrace_is_unsupported",
+    "model_address_and_undefined_sanitizers": "passed",
+    "native_guest_object_only_compile": "passed_with_fortify_and_warnings_as_errors",
+    "native_workflow_python_tests": {
+      "passed": 13,
+      "skipped_static_link_test": 1
+    },
+    "nixfmt_check": "passed",
+    "pinned_python_artifact_tests": {
+      "passed": 14,
+      "skipped": 0
+    },
+    "pure_c_model_fixtures": "passed_with_Wall_Wextra_Wpedantic_Werror",
+    "ruff_check_and_format": "passed",
+    "rust_fmt": "passed",
+    "rust_offline_locked_clippy_D_warnings": "passed",
+    "rust_offline_locked_tests": {
+      "passed": 29
+    }
+  },
+  "vm_or_namespace_launch": "not_performed"
+}
