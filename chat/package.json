@@ -70,6 +70,7 @@
     "@pandacss/preset-base": "1.12.1",
     "@pandacss/preset-panda": "1.12.1",
     "@types/node": "^25.9.1",
+    "fake-indexeddb": "^6.2.7",
     "knip": "^6.15.0",
     "postcss": "^8.5.28",
     "typescript": "^6.0.3"

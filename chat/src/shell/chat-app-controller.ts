@@ -361,6 +361,7 @@ export function useChatAppController() {
     xmppClient,
     session,
     waddles,
+    managedMucDomain,
     dmConversations,
     notifications,
     notifySettings,
@@ -368,7 +369,7 @@ export function useChatAppController() {
     isWindowFocused,
     isSelfDoNotDisturb: presence.isSelfDoNotDisturb,
     pendingNotificationActivities: messaging.pendingNotificationActivities,
-    selectChannel: roomSync.selectChannel,
+    selectChannelByRoomJid: roomSync.selectChannelByRoomJid,
     openDm: dmSync.handleOpenDm,
   });
 
