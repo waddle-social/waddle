@@ -69,6 +69,23 @@ currently provides Flutter 3.47.0 with Dart 3.13.0.
 
 ## Install-in-place artifacts
 
+Pull requests upload the FOSS debug APK as **waddle-android-apk**, retained for
+seven days. Open the PR's **waddle-android-pullRequest** check, then use the
+**Android APK** link in the run summary or download it from **Artifacts**. Sign
+in to GitHub, extract `app-foss-debug.apk` from the downloaded ZIP, and install
+it on Android 14 or later. The artifact uses the existing repository debug key.
+Its version code uses commit-timestamp minutes, matching the rolling preview,
+so a newer PR build can upgrade an older preview without clearing app data.
+
+```sh
+gh run download <run-id> --name waddle-android-apk
+adb install -r app-foss-debug.apk
+```
+
+Independent test failures do not prevent building or uploading an APK. The run
+still fails when any required check fails; review its check results before
+treating a downloadable build as validated. A missing APK fails the upload step.
+
 Every APK — local or CI — is signed with the **checked-in**
 `debug.keystore` (deliberately not a secret; never used for a store
 release), so `adb install -r` upgrades in place without uninstalling (app

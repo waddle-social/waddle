@@ -67,6 +67,40 @@ let _AndroidTestReports = schema.#Contributor & {
 	}]
 }
 
+// A PR build produces an installable APK even when an independent check fails.
+// Scope both finalizers to pipelines containing build; deviceTests and the
+// release publisher have different outputs and must not promise this artifact.
+let _AndroidApkArtifact = schema.#Contributor & {
+	id: "androidApkArtifact"
+	tasks: [
+		for outcome in ["success", "failure"] {
+			id:        "android.apkUpload.\(outcome)"
+			label:     "Upload Android APK (\(outcome))"
+			priority:  100
+			condition: "on_\(outcome)"
+			ci: github: tasks: ["build"]
+			provider: github: {
+				uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+				with: {
+					name: "waddle-android-apk"
+					path: "apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk"
+					"if-no-files-found": "error"
+					"retention-days":    7
+					"compression-level": 0
+				}
+			}
+		},
+		for outcome in ["success", "failure"] {
+			id:        "android.apkSummary.\(outcome)"
+			label:     "Link Android APK download (\(outcome))"
+			priority:  110
+			condition: "on_\(outcome)"
+			ci: github: tasks: ["build"]
+			script: "bash scripts/android-apk-summary.sh"
+		},
+	]
+}
+
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
@@ -85,6 +119,8 @@ let _ffiInputs = [
 let _gradleInputs = [
 	"env.cue",
 	"../../scripts/android-ci-gradle.sh",
+	"../../scripts/android-apk-summary.sh",
+	"../../scripts/android-ci-build.sh",
 	"../../scripts/setup-android-flutter.sh",
 	"../../flake.nix",
 	"flutter/pubspec.yaml",
@@ -126,6 +162,7 @@ schema.#Project & {
 		wc.#Hestia,
 		_NamespaceAndroidCache,
 		_AndroidTestReports,
+		_AndroidApkArtifact,
 		_AndroidCiMemory,
 		wc.#CuenvRelease,
 	]
@@ -150,6 +187,9 @@ schema.#Project & {
 			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.flutterCheck, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
+			// Continue independent checks/builds after failures, while keeping
+			// the pipeline's non-zero result. APK upload runs in a finalizer.
+			continueOnError: true
 			when: {
 				pullRequest: true
 				manual:      true
@@ -254,7 +294,7 @@ schema.#Project & {
 		// secrets, and R8 only needs the build to configure.
 		build: schema.#Task & {
 			command: "bash"
-			args: ["../../scripts/android-ci-gradle.sh", ":app:assembleFossDebug", ":app:assemblePlayDebug", ":app:minifyPlayReleaseWithR8", "-PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder", "-PWADDLE_FIREBASE_APP_ID=1:0:android:0", "-PWADDLE_FIREBASE_API_KEY=ci-placeholder", "-PWADDLE_FIREBASE_SENDER_ID=0"]
+			args: ["../../scripts/android-ci-build.sh", ":app:assembleFossDebug", ":app:assemblePlayDebug", ":app:minifyPlayReleaseWithR8", "-PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder", "-PWADDLE_FIREBASE_APP_ID=1:0:android:0", "-PWADDLE_FIREBASE_API_KEY=ci-placeholder", "-PWADDLE_FIREBASE_SENDER_ID=0"]
 			dependsOn: [setupSdk, setupFlutter, buildRustJni]
 			inputs: _gradleInputs
 			outputs: [
@@ -292,7 +332,7 @@ schema.#Project & {
 		ciGradleContract: schema.#Task & {
 			command: "python3"
 			args: ["../../scripts/test_android_ci_gradle.py"]
-			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
+			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/android-apk-summary.sh", "../../scripts/android-ci-build.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).

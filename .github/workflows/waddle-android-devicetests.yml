@@ -48,6 +48,10 @@ on:
     - cue.mod/**
     - flake.nix
     - flake.nix/**
+    - scripts/android-apk-summary.sh
+    - scripts/android-apk-summary.sh/**
+    - scripts/android-ci-build.sh
+    - scripts/android-ci-build.sh/**
     - scripts/android-ci-gradle.sh
     - scripts/android-ci-gradle.sh/**
     - scripts/build-android-rust.sh
