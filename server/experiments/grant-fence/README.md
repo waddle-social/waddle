@@ -32,7 +32,7 @@ export FENCE_TEST_SHELL=/absolute/bash/bin/bash
 export FENCE_TEST_SLEEP=/absolute/coreutils/bin/sleep
 ```
 
-`src/binaries.rs` requires absolute existing paths and attests the exact versions
+`../native-fixture/src/binaries.rs` requires absolute existing paths and attests the exact versions
 of `postgres`, `initdb`, and `spicedb` before starting a fixture. The process
 cleanup regression also requires explicit shell/sleep executable paths; the Nix
 runner supplies pinned Bash and coreutils paths. A missing path,
@@ -43,15 +43,15 @@ All database settings are generated internally; these binary-path variables do
 not permit supplying a DSN, database directory, or credential.
 
 ```sh
-cargo test --locked -- --nocapture
-cargo clippy --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --nocapture
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 The explicit CI/formal-evidence invocation additionally rejects dirty or
 untracked source:
 
 ```sh
-FENCE_REQUIRE_PINNED=1 cargo test --locked -- --nocapture
+FENCE_REQUIRE_PINNED=1 cargo test --workspace --locked -- --nocapture
 ```
 
 Development runs record their exact Git HEAD, byte count and full SHA-256 digest of dirty/untracked status, and a
@@ -277,3 +277,15 @@ passing pre-deadline response-loss observation. The bounded upstream task belong
 to the supervised proxy process and survives downstream cancellation for this
 control. Explicit process-group stop and the sticky cleanup latch cover that
 runtime and all its tasks; no detached task can outlive verified process cleanup.
+
+
+## Shared native supervisor
+
+The standalone workspace now includes `../native-fixture`. The existing proof
+uses that single implementation for native services, worker supervision, settings,
+credential scans and cleanup; its SQL/Zed schemas remain here. See the sibling
+README for the live-permit and trusted process-group boundaries. The runner uses
+`--workspace`, so moved native cleanup regressions remain mandatory. Source
+provenance includes both source trees/manifests, the single workspace lock, schemas,
+runner and repository Nix/toolchain inputs. Early fixture shutdown with an
+outstanding child is now an explicit sticky failure that retains private data.

@@ -236,14 +236,11 @@ impl Proxy {
         };
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn_tracked(
+        let process = fixture.spawn_worker(
             &mut command,
             Some(&serde_json::to_vec(&WorkerRequest::WriteProxy(
                 work.clone(),
             ))?),
-            false,
-            fixture.cleanup_latch(),
-            crate::cleanup::CleanupService::Worker,
         )?;
         let mut proxy = Self {
             process,

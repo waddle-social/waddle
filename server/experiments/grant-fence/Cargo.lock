@@ -2162,10 +2162,27 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
- "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
+ "uuid",
+ "waddle-native-fixture",
+]
+
+[[package]]
+name = "waddle-native-fixture"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "prescience",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
  "url",
  "uuid",
 ]
