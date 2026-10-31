@@ -65,7 +65,10 @@ module dependencies. Gradle stops with a setup instruction if its generated
 Flutter loader is missing. SDK, Android package and Maven availability are
 required to validate an APK; Dart analysis alone does not prove host integration.
 Flutter 3.47+ is required for the host's AGP 9 toolchain. The locked Nix package
-currently provides Flutter 3.47.0 with Dart 3.13.0.
+currently provides Flutter 3.47.0 with Dart 3.13.0. Gradle configuration caching
+is disabled because Flutter 3.47 build tasks still access `Project` during task
+execution, which Gradle 9 rejects with configuration caching enabled. Gradle
+output/build caching remains enabled.
 
 ## Install-in-place artifacts
 
