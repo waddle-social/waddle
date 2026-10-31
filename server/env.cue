@@ -139,6 +139,24 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
+		// The codec has its own workspace and must be checked without adding it
+		// to production tests, dependency graphs, or publishing task lists.
+		authzIdCodec: {
+			mode:        "expanded"
+			derivePaths: true
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
+			}
+			tasks: [_t.checkAuthzIdCodec]
+		}
 		default: {
 			mode: "expanded"
 			when: {
@@ -333,6 +351,29 @@ schema.#Project & {
 				"../flake.lock",
 				"../flake.nix",
 				"rust-toolchain.toml",
+			]
+		}
+
+		checkAuthzIdCodec: schema.#Task & {
+			// Cargo needs the host cache; the inherited Nix runtime supplies Rust
+			// from rust-toolchain.toml. No production build or publishing task.
+			hermetic: false
+			command:  "bash"
+			args: ["-euo", "pipefail", "-c", """
+				cd experiments/authz-id-codec
+				cargo test --locked
+				cargo clippy --all-targets --locked -- -D warnings
+				cargo fmt --check
+				"""]
+			inputs: [
+				"experiments/authz-id-codec/**",
+				"rust-toolchain.toml",
+				".cargo/**",
+				"../flake.nix",
+				"../flake.lock",
+				"../cuenv.lock",
+				"../env.cue",
+				"../ci/contributors/*.cue",
 			]
 		}
 
