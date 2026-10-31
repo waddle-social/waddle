@@ -17,7 +17,7 @@ tests while the Flutter interface is verified against the Android quality matrix
 # JDK via sdkman (or use the repo nix devshell, which exports JAVA_HOME):
 sdk install java 21.0.7-tem
 
-# Install Flutter 3.44 or later on PATH, or use the repo nix
+# Install Flutter 3.47 or later on PATH, or use the repo nix
 # devshell, which provides Flutter. FLUTTER_ROOT selects an existing SDK.
 # Generate the ignored add-to-app wrapper and resolve Dart packages:
 bash scripts/setup-android-flutter.sh
@@ -64,7 +64,7 @@ are generated locally; `pubspec.yaml` and the resolved lockfile describe the
 module dependencies. Gradle stops with a setup instruction if its generated
 Flutter loader is missing. SDK, Android package and Maven availability are
 required to validate an APK; Dart analysis alone does not prove host integration.
-Flutter 3.44+ is required for the host's AGP 9 toolchain. The locked Nix package
+Flutter 3.47+ is required for the host's AGP 9 toolchain. The locked Nix package
 currently provides Flutter 3.47.0 with Dart 3.13.0.
 
 ## Install-in-place artifacts

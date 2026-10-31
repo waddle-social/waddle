@@ -15,8 +15,8 @@ printf '%s' "$flutter_version_json" | python3 -c '
 import json, re, sys
 version = json.load(sys.stdin).get("frameworkVersion", "")
 match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
-if not match or tuple(map(int, match.groups())) < (3, 44, 0):
-    sys.exit("Flutter 3.44 or later is required for the Android AGP 9 host; found " + version)
+if not match or tuple(map(int, match.groups())) < (3, 47, 0):
+    sys.exit("Flutter 3.47 or later is required for the Android AGP 9 host; found " + version)
 '
 
 cd "$REPO_ROOT/apps/android/flutter"

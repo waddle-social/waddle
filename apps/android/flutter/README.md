@@ -8,7 +8,7 @@ second session store is created in Dart.
 
 ## Build and check
 
-Use Flutter 3.44 or newer with Dart 3.8 or newer, JDK 21 and the repository's
+Use Flutter 3.47 or newer with Dart 3.8 or newer, JDK 21 and the repository's
 Android SDK/NDK setup. The repository Nix development shell includes Flutter.
 From the repository root:
 
@@ -77,21 +77,21 @@ presentation projections.
 
 ## Verification status
 
-The initial migration was authored in an environment without Flutter, Dart or an
-Android SDK. The official Flutter SDK download was denied by its network policy.
-Source parsing/formatting, standalone Kotlin Detekt and repository whitespace
-checks can be run there; they do **not** establish Dart type correctness, Android
-compilation, visual parity or working device integration.
+Flutter analysis and all 23 widget/bridge tests pass locally on Flutter 3.44.0
+and Dart 3.12.0. The Android CI contract suite also passes all 11 checks.
+Standalone Kotlin Detekt and repository whitespace checks pass. Android APK
+compilation and device integration require their own build/runtime evidence;
+these source and widget checks do not establish visual or device feature parity.
 
 `test/bridge_test.dart` covers account invalidation, byte preservation, navigation
 acknowledgement, errors and listener disposal. `test/app_test.dart` covers provider
 selection, incoming-call presentation, route restoration, foldable layout and
 persisted appearance commands. Conversation tests cover composer Unicode
 offsets, threads, content insertion and view lifetime; theme tests cover signed
-Android palette values. These tests
-must run with the real Flutter toolchain before release. The existing Compose
-goldens continue to guard retained reference components; they do not validate the
-Flutter UI. Record and review new Flutter light/dark renderings, and exercise
+Android palette values. Dialog tests cover controller ownership through closing
+animations. These tests run with the real Flutter toolchain in CI. The existing
+Compose goldens continue to guard retained reference components; they do not
+validate the Flutter UI. Record and review new Flutter light/dark renderings, and exercise
 notification launch/inline reply, background push for both flavours, encrypted
 attachments, network churn and 1:1/group audio/video on a device before claiming
 verified feature parity.
