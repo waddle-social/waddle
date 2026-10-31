@@ -10,30 +10,21 @@ use waddle_xmpp::protocol::{ConnectionPhase, StanzaDispatcher};
 use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::carbons::{Disable, Enable};
-use xmpp_parsers::iq::Iq;
+use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::super::frame::handle_xmpp_frame;
 use super::super::state::WsConnState;
 use super::super::WebSocketState;
-use super::{create_test_websocket_state, register_test_connection, stanza_to_xml};
-
-const DOMAIN: &str = "example.com";
-const ORIGIN: &str = "alice@example.com/web";
-
-fn origin() -> FullJid {
-    ORIGIN.parse().expect("bound origin")
-}
+use super::iq_destination_support::{
+    assert_reply_addressing, bound_connection, dispatch, origin, DOMAIN, ORIGIN,
+};
+use super::{create_test_websocket_state, register_test_connection};
 
 async fn connection(
     state: &WebSocketState,
     enabled: bool,
 ) -> (WsConnState, mpsc::Receiver<OutboundStanza>) {
-    let (tx, rx) = mpsc::channel(8);
-    let owner = register_test_connection(state, &origin(), tx).await;
-    let mut conn = WsConnState::new();
-    conn.phase = ConnectionPhase::ready(origin(), false);
-    conn.registry_owner = Some(owner);
+    let (mut conn, rx) = bound_connection(state).await;
     conn.carbons_enabled = enabled;
     state
         .deps
@@ -49,37 +40,12 @@ fn request(target: Option<&str>, enable: bool, set: bool, from: Option<&str>) ->
     } else {
         Disable.into()
     };
-    let from = from.map(|value| value.parse().expect("request sender"));
-    let to = target.map(|value| value.parse().expect("request destination"));
-    let id = "carbons<&-correlation".into();
-    if set {
-        Iq::Set {
-            from,
-            to,
-            id,
-            payload,
-        }
+    let payload = if set {
+        IqPayload::Set(payload)
     } else {
-        Iq::Get {
-            from,
-            to,
-            id,
-            payload,
-        }
-    }
-}
-
-async fn dispatch(state: &WebSocketState, conn: &mut WsConnState, iq: Iq) -> Vec<Iq> {
-    handle_xmpp_frame(
-        &stanza_to_xml(&Stanza::Iq(Box::new(iq))),
-        DOMAIN,
-        state,
-        conn,
-    )
-    .await
-    .into_iter()
-    .map(|frame| Iq::try_from(frame.parse::<Element>().expect("response XML")).expect("IQ"))
-    .collect()
+        IqPayload::Get(payload)
+    };
+    super::iq_destination_support::request(payload, target, from, "carbons<&-correlation")
 }
 
 fn assert_state(state: &WebSocketState, conn: &WsConnState, enabled: bool) {
@@ -96,9 +62,7 @@ fn assert_state(state: &WebSocketState, conn: &WsConnState, enabled: bool) {
 }
 
 fn assert_remote_error(reply: &Iq, request: &Iq) {
-    assert_eq!(reply.id(), request.id());
-    assert_eq!(reply.from(), request.to());
-    assert_eq!(reply.to(), Some(&Jid::from(origin())), "bound origin");
+    assert_reply_addressing(reply, request);
     let Iq::Error { error, payload, .. } = reply else {
         panic!("foreign Carbons request must not be acknowledged: {reply:?}")
     };
