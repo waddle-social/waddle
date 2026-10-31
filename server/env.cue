@@ -435,6 +435,9 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -442,6 +445,10 @@ schema.#Project & {
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
 				"../ci/contributors/*.cue",
+				"../scripts/integration-ci*",
+				"../scripts/test_integration_ci_project.py",
+				"../scripts/test_cuenv_bootstrap.py",
+				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
 				"../ci/cache-benchmark/**",
