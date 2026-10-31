@@ -22,8 +22,6 @@ on:
     - apps/android/core/client/lint.xml/**
     - apps/android/core/client/src/**
     - apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/**
-    - apps/android/debug.keystore
-    - apps/android/debug.keystore/**
     - apps/android/detekt.yml
     - apps/android/detekt.yml/**
     - apps/android/env.cue

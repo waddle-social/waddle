@@ -99,7 +99,6 @@ let _gradleInputs = [
 	"core/client/consumer-rules.pro",
 	"core/client/lint.xml",
 	"core/client/src/**",
-	"debug.keystore",
 	"detekt.yml",
 ]
 
@@ -136,10 +135,9 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				manual:        true
 			}
-			provider: github: permissions: {contents: "write", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.publishApk]
+			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test]
 		}
 		pullRequest: {
 			when: {
@@ -299,11 +297,12 @@ schema.#Project & {
 		}
 
 		// Install-in-place artifact: every merge to main builds the FOSS
-		// `preview` APK (the Obtainium channel) — release-optimised (R8, shrinking, non-debuggable,
-		// mobile-profile Rust core) but signed with the shared checked-in
-		// key, so `adb install -r` upgrades over earlier rolling and debug
-		// builds without an uninstall — with a monotonic timestamp-derived
-		// versionCode, and publishes it as the repo's "latest" release.
+		// `preview` APK (the Obtainium channel) — release-optimised (R8,
+		// shrinking, non-debuggable, mobile-profile Rust core), signed with
+		// the private preview key from repository Actions secrets, and
+		// published with a monotonic timestamp-derived versionCode as the
+		// repo's "latest" release. It runs only in the separate workflow_run
+		// publisher after the main validation pipeline succeeds.
 		//
 		// Each build uses a UNIQUE tag `android-b<versionCode>-<sha>` and
 		// `gh release create --latest`; the stable download URL is
@@ -320,13 +319,31 @@ schema.#Project & {
 		// are pruned to a bounded window.
 		publishApk: schema.#Task & {
 			ci: github: permissions: contents: "write"
+			// The workflow_run publisher calls this directly in the checkout.
+			// It reads Git metadata and generated local.properties, so it must
+			// not run in the default per-task directory sandbox.
+			hermetic: false
 			command: "bash"
 			env: {
-				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_GITHUB_TOKEN:                         schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				CI_ANDROID_PREVIEW_KEYSTORE_B64:          schema.#EnvPassthrough & {name: "CI_ANDROID_PREVIEW_KEYSTORE_B64"}
+				CI_ANDROID_PREVIEW_KEYSTORE_PASSWORD:     schema.#EnvPassthrough & {name: "CI_ANDROID_PREVIEW_KEYSTORE_PASSWORD"}
 			}
 			args: ["-c", #"""
 				set -euo pipefail
 				export GH_TOKEN="${CI_GITHUB_TOKEN:?missing GITHUB_TOKEN}"
+				umask 077
+				preview_signing_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/waddle-preview-signing.XXXXXXXX")"
+				preview_keystore="$preview_signing_dir/preview.p12"
+				preview_password_file="$preview_signing_dir/password"
+				trap 'rm -f "$preview_keystore" "$preview_password_file"; rmdir "$preview_signing_dir" 2>/dev/null || true' EXIT
+				printf '%s' "${CI_ANDROID_PREVIEW_KEYSTORE_B64:?missing WADDLE_ANDROID_PREVIEW_KEYSTORE_B64}" \
+				  | base64 --decode > "$preview_keystore"
+				printf '%s' "${CI_ANDROID_PREVIEW_KEYSTORE_PASSWORD:?missing WADDLE_ANDROID_PREVIEW_KEYSTORE_PASSWORD}" \
+				  > "$preview_password_file"
+				chmod 600 "$preview_keystore" "$preview_password_file"
+				export WADDLE_ANDROID_PREVIEW_KEYSTORE="$preview_keystore"
+				export WADDLE_ANDROID_PREVIEW_KEYSTORE_PASSWORD="$(cat "$preview_password_file")"
 				# Commit-timestamp minutes: monotonic across builds and immune
 				# to shallow CI clones (rev-list --count would report 1).
 				version_code="$(( $(git show -s --format=%ct HEAD) / 60 ))"
@@ -345,7 +362,7 @@ schema.#Project & {
 				tag="android-b${version_code}-${sha}"
 				gh release create "${tag}" --latest \
 				  --title "Android ${sha}" \
-				  --notes "commit ${sha} — optimised preview build (R8, opt-level 3 core). Install: adb install -r waddle-android.apk (stable URL: releases/latest/download/waddle-android.apk; shared install-in-place signature, upgrades earlier rolling and debug builds without an uninstall)" \
+				  --notes "commit ${sha} — optimised preview build (R8, opt-level 3 core). Install: adb install -r waddle-android.apk (stable URL: releases/latest/download/waddle-android.apk). If updating from a preview signed with the retired key, uninstall it first; this removes local app data. Subsequent CI previews update in place." \
 				  "${apk}"
 				# Prune older rolling releases beyond the newest 10, tag and
 				# all (--cleanup-tag): the tags are never reused, so there

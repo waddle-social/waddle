@@ -40,12 +40,21 @@ cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
 
 ## Install-in-place artifacts
 
-Every APK — local or CI — is signed with the **checked-in**
-`debug.keystore` (deliberately not a secret; never used for a store
-release), so `adb install -r` upgrades in place without uninstalling (app
-data survives). Every merge to main builds the **preview** variant —
-release code with R8, the baseline profile, and the Rust core at
-`opt-level = 3` (`--profile mobile`) — as `waddle-android.apk`
+The trusted main-branch CI build signs the **preview** variant with a
+repository Actions secret; local builds and pull requests use the machine's
+Android debug keystore. CI preview APKs can update one another with
+`adb install -r`. A local APK may need to be uninstalled before installing a
+CI preview, and vice versa.
+
+The preview signing certificate has rotated from the previously checked-in
+debug keystore. If you have an older preview installed, uninstall it before
+installing the new one. Android removes the app's local data on uninstall.
+After this one-time reinstall, new CI previews can update in place. See
+[`docs/signing.md`](docs/signing.md) for the key boundary.
+
+Every merge to main builds the **preview** variant — release code with R8,
+the baseline profile, and the Rust core at `opt-level = 3`
+(`--profile mobile`) — as `waddle-android.apk`
 (versionCode = commit-timestamp minutes, so upgrades are always
 monotonic) and publishes it as the repo's **latest** release under a
 unique `android-b<versionCode>-<sha>` tag:
