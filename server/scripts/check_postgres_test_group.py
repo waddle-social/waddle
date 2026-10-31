@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when a Postgres-backed test can run outside nextest's `postgres` group.
+"""Check detected Postgres-backed tests against nextest's `postgres` group.
 
 Under nextest every test is its own process, so the process-local locks some
 Postgres fixtures take do not serialize them. Tests that reset or alter the
@@ -7,8 +7,8 @@ shared `public` schema of WADDLE_TEST_POSTGRES_URL must run in the
 single-threaded `postgres` test group (`.config/nextest.toml`), or a
 concurrent test can see a half-reset database.
 
-This check finds every Rust test that reads the test database (directly via
-`require_test_postgres_url()` or the variable name) and requires it to match
+This check finds Rust tests that it can trace to a test-database read (via
+`require_test_postgres_url()` or the variable name) and requires them to match
 the group's filter, or to sit in a module listed in
 `scripts/postgres-schema-isolated.txt` (tests that create and drop their own
 uniquely named schema and touch nothing shared).
@@ -22,6 +22,10 @@ Coverage is decided per test:
   library tests (crate-wide, every `open(` would match some fixture) and
   across the binary for integration tests. Integration binaries are
   `tests/*.rs` and `tests/<name>/main.rs`.
+- this is a source-level heuristic, not a complete Rust call graph. Cross-file
+  library calls through imported bare names or aliases, method dispatch,
+  macro-generated calls and helpers in other crates can be missed. Review new
+  database fixtures and their callers for correct grouping independently.
 - the allowlist names files whose tests are isolated, or single fixtures
   (`<file>::<Type>::<fn>`) that always create their own schema; a test
   whose only route to the database is such a fixture needs no listing.
@@ -31,7 +35,10 @@ Requires Python 3.11+ (tomllib).
 The filter grammar understood here is what the file uses today:
 `package(P) & (atom | atom | ...)` or `package(P) & atom`, where an atom is
 `binary(name)` or `test(substring)`. Anything else is rejected so the check
-cannot silently drift from nextest's semantics.
+cannot silently drift from nextest's semantics. Group assignments are limited
+to platform-independent `postgres` overrides in `profile.default`, and the
+group must have `max-threads = 1`; other assignments fail closed until their
+precedence can be modeled.
 """
 from __future__ import annotations
 
@@ -103,11 +110,31 @@ def parse_filter(expression: str) -> Filter:
 
 def group_filters(nextest_toml: Path) -> list[Filter]:
     config = tomllib.loads(nextest_toml.read_text())
+    group_config = config.get("test-groups", {}).get(GROUP, {})
+    max_threads = group_config.get("max-threads")
+    if type(max_threads) is not int or max_threads != 1:
+        raise CheckError(f"{nextest_toml}: {GROUP} group must set max-threads = 1")
     filters = []
-    for profile in config.get("profile", {}).values():
+    for name, profile in config.get("profile", {}).items():
         for override in profile.get("overrides", []):
-            if override.get("test-group") == GROUP:
-                filters.append(parse_filter(override["filter"]))
+            group = override.get("test-group")
+            if group is None:
+                continue
+            # Nextest resolves settings per key using the first matching
+            # override, and a named profile can override the default profile.
+            # Until this checker models arbitrary filter precedence, reject
+            # any alternate group assignment rather than unioning filters and
+            # silently accepting tests that a later profile can ungroup.
+            if name != "default" or group != GROUP:
+                raise CheckError(
+                    f"profile.{name}: unsupported test-group assignment {group!r}; "
+                    "the postgres guard requires all group assignments in profile.default"
+                )
+            if "platform" in override or "filter" not in override:
+                raise CheckError(
+                    f"profile.{name}: postgres group assignment requires a platform-independent filter"
+                )
+            filters.append(parse_filter(override["filter"]))
     if not filters:
         raise CheckError(f"{nextest_toml}: no override assigns test-group = '{GROUP}'")
     return filters
@@ -505,7 +532,7 @@ def main() -> int:
               "or, if every such test uses its own uniquely named schema, list the file in "
               "scripts/postgres-schema-isolated.txt with the reason.", file=sys.stderr)
         return 1
-    print(f"Postgres test group covers every Postgres-backed test ({len(allowlist)} allowlist entries)")
+    print(f"Postgres test group covers detected Postgres-backed tests ({len(allowlist)} allowlist entries)")
     return 0
 
 

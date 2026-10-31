@@ -240,6 +240,42 @@ class PostgresGroupCheckTests(unittest.TestCase):
             self.write_filter(extra)
             self.assertEqual(self.run_check().returncode, 2, extra)
 
+    def test_platform_scoped_group_override_is_rejected(self):
+        path = self.server / ".config/nextest.toml"
+        config = path.read_text().replace(
+            "test-group = 'postgres'", "platform = 'cfg(target_os = \"macos\")'\ntest-group = 'postgres'"
+        )
+        path.write_text(config)
+        with self.assertRaisesRegex(check.CheckError, "platform"):
+            check.group_filters(path)
+
+    def test_postgres_group_must_be_single_threaded(self):
+        path = self.server / ".config/nextest.toml"
+        for group_definition in ("postgres = { max-threads = 2 }", ""):
+            with self.subTest(group_definition=group_definition):
+                self.write_filter("")
+                config = path.read_text().replace("postgres = { max-threads = 1 }", group_definition)
+                path.write_text(config)
+                with self.assertRaisesRegex(check.CheckError, "max-threads"):
+                    check.group_filters(path)
+
+    def test_nondefault_group_override_is_rejected(self):
+        path = self.server / ".config/nextest.toml"
+        for group in ("@global", "postgres"):
+            with self.subTest(group=group):
+                self.write_filter("")
+                with path.open("a") as config:
+                    config.write(f"\n[[profile.ci.overrides]]\nfilter = 'all()'\ntest-group = '{group}'\n")
+                with self.assertRaisesRegex(check.CheckError, "profile.ci"):
+                    check.group_filters(path)
+
+    def test_other_default_group_override_is_rejected(self):
+        path = self.server / ".config/nextest.toml"
+        with path.open("a") as config:
+            config.write("\n[[profile.default.overrides]]\nfilter = 'all()'\ntest-group = '@global'\n")
+        with self.assertRaisesRegex(check.CheckError, "profile.default"):
+            check.group_filters(path)
+
     def test_parse_filter_atoms(self):
         parsed = check.parse_filter("package(p) & (binary(a) | test(b::) )")
         self.assertEqual((parsed.package, parsed.binaries, parsed.tests), ("p", ["a"], ["b::"]))

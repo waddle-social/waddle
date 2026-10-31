@@ -12,7 +12,9 @@
 # waddle_ws_test_support::require_test_postgres_url), add it to the filter
 # below, or, if every such test creates and drops its own uniquely named
 # schema, list it in scripts/postgres-schema-isolated.txt.
-# scripts/check_postgres_test_group.py enforces this (ciHelperContracts).
+# scripts/check_postgres_test_group.py checks detected call patterns
+# (ciHelperContracts); review new database fixtures and callers too because
+# its source-level analysis cannot resolve every Rust call.
 [test-groups]
 postgres = { max-threads = 1 }
 

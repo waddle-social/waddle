@@ -26,8 +26,8 @@ for contract in \
   python3 "scripts/${contract}.py"
 done
 
-# Every Postgres-backed test must run in nextest's serialized `postgres`
-# group unless it is listed as schema-isolated.
+# Check detected Postgres-backed tests against the serialized `postgres`
+# group or the schema-isolated allowlist. Review new fixtures and callers too.
 python3 scripts/check_postgres_test_group.py
 
 # The PR rustTests workflow runs this helper outside the dev shell. Use the
