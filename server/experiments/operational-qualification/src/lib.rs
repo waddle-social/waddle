@@ -6,8 +6,9 @@ mod manifest;
 mod plan;
 
 pub use accounting::{
-    account, AccountingStatus, GeneratorOutcome, MessageResult, ObservationSet, OfferObservation,
-    OfferOutcome, PairOutcome, PairResult, Qualification, Receipt, Report, Summary,
+    account, AccountingStatus, GeneratorOutcome, MessageResult, ObservationCoverage,
+    ObservationSet, OfferObservation, OfferOutcome, PairOutcome, PairResult, Qualification,
+    Receipt, Report, Summary,
 };
 pub use manifest::{ClientId, Manifest, Phases, RetryPolicy, Room, RoomId};
 pub use plan::{MessageId, Phase, Plan, PlannedMessage, Totals};

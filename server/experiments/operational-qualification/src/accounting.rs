@@ -59,6 +59,12 @@ pub enum Qualification {
     NotAssessed,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationCoverage {
+    Unverified,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GeneratorOutcome {
@@ -144,6 +150,7 @@ impl Summary {
 pub struct Report {
     pub schema_version: u16,
     pub qualification: Qualification,
+    pub observation_coverage: ObservationCoverage,
     pub accounting_status: AccountingStatus,
     pub closed_at_ms: u64,
     pub plan: Plan,
@@ -259,6 +266,7 @@ pub fn account(plan: Plan, observations: ObservationSet) -> Result<Report, Contr
     Ok(Report {
         schema_version: 1,
         qualification: Qualification::NotAssessed,
+        observation_coverage: ObservationCoverage::Unverified,
         accounting_status,
         closed_at_ms: observations.closed_at_ms,
         plan,

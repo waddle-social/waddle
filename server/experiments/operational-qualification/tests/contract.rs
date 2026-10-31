@@ -1,8 +1,8 @@
 use serde_json::json;
 use waddle_operational_qualification::{
     account, AccountingStatus, ClientId, ContractError, GeneratorOutcome, Manifest, MessageId,
-    ObservationSet, OfferObservation, OfferOutcome, PairOutcome, Phase, Phases, Plan,
-    Qualification, Receipt, RetryPolicy, Room, RoomId,
+    ObservationCoverage, ObservationSet, OfferObservation, OfferOutcome, PairOutcome, Phase,
+    Phases, Plan, Qualification, Receipt, RetryPolicy, Room, RoomId,
 };
 
 fn manifest() -> Manifest {
@@ -315,6 +315,17 @@ fn missing_pairs_remain_in_denominator_and_late_receipts_are_explicit() {
         report.messages[2].recipients[1].receipt_times_ms,
         vec![250, 260]
     );
+}
+
+#[test]
+fn all_timeouts_leave_observation_coverage_unverified_when_accounting_is_complete() {
+    let report = account(Plan::build(manifest()).expect("plan"), observations()).expect("account");
+    assert_eq!(report.accounting_status, AccountingStatus::Complete);
+    assert_eq!(report.measurement.expected_pairs, 6);
+    assert_eq!(report.measurement.timed_out_pairs, 6);
+    assert_eq!(report.observation_coverage, ObservationCoverage::Unverified);
+    let json = serde_json::to_value(report).expect("serialize");
+    assert_eq!(json["observation_coverage"], "unverified");
 }
 
 #[test]

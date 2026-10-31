@@ -28,6 +28,9 @@ An exit code of zero means contract processing succeeded. The result always has
 covered the entire planned duration and generator observations were complete and
 within budget; it can still contain late pairs, timeouts, and duplicate receipts.
 It is not a performance, durability, UI visibility, or production qualification.
+Every report also sets `observation_coverage: "unverified"`: for example, a
+completed collection with no receipts records timeouts but cannot distinguish
+missed observations from undelivered messages.
 
 ## Frozen offered workload
 
