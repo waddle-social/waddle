@@ -231,7 +231,7 @@ async fn sqlite_legacy_outbox_upgrade_preserves_jobs_indexes_and_triggers() {
 }
 
 async fn postgres_upgrade(fixture: &'static str) {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (outbox action upgrade)");
         return;
     };
