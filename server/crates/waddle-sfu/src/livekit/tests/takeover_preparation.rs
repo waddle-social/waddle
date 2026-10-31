@@ -5,7 +5,10 @@ use super::{
     fixture_participant_sid, observed_sids, CallId, CallTeardownIntentLite, Identity, LiveKitSfu,
     MediaCapabilities, RecordingAdmin, SessionBinding, SfuService, StdDuration, TeardownTargetLite,
 };
-use crate::{JoinToken, ParticipantRegistrationExpectation, SfuReconciler};
+use crate::{
+    JoinToken, LiveKitAdmin, ParticipantPreparationError, ParticipantRegistrationExpectation,
+    SfuReconciler,
+};
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 struct TakeoverFixture {
@@ -94,7 +97,9 @@ impl TakeoverFixture {
 
     fn start_preparation(
         &self,
-    ) -> tokio::task::JoinHandle<Option<ParticipantRegistrationExpectation>> {
+    ) -> tokio::task::JoinHandle<
+        Result<ParticipantRegistrationExpectation, ParticipantPreparationError>,
+    > {
         let sfu = Arc::clone(&self.sfu);
         let call = self.call.clone();
         let identity = self.alice.clone();
@@ -190,7 +195,7 @@ async fn provider_failure_does_not_prepare_publication_or_change_authority() {
             .sfu
             .prepare_participant_registration(&fixture.call, &fixture.alice)
             .await
-            .is_none());
+            .is_err_and(|error| error == ParticipantPreparationError::ProviderUnavailable));
         assert!(!fixture
             .sfu
             .has_call_participant(&fixture.call, &fixture.alice));
@@ -217,7 +222,10 @@ async fn preparation_cannot_overwrite_a_concurrent_publication() {
         captured_registration(&fixture.sfu, &fixture.call, &fixture.alice),
     );
     fixture.admin.release_list();
-    assert!(preparing.await.expect("preparation task").is_none());
+    assert!(preparing
+        .await
+        .expect("preparation task")
+        .is_err_and(|error| error == ParticipantPreparationError::Superseded));
     assert_eq!(
         fixture
             .sfu
@@ -229,7 +237,7 @@ async fn preparation_cannot_overwrite_a_concurrent_publication() {
 }
 
 #[tokio::test]
-async fn preparation_cannot_overwrite_a_fresh_same_sid_webhook() {
+async fn preparation_retries_a_fresh_same_sid_webhook_without_rebinding_signaling() {
     let fixture = TakeoverFixture::new();
     let generation = fixture_occupancy_session();
     let mut observation = observed_sids(Some("RM_live"), Some("PA_same"));
@@ -252,7 +260,22 @@ async fn preparation_cannot_overwrite_a_fresh_same_sid_webhook() {
         super::SidObservationDisposition::Applied
     );
     fixture.admin.release_list();
-    assert!(preparing.await.expect("preparation task").is_none());
+    fixture.admin.list_gate.lock().expect("probe gate").take();
+    let prepared = preparing
+        .await
+        .expect("preparation task")
+        .expect("one newer observation is retried");
+    assert_eq!(
+        prepared.revision,
+        captured_registration(&fixture.sfu, &fixture.call, &fixture.alice).revision
+    );
+    assert_eq!(
+        fixture
+            .admin
+            .occupancy_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
     assert_eq!(
         fixture
             .sfu
@@ -319,7 +342,7 @@ async fn ghost_probe_cannot_sweep_a_registration_published_while_it_waited() {
 }
 
 #[tokio::test]
-async fn preparation_rejects_a_room_rotated_during_its_participant_probe() {
+async fn preparation_retries_a_room_rotated_during_its_participant_probe() {
     let fixture = TakeoverFixture::new();
     let generation = fixture_occupancy_session();
     let room = |sid| crate::ListedRoom {
@@ -341,12 +364,28 @@ async fn preparation_rejects_a_room_rotated_during_its_participant_probe() {
     fixture.admin.set_rooms(vec![room("RM_new")]);
     fixture.set_media(generation, "PA_new");
     fixture.admin.release_list();
-    assert!(preparing.await.expect("preparation task").is_none());
-    assert!(
-        !fixture
-            .sfu
-            .has_call_participant(&fixture.call, &fixture.alice),
-        "never seed the successor participant under the predecessor room SID"
+    fixture.admin.list_gate.lock().expect("probe gate").take();
+    preparing
+        .await
+        .expect("preparation task")
+        .expect("stable successor room is retried");
+    let entry = fixture.sfu.calls.get(&fixture.call).expect("restored room");
+    assert_eq!(entry.room_sid, observed_sids(Some("RM_new"), None).room_sid);
+    assert_eq!(
+        entry
+            .participants
+            .get(&fixture.alice)
+            .expect("restored media")
+            .participant_sid,
+        Some(fixture_participant_sid("PA_new"))
+    );
+    drop(entry);
+    assert_eq!(
+        fixture
+            .admin
+            .occupancy_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
     );
     assert!(fixture.reported.lock().expect("intents").is_empty());
     assert_eq!(fixture.sfu.issued_count(&fixture.call, &fixture.alice), 0);
@@ -397,4 +436,239 @@ async fn retrying_the_same_generation_keeps_its_tokens_while_retiring_older_medi
         intents.iter().any(|intent| intent.session.is_none()),
         "g2's signaling session must not be attributed to g1's connected media"
     );
+}
+
+struct FlakyLookupAdmin {
+    inner: Arc<RecordingAdmin>,
+    lookups: std::sync::atomic::AtomicUsize,
+    failures: usize,
+    before_failure: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl FlakyLookupAdmin {
+    fn new(failures: usize) -> Self {
+        Self {
+            inner: Arc::new(RecordingAdmin::default()),
+            lookups: std::sync::atomic::AtomicUsize::new(0),
+            failures,
+            before_failure: Mutex::new(None),
+        }
+    }
+}
+
+impl LiveKitAdmin for FlakyLookupAdmin {
+    fn list_rooms(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<crate::ListedRoom>, crate::SfuError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_rooms()
+    }
+    fn lookup_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<crate::ListedRoom>, crate::SfuError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let lookup = self
+                .lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if lookup < self.failures {
+                let hook = self.before_failure.lock().expect("failure hook").take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                return Err(crate::SfuError::InvalidCallId(
+                    "simulated lookup failure".into(),
+                ));
+            }
+            self.inner.lookup_room(room).await
+        })
+    }
+    fn remove_participant<'a>(
+        &'a self,
+        room: &'a CallId,
+        identity: &'a Identity,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::SfuError>> + Send + 'a>>
+    {
+        self.inner.remove_participant(room, identity)
+    }
+    fn delete_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::SfuError>> + Send + 'a>>
+    {
+        self.inner.delete_room(room)
+    }
+    fn update_participant<'a>(
+        &'a self,
+        room: &'a CallId,
+        identity: &'a Identity,
+        capabilities: MediaCapabilities,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::SfuError>> + Send + 'a>>
+    {
+        self.inner.update_participant(room, identity, capabilities)
+    }
+    fn room_occupancy<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::RoomOccupancy, crate::SfuError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.room_occupancy(room)
+    }
+}
+
+#[tokio::test]
+async fn a_single_provider_failure_is_retried_before_publication() {
+    let admin = Arc::new(FlakyLookupAdmin::new(1));
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
+    let call = CallId::try_new("retry-once@muc.waddle.social").expect("call");
+    let identity = fixture_identity("alice");
+    let prepared = sfu
+        .prepare_participant_registration(&call, &identity)
+        .await
+        .expect("one transient provider error is retried");
+    assert_eq!(admin.lookups.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(sfu
+        .issue_join_token_with_session(
+            &call,
+            &identity,
+            MediaCapabilities::direct_call_peer(),
+            &SessionBinding::try_new("retried-session").expect("session"),
+            fixture_occupancy_session(),
+            prepared,
+        )
+        .expect("mint")
+        .is_some());
+}
+
+#[tokio::test]
+async fn two_provider_failures_return_the_typed_error_without_publication() {
+    let admin = Arc::new(FlakyLookupAdmin::new(2));
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
+    let call = CallId::try_new("retry-exhausted@muc.waddle.social").expect("call");
+    let identity = fixture_identity("alice");
+    assert!(sfu
+        .prepare_participant_registration(&call, &identity)
+        .await
+        .is_err_and(|error| error == ParticipantPreparationError::ProviderUnavailable));
+    assert_eq!(admin.lookups.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(!sfu.has_call_participant(&call, &identity));
+    assert_eq!(sfu.issued_count(&call, &identity), 0);
+}
+
+#[tokio::test]
+async fn retry_after_provider_failure_cannot_adopt_a_new_signaling_session_in_the_same_generation()
+{
+    let admin = Arc::new(FlakyLookupAdmin::new(1));
+    let sfu = Arc::new(LiveKitSfu::with_admin(
+        fixture_config(),
+        admin.clone() as Arc<_>,
+    ));
+    let call = CallId::try_new("anchored-retry@muc.waddle.social").expect("call");
+    let identity = fixture_identity("alice");
+    let generation = fixture_occupancy_session();
+    sfu.register_call_participant_with_session(
+        &call,
+        &identity,
+        &SessionBinding::try_new("session-a").expect("session"),
+        generation,
+    );
+    let newer = Arc::new(Mutex::new(None::<JoinToken>));
+    let observed = Arc::clone(&newer);
+    let weak = Arc::downgrade(&sfu);
+    let hook_call = call.clone();
+    let hook_identity = identity.clone();
+    *admin.before_failure.lock().expect("failure hook") = Some(Arc::new(move || {
+        let sfu = weak.upgrade().expect("SFU alive");
+        *observed.lock().expect("new token") = sfu
+            .issue_join_token_with_session(
+                &hook_call,
+                &hook_identity,
+                MediaCapabilities::direct_call_peer(),
+                &SessionBinding::try_new("session-b").expect("session"),
+                generation,
+                captured_registration(&sfu, &hook_call, &hook_identity),
+            )
+            .expect("newer mint");
+    }));
+    assert!(sfu
+        .prepare_participant_registration(&call, &identity)
+        .await
+        .is_err_and(|error| error == ParticipantPreparationError::Superseded));
+    assert_eq!(
+        admin.lookups.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a retry must preserve the original anchor even when the first RPC failed"
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &identity),
+        Some(SessionBinding::try_new("session-b").expect("session"))
+    );
+    let newer = newer.lock().expect("new token");
+    assert!(!sfu.is_revoked(&newer.as_ref().expect("newer publication").jti));
+    assert!(sfu.pending_media_retirements(&call, &identity).is_empty());
+}
+
+#[tokio::test]
+async fn preparation_retries_benign_poll_restoration_without_promoting_occupancy() {
+    let fixture = TakeoverFixture::new();
+    let generation = fixture_occupancy_session();
+    fixture.set_media(generation, "PA_old");
+    fixture.admin.hold_list();
+    let preparing = fixture.start_preparation();
+    fixture
+        .admin
+        .await_list_in_flight(StdDuration::from_secs(2))
+        .await;
+    let blocked = fixture
+        .admin
+        .list_gate
+        .lock()
+        .expect("probe gate")
+        .take()
+        .expect("blocked preparation");
+    fixture.set_media(generation, "PA_new");
+    let reconciled = fixture
+        .sfu
+        .reconcile_active_calls(chrono::Duration::zero())
+        .await;
+    assert_eq!(reconciled.rooms_adopted, 1);
+    blocked.notify_one();
+    let prepared = preparing
+        .await
+        .expect("preparation task")
+        .expect("a provider-only restoration is a benign retry");
+    assert_eq!(
+        prepared.revision,
+        captured_registration(&fixture.sfu, &fixture.call, &fixture.alice).revision
+    );
+    assert_eq!(
+        fixture
+            .admin
+            .occupancy_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+    assert_eq!(
+        fixture
+            .sfu
+            .participant_occupant_session(&fixture.call, &fixture.alice),
+        None
+    );
+    assert!(fixture.reported.lock().expect("intents").is_empty());
 }

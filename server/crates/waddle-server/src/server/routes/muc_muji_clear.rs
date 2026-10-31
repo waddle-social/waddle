@@ -113,9 +113,6 @@ pub(crate) async fn clear_muji_presence_only(
     let Some(occupant) = snapshot.room.session_generation(full_jid) else {
         return WebhookEffectOutcome::Retryable("occupancy_generation_unavailable");
     };
-    if registration_exists() {
-        return WebhookEffectOutcome::Stale;
-    }
     let clear = actor
         .ask(ClearMujiPresence {
             sender_jid: full_jid.clone(),

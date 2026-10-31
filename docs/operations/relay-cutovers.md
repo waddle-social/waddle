@@ -32,10 +32,38 @@ an XMPP connection interruption; verify call recovery instead of assuming it.
    the publisher revision accepted by the guard below. Keep unrelated
    publisher-triggering changes out of the gap.
 
-Prefer roll-forward recovery. An old binary cannot read the new action; binary
-rollback requires stopped writers and explicit disposition of incompatible
-rows before restarting old drainers. No signing keys need restoring. This
-procedure records requirements; it does not authorize or assert a deployment.
+Prefer roll-forward recovery. **One incompatible row can stall all teardown:**
+the old decoder fails the whole claimed batch, including unrelated supported
+jobs, rather than skipping the new action. Binary rollback requires stopping
+all new writers and drainers, exporting the incompatible rows for audit, and
+explicitly abandoning their pending cleanup before starting old binaries.
+
+Inspect the affected work first (SQLite and PostgreSQL):
+
+```sql
+SELECT action, status, COUNT(*) AS jobs
+FROM call_teardown_outbox
+WHERE action IN ('retire_displaced_participant', 'muji_presence_clear_only')
+GROUP BY action, status;
+```
+
+Only as the final, explicitly chosen rollback disposal step, with writers and
+drainers still stopped, run this exact destructive transaction. It deletes all
+statuses of the two new actions, so no unsupported historical row remains to
+poison an old reader; it preserves every other action:
+
+```sql
+BEGIN;
+DELETE FROM call_teardown_outbox
+WHERE action IN ('retire_displaced_participant', 'muji_presence_clear_only');
+COMMIT;
+```
+
+Re-run the inspection query and require zero rows before starting old drainers.
+This abandons displaced-media retirement and actor-only repair responsibilities;
+it does not undo completed removals or invalidate old credentials. No signing
+keys need restoring. These instructions do not authorize or assert a deployment,
+rollback, SQL execution or live verification.
 
 LiveKit removal is identity-keyed: a successor connecting after the final SID
 probe can still be removed. Local JTI revocation is bookkeeping, not provider

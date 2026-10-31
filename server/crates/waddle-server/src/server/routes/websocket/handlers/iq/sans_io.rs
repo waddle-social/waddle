@@ -297,10 +297,21 @@ async fn handle_sans_io_iq_with_relay_override(
         // credentials; its capabilities must be re-read after preparation.
         let prepare_room = super::jingle_muji_gate::muji_session_initiate_room(iq);
         let participant_registration = if let Some(room) = prepare_room {
-            let registration = super::jingle_muji_gate::participant_registration_expectation(
+            let registration = match super::jingle_muji_gate::participant_registration_expectation(
                 state, &room, full_jid,
             )
-            .await;
+            .await
+            {
+                Ok(registration) => registration,
+                Err(error) => {
+                    return Some(vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        *error,
+                    )])
+                }
+            };
             match super::jingle_muji_gate::verify_muji_jingle_request(
                 state,
                 full_jid,
@@ -346,7 +357,7 @@ async fn handle_sans_io_iq_with_relay_override(
                     error,
                 )]);
             }
-            registration
+            Some(registration)
         } else {
             None
         };

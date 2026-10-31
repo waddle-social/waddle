@@ -213,6 +213,7 @@ mod displaced;
 mod drain_basics;
 mod ghost_clear;
 mod muji;
+mod queued_takeover_leave;
 mod retention_fences;
 mod session_fence;
 mod store_queue;

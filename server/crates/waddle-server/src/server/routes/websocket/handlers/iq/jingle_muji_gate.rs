@@ -47,7 +47,9 @@ use super::super::super::call_signaling_telemetry::{
 };
 use super::super::super::cleanup::get_room_actor_result;
 use super::super::super::WebSocketState;
-use super::errors::{bad_request_iq_error, forbidden_iq_error, internal_server_error_iq_error};
+use super::errors::{
+    bad_request_iq_error, conflict_iq_error, forbidden_iq_error, internal_server_error_iq_error,
+};
 
 /// Outcome of the Muji Jingle membership gate.
 ///
@@ -287,11 +289,33 @@ pub(super) async fn participant_registration_expectation(
     state: &WebSocketState,
     room: &BareJid,
     full_jid: &FullJid,
-) -> Option<waddle_sfu::ParticipantRegistrationExpectation> {
-    let sfu = state.deps.protocol.sfu.as_ref()?;
-    let call = waddle_sfu::CallId::try_new(room.to_string()).ok()?;
-    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
-    sfu.prepare_participant_registration(&call, &identity).await
+) -> Result<waddle_sfu::ParticipantRegistrationExpectation, Box<StanzaError>> {
+    let prepared = async {
+        let sfu = state
+            .deps
+            .protocol
+            .sfu
+            .as_ref()
+            .ok_or(waddle_sfu::ParticipantPreparationError::ContextUnavailable)?;
+        let call = waddle_sfu::CallId::try_new(room.to_string())
+            .map_err(|_| waddle_sfu::ParticipantPreparationError::ContextUnavailable)?;
+        let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+        sfu.prepare_participant_registration(&call, &identity).await
+    }
+    .await;
+    prepared.map_err(|cause| {
+        waddle_xmpp::telemetry::call::record_call_setup_rejected(
+            waddle_xmpp::telemetry::attributes::CallSetupFailureReason::MediaPreparationFailed,
+        );
+        tracing::warn!(room = %room, preparation_cause = ?cause,
+            "Muji media preparation failed before token publication");
+        Box::new(match cause {
+            waddle_sfu::ParticipantPreparationError::Superseded => {
+                conflict_iq_error("call setup was superseded by a newer signaling session")
+            }
+            _ => internal_server_error_iq_error("could not prepare media; please retry"),
+        })
+    })
 }
 
 /// Commit every displaced-media obligation before interpreting token-bearing
