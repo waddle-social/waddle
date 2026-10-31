@@ -336,12 +336,6 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
         with:
           extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
       - id: tools
         name: Verify pinned Flutter and Rust toolchains
         run: "nix develop .#flutter --command flutter --version\nnix develop .#flutter --command rustc --version\nnix develop .#flutter --command wasm-pack --version\nnix develop .#flutter --command actionlint -shellcheck= -pyflakes= .github/workflows/waddle-flutter-apk.yml\nnix develop .#flutter --command cmake --version\nnix develop .#flutter --command ninja --version\n"

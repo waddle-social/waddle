@@ -295,3 +295,98 @@ describe("artifact and aggregate quality gates", () => {
     expect(() => verifyGate({ plan: { result: "success" }, [id]: { result: "success" } }, [id], [id])).not.toThrow();
   });
 });
+
+describe("Android smoke screenshot handshake", () => {
+  const smoke = readFileSync(join(root, "scripts/flutter-device-smoke.sh"), "utf8");
+  const capture = smoke.slice(smoke.indexOf("capture_production_ui() {"), smoke.indexOf("\ncleanup() {"));
+  const cleanup = smoke.slice(smoke.indexOf("cleanup() {"), smoke.indexOf("\ntrap cleanup EXIT"));
+  const token = "0123456789abcdef0123456789abcdef";
+  function fixture(mode: string) {
+    const directory = mkdtempSync(join(tmpdir(), "waddle-smoke-capture-"));
+    temporary.push(directory);
+    const artifact = join(directory, "artifacts");
+    mkdirSync(artifact);
+    mkdirSync(join(directory, "temp"));
+    const adb = join(directory, "adb");
+    writeFileSync(adb, `#!/usr/bin/python3
+import base64, json, os, sys
+from pathlib import Path
+root = Path(os.environ["SMOKE_FIXTURE"])
+mode = os.environ["SMOKE_MODE"]
+args = sys.argv[1:]
+assert args[:2] == ["-s", "emulator-5554"], args
+args = args[2:]
+with (root / "calls").open("a") as log:
+    log.write(json.dumps(args) + "\\n")
+if args == ["exec-out", "run-as", "social.waddle.flutter", "cat", "cache/standalone-smoke.ready"]:
+    if mode == "missing": sys.exit(1)
+    probe = root / "probe"
+    count = int(probe.read_text()) + 1 if probe.exists() else 1
+    probe.write_text(str(count))
+    print("stale-run-token" if mode == "stale" or (mode == "delayed" and count == 1) else os.environ["SMOKE_CAPTURE_TOKEN"], end="")
+elif args == ["exec-out", "screencap", "-p"]:
+    if mode == "capture-failed": sys.exit(17)
+    image = b"not a PNG" if mode == "invalid" else base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
+    sys.stdout.buffer.write(image)
+elif args == ["exec-in", "run-as", "social.waddle.flutter", "tee", "cache/standalone-smoke.ack"]:
+    assert (root / "artifacts/production.png").read_bytes().startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+    value = sys.stdin.read()
+    assert value == os.environ["SMOKE_CAPTURE_TOKEN"], value
+    if mode == "ack-failed": sys.exit(23)
+    (root / "ack").write_text(value)
+else: raise AssertionError(args)
+`, { mode: 0o755 });
+    const env = { ...process.env, ADB: adb, SERIAL: "emulator-5554", SMOKE_ARTIFACT: artifact, SMOKE_CAPTURE_TOKEN: token, SMOKE_FIXTURE: directory, SMOKE_MODE: mode };
+    return { directory, artifact, env, run: () => Bun.spawnSync(["bash", "-c", `set -euo pipefail\n${capture}\ncapture_production_ui 2`], { env }) };
+  }
+  test("captures only the current ready token and acknowledges after promoting a valid PNG", () => {
+    const h = fixture("delayed");
+    const result = h.run();
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(h.directory, "probe"), "utf8")).toBe("2");
+    expect(readFileSync(join(h.directory, "ack"), "utf8")).toBe(token);
+    expect(existsSync(join(h.artifact, "production.png"))).toBe(true);
+    expect(existsSync(join(h.artifact, "production.pending.png"))).toBe(false);
+  });
+  test("capture failure or invalid PNG cannot acknowledge or publish production evidence", () => {
+    for (const mode of ["capture-failed", "invalid"]) {
+      const h = fixture(mode);
+      expect(h.run().exitCode).not.toBe(0);
+      expect(existsSync(join(h.directory, "ack"))).toBe(false);
+      expect(existsSync(join(h.artifact, "production.png"))).toBe(false);
+    }
+  });
+  test("an old run token expires without capturing and acknowledgment errors remain failures", () => {
+    const stale = fixture("stale");
+    expect(stale.run().exitCode).toBe(1);
+    expect(existsSync(join(stale.artifact, "production.png"))).toBe(false);
+    expect(existsSync(join(stale.directory, "ack"))).toBe(false);
+    const failed = fixture("ack-failed");
+    expect(failed.run().exitCode).toBe(23);
+    expect(existsSync(join(failed.directory, "ack"))).toBe(false);
+  });
+  test("parent cleanup retires the capture poller and preserves the Flutter failure status", () => {
+    const h = fixture("missing");
+    const result = Bun.spawnSync(["bash", "-c", `set -euo pipefail
+${capture}
+${cleanup}
+SMOKE_TEMP="$SMOKE_FIXTURE/temp"
+SMOKE_LOG="$SMOKE_TEMP/emulator.log"
+EMULATOR_PID=''
+SMOKE_BOOTED=false
+CAPTURE_PID=''
+trap cleanup EXIT
+capture_production_ui 60 &
+CAPTURE_PID=$!
+printf '%s' "$CAPTURE_PID" > "$SMOKE_FIXTURE/poller.pid"
+fixture_deadline=$((SECONDS + 3))
+while [[ ! -f "$SMOKE_FIXTURE/calls" && $SECONDS -lt $fixture_deadline ]]; do sleep 0.02; done
+test -f "$SMOKE_FIXTURE/calls"
+exit 7
+`], { env: h.env });
+    expect(result.exitCode).toBe(7);
+    expect(readFileSync(join(h.artifact, "status.txt"), "utf8")).toBe("exit_status=7\n");
+    const pid = readFileSync(join(h.directory, "poller.pid"), "utf8");
+    expect(Bun.spawnSync(["kill", "-0", pid]).exitCode).not.toBe(0);
+  });
+});

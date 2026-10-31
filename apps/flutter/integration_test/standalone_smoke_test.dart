@@ -21,7 +21,9 @@ Future<void> _pumpUntil(
   String reason,
 ) async {
   for (var attempt = 0; attempt < 150; attempt++) {
-    if (ready()) return;
+    if (ready()) {
+      return;
+    }
     await tester.pump(const Duration(milliseconds: 100));
   }
   fail(reason);
@@ -89,8 +91,46 @@ Future<void> _exerciseBundledRust() async {
   );
 }
 
+Future<void> _captureMountedApp(WidgetTester tester) async {
+  const token = String.fromEnvironment('WADDLE_SMOKE_CAPTURE_TOKEN');
+  expect(
+    token,
+    matches(RegExp(r'^[0-9a-f]{32}$')),
+    reason: 'Run this test through scripts/flutter-device-smoke.sh.',
+  );
+  final cache = await getTemporaryDirectory();
+  final ready = File('${cache.path}/standalone-smoke.ready');
+  final acknowledged = File('${cache.path}/standalone-smoke.ack');
+  for (final marker in [ready, acknowledged]) {
+    if (await marker.exists()) {
+      await marker.delete();
+    }
+  }
+  try {
+    await tester.pump();
+    await ready.writeAsString(token, flush: true);
+    final deadline = DateTime.now().add(const Duration(seconds: 60));
+    while (DateTime.now().isBefore(deadline)) {
+      if (await acknowledged.exists() &&
+          await acknowledged.readAsString() == token) {
+        return;
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    fail(
+      'The host did not acknowledge a verified ADB screenshot within 60 seconds.',
+    );
+  } finally {
+    for (final marker in [ready, acknowledged]) {
+      if (await marker.exists()) {
+        await marker.delete();
+      }
+    }
+  }
+}
+
 void main() {
-  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('standalone Android bootstrap, ownership, secure storage and Rust', (
     tester,
@@ -130,12 +170,12 @@ void main() {
       find.byType(application.WaddleApp),
     );
     final bridge = widget.bridge;
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(
-      bridge.session['state'] ?? 'loading',
-      isIn(['loading', 'signedOut', 'error']),
-      reason: 'No credentials or production sign-in are part of this test.',
+    await _pumpUntil(
+      tester,
+      () => bridge.session['state'] == 'signedOut',
+      'A clean emulator did not reach the signed-out production screen.',
     );
+    expect(bridge.session['state'], 'signedOut');
     expect(IsolateNameServer.lookupPortByName(_ownerPort), isNotNull);
 
     // Exercise the real headless entry point while the UI already owns runtime.
@@ -159,15 +199,8 @@ void main() {
     expect(acquiredSecondOwner, isFalse);
     expect(tester.takeException(), isNull);
 
-    await binding.convertFlutterSurfaceToImage();
-    await tester.pump(const Duration(milliseconds: 100));
-    final screenshot = await binding.takeScreenshot(
-      'standalone-production-boot',
-    );
-    final cache = await getTemporaryDirectory();
-    await File(
-      '${cache.path}/standalone-smoke.png',
-    ).writeAsBytes(screenshot, flush: true);
+    // Keep the normal rendered app mounted until the host captures its display.
+    await _captureMountedApp(tester);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _pumpUntil(

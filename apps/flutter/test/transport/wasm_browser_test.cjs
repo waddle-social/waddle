@@ -9,33 +9,139 @@ const browserBinary=process.env.WADDLE_BROWSER_BINARY ?? ['chromium','chromium-b
 const available=browserBinary!=null&&fs.existsSync(path.join(root,'rust/waddle_xmpp_client_wasm_bg.wasm'));
 const required=process.env.WADDLE_REQUIRE_BROWSER_CONTRACT==='1';
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const startupTimeoutMs=60000,contractTimeoutMs=15000;
 
-async function chromiumPage(url) {
+async function settlesWithin(promise,milliseconds) {
+  let timer;
+  try{return await Promise.race([promise.then(()=>true),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),milliseconds);})]);}
+  finally{clearTimeout(timer);}
+}
+
+async function launchChromium(startupDeadline) {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'waddle-wasm-browser-'));
-  const child=Bun.spawn([browserBinary,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
-    '--no-first-run','--remote-debugging-port=0',`--user-data-dir=${directory}`,'about:blank'],{stdout:'ignore',stderr:'ignore'});
-  const deadline=Date.now()+15000;
-  let socket;
+  let child,socket,stderr='',stderrReader,stderrDone=false,exited=false,exitCode,closed=false;
+  const pending=new Map();
+  let stderrPump=Promise.resolve();
+  const rejectPending=error=>{for(const request of pending.values())request.reject(error);pending.clear();};
+  const diagnostic=error=>new Error(`${error.message??error}\nChromium stderr (last 16 KiB):\n${stderr.trim()||'<empty>'}`,{cause:error});
+  const cleanup=async()=>{
+    if(closed)return;closed=true;
+    rejectPending(new Error('Chromium session is closing'));
+    try{socket?.close();}catch{}
+    let failure;
+    if(child){
+      try{
+        if(!exited)child.kill('SIGTERM');
+        if(!await settlesWithin(child.exited,5000)){
+          child.kill('SIGKILL');
+          if(!await settlesWithin(child.exited,5000))throw new Error('Chromium did not exit after SIGKILL');
+        }
+      }catch(error){failure=error;}
+      await settlesWithin(stderrPump,1000);
+      if(!stderrDone){try{await settlesWithin(stderrReader.cancel(),1000);}catch{}}
+    }
+    try{fs.rmSync(directory,{recursive:true,force:true,maxRetries:3,retryDelay:50});}catch(error){failure??=error;}
+    if(failure)throw failure;
+  };
+  let processExit;
   try {
+    child=Bun.spawn([browserBinary,'--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',
+      '--no-first-run','--remote-debugging-port=0',`--user-data-dir=${directory}`,'about:blank'],{stdout:'ignore',stderr:'pipe'});
+    processExit=child.exited.then(code=>{exited=true;exitCode=code;return{kind:'exit',code};});
+    stderrReader=child.stderr.getReader();
+    stderrPump=(async()=>{
+      const decoder=new TextDecoder();
+      try{for(;;){const chunk=await stderrReader.read();if(chunk.done)break;stderr=(stderr+decoder.decode(chunk.value,{stream:true})).slice(-16384);}}
+      catch(error){stderr=(stderr+`\nFailed reading Chromium stderr: ${error}`).slice(-16384);}
+      finally{stderrDone=true;stderrReader.releaseLock();}
+    })();
+    const bounded=async(promise,deadline,phase)=>{
+      let timer;
+      try{
+        const outcome=await Promise.race([
+          promise.then(value=>({kind:'value',value})),processExit,
+          new Promise(resolve=>{timer=setTimeout(()=>resolve({kind:'timeout'}),Math.max(0,deadline-Date.now()));}),
+        ]);
+        if(outcome.kind==='exit')throw new Error(`Chromium exited with code ${outcome.code} during ${phase}`);
+        if(outcome.kind==='timeout')throw new Error(`Timed out during ${phase}`);
+        return outcome.value;
+      }finally{clearTimeout(timer);}
+    };
     const portFile=path.join(directory,'DevToolsActivePort');
-    while(!fs.existsSync(portFile)){if(Date.now()>deadline)throw new Error('Chromium did not start');await delay(30);}
-    const [port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split('\n');
-    socket=new WebSocket(`ws://127.0.0.1:${port}${browserPath}`);
-    await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
-    let id=0;const pending=new Map();
-    socket.onmessage=event=>{const value=JSON.parse(event.data);if(!value.id)return;const request=pending.get(value.id);pending.delete(value.id);
-      if(value.error)request.reject(new Error(value.error.message));else request.resolve(value.result);};
-    const send=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const requestId=++id;pending.set(requestId,{resolve,reject});socket.send(JSON.stringify({id:requestId,method,params,...(sessionId?{sessionId}:{})}));});
+    let address;
+    while(!address){
+      if(exited)throw new Error(`Chromium exited with code ${exitCode} before DevTools became available`);
+      if(Date.now()>=startupDeadline)throw new Error(`Chromium startup timed out within its ${startupTimeoutMs}ms budget waiting for DevToolsActivePort`);
+      try{
+        const [port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split('\n');
+        if(/^\d+$/.test(port)&&Number(port)>0&&Number(port)<=65535&&browserPath?.startsWith('/devtools/browser/'))address=`ws://127.0.0.1:${port}${browserPath}`;
+      }catch(error){if(error.code!=='ENOENT')throw error;}
+      if(!address)await delay(30);
+    }
+    socket=new WebSocket(address);
+    await bounded(new Promise((resolve,reject)=>{
+      socket.onopen=resolve;
+      socket.onerror=()=>reject(new Error('Chromium DevTools WebSocket failed to open'));
+      socket.onclose=()=>reject(new Error('Chromium DevTools WebSocket closed before opening'));
+    }),startupDeadline,'opening Chromium DevTools');
+    socket.onerror=()=>rejectPending(new Error('Chromium DevTools WebSocket failed'));
+    socket.onclose=()=>rejectPending(new Error('Chromium DevTools WebSocket closed'));
+    let id=0;
+    socket.onmessage=event=>{
+      try{
+        const value=JSON.parse(event.data);if(!value.id)return;
+        const request=pending.get(value.id);if(!request)return;pending.delete(value.id);
+        if(value.error)request.reject(new Error(value.error.message));else request.resolve(value.result);
+      }catch(error){rejectPending(error);}
+    };
+    const send=async(method,params={},sessionId,deadline=startupDeadline)=>{
+      const requestId=++id;
+      try{return await bounded(new Promise((resolve,reject)=>{
+        pending.set(requestId,{resolve,reject});
+        socket.send(JSON.stringify({id:requestId,method,params,...(sessionId?{sessionId}:{})}));
+      }),deadline,`Chromium DevTools ${method}`);}finally{pending.delete(requestId);}
+    };
     const {targetId}=await send('Target.createTarget',{url:'about:blank'});
     const {sessionId}=await send('Target.attachToTarget',{targetId,flatten:true});
-    await send('Runtime.enable',{},sessionId);await send('Page.navigate',{url},sessionId);
+    await send('Runtime.enable',{},sessionId);
+    return {send,sessionId,cleanup,diagnostic};
+  }catch(error){
+    // A socket error can precede the child's exit notification by a short tick.
+    const crashed=exited||(processExit&&await settlesWithin(processExit,50));
+    let cleaned=true;
+    try{await cleanup();}catch(cleanupError){cleaned=false;error=new AggregateError([error,cleanupError],'Chromium startup and cleanup failed');}
+    const failure=diagnostic(error);failure.retryableStartup=Boolean(crashed&&cleaned);throw failure;
+  }
+}
+
+async function chromiumPage(url) {
+  const startupDeadline=Date.now()+startupTimeoutMs;
+  const startupFailures=[];
+  let browser;
+  for(let attempt=1;attempt<=2;attempt++){
+    try{browser=await launchChromium(startupDeadline);break;}
+    catch(error){
+      startupFailures.push(error);
+      if(attempt===2||!error.retryableStartup||Date.now()>=startupDeadline)throw new AggregateError(startupFailures,'Chromium startup failed');
+      process.stderr.write(`Chromium startup exited before protocol navigation; retrying once with a fresh profile.\n${error.message}\n`);
+      await delay(Math.min(250,Math.max(0,startupDeadline-Date.now())));
+    }
+  }
+  let result,failure;
+  try{
+    // Recovery ends before navigation: protocol results/assertions are never retried.
+    const deadline=Date.now()+contractTimeoutMs;
+    await browser.send('Page.navigate',{url},browser.sessionId,deadline);
     while(Date.now()<deadline){
-      const result=await send('Runtime.evaluate',{expression:'globalThis.__contractResult ?? null',returnByValue:true},sessionId);
-      if(result.result?.value!=null)return result.result.value;
+      const evaluated=await browser.send('Runtime.evaluate',{expression:'globalThis.__contractResult ?? null',returnByValue:true},browser.sessionId,deadline);
+      if(evaluated.result?.value!=null){result=evaluated.result.value;break;}
       await delay(30);
     }
-    throw new Error('The browser protocol contract timed out');
-  } finally {socket?.close();child.kill();await child.exited;fs.rmSync(directory,{recursive:true,force:true});}
+    if(result===undefined)throw new Error(`The browser protocol contract timed out after ${contractTimeoutMs}ms`);
+  }catch(error){failure=error;}
+  finally{try{await browser.cleanup();}catch(error){failure??=error;}}
+  if(failure)throw browser.diagnostic(failure);
+  return result;
 }
 
 function html(endpoint,authenticationFailure=false) {
@@ -70,7 +176,7 @@ function html(endpoint,authenticationFailure=false) {
 }
 
 test('actual Chromium/WASM authenticates, binds without resume, sends and receives with native DTOs',{
- skip:!available&&!required?'Build WASM and install Chromium for this wire contract.':false,timeout:30000,
+ skip:!available&&!required?'Build WASM and install Chromium for this wire contract.':false,timeout:180000,
 },async()=>{
  assert.ok(available,'The browser wire contract requires a built WASM artifact and Chrome/Chromium.');
  let outbound,smResume,openCount=0,handled=0;const published=[];
@@ -165,7 +271,7 @@ function delayedWebSocketFixture({authenticationFailure=false,protocolError=fals
 }
 
 for (const mode of ['graceful disconnect','SASL failure','protocol failure']) test(`actual WASM replacement waits for browser CLOSED after ${mode}`,{
- skip:!available&&!required?'Build WASM and install Chromium for the close contract.':false,timeout:30000,
+ skip:!available&&!required?'Build WASM and install Chromium for the close contract.':false,timeout:90000,
 },async()=>{
  assert.ok(available,'The close contract requires the actual WASM and browser.');
  const authenticationFailure=mode==='SASL failure',protocolError=mode==='protocol failure';
@@ -189,7 +295,7 @@ for (const mode of ['graceful disconnect','SASL failure','protocol failure']) te
 
 
 test('actual WASM immediate close cancels admitted startup before a socket can escape',{
- skip:!available&&!required?'Build WASM and install Chromium for the startup contract.':false,timeout:30000,
+ skip:!available&&!required?'Build WASM and install Chromium for the startup contract.':false,timeout:90000,
 },async()=>{
  assert.ok(available,'The startup contract requires the actual WASM and browser.');
  const fixture=delayedWebSocketFixture();
