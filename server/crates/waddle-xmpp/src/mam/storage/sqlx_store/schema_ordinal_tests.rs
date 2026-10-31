@@ -112,7 +112,7 @@ async fn sqlite_partial_backfill_reranks_all_rows_of_incomplete_archives() {
 
 #[tokio::test]
 async fn postgres_legacy_ordinal_backfill_is_restart_safe_and_preserves_high_water() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping Postgres MAM ordinal schema test: WADDLE_TEST_POSTGRES_URL is unset");
         return;
     };

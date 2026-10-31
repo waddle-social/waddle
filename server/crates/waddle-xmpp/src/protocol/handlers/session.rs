@@ -1,4 +1,4 @@
-//! RFC 3921 / legacy XEP-0078 — session establishment.
+//! RFC 3921 §3 — legacy session establishment.
 //!
 //! Session establishment was removed from RFC 6121 (the binding step alone
 //! is sufficient) but many older XMPP clients still send the empty

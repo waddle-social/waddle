@@ -214,7 +214,7 @@ async fn committed_inbox_push_existing_thread_reply_count_sqlite() {
 }
 
 async fn postgres_push(conversation: Conversation) {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (committed inbox push contents)");
         return;
     };

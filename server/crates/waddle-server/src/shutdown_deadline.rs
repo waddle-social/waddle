@@ -9,12 +9,14 @@
 //! 2. the clustering room drain, inside `claim_release`
 //!    (`WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS`), in parallel with 1;
 //! 3. identity retirement: the `disable()` barrier, exact-owner demotion and
-//!    `retire_after_shutdown`, inside [`SHUTDOWN_RETIRE_BUDGET`];
-//! 4. the local terminal sweep and terminal departure write, inside
-//!    [`SHUTDOWN_TERMINAL_SWEEP_BUDGET`].
+//!    `retire_after_shutdown`, with [`SHUTDOWN_RETIRE_BUDGET`] reserved
+//!    after the drain phase;
+//! 4. the local terminal sweep and terminal departure write, with
+//!    [`SHUTDOWN_TERMINAL_SWEEP_BUDGET`] reserved after retirement.
 //!
 //! The enclosing total is the sum of all four, so stage 1 and 2 running in
-//! parallel only ever leave more time for 3 and 4. A stage is clamped to
+//! parallel only ever leave more time for 3 and 4. The two tail terms are
+//! reservations, not individual stage caps. A stage is clamped to
 //! what remains of the enclosing deadline after the reservations of the
 //! stages that follow it. Clustering terminal fencing started before process
 //! stop can retain unbounded publication or demotion waits; those waits do not

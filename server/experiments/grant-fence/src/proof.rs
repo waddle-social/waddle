@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::authority::{check, client, grant, publish};
 use crate::fixture::Fixture;
-use crate::model::{write_private, Action, Event, Guard, Work, BARRIER_BUDGET};
+use crate::model::{write_private, Action, Event, Guard, Work, WorkerRequest, BARRIER_BUDGET};
 use crate::process::Process;
 use crate::provenance::Provenance;
 use crate::worker::fresh_guard;
@@ -34,6 +34,9 @@ struct Report {
     authority: &'static str,
     outcome: String,
     cases: Vec<Case>,
+    recovery_cases: Vec<crate::recovery::RecoveryCase>,
+    lost_response_cases: Vec<crate::recovery::LostResponseCase>,
+    multi_edge_cases: Vec<crate::multi_edge::Case>,
     pending: Vec<&'static str>,
 }
 
@@ -49,6 +52,9 @@ struct EvidenceSummary<'a> {
     versions: &'a [String],
     authority: &'static str,
     cases: &'a [Case],
+    recovery_cases: &'a [crate::recovery::RecoveryCase],
+    lost_response_cases: &'a [crate::recovery::LostResponseCase],
+    multi_edge_cases: &'a [crate::multi_edge::Case],
     pending: &'a [&'static str],
 }
 
@@ -72,12 +78,9 @@ impl Worker {
         };
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn_tracked(
+        let process = fixture.spawn_worker(
             &mut command,
-            Some(&serde_json::to_vec(&work)?),
-            false,
-            fixture.cleanup_latch(),
-            crate::cleanup::CleanupService::Worker,
+            Some(&serde_json::to_vec(&WorkerRequest::Guard(work.clone()))?),
         )?;
         Ok(Self { process, work })
     }
@@ -206,13 +209,13 @@ pub async fn run(worker_binary: &str) -> Result<()> {
     let measure_shutdown = std::env::var("FENCE_MEASURE_POSTGRES_SHUTDOWN").as_deref() == Ok("1");
     let mut report = Report {
         formal_evidence: provenance.clean && !measure_shutdown, provenance: provenance.clone(), cleanup_verified: false, cleanup_failure: None, versions: Vec::new(),
-        authority: "PostgreSQL canonical grant, immutable generation-qualified single-edge SpiceDB projection",
-        outcome: "running".to_owned(), cases: Vec::new(),
+        authority: "Bounded PostgreSQL/SpiceDB canonical leaf recovery comparison plus original PostgreSQL guard and finite synthetic multi-edge admission proofs",
+        outcome: "running".to_owned(), cases: Vec::new(), recovery_cases: Vec::new(), lost_response_cases: Vec::new(), multi_edge_cases: Vec::new(),
         pending: vec![
-            "SpiceDB-canonical authority variant and P/S comparison",
-            "unknown accepted external-write outcomes and durable recovery protocol",
+            "production canonical authority selection and complete P/S recovery comparison",
+            "production unknown-write recovery beyond bounded leaf response-loss scenarios",
             "PostgreSQL process restart and physical/logical restore",
-            "graph loss/rebuild and multi-edge dependency closure",
+            "physical/logical graph loss, restore and production multi-edge dependency closure",
             "schema/dependency drift and immutable schema enforcement",
             "cross-scope moves and complete delete/recreate lifecycle writer closure",
             "production writer inventory, codecs, actors, cluster claims, ingress frozen-child contract",
@@ -225,8 +228,29 @@ pub async fn run(worker_binary: &str) -> Result<()> {
             "formal evidence requires a clean committed experiment source"
         );
         report.versions = fixture.versions().await?;
-        fixture.start().await?;
-        exercise(&mut fixture, Path::new(worker_binary), &mut report).await
+        fixture
+            .start(crate::model::APP_SCHEMA, crate::model::SPICE_SCHEMA)
+            .await?;
+        exercise(&mut fixture, Path::new(worker_binary), &mut report).await?;
+        crate::recovery::run(
+            &mut fixture,
+            Path::new(worker_binary),
+            &mut report.recovery_cases,
+        )
+        .await?;
+        crate::recovery::run_lost_responses(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.lost_response_cases,
+        )
+        .await?;
+        crate::multi_edge::run(
+            &fixture,
+            Path::new(worker_binary),
+            &mut report.multi_edge_cases,
+        )
+        .await?;
+        Ok(())
     }
     .await;
     if measure_shutdown {
@@ -275,6 +299,9 @@ pub async fn run(worker_binary: &str) -> Result<()> {
         versions: &report.versions,
         authority: report.authority,
         cases: &report.cases,
+        recovery_cases: &report.recovery_cases,
+        lost_response_cases: &report.lost_response_cases,
+        multi_edge_cases: &report.multi_edge_cases,
         pending: &report.pending,
     };
     let summary = serde_json::to_vec(&summary)?;

@@ -15,7 +15,10 @@
 //!   pending after the process deadline, without retiring the identity;
 //! - SIGTERM while the node is re-registering after a self-fence (#1985
 //!   follow-up) is an ordinary shutdown: both identities are retired after
-//!   the publication barrier, instead of waiting for the orphan reaper.
+//!   the publication barrier, instead of waiting for the orphan reaper;
+//! - fatal fencing observed during marking prevents graceful retirement;
+//!   an already-dispatched retirement may still commit, but no second
+//!   identity is admitted after observing the fence.
 #![cfg(feature = "clustering")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,12 +45,42 @@ use waddle_xmpp::ownership::{
 
 type RetirementProbe = Box<dyn Fn(&NodeIdentity) -> bool + Send + Sync>;
 
+/// Suspend the first matching lease call after the publication barrier.
+struct TerminalLeaseGate {
+    live_identity: SharedNodeIdentity,
+    entered: Notify,
+    release: Notify,
+    claimed: AtomicBool,
+}
+
+impl TerminalLeaseGate {
+    fn new(live_identity: SharedNodeIdentity) -> Self {
+        Self {
+            live_identity,
+            entered: Notify::new(),
+            release: Notify::new(),
+            claimed: AtomicBool::new(false),
+        }
+    }
+
+    async fn suspend_after_disable_once(&self) {
+        if !self.live_identity.current().is_active() && !self.claimed.swap(true, Ordering::AcqRel) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 /// In-memory node-lease store: records both retirement APIs and what
-/// `probe` observed at each call.
+/// `probe` observed at each completed call. A gated retirement models an
+/// already-dispatched database operation that can still commit after fencing.
 struct RecordingLease {
     heartbeat_ok: bool,
     registration_entered: Option<Arc<Notify>>,
     registration_release: Option<Arc<Notify>>,
+    mark_draining_gate: Option<Arc<TerminalLeaseGate>>,
+    retirement_gate: Option<Arc<TerminalLeaseGate>>,
+    draining: Arc<Mutex<Vec<(NodeIdentity, bool)>>>,
     retirements: Arc<Mutex<Vec<(NodeIdentity, bool)>>>,
     departures: Arc<Mutex<Vec<(NodeIdentity, bool)>>>,
     probe: RetirementProbe,
@@ -59,6 +92,9 @@ impl RecordingLease {
             heartbeat_ok,
             registration_entered: None,
             registration_release: None,
+            mark_draining_gate: None,
+            retirement_gate: None,
+            draining: Arc::new(Mutex::new(Vec::new())),
             retirements: Arc::new(Mutex::new(Vec::new())),
             departures: Arc::new(Mutex::new(Vec::new())),
             probe,
@@ -96,6 +132,9 @@ impl NodeLeaseStore for RecordingLease {
         Ok(true)
     }
     async fn retire_after_shutdown(&self, me: &NodeIdentity) -> Result<bool, ClaimError> {
+        if let Some(gate) = &self.retirement_gate {
+            gate.suspend_after_disable_once().await;
+        }
         let observed = (self.probe)(me);
         self.retirements
             .lock()
@@ -103,7 +142,15 @@ impl NodeLeaseStore for RecordingLease {
             .push((me.clone(), observed));
         Ok(true)
     }
-    async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+    async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+        if let Some(gate) = &self.mark_draining_gate {
+            gate.suspend_after_disable_once().await;
+        }
+        let observed = (self.probe)(me);
+        self.draining
+            .lock()
+            .expect("lock")
+            .push((me.clone(), observed));
         Ok(())
     }
     async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
@@ -706,6 +753,121 @@ async fn process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
         "an identity whose barrier did not close is never retired"
     );
     drop(publication);
+}
+
+#[derive(Clone, Copy)]
+enum TerminalLeaseStep {
+    MarkDraining,
+    FirstRetirement,
+}
+
+async fn fatal_fence_during_terminal_lease_step(step: TerminalLeaseStep) {
+    let initial = identity();
+    let live_identity = SharedNodeIdentity::new(initial.clone());
+    let demoted_owners = Arc::new(Mutex::new(Vec::new()));
+    let probe_identity = live_identity.clone();
+    let probe_demoted = Arc::clone(&demoted_owners);
+    let (mut lease, registration) = fencing_lease(Box::new(move |retired| {
+        !probe_identity.current().is_active()
+            && probe_demoted.lock().expect("lock").contains(retired)
+    }));
+    let gate = Arc::new(TerminalLeaseGate::new(live_identity.clone()));
+    match step {
+        TerminalLeaseStep::MarkDraining => lease.mark_draining_gate = Some(Arc::clone(&gate)),
+        TerminalLeaseStep::FirstRetirement => lease.retirement_gate = Some(Arc::clone(&gate)),
+    }
+    let draining = Arc::clone(&lease.draining);
+    let retirements = Arc::clone(&lease.retirements);
+    let departures = Arc::clone(&lease.departures);
+    let process_stop = CancellationToken::new();
+    let deadline = ten_second_deadline();
+    let lifecycle = NodeLifecycle::new();
+    let interval = Duration::from_millis(50);
+    let task = tokio::spawn(run_node_lease(
+        lease,
+        initial.clone(),
+        process_stop.child_token(),
+        run_config(
+            interval,
+            Arc::new(StallingLocalClaims {
+                stall: false,
+                demoted_owners: Arc::clone(&demoted_owners),
+            }),
+            lifecycle.clone(),
+            live_identity.clone(),
+            Some(stalled_q6(&process_stop, &deadline)),
+        ),
+    ));
+
+    reach_reregistration(interval, &registration).await;
+    process_stop.cancel();
+    let shutdown = deadline.start();
+    // Keep the detached registration parked until finish reaches its gate;
+    // its late-row mark_draining must not claim the marking gate instead.
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .expect("the chosen lease step suspends after disable and exact demotion");
+    assert!(!live_identity.current().is_active());
+    {
+        let demoted = demoted_owners.lock().expect("lock");
+        assert!(demoted.contains(&initial));
+        assert!(demoted.iter().any(|owner| owner != &initial));
+    }
+    assert!(retirements.lock().expect("lock").is_empty());
+
+    lifecycle.fail(CriticalNodeFailure::RoomRegistryTerminated);
+    gate.release.notify_one();
+    tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+        .await
+        .expect("fatal fencing preserves the enclosing shutdown deadline")
+        .expect("node-lease task");
+    assert!(lifecycle.is_terminally_fenced());
+    assert!(
+        departures.lock().expect("lock").is_empty(),
+        "unsettled Q6 cannot commit terminal departure"
+    );
+    {
+        let marked = draining.lock().expect("lock");
+        for owner in demoted_owners.lock().expect("lock").iter() {
+            assert!(
+                marked.iter().any(|(identity, after_barrier)| identity == owner && *after_barrier),
+                "finish must still mark both disabled, demoted identities draining after fatal fencing"
+            );
+        }
+    }
+    // Only finish could mark the fresh owner above: the detached registration
+    // remains parked until its cleanup can no longer mask a missing mark.
+    registration.release.notify_one();
+
+    let retired = retirements.lock().expect("lock");
+    match step {
+        TerminalLeaseStep::MarkDraining => {
+            assert!(
+                retired.is_empty(),
+                "fatal fencing during marking prevents every graceful retirement"
+            );
+        }
+        TerminalLeaseStep::FirstRetirement => {
+            // This call was dispatched before cancellation. Fencing does not
+            // retract a database operation: allow it to commit, but admit no
+            // retirement of the second identity after observing the fence.
+            assert_eq!(
+                &*retired,
+                &[(initial, true)],
+                "only the already-dispatched retirement may commit"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn fatal_fence_during_terminal_marking_prevents_graceful_retirement() {
+    fatal_fence_during_terminal_lease_step(TerminalLeaseStep::MarkDraining).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn fatal_fence_during_first_retirement_prevents_second_admission() {
+    fatal_fence_during_terminal_lease_step(TerminalLeaseStep::FirstRetirement).await;
 }
 
 /// Exact demotion can stall even when the broad terminal sweep is empty.

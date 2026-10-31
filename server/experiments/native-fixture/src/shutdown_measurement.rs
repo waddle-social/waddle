@@ -90,7 +90,7 @@ mod tests {
     #[tokio::test]
     async fn durability_deadline_bounds_a_connected_unresponsive_backend() -> Result<()> {
         let mut fixture = Fixture::new()?;
-        fixture.start().await?;
+        fixture.start("", crate::TEST_SCHEMA).await?;
         let mut connection = fixture
             .settings
             .connect(

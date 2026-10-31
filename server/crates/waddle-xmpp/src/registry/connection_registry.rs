@@ -42,6 +42,8 @@ pub use state::{LastActivityState, PresenceState};
 /// Uses DashMap for concurrent access without explicit locking.
 pub struct ConnectionRegistry {
     bind_slots: Arc<binding::BindSlots>,
+    #[cfg(feature = "test-utils")]
+    bind_pending_probes: DashMap<FullJid, tokio::sync::oneshot::Sender<()>>,
     /// Map of full JID to connection entry (includes sender and carbons status)
     connections: Arc<DashMap<FullJid, ConnectionEntry>>,
     /// Pending subscription stanzas for offline users (RFC 6121).
@@ -66,6 +68,8 @@ impl ConnectionRegistry {
         info!("Creating connection registry");
         Self {
             bind_slots: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-utils")]
+            bind_pending_probes: DashMap::new(),
             connections: Arc::new(DashMap::new()),
             pending_subscription_stanzas: DashMap::new(),
             presence_states: Arc::new(DashMap::new()),

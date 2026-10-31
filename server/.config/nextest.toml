@@ -8,7 +8,13 @@
 # interleave with other tests on the shared WADDLE_TEST_POSTGRES_URL
 # database. Every test that touches that database must run in this
 # single-threaded group. If you add a new test module that reads
-# WADDLE_TEST_POSTGRES_URL, add it to the filter below.
+# WADDLE_TEST_POSTGRES_URL (through
+# waddle_ws_test_support::require_test_postgres_url), add it to the filter
+# below, or, if every such test creates and drops its own uniquely named
+# schema, list it in scripts/postgres-schema-isolated.txt.
+# scripts/check_postgres_test_group.py checks detected call patterns
+# (ciHelperContracts); review new database fixtures and callers too because
+# its source-level analysis cannot resolve every Rust call.
 [test-groups]
 postgres = { max-threads = 1 }
 
@@ -22,6 +28,21 @@ postgres = { max-threads = 1 }
 # matching override, so these binaries still join the postgres group.
 [[profile.default.overrides]]
 filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume))'
+threads-required = 'num-cpus'
+
+# These local full-server tests require each Pending observation within 1 s
+# to bound the work before the observed send against the real 15 s backstop.
+# Keep unrelated nextest jobs from starving that correctness precondition.
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & binary(characterization_routing) & test(cycle::)'
+threads-required = 'num-cpus'
+
+# The liveness/readiness split test asserts that a spawned server answers
+# its probes inside the kubelet's 2 s timeout during a PostgreSQL outage.
+# Co-scheduled CPU-heavy tests would turn that budget into a scheduling
+# race, so it gets the machine too (and joins the postgres group below).
+[[profile.default.overrides]]
+filter = 'package(waddle-server) & binary(liveness_readiness_split)'
 threads-required = 'num-cpus'
 
 [[profile.default.overrides]]
@@ -46,6 +67,7 @@ package(waddle-server) & (
     | binary(xep0045_ingress_occupant_progress)
     | binary(xep0421_ingress_occupant_copies)
     | binary(xep0313_ingress_archive)
+    | binary(liveness_readiness_split)
     | test(clustering::)
     | test(db::)
     | test(inbox::)
@@ -57,6 +79,7 @@ package(waddle-server) & (
     | test(committed_inbox_push)
     | test(websocket::tests::ingress_authority::)
     | test(websocket::tests::keyed_detach_drain::)
+    | test(websocket::tests::space_fanout_postgres::)
     | test(paused_local_mirror_releases_the_only_main_pool_connection)
     | test(ingress_uow::)
     | test(extension_host_adapter::tests::room_results::)
@@ -72,14 +95,17 @@ package(waddle-server) & (
     | test(muc_direct::plan_failure_tests::) | test(group_dm_invite::plan_failure_tests::) | test(dm_pin::authority_tests::)
     | test(routing_plan_failure_tests::) | test(direct_archive::correction_plan_tests::) | test(message_plan::envelope_tests::)
     | test(ingress_frame_limits::) | test(ingress_replay_receipts::)
+    | test(muc_destroy_completion_outbox::) | test(room_effect_outbox::tests::store_queue::)
 )
 '''
 test-group = 'postgres'
 
 # XMPP storage tests use the same public Postgres schema as the server's
 # table-resetting fixtures, including recipient MAM conflict verification.
+# The `tx_archive` integration tests open SqlxMamStorage (schema DDL) on that
+# same public schema.
 [[profile.default.overrides]]
-filter = 'package(waddle-xmpp) & test(postgres)'
+filter = 'package(waddle-xmpp) & (test(postgres) | test(tx_archive))'
 test-group = 'postgres'
 
 # Full-server e2e scenarios spin up a complete server and wait on wire
@@ -96,3 +122,30 @@ threads-required = 'num-cpus'
 fail-fast = false
 # Flaky tests must fail loudly; retries mask flakiness.
 retries = 0
+# A hung test fails by name instead of consuming the 55-minute shard lane
+# (`nixTestLocal`) or the 60-minute PR job. Ordinary tests, including the
+# serialized `postgres` group (time counts from each test's own start, not
+# from queueing behind the group), finish in seconds: the longest test
+# observed across 10,645 was about 61 s (docs/ci-performance.md), and the
+# longest single real-time budgets outside the cluster binaries are 120 s
+# (the spawned test server's startup, SERVER_STARTUP_TIMEOUT in
+# waddle-ws-test-support; a route-bridge retry join). Ten minutes is about
+# 10x the observed maximum and 5x the largest budget.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The Postgres shard lane reads executed test names from this report and
+# fails when a test in `.config/required-cluster-tests.txt` did not run
+# (`scripts/check_required_tests.py`). Written under the store directory,
+# `target/nextest/ci/junit.xml`.
+[profile.ci.junit]
+path = "junit.xml"
+
+# The multi-process cluster harness and the CUE scenario suite chain several
+# real-time phases per test: lease heartbeats with a 10 s TTL, stale
+# retirement bounds, and per-phase budgets of 30-180 s in
+# clustering_cluster_e2e.rs (one 180 s, two 120 s, one 90 s wait). Twenty
+# minutes leaves room for every phase to use most of its budget on a loaded
+# runner while still failing a hung test well inside the lane's 55 minutes.
+[[profile.ci.overrides]]
+filter = 'package(waddle-server) & (binary(clustering_cluster_e2e) | binary(xep0198_cross_node_resume) | binary(xmpp_e2e_cue))'
+slow-timeout = { period = "120s", terminate-after = 10 }

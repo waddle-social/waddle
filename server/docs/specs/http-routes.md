@@ -39,9 +39,27 @@ stack, authentication bootstrap, upload transfer, or operations require it.
 - `PUT /api/upload/:slot_id`: XEP-0363 upload transfer after an XMPP slot request.
 - `OPTIONS /api/upload/:slot_id`: CORS preflight for XEP-0363 upload transfer.
 - `GET /api/files/:slot_id/:filename`: XEP-0363 download transfer.
-- `GET /health`: Liveness.
+- `GET /health`: Liveness. Fails only for states a restart fixes; never
+  touches the database, lineage or claims. `503` with
+  `"error": "runtime_stalled"`: the runtime heartbeat has not ticked for
+  10 s. `503` with `"error": "terminally_fenced"`: the node took a clustering
+  fatal fence (while serving or while re-registering) and its node-lease loop
+  finished the terminal demotion and exited, so it can never serve again in
+  this process. This includes clustering's own shutdown finding the node
+  lease unavailable, which takes a fatal fence. The demotion has no deadline
+  of its own; a wedged publication guard or actor delays this signal. `503`
+  with `"error": "clustering_stopped"`: the clustering scope stopped while
+  the process keeps running (for example the swarm's keypair-slot lease
+  self-fenced) and the node-lease loop exited, with no fatal fence; nothing
+  re-serves the node in this process. `clustering_stopped` is never reported
+  while the process itself is stopping; `terminally_fenced` can be, when the
+  shutdown drain finds the lease unavailable (harmless then). A clustered
+  Postgres outage longer than the 30 s lease TTL ends in one of these two
+  reasons, so liveness restarts the pod.
 - `GET /healthz`: Liveness alias.
-- `GET /ready`: Readiness.
+- `GET /ready`: Readiness. Database pool health, per-store lineage and the
+  node lifecycle (claims/self-fence, drain), all bounded so the answer
+  arrives within 1.5 s; an unreachable database returns `503`.
 - `GET /readyz`: Readiness alias.
 - `GET /metrics`: Prometheus metrics.
 - `GET /api/v1/health`: Detailed health.

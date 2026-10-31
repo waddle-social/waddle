@@ -238,9 +238,7 @@ async fn stream_lookup_failure_case(state: Arc<WebSocketState>) {
 }
 
 async fn postgres_state() -> Option<(Arc<WebSocketState>, sqlx::PgPool, String)> {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
-        return None;
-    };
+    let database_url = waddle_ws_test_support::require_test_postgres_url()?;
     let admin = sqlx::PgPool::connect(&database_url)
         .await
         .expect("postgres");

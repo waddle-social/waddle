@@ -1,0 +1,165 @@
+# Required tests for the publish-gating Postgres + all-features lane.
+#
+# The lane (`scripts/run-nextest-shards.sh`, task `nixTestLocal`, a
+# dependency of `publishContainerImage`) runs every workspace lib and
+# integration test with `--all-features` (so `clustering`) against a real
+# Postgres, with WADDLE_TEST_REQUIRE_POSTGRES=1 so a test that finds no
+# database panics instead of returning early as a pass. It then reads the
+# executed test names from each shard's nextest JUnit report
+# (`scripts/check_required_tests.py`) and fails, blocking publish, if any test
+# below did not execute or did not pass. The executed names are saved as
+# `.ci/nextest-archive/executed-tests.txt` in the lane's diagnostics artifact
+# (uploaded on PRs always, on main only when the lane passes); on failure the
+# missing names and the executed names of their binaries are printed to the
+# job log. A test nextest reports as flaky (passed on retry) counts as failed;
+# the `ci` profile sets `retries = 0`, so keep that coupling in mind before
+# adding retries.
+#
+# FORMAT: one test per line, `<binary-id> <test-name>`, separated by
+# whitespace, exactly as `cargo nextest list --workspace --all-features`
+# prints them. `#` starts a comment; blank lines are ignored; duplicates and
+# lines with other than two fields are rejected.
+#   Integration test (crates/<crate>/tests/<file>.rs):
+#     waddle-server::clustering_cluster_e2e lone_survivor_and_isolation_fencing
+#   Library unit test (#[cfg(test)] module inside crates/<crate>/src): the
+#   binary id is the bare crate name and the name is the module path:
+#     waddle-server ingress::xep0045_room_manifest_tests::postgres_clustered_dark_manifest_remains_authoritative_without_test_opt_in
+#     waddle-xmpp mam::storage::sqlx_store::tests::postgres_backend_exposes_only_postgres_pool
+#
+# TO ADD TESTS: append a block at the end of the file headed by a comment
+# naming the slice/issue and why the tests must run before an image ships.
+# List tests whose omission would invalidate the publish evidence. Listing a
+# test checks that it ran and passed; it does not alter which tests run or
+# suppress failures. Track and fix flakes separately.
+#
+# Exclusions:
+# - waddle-server::clustering_cluster_e2e dead_publisher_record_visibility_window
+#     #[ignore]d manual measurement; never runs in CI.
+# The other tracked flakes are outside this list's scope and stay excluded:
+# #1699/#1705/#1745 room_effect_outbox::tests::drain::superseded_mid_pass_renewal_aborts_delivery_and_unblocks_terminal_drain
+#   and admin::channels::group_dm_durable_reconciliation_tests::group_dm_rename_recovers_and_arms_the_committed_config_reservation,
+# #1720 server::session_janitors::hung_exact_release_worker_is_cancelled_and_joined,
+# #1744 server::routes::websocket::tests::muc::managed_internal_admission_failure_exports_error_dispatch_span,
+# #1787 waddle-server::xmpp_e2e_cue cue_scenarios_run_over_websocket.
+
+# --- W1.1 (#2046, closes the #1796 remainder): baseline cluster evidence ---
+
+# Two-process cluster harness: two spawned waddle-server processes plus the
+# test process as a third swarm node over a shared Postgres control plane.
+# This scenario previously had a swarm-registry failure (#1720); #1984
+# changed its peer identity lookup. Requiring its execution does not claim
+# that all flakes are fixed.
+waddle-server::clustering_cluster_e2e cluster_exit_criteria_end_to_end
+waddle-server::clustering_cluster_e2e cold_mesh_admits_registered_peers_before_default_isolation_window
+waddle-server::clustering_cluster_e2e surge_node_joins_default_mesh_without_rotating_startup_identity
+waddle-server::clustering_cluster_e2e lone_survivor_and_isolation_fencing
+waddle-server::clustering_cluster_e2e cross_node_resume_live_steal_handshake
+waddle-server::clustering_cluster_e2e orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions
+waddle-server::clustering_cluster_e2e deposed_owner_with_live_socket_room_actor_scenario
+waddle-server::clustering_cluster_e2e muc_join_routes_to_foreign_room_owner
+waddle-server::clustering_cluster_e2e groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes
+waddle-server::clustering_cluster_e2e muji_initiate_routes_to_foreign_room_owner
+waddle-server::clustering_cluster_e2e participant_joined_webhook_reasserts_grants_on_foreign_room_owner
+waddle-server::clustering_cluster_e2e subscription_presence_and_probe_route_to_foreign_user_owner
+waddle-server::clustering_cluster_e2e whole_node_isolation_fences_then_self_heals_without_operator_intervention
+# The harness's submodules (tests/xep0045_*/mod.rs) run in the same binary.
+waddle-server::clustering_cluster_e2e xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_terminalizes
+waddle-server::clustering_cluster_e2e xep0045_remote_cleanup_retry::transferred_user_claim_routes_remote_departure_without_waiting_for_release
+waddle-server::clustering_cluster_e2e xep0045_xep0198_remote_cleanup::disconnect_removes_remote_occupant_while_claim_owner_sibling_is_live
+waddle-server::clustering_cluster_e2e xep0045_xep0198_remote_cleanup::sm_expiry_removes_remote_occupant_while_claim_owner_sibling_is_live
+
+# XEP-0198 cross-node resume: two node identities sharing one Postgres claim
+# store and fenced SM persistence.
+waddle-server::xep0198_cross_node_resume cross_node_resume_preserves_production_replay_bytes_and_original_delay
+waddle-server::xep0198_cross_node_resume detached_cross_node_resume_preserves_occupancy_generation
+waddle-server::xep0198_cross_node_resume detached_principal_hydrates_cross_node_and_preserves_replay
+waddle-server::xep0198_cross_node_resume legacy_null_principal_rejects_without_losing_cross_node_recovery_snapshot
+waddle-server::xep0198_cross_node_resume persisted_cross_node_principal_contains_only_identity_reference_columns
+waddle-server::xep0198_cross_node_resume detached_owned_elsewhere_steals_and_hydrates_with_h_counter_integrity
+waddle-server::xep0198_cross_node_resume live_handshake_via_asker_falls_through_to_detached_path
+waddle-server::xep0198_cross_node_resume remote_ask_unreachable_after_early_persist_retries_to_cross_node_resume
+waddle-server::xep0198_cross_node_resume forged_previd_wrong_identity_returns_not_authorized_without_stealing
+waddle-server::xep0198_cross_node_resume pure_two_node_detached_steal_race_exactly_one_winner
+waddle-server::xep0198_cross_node_resume two_simultaneous_live_resume_race_loser_falls_back_to_detached_path_and_fails_cleanly
+waddle-server::xep0198_cross_node_resume reaper_wins_mid_resume_interleaving_resume_fails_cleanly
+waddle-server::xep0198_cross_node_resume owner_unreachable_past_the_handshake_window_fails_with_owner_unreachable
+waddle-server::xep0198_cross_node_resume owner_lease_expired_past_the_handshake_window_fails_with_not_found
+waddle-server::xep0198_cross_node_resume resume_retransmit_during_admission_preserves_the_original_resume
+waddle-server::xep0198_cross_node_resume resume_retransmit_race_against_the_same_new_node_dedups_without_double_hydration
+waddle-server::xep0198_cross_node_resume recipient_claim_move_retry_dedups_pending_delivery_delete
+waddle-server::xep0198_cross_node_resume handoff_fanout_survives_a_cross_node_steal_unchanged
+waddle-server::xep0198_cross_node_resume post_win_hydrate_failure_repairs_and_client_retry_recovers_the_session
+
+# Database lineage across real server subprocesses (#1652 guard order).
+waddle-server::db_lineage_multiprocess two_replicas_same_database_both_ready
+waddle-server::db_lineage_multiprocess sqlite_unenrolled_database_stays_unready
+waddle-server::db_lineage_multiprocess unenrolled_database_stays_unready
+waddle-server::db_lineage_multiprocess split_deployment_rejected
+waddle-server::db_lineage_multiprocess enroll_action_is_one_shot_and_idempotent
+
+# PostgreSQL room manifests: a persisted envelope manifest stays authoritative
+# regardless of the clustered gate (ingress/commit/implementation.rs).
+waddle-server ingress::xep0045_room_manifest_tests::postgres_clustered_acceptance_keeps_archive_free_room_delivery_legacy
+waddle-server ingress::xep0045_room_manifest_tests::postgres_clustered_dark_manifest_remains_authoritative_without_test_opt_in
+waddle-server ingress::xep0045_room_manifest_tests::postgres_clustered_legacy_remote_completion_releases_local_successor
+
+# PostgreSQL ingress epoch guards and their append-only guard manifest.
+waddle-server ingress_substrate::tests::epoch_and_manifest_tables_enforce_their_singleton_and_append_only_rules
+waddle-server ingress_substrate::tests::epoch_guard_manifest_matches_rust_and_live_trigger_catalog
+
+# W1.2 (#2046): a real PostgreSQL outage must leave the server live, remove
+# readiness within the probe timeout, and recover without restarting.
+waddle-server::liveness_readiness_split postgres_outage_leaves_server_live_and_unready_then_recovers
+
+# --- W1.6a (#2046): bind characterization ---
+#
+# Native WebSocket characterization of resource binding, rebind and the
+# claim-store / UserActor registration delays that E0 changes. The suite is
+# gated on `test-support`, which the default-features publish `test` task
+# compiles out, so this lane is the only publish gate that runs it.
+waddle-server::characterization_bind fresh_bind_returns_requested_full_jid_and_registers_route_and_user_actor
+waddle-server::characterization_bind bind_without_resource_assigns_server_generated_ws_resource
+waddle-server::characterization_bind second_bind_on_bound_stream_is_refused_not_authorized_and_keeps_first_binding
+waddle-server::characterization_bind rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer
+waddle-server::characterization_bind rebind_after_clean_close_binds_without_conflict
+waddle-server::characterization_bind concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other
+waddle-server::characterization_bind concurrent_first_binds_serialize_node_wide_behind_parked_user_claim_acquire
+waddle-server::characterization_bind slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_constraint
+waddle-server::characterization_bind register_then_unregister_behind_a_busy_user_actor_retains_retry_and_serves_later_binds
+
+# --- W1.6b (#2046): prove the local capacity-wait cycle with test-support ---
+# Default builds retain the other routing tests; this one needs the Pending
+# observer to prove both handlers entered before attempting recovery ACKs.
+waddle-server::characterization_routing cycle::mutual_full_outbound_channels_hold_iq_forwarders_despite_recovery_acks_until_a_backstop
+waddle-server::characterization_routing cycle::staggered_full_outbound_channels_hold_both_iq_forwarders_despite_recovery_acks
+
+# W1.6c characterization (#2046): XEP-0198 resume and XEP-0045 join-burst
+# seams. They need the `test-support` feature. The default `test` lane builds
+# without it; the xmppServerCompliance lane (waddle-server-xmpp-server-tests,
+# `--features test-support`, no clustering) runs them but does not gate
+# publish, so this is the one publish-gating lane that runs them. The suite's
+# seam-free tests also run in the default `test` lane.
+waddle-server::characterization_resume_muc seams::muc_live_message_queued_during_join_burst_is_written_after_subject
+waddle-server::characterization_resume_muc seams::sm_replay_precedes_live_with_concurrently_delivering_peer
+waddle-server::characterization_resume_muc seams::sm_detach_canonical_read_outage_replays_unacked_ingress_frame_unkeyed
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_accepts_complete_replay_then_live_transcript
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_duplicate_final_data_before_sentinel
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_replay_after_final_data_before_sentinel
+
+# W1.10 (#2046): shutdown deadline, terminal ownership and pre-SIGTERM waits.
+# These regressions require `clustering`, so the default-feature publish test
+# task compiles them out. The all-features evidence lane must execute them.
+waddle-server::clustering_shutdown_deadline fatal_publication_wait_started_before_sigterm_outlasts_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline sigterm_during_a_clustering_only_room_drain_still_waits_for_q6
+waddle-server::clustering_shutdown_deadline sigterm_with_a_held_publication_guard_does_not_retire
+waddle-server::clustering_shutdown_deadline sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline terminal_departure_requires_both_exact_demotions
+
+# W1.10 follow-up (#2086): distinguish graceful re-registration shutdown
+# retirement from fatal terminal departure after socket drain settlement.
+waddle-server::clustering_shutdown_deadline sigterm_during_reregistration_retires_both_identities
+waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_retires_inside_the_deadline
+waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
+waddle-server::clustering_shutdown_deadline fatal_fence_terminal_departure_requires_a_completed_socket_drain
+waddle-server::clustering_shutdown_deadline fatal_fence_during_terminal_marking_prevents_graceful_retirement
+waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_prevents_second_admission

@@ -423,7 +423,10 @@ impl XmppStateMachine {
                 // bob's session-initiate, otherwise the call surfaces
                 // and the block is effectively meaningless.
                 if let Some(sender) = iq.from() {
-                    if self.blocklist.contains_jid(sender) {
+                    // XEP-0191 note 8 also applies after peer delivery: an
+                    // own-JID/domain block cannot separate account resources.
+                    if sender.to_bare() != full_jid.to_bare() && self.blocklist.contains_jid(sender)
+                    {
                         return vec![OutboundEvent::Log {
                             level: Level::DEBUG,
                             message: format!(

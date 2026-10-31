@@ -57,6 +57,8 @@ use waddle_xmpp::pubsub::PubSubStorage;
 
 mod batch_write;
 mod call_signaling_telemetry;
+#[cfg(feature = "test-support")]
+mod characterization_seams;
 mod cleanup;
 mod connection;
 mod drain_append;

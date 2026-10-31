@@ -80,11 +80,12 @@ podSecurityContext:
   fsGroup: 1000
 
 # Pod termination grace period (seconds).
-# Must cover the full shutdown budget: preStopSleepSeconds (endpoint
+# Must cover the configured shutdown waits: preStopSleepSeconds (endpoint
 # propagation) + the server's enclosing shutdown deadline (#2046 W1.10:
 # config.drainTimeoutSeconds for the connection + Q6 SM drain,
 # clustering.claimReleaseBudgetSeconds for the room claim-release drain,
-# 5 s identity retirement, 2 s terminal sweep) + a 5 s kill margin.
+# 5 s reserved for identity retirement, 2 s reserved for the terminal sweep)
+# + a 5 s kill margin. The tail reservations are not individual stage caps.
 # Default = 5 + (30 + 5 + 5 + 2) + 5. validations.yaml enforces the floor.
 terminationGracePeriodSeconds: 52
 
@@ -273,6 +274,13 @@ secret:
   clusteringKeypairPool: ""
 
 probes:
+  # Liveness never touches the database: a short Postgres outage must leave
+  # pods live and unready, not restart them. It fails only on a stalled
+  # runtime heartbeat, a finished clustering fatal fence, or a clustering
+  # scope that stopped while the process runs (e.g. after an outage longer
+  # than the 30s lease TTL) - states only a restart recovers. Readiness owns
+  # the database, lineage and claim checks and answers within 1.5s, inside
+  # timeoutSeconds.
   liveness:
     path: /health
     initialDelaySeconds: 15

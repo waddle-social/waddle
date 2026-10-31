@@ -1,12 +1,13 @@
 use super::{
-    ActorRef, BareJid, ClaimEpoch, DemoteUserActor, DemoteUserActorIfOwner, ForceDetachOrigin,
-    FullJid, GetOrCreateUser, GetUser, GetUserForLocalClaim, HashMap, ListUsers, ListUsersOwnedBy,
-    ReapUserIfEmpty, RecordPendingUserUnregister, RegisterUserResource,
-    RegisterUserResourceIfOwnerOrAbsent, RemoveUser, RetryUserRegistryConvergence,
-    StaleRetirementQueueResult, UnregisterAndReleaseIfEmpty, UnregisterAndReleaseOutcome,
-    UnregisterAndReleaseRetryableFailure, UnregisterUserResource, UserActor, UserClaimLease,
-    UserCount, UserEntry, UserRegistryActor, UserRegistryConvergenceReport, UserRegistryError,
-    WireUserClusteringClaims, CLAIM_RELEASE_TIMEOUT, STALE_RETIREMENT_RETRY_DELAY,
+    ActorRef, BareJid, ClaimEpoch, DemoteUserActor, DemoteUserActorIfOwner,
+    EnqueueUserResourceUnregister, ForceDetachOrigin, FullJid, GetOrCreateUser, GetUser,
+    GetUserForLocalClaim, HashMap, ListUsers, ListUsersOwnedBy, ReapUserIfEmpty,
+    RecordPendingUserUnregister, RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent,
+    RemoveUser, RetryUserRegistryConvergence, StaleRetirementQueueResult,
+    UnregisterAndReleaseIfEmpty, UnregisterAndReleaseOutcome, UnregisterAndReleaseRetryableFailure,
+    UnregisterUserResource, UserActor, UserClaimLease, UserCount, UserEntry, UserRegistryActor,
+    UserRegistryConvergenceReport, UserRegistryError, WireUserClusteringClaims,
+    CLAIM_RELEASE_TIMEOUT, STALE_RETIREMENT_RETRY_DELAY,
 };
 use crate::ownership::{
     ClaimError, ClaimSnapshot, ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity,
@@ -2736,6 +2737,54 @@ fn duplicate_owner_gated_pending_unregister_uses_one_inventory_entry() {
     registry.remember_pending_unregister(jid, Some(owner));
 
     assert_eq!(registry.pending_unregisters.len(), 1);
+}
+
+#[tokio::test]
+async fn poisoned_but_present_unregister_tell_retains_retry_and_ask_reports_state_lost() {
+    // This defensive state is constructed locally instead of exposing a new
+    // production mutation seam: normal state-loss handling removes the entry.
+    let mut state = UserRegistryActor::new();
+    let jid = full("poisoned-present", "phone");
+    let bare_jid = jid.to_bare();
+    let child = state.spawn_user_actor(
+        bare_jid.clone(),
+        UserClaimLease {
+            owner: NodeIdentity::local(),
+            epoch: ClaimEpoch(1),
+        },
+    );
+    state.poisoned_users.insert(bare_jid.clone());
+    let registry = UserRegistryActor::spawn(state);
+    registry
+        .tell(EnqueueUserResourceUnregister {
+            jid: jid.clone(),
+            owner: None,
+        })
+        .await
+        .expect("enqueue defensive mirror");
+    assert_eq!(
+        registry
+            .ask(RetryUserRegistryConvergence)
+            .await
+            .expect("tell failure must not terminate registry"),
+        UserRegistryConvergenceReport {
+            pending_unregisters: 1,
+            terminal_releases: 0,
+            failed_operations: 1,
+        }
+    );
+    assert!(matches!(
+        registry.ask(UnregisterUserResource { jid, owner: None }).await,
+        Err(SendError::HandlerError(UserRegistryError::UserActorStateLost(jid)))
+            if jid == bare_jid
+    ));
+    assert_eq!(registry.ask(UserCount).await.expect("registry alive"), 1);
+    assert!(
+        child.is_alive(),
+        "defensive failure must preserve the child"
+    );
+    registry.kill();
+    child.kill();
 }
 
 #[tokio::test]

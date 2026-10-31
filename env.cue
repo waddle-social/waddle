@@ -3,9 +3,15 @@ package cuenv
 import (
 	"github.com/cuenv/cuenv/schema"
 	xNix "github.com/cuenv/cuenv/contrib/nix"
+	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
 schema.#Base & {
+	config: ci: cuenv: {
+		source:  "release"
+		version: wc.#CuenvVersion
+	}
+
 	runtime: type: "nix"
 
 	hooks: onEnter: nix: xNix.#NixFlake

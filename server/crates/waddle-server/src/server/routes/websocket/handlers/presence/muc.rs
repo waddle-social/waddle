@@ -2450,6 +2450,42 @@ mod join_denial_telemetry_tests {
         );
     }
 
+    /// No actor runs inside this span, so it closes and exports
+    /// deterministically with the condition attribute and ERROR status.
+    #[tokio::test(flavor = "current_thread")]
+    async fn internal_join_denial_exports_error_dispatch_span() {
+        let _metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let spans = waddle_xmpp::telemetry::test_support::acquire_spans();
+        let room_jid: BareJid = "fail-room@muc.example.com".parse().expect("room jid");
+        let sender_jid: FullJid = "alice@example.com/web".parse().expect("sender jid");
+        let dispatch_span =
+            tracing::info_span!("xmpp.stanza.dispatch", condition = tracing::field::Empty);
+
+        let frames = dispatch_span.in_scope(|| {
+            deny_join_admission(
+                &room_jid,
+                &sender_jid,
+                "alice",
+                false,
+                JoinAdmissionDenial {
+                    condition: StanzaErrorCondition::InternalServerError,
+                    deny_reason: MucJoinDenyReason::RoomLookup,
+                    error_type: ErrorType::Wait,
+                    resolver_outcome: ManagedAdmissionResolverOutcome::NotConsulted,
+                    message: "Failed to look up room before join.",
+                },
+            )
+        });
+        drop(dispatch_span);
+
+        assert!(frames[0].contains("internal-server-error"), "{frames:?}");
+        assert_eq!(
+            spans.attribute_of("xmpp.stanza.dispatch", "condition"),
+            Some("internal-server-error".to_string())
+        );
+        assert!(spans.has_error_status("xmpp.stanza.dispatch"));
+    }
+
     /// The wait-type infrastructure faults stay failed operations even
     /// though their condition is not `internal-server-error`; policy
     /// denials must not be promoted to span errors.

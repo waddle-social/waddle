@@ -1586,6 +1586,15 @@ where
                         replay_after_h,
                         state.deps.auth_state.xmpp_domain.as_str(),
                     ));
+                    // W1.6c seam: queue a live stanza behind the unwritten replay.
+                    #[cfg(feature = "test-support")]
+                    super::characterization_seams::hold_until_live_stanza_queued(
+                        state,
+                        conn.phase.bound_jid(),
+                        conn.registry_owner.as_ref(),
+                        super::characterization_seams::HeldBatch::SmResumed,
+                    )
+                    .await;
                 }
                 SmRegistrationFinalization::ReplaceWithFailed(failed) => {
                     responses = ResponseBatch::from_frames(vec![failed.to_element()]);
