@@ -180,6 +180,16 @@ class AndroidCiGradleTests(unittest.TestCase):
         self.assertIn("Gradle diagnostic fixture", result.stdout)
         self.assertNotIn("Gradle diagnostic fixture", result.stderr)
 
+    def test_direct_host_builds_relocate_read_only_flutter_sdk_caches(self):
+        result, calls = self.run_entrypoint("build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for prefix, suffix in (("--project-cache-dir=", "/cache"), ("-Pkotlin.project.persistent.dir=", "/kotlin")):
+            values = [arg.removeprefix(prefix) for arg in calls[0] if arg.startswith(prefix)]
+            self.assertEqual(len(values), 1)
+            self.assertTrue(Path(values[0]).is_absolute())
+            self.assertTrue(values[0].endswith("/.gradle/waddle-ci" + suffix))
+            self.assertNotIn("/nix/store/", values[0])
+
     def test_apk_upload_finalizers_only_emit_for_build_pipeline(self):
         workflow = (REPO_ROOT / ".github/workflows/waddle-android-pullrequest.yml").read_text()
         pipeline = workflow.index("Run pipeline: pullRequest")
