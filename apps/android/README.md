@@ -74,7 +74,10 @@ The public preview certificate SHA-256 is
 `ae705e4a0f2f14946a712b21373589680ffe8871ded17ecadb60beacc504de0d`.
 For a local preview build, set `WADDLE_ANDROID_PREVIEW_SIGNING_DIR` to a private
 directory containing `preview.p12` and `store-password`, then run
-`./gradlew :app:assembleFossPreview`. Play store releases continue to use the
+`./gradlew --no-configuration-cache :app:assembleFossPreview`. Configuration
+caching is disabled when private preview signing is configured, so Gradle
+cannot persist signing credentials in its configuration cache.
+Play store releases continue to use the
 separate `WADDLE_ANDROID_UPLOAD_*` credentials.
 
 (A single reused tag like `android-latest` is deliberately avoided:

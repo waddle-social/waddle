@@ -78,8 +78,8 @@ let _AndroidPreviewSigning = schema.#Contributor & {
 			priority: 11
 			ci: github: tasks: ["publishApk"]
 			env: {
-				WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: "${{ secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 }}"
-				WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: "${{ secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD }}"
+				WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: "${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 || '' }}"
+				WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: "${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD || '' }}"
 			}
 			provider: github: {
 				uses: "./.github/actions/android-preview-signing"

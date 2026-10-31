@@ -158,6 +158,9 @@ android {
             signingConfig = null
             val signingDir = System.getenv("WADDLE_ANDROID_PREVIEW_SIGNING_DIR")
             if (!signingDir.isNullOrBlank()) {
+                check(!gradle.startParameter.isConfigurationCacheRequested) {
+                    "Private preview signing requires --no-configuration-cache to protect signing credentials"
+                }
                 val privateDir = file(signingDir)
                 signingConfig = signingConfigs.create("previewPrivate") {
                     storeFile = privateDir.resolve("preview.p12")

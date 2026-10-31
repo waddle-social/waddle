@@ -138,8 +138,8 @@ jobs:
       if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
       uses: ./.github/actions/android-preview-signing
       env:
-        WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: ${{ secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
-        WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: ${{ secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD }}
+        WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 || '' }}
+        WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD || '' }}
     - name: 'Run pipeline: default'
       run: cuenv ci --pipeline default --path apps/android
       env:
@@ -147,8 +147,8 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
-        WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: ${{ secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
-        WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: ${{ secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD }}
+        WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 || '' }}
+        WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD || '' }}
     - name: Upload Android test failure reports
       if: failure()
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
