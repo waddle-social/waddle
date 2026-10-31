@@ -164,13 +164,14 @@ pub(super) async fn route_full_jid_iq(
     }
     #[cfg(not(feature = "clustering"))]
     let _ = ordered_relay_origin;
-    match state
+    let send = state
         .deps
         .protocol
         .connection_registry
-        .send_to(&target, stanza)
-        .await
-    {
+        .send_to(&target, stanza);
+    #[cfg(feature = "test-support")]
+    let send = crate::test_support::iq_forward::observe_local_iq_forward(&iq, send);
+    match send.await {
         waddle_xmpp::registry::SendResult::Sent => Vec::new(),
         waddle_xmpp::registry::SendResult::NotConnected
         | waddle_xmpp::registry::SendResult::ChannelClosed => fallback_iq_frames(&iq, state),

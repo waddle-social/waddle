@@ -3,6 +3,9 @@
 //! The helpers are test-only by construction and use `expect` internally when
 //! creating fixed local fixtures; they are never enabled in release images.
 
+#[cfg(feature = "test-support")]
+pub mod iq_forward;
+
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;
 use crate::notification_outbox::NotificationOutboxStore;

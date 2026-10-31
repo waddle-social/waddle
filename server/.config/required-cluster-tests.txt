@@ -126,3 +126,9 @@ waddle-server::characterization_bind concurrent_same_full_jid_binds_leave_one_li
 waddle-server::characterization_bind concurrent_first_binds_serialize_node_wide_behind_parked_user_claim_acquire
 waddle-server::characterization_bind slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_constraint
 waddle-server::characterization_bind register_then_unregister_behind_a_busy_user_actor_retains_retry_and_serves_later_binds
+
+# --- W1.6b (#2046): prove the local capacity-wait cycle with test-support ---
+# Default builds retain the other routing tests; this one needs the Pending
+# observer to prove both handlers entered before attempting recovery ACKs.
+waddle-server::characterization_routing cycle::mutual_full_outbound_channels_hold_iq_forwarders_despite_recovery_acks_until_a_backstop
+waddle-server::characterization_routing cycle::staggered_full_outbound_channels_hold_both_iq_forwarders_despite_recovery_acks
