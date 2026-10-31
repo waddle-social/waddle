@@ -106,3 +106,7 @@ waddle-server ingress::xep0045_room_manifest_tests::postgres_clustered_legacy_re
 # PostgreSQL ingress epoch guards and their append-only guard manifest.
 waddle-server ingress_substrate::tests::epoch_and_manifest_tables_enforce_their_singleton_and_append_only_rules
 waddle-server ingress_substrate::tests::epoch_guard_manifest_matches_rust_and_live_trigger_catalog
+
+# W1.2 (#2046): a real PostgreSQL outage must leave the server live, remove
+# readiness within the probe timeout, and recover without restarting.
+waddle-server::liveness_readiness_split postgres_outage_leaves_server_live_and_unready_then_recovers

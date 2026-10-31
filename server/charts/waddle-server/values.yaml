@@ -272,6 +272,13 @@ secret:
   clusteringKeypairPool: ""
 
 probes:
+  # Liveness never touches the database: a short Postgres outage must leave
+  # pods live and unready, not restart them. It fails only on a stalled
+  # runtime heartbeat, a finished clustering fatal fence, or a clustering
+  # scope that stopped while the process runs (e.g. after an outage longer
+  # than the 30s lease TTL) - states only a restart recovers. Readiness owns
+  # the database, lineage and claim checks and answers within 1.5s, inside
+  # timeoutSeconds.
   liveness:
     path: /health
     initialDelaySeconds: 15
