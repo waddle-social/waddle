@@ -48,9 +48,11 @@ The shared visual system in `lib/design.dart` pairs warm-paper and deep-teal
 surfaces with Manrope UI typography, Waddle's Fredoka wordmark and the shared
 penguin mark. Fonts are bundled with their SIL Open Font Licenses; no runtime
 font download is required. Community rooms use grouped rows and contextual
-creation actions. Conversations and the layered composer share a bounded reading
-lane on wide screens. Profiles, preferences, people and calls use the same
-spacing, tonal roles and typography.
+creation actions. Conversations use compact sender groups and a bottom composer
+in both timeline orders. Formatting, attachments and safety details are available on demand;
+reply context stays visible above a clipped, scrollable draft editor. The
+timeline and composer share a bounded reading lane on wide screens. Profiles,
+preferences, people and calls use the same spacing, tonal roles and typography.
 
 Material You uses Material 3 controls, a generated teal scheme, stored light/dark
 overrides, and Android wallpaper schemes when the existing wallpaper preference
@@ -85,13 +87,14 @@ presentation projections.
 
 ## Verification status
 
-Flutter analysis and all 46 widget/bridge/layout tests pass locally on Flutter 3.44.0
+Flutter analysis and all 61 widget/bridge/layout tests pass locally on Flutter 3.44.0
 and Dart 3.12.0. The Android CI contract suite also passes all 11 checks.
-Standalone Kotlin Detekt and repository whitespace checks pass. The baseline
-migration compiled both APK distributions and passed Android unit tests in CI
-with the pinned Flutter 3.47 toolchain. The visual redesign requires its own APK
-build. Device integration and feature parity require runtime evidence beyond
-these source, widget and compilation checks.
+Standalone Kotlin Detekt and repository whitespace checks pass. The migration
+and shared visual redesign compiled both APK distributions and passed Android
+unit tests in CI with the pinned Flutter 3.47 toolchain. Each subsequent room
+refinement must pass that same APK workflow before delivery. Device integration
+and feature parity require runtime evidence beyond these source, widget and
+compilation checks.
 
 `test/bridge_test.dart` covers account invalidation, byte preservation, navigation
 acknowledgement, errors and listener disposal. `test/app_test.dart` covers provider
@@ -103,7 +106,11 @@ animations. These tests run with the real Flutter toolchain in CI. The existing
 Compose goldens continue to guard retained reference components; they do not
 validate the Flutter UI. `test/layout_test.dart` loads the real bundled fonts
 and checks light/dark phone layouts, wide Home/conversation panes, and all main
-screens at 320px with doubled text. Theme tests enforce normal-text contrast.
+screens at 320px with doubled text. Room previews include both timeline orders,
+wallpaper colours, and a reply with a selected mention above the keyboard.
+Conversation tests also cover sender identity, unread boundaries, safety actions,
+editor clipping and accessible action targets. Theme tests enforce normal-text
+contrast.
 To export inspectable previews from the module directory:
 
 ```sh

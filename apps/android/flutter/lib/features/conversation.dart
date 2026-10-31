@@ -508,7 +508,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         appBar: AppBar(
           toolbarHeight: MediaQuery.textScalerOf(context).scale(18) > 26
               ? 100
-              : 88,
+              : 72,
           titleSpacing: 4,
           title: _header(),
           bottom: PreferredSize(
@@ -604,7 +604,7 @@ class _ConversationScreenState extends State<ConversationScreen>
           child: Align(
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 800),
+              constraints: const BoxConstraints(maxWidth: 760),
               child: Column(
                 children: [
                   if (_error != null)
@@ -660,7 +660,6 @@ class _ConversationScreenState extends State<ConversationScreen>
                         ),
                       ),
                     ),
-                  if (social) _composer(),
                   Expanded(
                     child: Stack(
                       children: [
@@ -750,69 +749,34 @@ class _ConversationScreenState extends State<ConversationScreen>
                                 );
                               }
                               final message = rows[index];
-                              final older = index + 1 < rows.length
-                                  ? rows[index + 1]
-                                  : null;
+                              final previous = social
+                                  ? (index > 0 ? rows[index - 1] : null)
+                                  : (index + 1 < rows.length
+                                        ? rows[index + 1]
+                                        : null);
                               final date = _date(message);
-                              final olderDate = older == null
+                              final previousDate = previous == null
                                   ? null
-                                  : _date(older);
-                              final sameDay =
-                                  date != null &&
-                                  olderDate != null &&
-                                  date.year == olderDate.year &&
-                                  date.month == olderDate.month &&
-                                  date.day == olderDate.day;
-                              final grouped =
-                                  older != null &&
-                                  older['author'] == message['author'] &&
-                                  sameDay &&
-                                  date.difference(olderDate).inMinutes.abs() <
-                                      5;
-                              final newerDate = index > 0
-                                  ? _date(rows[index - 1])
-                                  : null;
-                              final startsSocialDay =
-                                  date != null &&
-                                  (newerDate == null ||
-                                      date.year != newerDate.year ||
-                                      date.month != newerDate.month ||
-                                      date.day != newerDate.day);
+                                  : _date(previous);
                               final separator =
-                                  message.containsKey('daySeparator')
-                                  ? DateTime.tryParse(
-                                      _str(message['daySeparator']),
-                                    )
-                                  : (social ? startsSocialDay : !sameDay)
+                                  date != null && !_sameDay(date, previousDate)
                                   ? date
                                   : null;
+                              final grouped = _continuesGroup(
+                                message,
+                                previous,
+                                social: social,
+                              );
                               return Column(
                                 children: [
                                   if (separator != null) _dayLabel(separator),
-                                  if (message['unreadDivider'] == true)
-                                    const Padding(
-                                      padding: EdgeInsets.symmetric(
-                                        vertical: 8,
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Expanded(child: Divider()),
-                                          Padding(
-                                            padding: EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                            ),
-                                            child: Text('New messages'),
-                                          ),
-                                          Expanded(child: Divider()),
-                                        ],
-                                      ),
-                                    ),
-                                  _message(
-                                    message,
-                                    message.containsKey('startsGroup')
-                                        ? message['startsGroup'] != true
-                                        : grouped,
-                                  ),
+                                  if (!social &&
+                                      message['unreadDivider'] == true)
+                                    _unreadDivider(message),
+                                  _message(message, grouped),
+                                  if (social &&
+                                      message['unreadDivider'] == true)
+                                    _unreadDivider(message),
                                 ],
                               );
                             },
@@ -853,7 +817,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                         ),
                       ),
                     ),
-                  if (!social) _composer(),
+                  _composer(),
                 ],
               ),
             ),
@@ -888,13 +852,20 @@ class _ConversationScreenState extends State<ConversationScreen>
     final online =
         person.isNotEmpty &&
         ['available', 'chat'].contains(person.first['show']);
+    final description = room.isEmpty
+        ? ''
+        : _str(room.first['description']).trim();
+    final roomMeta = [
+      if (here != null) '$here here',
+      if (description.isNotEmpty) description,
+    ];
     final subline = widget.threadId != null
         ? widget.title
         : widget.group
-        ? '${here == null ? 'A place to catch up' : '$here here'}${_isGroupDm ? ' · Private group' : ' · Community'}'
+        ? (roomMeta.isEmpty ? widget.jid : roomMeta.join(' · '))
         : online
         ? 'Online now'
-        : 'Direct message';
+        : widget.jid;
     return LayoutBuilder(
       builder: (context, constraints) => Row(
         children: [
@@ -965,7 +936,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         : MaterialLocalizations.of(context).formatMediumDate(date);
     final colors = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24),
+      padding: const EdgeInsets.symmetric(vertical: 14),
       child: Row(
         children: [
           Expanded(child: Divider(color: colors.outlineVariant)),
@@ -996,14 +967,84 @@ class _ConversationScreenState extends State<ConversationScreen>
     );
   }
 
+  Widget _unreadDivider(Map<String, dynamic> message) => Padding(
+    key: ValueKey('unread-divider:${message['id']}'),
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: const Row(
+      children: [
+        Expanded(child: Divider()),
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12),
+          child: Text('New messages'),
+        ),
+        Expanded(child: Divider()),
+      ],
+    ),
+  );
+
+  bool _sameDay(DateTime? one, DateTime? two) =>
+      one != null &&
+      two != null &&
+      one.year == two.year &&
+      one.month == two.month &&
+      one.day == two.day;
+
+  String? _senderIdentity(Map<String, dynamic> message) {
+    for (final key in ['authorJid', 'senderJid', 'senderId', 'from']) {
+      final value = _str(message[key]).trim();
+      if (value.isNotEmpty) {
+        return '$key:$value';
+      }
+    }
+    final own = _str(widget.bridge.session['jid']);
+    return message['mine'] == true && own.isNotEmpty ? 'authorJid:$own' : null;
+  }
+
+  bool _groupBoundary(Map<String, dynamic> message) =>
+      message['isCallRow'] == true ||
+      message['system'] == true ||
+      message['isSystem'] == true ||
+      message['deleted'] == true ||
+      ['system', 'call'].contains(message['kind']);
+
+  bool _continuesGroup(
+    Map<String, dynamic> message,
+    Map<String, dynamic>? previous, {
+    required bool social,
+  }) {
+    if (previous == null ||
+        _groupBoundary(message) ||
+        _groupBoundary(previous) ||
+        (social ? previous['unreadDivider'] : message['unreadDivider']) ==
+            true) {
+      return false;
+    }
+    final identity = _senderIdentity(message);
+    final when = _date(message);
+    final prior = _date(previous);
+    return identity != null &&
+        identity == _senderIdentity(previous) &&
+        _sameDay(when, prior) &&
+        when!.difference(prior!).inMinutes.abs() < 5;
+  }
+
   Widget _message(Map<String, dynamic> message, bool grouped) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final mine = message['mine'] == true;
     final deleted = message['deleted'] == true;
     final actionable = !deleted && message['pending'] != true;
+    final hasActions =
+        actionable ||
+        message['pending'] == true ||
+        message['safetyScores'] != null;
     final author = _str(message['author'], mine ? 'You' : 'Unknown');
     final date = _date(message);
+    final time = date == null
+        ? ''
+        : MaterialLocalizations.of(
+            context,
+          ).formatTimeOfDay(TimeOfDay.fromDateTime(date));
     final reactions = _maps(message['reactions']);
     final thread = _str(
       message['threadTargetId'],
@@ -1020,9 +1061,18 @@ class _ConversationScreenState extends State<ConversationScreen>
     final pinned =
         message['pinned'] == true ||
         (_data['pinnedIds'] as List? ?? const []).contains(message['id']);
+    final actions = IconButton(
+      tooltip: 'Message actions',
+      onPressed: () => _actions(message),
+      icon: Icon(
+        Icons.more_horiz_rounded,
+        size: 18,
+        color: colors.onSurfaceVariant,
+      ),
+    );
     return Padding(
       key: ValueKey(message['presentationId'] ?? message['id']),
-      padding: EdgeInsets.only(top: grouped ? 4 : 20, bottom: 4),
+      padding: EdgeInsets.only(top: grouped ? 0 : 8, bottom: 2),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1030,7 +1080,20 @@ class _ConversationScreenState extends State<ConversationScreen>
             width: 48,
             height: 48,
             child: grouped
-                ? null
+                ? (hasActions
+                      ? IconButton(
+                          tooltip: time.isEmpty
+                              ? 'Message actions'
+                              : 'Message actions · $time',
+                          padding: EdgeInsets.zero,
+                          onPressed: () => _actions(message),
+                          icon: Icon(
+                            Icons.more_horiz_rounded,
+                            size: 16,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        )
+                      : null)
                 : Semantics(
                     label: 'Profile of $author',
                     button: true,
@@ -1043,258 +1106,195 @@ class _ConversationScreenState extends State<ConversationScreen>
                     ),
                   ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onLongPress: actionable ? () => _actions(message) : null,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: mine
-                      ? Border(
-                          left: BorderSide(color: colors.primary, width: 2),
-                        )
-                      : null,
-                ),
-                child: Padding(
-                  padding: EdgeInsets.only(left: mine ? 12 : 0, right: 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (!grouped)
-                        Wrap(
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: 8,
-                          runSpacing: 0,
-                          children: [
-                            InkWell(
-                              borderRadius: BorderRadius.circular(8),
-                              onTap: () => _profile(message),
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  minHeight: 48,
-                                ),
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  widthFactor: 1,
-                                  child: Text(
-                                    author,
-                                    style: theme.textTheme.labelLarge?.copyWith(
-                                      fontWeight: FontWeight.w800,
-                                      color: mine
-                                          ? colors.primary
-                                          : colors.onSurface,
-                                    ),
-                                  ),
-                                ),
+              onLongPress: hasActions ? () => _actions(message) : null,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (!grouped)
+                    Padding(
+                      key: ValueKey('message-header:${message['id']}'),
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        children: [
+                          GestureDetector(
+                            excludeFromSemantics: true,
+                            onTap: () => _profile(message),
+                            child: Text(
+                              author,
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: mine ? colors.primary : colors.onSurface,
                               ),
                             ),
-                            if (date != null)
-                              Text(
-                                MaterialLocalizations.of(
-                                  context,
-                                ).formatTimeOfDay(TimeOfDay.fromDateTime(date)),
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: colors.onSurfaceVariant,
-                                  fontSize: 11,
-                                ),
-                              ),
-                            if (message['edited'] == true)
-                              Text(
-                                'edited',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: colors.onSurfaceVariant,
-                                ),
-                              ),
-                            if (pinned)
-                              Tooltip(
-                                message: 'Pinned message',
-                                child: Icon(
-                                  Icons.push_pin_rounded,
-                                  size: 13,
-                                  color: colors.primary,
-                                ),
-                              ),
-                          ],
-                        ),
-                      if (message['replyTo'] != null && !deleted)
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 9,
                           ),
-                          decoration: BoxDecoration(
-                            color: colors.surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '↳ ${_str((message['replyPreview'] as Map?)?['author'], 'Reply')}',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: colors.onSurfaceVariant,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              if (message['replyPreview'] is Map)
-                                Text(
-                                  _str(
-                                    (message['replyPreview'] as Map)['body'],
-                                  ),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: colors.onSurface,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      if (deleted)
-                        Text(
-                          'Message removed',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            fontStyle: FontStyle.italic,
-                            color: colors.onSurfaceVariant,
-                          ),
-                        )
-                      else ...[
-                        if (message['isCallRow'] == true)
-                          _callRow(message)
-                        else if (_str(message['body']).isNotEmpty)
-                          _richBody(message),
-                        for (final file in _maps(message['files']))
-                          _attachment(message, file),
-                        for (final preview in _maps(message['linkPreviews']))
-                          _linkPreview(preview),
-                      ],
-                      if (message['pending'] == true ||
-                          message['failed'] == true ||
-                          message['rejected'] == true ||
-                          message['queued'] == true)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Wrap(
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            spacing: 5,
-                            children: [
-                              Icon(
-                                message['failed'] == true ||
-                                        message['rejected'] == true
-                                    ? Icons.error_outline
-                                    : Icons.schedule_rounded,
-                                size: 13,
+                          if (time.isNotEmpty)
+                            Text(
+                              time,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                fontSize: 10,
                                 color: colors.onSurfaceVariant,
                               ),
-                              Text(
-                                message['queued'] == true
-                                    ? 'Queued · waiting for connection'
-                                    : message['failed'] == true ||
-                                          message['rejected'] == true
-                                    ? 'Not sent'
-                                    : 'Sending…',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: colors.onSurfaceVariant,
-                                ),
-                              ),
-                              if (message['failed'] == true)
-                                TextButton(
-                                  onPressed: () => _command(
-                                    'conversation.retry',
-                                    {'localId': message['localId']},
-                                  ),
-                                  child: const Text('Retry'),
-                                ),
-                            ],
-                          ),
-                        ),
-                      if (!deleted && reactions.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Wrap(
-                            spacing: 7,
-                            runSpacing: 4,
-                            children: [
-                              for (final reaction in reactions)
-                                FilterChip(
-                                  selected: reaction['mine'] == true,
-                                  showCheckmark: false,
-                                  backgroundColor:
-                                      colors.surfaceContainerLowest,
-                                  selectedColor: colors.primaryContainer,
-                                  side: BorderSide(
-                                    color: reaction['mine'] == true
-                                        ? colors.primary
-                                        : colors.outlineVariant,
-                                  ),
-                                  shape: const StadiumBorder(),
-                                  label: Text(
-                                    '${_str(reaction['emoji'])}  ${reaction['count'] ?? 0}',
-                                    style: theme.textTheme.labelMedium
-                                        ?.copyWith(
-                                          color: reaction['mine'] == true
-                                              ? colors.onPrimaryContainer
-                                              : colors.onSurface,
-                                        ),
-                                  ),
-                                  onSelected: (_) =>
-                                      _command('conversation.reaction', {
-                                        'targetId': message['id'],
-                                        'emoji': reaction['emoji'],
-                                      }),
-                                ),
-                            ],
-                          ),
-                        ),
-                      if (!deleted && widget.threadId == null && replyCount > 0)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: TextButton.icon(
-                            style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                              ),
-                              backgroundColor: colors.primaryContainer,
-                              foregroundColor: colors.onPrimaryContainer,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14),
+                            ),
+                          if (message['edited'] == true)
+                            Text(
+                              'edited',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: colors.onSurfaceVariant,
                               ),
                             ),
-                            onPressed: () => _thread(thread),
-                            icon: const Icon(
-                              Icons.subdirectory_arrow_right_rounded,
-                              size: 17,
+                          if (pinned)
+                            Tooltip(
+                              message: 'Pinned message',
+                              child: Icon(
+                                Icons.push_pin_rounded,
+                                size: 12,
+                                color: colors.primary,
+                              ),
                             ),
+                        ],
+                      ),
+                    ),
+                  if (message['replyTo'] != null && !deleted)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.reply_rounded,
+                            size: 15,
+                            color: colors.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '${_str((message['replyPreview'] as Map?)?['author'], 'Reply')} · ${_str((message['replyPreview'] as Map?)?['body'])}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (deleted)
+                    Text(
+                      'Message removed',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontStyle: FontStyle.italic,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    )
+                  else ...[
+                    if (message['isCallRow'] == true)
+                      _callRow(message)
+                    else if (_str(message['body']).isNotEmpty)
+                      _richBody(message),
+                    for (final file in _maps(message['files']))
+                      _attachment(message, file),
+                    for (final preview in _maps(message['linkPreviews']))
+                      _linkPreview(preview),
+                  ],
+                  if (message['pending'] == true ||
+                      message['failed'] == true ||
+                      message['rejected'] == true ||
+                      message['queued'] == true)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 5,
+                        children: [
+                          Icon(
+                            message['failed'] == true ||
+                                    message['rejected'] == true
+                                ? Icons.error_outline
+                                : Icons.schedule_rounded,
+                            size: 12,
+                            color: colors.onSurfaceVariant,
+                          ),
+                          Text(
+                            message['queued'] == true
+                                ? 'Queued · waiting for connection'
+                                : message['failed'] == true ||
+                                      message['rejected'] == true
+                                ? 'Not sent'
+                                : 'Sending…',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ),
+                          if (message['failed'] == true)
+                            TextButton(
+                              onPressed: () => _command('conversation.retry', {
+                                'localId': message['localId'],
+                              }),
+                              child: const Text('Retry'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  if (!deleted && reactions.isNotEmpty)
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 2,
+                      children: [
+                        for (final reaction in reactions)
+                          FilterChip(
+                            selected: reaction['mine'] == true,
+                            showCheckmark: false,
+                            backgroundColor: colors.surfaceContainerLowest,
+                            selectedColor: colors.primaryContainer,
+                            side: BorderSide(
+                              color: reaction['mine'] == true
+                                  ? colors.primary
+                                  : colors.outlineVariant,
+                            ),
+                            shape: const StadiumBorder(),
                             label: Text(
-                              '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
+                              '${_str(reaction['emoji'])}  ${reaction['count'] ?? 0}',
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: reaction['mine'] == true
+                                    ? colors.onPrimaryContainer
+                                    : colors.onSurface,
+                              ),
                             ),
+                            onSelected: (_) =>
+                                _command('conversation.reaction', {
+                                  'targetId': message['id'],
+                                  'emoji': reaction['emoji'],
+                                }),
                           ),
-                        ),
-                      if (message['safetyScores'] != null)
-                        TextButton.icon(
-                          onPressed: () =>
-                              _safetyScores(message['safetyScores']),
-                          icon: const Icon(Icons.shield_outlined, size: 15),
-                          label: const Text('Safety scores'),
-                        ),
-                    ],
-                  ),
-                ),
+                      ],
+                    ),
+                  if (!deleted && widget.threadId == null && replyCount > 0)
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        foregroundColor: colors.primary,
+                      ),
+                      onPressed: () => _thread(thread),
+                      icon: const Icon(
+                        Icons.subdirectory_arrow_right_rounded,
+                        size: 16,
+                      ),
+                      label: Text(
+                        '$replyCount ${replyCount == 1 ? 'reply' : 'replies'}',
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
-          if (actionable)
-            SizedBox(
-              width: 48,
-              height: 48,
-              child: IconButton(
-                tooltip: 'Message actions',
-                icon: const Icon(Icons.more_horiz_rounded, size: 18),
-                onPressed: () => _actions(message),
-              ),
-            ),
+          if (!grouped && hasActions)
+            SizedBox(width: 48, height: 48, child: actions),
         ],
       ),
     );
@@ -1709,222 +1709,227 @@ class _ConversationScreenState extends State<ConversationScreen>
   Widget _composer() {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    return LayoutBuilder(
-      builder: (context, constraints) => Padding(
-        padding: EdgeInsets.fromLTRB(
-          constraints.maxWidth < 420 ? 12 : 24,
-          12,
-          constraints.maxWidth < 420 ? 12 : 24,
-          16,
+    final media = MediaQuery.of(context);
+    final header = media.textScaler.scale(18) > 26 ? 100.0 : 72.0;
+    final available =
+        (media.size.height -
+                media.viewInsets.bottom -
+                media.padding.vertical -
+                header)
+            .clamp(100.0, double.infinity)
+            .toDouble();
+    final editorMax = (available * .28).clamp(56.0, 136.0).toDouble();
+    final extrasMax = (available - editorMax - 72).clamp(0.0, 152.0).toDouble();
+    final hasContext = _reply != null || _edit != null;
+    return Padding(
+      key: const ValueKey('conversation-composer'),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colors.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: colors.outlineVariant),
         ),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: colors.surfaceContainerLowest,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: colors.outlineVariant),
-            boxShadow: [
-              BoxShadow(
-                color: colors.shadow.withValues(alpha: .035),
-                blurRadius: 24,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_reply != null || _edit != null)
-                  Container(
-                    margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                    padding: const EdgeInsets.only(left: 12),
-                    decoration: BoxDecoration(
-                      color: colors.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Row(
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasContext || _mentions.isNotEmpty)
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: extrasMax),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          _edit == null
-                              ? Icons.reply_rounded
-                              : Icons.edit_outlined,
-                          size: 18,
-                          color: colors.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _edit == null
-                                    ? 'Replying to ${_str(_reply?['author'])}'
-                                    : 'Editing message',
-                                style: theme.textTheme.labelLarge?.copyWith(
-                                  color: colors.onSurface,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              Text(
-                                _str((_edit ?? _reply)?['body']),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.bodySmall?.copyWith(
+                        if (hasContext)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 12),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  _edit == null
+                                      ? Icons.reply_rounded
+                                      : Icons.edit_outlined,
+                                  size: 16,
                                   color: colors.onSurfaceVariant,
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Cancel ${_edit == null ? 'reply' : 'edit'}',
-                          onPressed: () => setState(() {
-                            _reply = null;
-                            _edit = null;
-                          }),
-                          icon: const Icon(Icons.close_rounded, size: 18),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (_mentions.isNotEmpty)
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 180),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
-                        for (final person in _mentions)
-                          ListTile(
-                            leading: WaddleAvatar(
-                              name: _str(person['name'], _str(person['jid'])),
-                              size: 32,
-                            ),
-                            title: Text(
-                              _str(person['name'], _str(person['jid'])),
-                            ),
-                            subtitle: Text(_str(person['jid'])),
-                            onTap: () => _insertMention(person),
-                          ),
-                      ],
-                    ),
-                  ),
-                TextField(
-                  controller: _draft,
-                  focusNode: _focus,
-                  minLines: 1,
-                  maxLines: 5,
-                  textCapitalization: TextCapitalization.sentences,
-                  keyboardType: TextInputType.multiline,
-                  style: theme.textTheme.bodyLarge?.copyWith(
-                    color: colors.onSurface,
-                    height: 1.5,
-                  ),
-                  contentInsertionConfiguration: ContentInsertionConfiguration(
-                    allowedMimeTypes: const ['image/*'],
-                    onContentInserted: (content) =>
-                        _command('conversation.insertContent', {
-                          'uri': content.uri,
-                          'mimeType': content.mimeType,
-                          if (content.data != null) 'data': content.data,
-                        }),
-                  ),
-                  decoration: InputDecoration(
-                    hintText: widget.threadId == null
-                        ? 'Message ${widget.title}'
-                        : 'Reply in thread',
-                    hintStyle: theme.textTheme.bodyLarge?.copyWith(
-                      color: colors.onSurfaceVariant,
-                    ),
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 0, 8, 8),
-                  child: Row(
-                    children: [
-                      IconButton(
-                        tooltip: 'Attach encrypted file',
-                        icon: const Icon(Icons.add_rounded),
-                        onPressed: () => _command('conversation.attach'),
-                      ),
-                      IconButton(
-                        tooltip: 'Stickers',
-                        icon: const Icon(Icons.emoji_emotions_outlined),
-                        onPressed: _stickerPicker,
-                      ),
-                      if (constraints.maxWidth >= 420)
-                        IconButton(
-                          tooltip: 'GIFs',
-                          icon: const Icon(Icons.gif_box_outlined),
-                          onPressed: _gifPicker,
-                        ),
-                      PopupMenuButton<String>(
-                        tooltip: 'More message options',
-                        icon: const Icon(Icons.tune_rounded, size: 21),
-                        onSelected: _composerAction,
-                        itemBuilder: (context) => [
-                          _menuItem('bold', 'Bold', Icons.format_bold),
-                          _menuItem('italic', 'Italic', Icons.format_italic),
-                          _menuItem('code', 'Code', Icons.code_rounded),
-                          _menuItem(
-                            'strike',
-                            'Strikethrough',
-                            Icons.strikethrough_s,
-                          ),
-                          _menuItem('gifs', 'GIFs', Icons.gif_box_outlined),
-                          _menuItem(
-                            'paste',
-                            'Paste image',
-                            Icons.content_paste_rounded,
-                          ),
-                          _menuItem(
-                            'slash',
-                            'Slash commands',
-                            Icons.terminal_rounded,
-                          ),
-                        ],
-                      ),
-                      const Spacer(),
-                      ValueListenableBuilder<TextEditingValue>(
-                        valueListenable: _draft,
-                        builder: (context, value, _) => IconButton.filled(
-                          tooltip: _edit == null ? 'Send message' : 'Save edit',
-                          onPressed: _sending || value.text.trim().isEmpty
-                              ? null
-                              : _send,
-                          style: IconButton.styleFrom(
-                            minimumSize: const Size(48, 48),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                          ),
-                          icon: _sending
-                              ? SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: colors.onPrimary,
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _edit == null
+                                        ? 'Replying to ${_str(_reply?['author'])} · ${_str(_reply?['body'])}'
+                                        : 'Editing message · ${_str(_edit?['body'])}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color: colors.onSurfaceVariant,
+                                        ),
                                   ),
-                                )
-                              : Icon(
-                                  _edit == null
-                                      ? Icons.arrow_upward_rounded
-                                      : Icons.check_rounded,
                                 ),
-                        ),
-                      ),
-                    ],
+                                IconButton(
+                                  style: IconButton.styleFrom(
+                                    minimumSize: const Size(48, 48),
+                                  ),
+                                  tooltip:
+                                      'Cancel ${_edit == null ? 'reply' : 'edit'}',
+                                  onPressed: () => setState(() {
+                                    _reply = null;
+                                    _edit = null;
+                                  }),
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (_mentions.isNotEmpty) ...[
+                          for (final person in _mentions)
+                            ListTile(
+                              leading: WaddleAvatar(
+                                name: _str(person['name'], _str(person['jid'])),
+                                size: 32,
+                              ),
+                              title: Text(
+                                _str(person['name'], _str(person['jid'])),
+                              ),
+                              subtitle: Text(_str(person['jid'])),
+                              onTap: () => _insertMention(person),
+                            ),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
-              ],
-            ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      tooltip: 'Attach encrypted file',
+                      icon: const Icon(Icons.add_rounded),
+                      onPressed: () => _command('conversation.attach'),
+                    ),
+                    Expanded(
+                      child: ClipRect(
+                        key: const ValueKey('composer-editor-clip'),
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: 48,
+                            maxHeight: editorMax,
+                          ),
+                          child: TextField(
+                            controller: _draft,
+                            focusNode: _focus,
+                            minLines: 1,
+                            maxLines: 4,
+                            textCapitalization: TextCapitalization.sentences,
+                            keyboardType: TextInputType.multiline,
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              color: colors.onSurface,
+                              height: 1.4,
+                            ),
+                            contentInsertionConfiguration:
+                                ContentInsertionConfiguration(
+                                  allowedMimeTypes: const ['image/*'],
+                                  onContentInserted: (content) =>
+                                      _command('conversation.insertContent', {
+                                        'uri': content.uri,
+                                        'mimeType': content.mimeType,
+                                        if (content.data != null)
+                                          'data': content.data,
+                                      }),
+                                ),
+                            decoration: InputDecoration(
+                              hintText: widget.threadId == null
+                                  ? 'Message ${widget.title}'
+                                  : 'Reply in thread',
+                              isDense: true,
+                              hintStyle: theme.textTheme.bodyLarge?.copyWith(
+                                color: colors.onSurfaceVariant,
+                              ),
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'More message options',
+                      icon: const Icon(Icons.more_horiz_rounded),
+                      onSelected: _composerAction,
+                      itemBuilder: (context) => [
+                        _menuItem(
+                          'stickers',
+                          'Stickers',
+                          Icons.emoji_emotions_outlined,
+                        ),
+                        _menuItem('gifs', 'GIFs', Icons.gif_box_outlined),
+                        _menuItem('bold', 'Bold', Icons.format_bold),
+                        _menuItem('italic', 'Italic', Icons.format_italic),
+                        _menuItem('code', 'Code', Icons.code_rounded),
+                        _menuItem(
+                          'strike',
+                          'Strikethrough',
+                          Icons.strikethrough_s,
+                        ),
+                        _menuItem(
+                          'paste',
+                          'Paste image',
+                          Icons.content_paste_rounded,
+                        ),
+                        _menuItem(
+                          'slash',
+                          'Slash commands',
+                          Icons.terminal_rounded,
+                        ),
+                      ],
+                    ),
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: _draft,
+                      builder: (context, value, _) => IconButton.filled(
+                        tooltip: _edit == null ? 'Send message' : 'Save edit',
+                        onPressed: _sending || value.text.trim().isEmpty
+                            ? null
+                            : _send,
+                        style: IconButton.styleFrom(
+                          minimumSize: const Size(48, 48),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(15),
+                          ),
+                        ),
+                        icon: _sending
+                            ? SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: colors.onPrimary,
+                                ),
+                              )
+                            : Icon(
+                                _edit == null
+                                    ? Icons.arrow_upward_rounded
+                                    : Icons.check_rounded,
+                              ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1933,6 +1938,8 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   Future<void> _composerAction(String action) async {
     switch (action) {
+      case 'stickers':
+        await _stickerPicker();
       case 'bold':
         _format('**');
       case 'italic':
@@ -1996,6 +2003,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Future<void> _actions(Map<String, dynamic> message) async {
+    final mutable = message['deleted'] != true && message['pending'] != true;
     final choice = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -2005,30 +2013,49 @@ class _ConversationScreenState extends State<ConversationScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final emoji in ['👍', '❤️', '😂', '🎉', '👀', '😢'])
-                      IconButton(
-                        tooltip: 'React $emoji',
-                        onPressed: () => Navigator.pop(context, 'react:$emoji'),
-                        icon: Text(emoji, style: const TextStyle(fontSize: 24)),
-                      ),
-                  ],
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Message actions',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
               ),
-              _actionTile(context, 'Reply', Icons.reply, 'reply'),
-              _actionTile(
-                context,
-                'Reply in thread',
-                Icons.forum_outlined,
-                'thread',
-              ),
-              _actionTile(context, 'Copy text', Icons.copy_outlined, 'copy'),
-              if (message['mine'] == true)
+              if (mutable)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final emoji in ['👍', '❤️', '😂', '🎉', '👀', '😢'])
+                        IconButton(
+                          tooltip: 'React $emoji',
+                          onPressed: () =>
+                              Navigator.pop(context, 'react:$emoji'),
+                          icon: Text(
+                            emoji,
+                            style: const TextStyle(fontSize: 24),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              if (mutable) ...[
+                _actionTile(context, 'Reply', Icons.reply, 'reply'),
+                _actionTile(
+                  context,
+                  'Reply in thread',
+                  Icons.forum_outlined,
+                  'thread',
+                ),
+              ],
+              if (message['deleted'] != true &&
+                  _str(message['body']).isNotEmpty)
+                _actionTile(context, 'Copy text', Icons.copy_outlined, 'copy'),
+              if (mutable && message['mine'] == true)
                 _actionTile(context, 'Edit', Icons.edit_outlined, 'edit'),
-              if (widget.group && _data['canPin'] == true)
+              if (mutable && widget.group && _data['canPin'] == true)
                 _actionTile(
                   context,
                   (_data['pinnedIds'] as List? ?? []).contains(message['id'])
@@ -2037,19 +2064,30 @@ class _ConversationScreenState extends State<ConversationScreen>
                   Icons.push_pin_outlined,
                   'pin',
                 ),
-              if (message['mine'] == true)
+              if (mutable && message['mine'] == true)
                 _actionTile(
                   context,
                   'Remove message',
                   Icons.delete_outline,
                   'retract',
                 ),
-              if (message['mine'] != true && _data['canModerate'] == true)
+              if (mutable &&
+                  message['mine'] != true &&
+                  _data['canModerate'] == true)
                 _actionTile(
                   context,
                   'Moderate message',
                   Icons.shield_outlined,
                   'moderate',
+                ),
+              if (message['failed'] == true && message['localId'] != null)
+                _actionTile(context, 'Retry', Icons.refresh_rounded, 'retry'),
+              if (message['safetyScores'] != null)
+                _actionTile(
+                  context,
+                  'Safety scores',
+                  Icons.shield_outlined,
+                  'scores',
                 ),
               const SizedBox(height: 12),
             ],
@@ -2068,6 +2106,10 @@ class _ConversationScreenState extends State<ConversationScreen>
       return;
     }
     switch (choice) {
+      case 'scores':
+        await _safetyScores(message['safetyScores']);
+      case 'retry':
+        await _command('conversation.retry', {'localId': message['localId']});
       case 'reply':
         setState(() {
           _reply = message;

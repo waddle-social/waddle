@@ -79,6 +79,20 @@ class _ConversationHarness {
     });
   }
 
+  void timeline(List<Map<String, dynamic>> messages, {bool social = false}) {
+    snapshot(social: social);
+    bridge.acceptEvent({
+      'topic': 'conversation',
+      'data': {
+        'jid': _jid,
+        'loading': false,
+        'reachedStart': true,
+        'newestFirst': social,
+        'messages': messages,
+      },
+    });
+  }
+
   Widget app() => MaterialApp(
     restorationScopeId: 'conversation-test',
     navigatorKey: navigator,
@@ -135,6 +149,23 @@ Finder _body(String text) => find.byWidgetPredicate(
   (widget) => widget is SelectableText && widget.data == text,
 );
 
+Map<String, dynamic> _message(
+  String id,
+  int minute, {
+  String jid = 'alex@example.org',
+  String author = 'Alex',
+}) => {
+  'id': id,
+  'body': 'Message $id',
+  'author': author,
+  'authorJid': jid,
+  'mine': false,
+  'timestamp': DateTime.utc(2026, 10, 31, 10, minute).toIso8601String(),
+  'startsGroup': true,
+};
+
+Finder _groupHeader(String id) => find.byKey(ValueKey('message-header:$id'));
+
 void main() {
   testWidgets(
     'compact conversation keeps its tools reachable at double text size',
@@ -182,6 +213,10 @@ void main() {
       lessThan(tester.getTopLeft(_body('Newer message')).dy),
     );
     expect(tester.widget<ListView>(find.byType(ListView)).reverse, isTrue);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('conversation-composer'))).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(find.byType(ListView)).dy),
+    );
 
     harness.snapshot(social: true, messages: true);
     await tester.pump();
@@ -191,9 +226,233 @@ void main() {
       lessThan(tester.getTopLeft(_body('Older message')).dy),
     );
     expect(tester.widget<ListView>(find.byType(ListView)).reverse, isFalse);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('conversation-composer'))).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(find.byType(ListView)).dy),
+    );
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+    'message groups use sender identity and follow the visual order',
+    (tester) async {
+      final messages = [
+        _message('one', 0, jid: 'one@example.org', author: 'Same name'),
+        _message('two', 1, jid: 'two@example.org', author: 'Same name'),
+        _message(
+          'three',
+          2,
+          jid: 'two@example.org',
+          author: 'New display name',
+        ),
+      ];
+      final harness = _ConversationHarness()..timeline(messages);
+      await _mount(tester, harness);
+      expect(_groupHeader('one'), findsOneWidget);
+      expect(_groupHeader('two'), findsOneWidget);
+      expect(_groupHeader('three'), findsNothing);
+      expect(tester.getSize(_groupHeader('one')).height, lessThan(32));
+      expect(
+        tester.getTopLeft(_body('Message one')).dy -
+            tester.getBottomLeft(_groupHeader('one')).dy,
+        lessThanOrEqualTo(2),
+      );
+      expect(
+        tester.getSize(find.byTooltip('Message actions').first).height,
+        greaterThanOrEqualTo(48),
+      );
+      final groupedTime =
+          MaterialLocalizations.of(
+            tester.element(_body('Message three')),
+          ).formatTimeOfDay(
+            TimeOfDay.fromDateTime(
+              DateTime.parse(messages.last['timestamp'] as String).toLocal(),
+            ),
+          );
+      expect(find.text(groupedTime), findsNothing);
+      expect(find.byTooltip('Message actions · $groupedTime'), findsOneWidget);
+      harness.timeline(messages, social: true);
+      await tester.pumpAndSettle();
+      expect(_groupHeader('three'), findsOneWidget);
+      expect(_groupHeader('two'), findsNothing);
+      expect(_groupHeader('one'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  for (final social in [false, true]) {
+    testWidgets(
+      '${social ? 'social' : 'chat'} places the oldest-unread boundary between read and unread groups',
+      (tester) async {
+        final harness = _ConversationHarness()
+          ..timeline([
+            _message('read-A', 0),
+            {..._message('oldest-unread-B', 1), 'unreadDivider': true},
+            _message('new-unread-C', 2),
+          ], social: social);
+        await _mount(tester, harness);
+        final divider = tester.getRect(
+          find.byKey(const ValueKey('unread-divider:oldest-unread-B')),
+        );
+        if (social) {
+          expect(_groupHeader('new-unread-C'), findsOneWidget);
+          expect(_groupHeader('oldest-unread-B'), findsNothing);
+          expect(_groupHeader('read-A'), findsOneWidget);
+          expect(
+            divider.top,
+            greaterThanOrEqualTo(
+              tester.getBottomLeft(_body('Message oldest-unread-B')).dy,
+            ),
+          );
+          expect(
+            divider.bottom,
+            lessThanOrEqualTo(tester.getTopLeft(_groupHeader('read-A')).dy),
+          );
+        } else {
+          expect(_groupHeader('read-A'), findsOneWidget);
+          expect(_groupHeader('oldest-unread-B'), findsOneWidget);
+          expect(_groupHeader('new-unread-C'), findsNothing);
+          expect(
+            divider.top,
+            greaterThanOrEqualTo(
+              tester.getBottomLeft(_body('Message read-A')).dy,
+            ),
+          );
+          expect(
+            divider.bottom,
+            lessThanOrEqualTo(
+              tester.getTopLeft(_groupHeader('oldest-unread-B')).dy,
+            ),
+          );
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets('day unread system and call rows break message groups', (
+    tester,
+  ) async {
+    final harness = _ConversationHarness()
+      ..timeline([
+        _message('first', 0),
+        {..._message('unread', 1), 'unreadDivider': true},
+        {..._message('system', 2), 'system': true},
+        _message('after-system', 3),
+        {..._message('call', 4), 'isCallRow': true},
+        _message('after-call', 5),
+        {..._message('next-day', 6), 'timestamp': '2026-11-01T10:06:00Z'},
+      ]);
+    await _mount(tester, harness);
+    for (final id in [
+      'first',
+      'unread',
+      'system',
+      'after-system',
+      'call',
+      'after-call',
+      'next-day',
+    ]) {
+      expect(
+        _groupHeader(id),
+        findsOneWidget,
+        reason: '$id starts a visible group',
+      );
+    }
+    expect(find.text('New messages'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final state in ['pending', 'deleted']) {
+    testWidgets(
+      '$state message safety details are explicit and absent from the feed',
+      (tester) async {
+        final harness = _ConversationHarness()
+          ..timeline([
+            {
+              ..._message('scored', 0),
+              state: true,
+              'safetyScores': {
+                'modelVersion': 'safety-v1',
+                'scores': [
+                  {'category': 'toxicity', 'probability': .2},
+                ],
+              },
+            },
+          ]);
+        await _mount(tester, harness);
+        expect(find.text('Safety scores'), findsNothing);
+        await tester.tap(find.byTooltip('Message actions'));
+        await tester.pumpAndSettle();
+        expect(find.text('Safety scores'), findsOneWidget);
+        expect(find.text('Edit'), findsNothing);
+        expect(find.text('Reply'), findsNothing);
+        await tester.tap(find.text('Safety scores'));
+        await tester.pumpAndSettle();
+        expect(find.text('Model: safety-v1'), findsOneWidget);
+        harness.navigator.currentState!.pop();
+        await tester.pumpAndSettle();
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets(
+    'reply context and long editor fit a small viewport above the keyboard',
+    (tester) async {
+      final harness = _ConversationHarness()
+        ..timeline([_message('reply-target', 0)])
+        ..textScale = 2;
+      await _mount(tester, harness);
+      await tester.tap(find.byTooltip('Message actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reply'));
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(320, 740);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      const draft =
+          'A longer draft with several lines of text that must scroll inside the editor while reply controls stay reachable.';
+      await tester.enterText(find.byType(TextField), draft);
+      await tester.pumpAndSettle();
+      final composer = tester.getRect(
+        find.byKey(const ValueKey('conversation-composer')),
+      );
+      expect(composer.bottom, lessThanOrEqualTo(440));
+      expect(composer.height, lessThan(280));
+      final editorClip = find.byKey(const ValueKey('composer-editor-clip'));
+      expect(tester.widget<ClipRect>(editorClip).clipBehavior, Clip.hardEdge);
+      expect(
+        tester.getTopLeft(editorClip).dy,
+        greaterThanOrEqualTo(
+          tester.getBottomLeft(find.byTooltip('Cancel reply')).dy,
+        ),
+      );
+      expect(
+        find.ancestor(of: find.byType(TextField), matching: editorClip),
+        findsOneWidget,
+      );
+      expect(
+        tester.getSize(find.byTooltip('Cancel reply')).height,
+        greaterThanOrEqualTo(48),
+      );
+      expect(
+        tester.getSize(find.byTooltip('Send message')).height,
+        greaterThanOrEqualTo(48),
+      );
+      await tester.tap(find.byTooltip('Cancel reply'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        draft,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets('selected mentions use Unicode code point send offsets', (
     tester,
