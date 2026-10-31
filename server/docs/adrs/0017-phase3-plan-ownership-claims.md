@@ -3251,6 +3251,15 @@ record the retained work.
     regression holds two old-actor dispatches at this boundary, publishes a
     successor, then proves both messages bounce with no archive or occupant
     reflection and the successor remains registered.
+    *Update (#2046 W1.4, 2026-10-30):* the `Err` branch no longer fails
+    open. `dispatch_to_room` retries it a bounded number of times, then bounces
+    the sender with a retryable `wait`/`<resource-constraint/>` error without
+    fan-out and without demotion. This backstop runs only on the immediate
+    (non-ingress) interpreter path, so in production only the
+    `handlers::message::handle_message` fallback reaches it. Authenticated
+    client groupchat and relayed room submissions are planned, and their room
+    claim is asserted inside the ingress transaction (`ingress/commit_room.rs`,
+    `ClaimRepository::assert_room_claim`).
 66. **FIX 2 (critical) — every durable-relevant `RoomActor` mutation
     handler now runs a two-stage gate: verify ownership BEFORE mutating,
     surface a non-ownership persist failure typed AFTER mutating.**
