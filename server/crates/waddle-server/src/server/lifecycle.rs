@@ -63,10 +63,10 @@ pub async fn start_with_config(
     let sm_drain_complete = tokio_util::sync::CancellationToken::new();
     let connections_drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // #2046 W1.10: one enclosing shutdown deadline, started by the first
-    // observer of SIGTERM/SIGQUIT. Every shutdown stage — connection and Q6
-    // drain, clustering room drain, identity retirement and the terminal
-    // sweep — derives its budget from it, and the chart's
-    // terminationGracePeriodSeconds floor adds the same terms.
+    // observer of SIGTERM/SIGQUIT. HTTP/Q6 and normal process-triggered
+    // clustering shutdown derive their limits from it. The outer clustering
+    // await also uses it when a terminal fence was already pending before
+    // process stop. The chart's grace-period floor adds the same terms.
     let shutdown_deadline = crate::shutdown_deadline::ShutdownDeadline::new(
         crate::shutdown_deadline::ShutdownBudget::new(
             session_janitors::max_drain_duration_from_env(),
@@ -399,11 +399,9 @@ pub async fn start_with_config(
         info!(signal = ?signal, "Shutdown lifecycle complete");
     });
 
-    // Wait for the HTTP server to fully exit. axum's
-    // `graceful_shutdown` closure (in `start_http_server`) is what
-    // waits on the SM Q6 drain via `drain_complete.notified()`, so
-    // letting `http_handle` drive the exit guarantees the runtime
-    // doesn't tear down mid-drain.
+    // Await the HTTP serving task, whose graceful-shutdown closure waits
+    // for the SM Q6 drain notification. Its forced deadline can end this
+    // wait without proving that every connection or drain task completed.
     let result = match http_handle.await {
         Ok(Ok(())) => {
             info!("HTTP server stopped (graceful drain complete)");
@@ -426,13 +424,15 @@ pub async fn start_with_config(
     // ADR-0017 Phase 3 Slice 10: the clustering node-lease loop runs its
     // own per-entity graceful drain (mark draining, seal + batch-release
     // owned `RoomActor` claims) on this same `stop_token` firing, in
-    // parallel with the HTTP/SM drain just awaited above, then retires its
-    // identity and sweeps — element 4 requires this "completing before
-    // process exit," not merely racing shutdown in the background. #2046
-    // W1.10: it bounds every one of those stages by the same enclosing
-    // shutdown deadline, so it is awaited up to that deadline, not for a
-    // fresh budget measured from whenever HTTP happened to exit. A no-op
-    // (returns immediately) when clustering is disabled.
+    // parallel with the HTTP/SM drain just awaited above, then attempts
+    // retirement and the terminal sweep. #2046 W1.10: wait for completion
+    // only until the shared deadline, not for a fresh budget after HTTP
+    // exit. A terminal wait entered before process stop can still be pending;
+    // timing out this await neither proves demotion completed nor cancels
+    // the task. It remains detached until completion or runtime teardown,
+    // with unfinished ownership left to lease expiry. Telemetry shutdown
+    // and runtime teardown follow this wait. A no-op when clustering is
+    // disabled.
     clustering_shutdown
         .await_drain_until(shutdown_deadline.start().deadline())
         .await;
@@ -441,10 +441,9 @@ pub async fn start_with_config(
     // clustering per-entity via `clustering_shutdown`) increment counters and
     // histograms — including the tail-end-only `xmpp.sm.drain_timeout` and
     // `waddle.clustering.drain_duration_ms` — right up to the moment they
-    // return. Those increments have no guarantee of a periodic OTLP export
-    // tick before process exit, so force-flush the meter provider here, now
-    // that every end-of-drain increment has already happened and before
-    // anything below can shorten the remaining time budget.
+    // return. Flush the observations available after the bounded waits:
+    // there may be no periodic export before exit, and a detached task
+    // that outlasted its wait may still emit later observations.
     let metrics_flush = crate::telemetry::flush_metrics_before_exit().await;
 
     // Tear down the shutdown lifecycle task so we don't dangle.

@@ -1,7 +1,8 @@
 //! One enclosing graceful-shutdown deadline (#2046 W1.10).
 //!
-//! SIGTERM starts a single deadline. Every shutdown stage derives its budget
-//! from it, in this order:
+//! SIGTERM establishes one budget for HTTP/Q6 and the process's wait for
+//! clustering. The normal process-shutdown path derives stage limits from
+//! it, in this order:
 //!
 //! 1. connection drain (at most half of `drain`) and the Q6 SM drain, both
 //!    inside `drain` (`WADDLE_DRAIN_TIMEOUT_SECS`);
@@ -15,7 +16,15 @@
 //! The enclosing total is the sum of all four, so stage 1 and 2 running in
 //! parallel only ever leave more time for 3 and 4. A stage is clamped to
 //! what remains of the enclosing deadline after the reservations of the
-//! stages that follow it, so the stages together cannot outlast it.
+//! stages that follow it. Clustering terminal fencing started before process
+//! stop can retain unbounded publication or demotion waits; those waits do not
+//! acquire a deadline retroactively. The lifecycle stops awaiting clustering
+//! at the enclosing deadline; this does not prove the task completed or cancel
+//! it. The detached task may continue until the runtime is torn down, with
+//! unfinished ownership left to lease expiry rather than assumed retired.
+//!
+//! This deadline bounds those waits, not physical process exit: telemetry
+//! shutdown and runtime teardown follow them.
 //!
 //! The Helm chart's `terminationGracePeriodSeconds` floor
 //! (`charts/waddle-server/templates/validations.yaml`) is

@@ -1,5 +1,5 @@
-//! #2046 W1.10: the node-lease shutdown path runs inside one enclosing
-//! shutdown deadline.
+//! #2046 W1.10: shutdown stage deadlines and the pre-SIGTERM terminal-wait
+//! exception handled by the lifecycle's bounded outer await.
 //!
 //! These drive the production `run_node_lease` loop with an in-memory
 //! node-lease store and injected stalled stages, on paused Tokio time:
@@ -11,6 +11,8 @@
 //!   identity is not retired;
 //! - if either exact-owner demotion cannot complete, neither retirement
 //!   API runs, even after Q6 and the socket drain have completed;
+//! - a fatal fence waiting on a publication guard before SIGTERM remains
+//!   pending after the process deadline, without retiring the identity;
 //! - SIGTERM while the node is re-registering after a self-fence (#1985
 //!   follow-up) is an ordinary shutdown: both identities are retired after
 //!   the publication barrier, instead of waiting for the orphan reaper.
@@ -29,7 +31,7 @@ use waddle_server::clustering::claims::{
 use waddle_server::clustering::self_fence::{
     run_node_lease, ConnectedPeerCount, LocallyClaimedEntities, NodeLeaseRunConfig,
 };
-use waddle_server::clustering::{NodeLifecycle, ShutdownSmDrain};
+use waddle_server::clustering::{CriticalNodeFailure, NodeLifecycle, ShutdownSmDrain};
 use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
 use waddle_server::shutdown_deadline::{
     ShutdownBudget, ShutdownDeadline, SHUTDOWN_TERMINAL_SWEEP_BUDGET,
@@ -375,6 +377,76 @@ async fn sigterm_with_a_held_publication_guard_does_not_retire() {
         "an identity whose barrier did not close is never retired"
     );
     assert!(live_identity.current().is_active());
+    drop(publication);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fatal_publication_wait_started_before_sigterm_outlasts_the_enclosing_deadline() {
+    let owner = identity();
+    let live_identity = SharedNodeIdentity::new(owner.clone());
+    let mut rotations = live_identity.subscribe_rotations();
+    let deadline = ten_second_deadline();
+    let lease = RecordingLease::new(true, Box::new(|_| true));
+    let retirements = Arc::clone(&lease.retirements);
+    let departures = Arc::clone(&lease.departures);
+    let process_stop = CancellationToken::new();
+    let clustering_stop = process_stop.child_token();
+    let lifecycle = NodeLifecycle::new();
+    let mut task = tokio::spawn(run_node_lease(
+        lease,
+        owner.clone(),
+        clustering_stop.clone(),
+        run_config(
+            Duration::from_secs(10),
+            Arc::new(StallingLocalClaims {
+                stall: false,
+                demoted_owners: Arc::new(Mutex::new(Vec::new())),
+            }),
+            lifecycle.clone(),
+            live_identity.clone(),
+            Some(stalled_q6(&process_stop, &deadline)),
+        ),
+    ));
+    tokio::time::timeout(Duration::from_secs(1), rotations.changed())
+        .await
+        .expect("initial identity rotation completes promptly")
+        .expect("identity rotation source stays alive");
+    let publication = live_identity
+        .guard_if_current(&owner)
+        .await
+        .expect("hold the current identity before fatal fencing");
+
+    // Trigger the fatal-fence token through the lifecycle, independently of
+    // process stop. The production loop cancels clustering before disable().
+    lifecycle.fail(CriticalNodeFailure::RoomRegistryTerminated);
+    tokio::time::timeout(Duration::from_secs(1), clustering_stop.cancelled())
+        .await
+        .expect("fatal fencing reaches the publication barrier before process stop");
+    assert!(!process_stop.is_cancelled());
+    assert!(deadline.started().is_none());
+
+    process_stop.cancel();
+    let shutdown = deadline.start();
+    tokio::time::advance(shutdown.remaining() + Duration::from_millis(1)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut task)
+            .await
+            .is_err(),
+        "an existing terminal publication wait does not acquire a deadline retroactively"
+    );
+    assert!(!lifecycle.is_ready());
+    assert!(live_identity.current().is_active());
+    assert!(retirements.lock().expect("lock").is_empty());
+    assert!(departures.lock().expect("lock").is_empty());
+
+    // The outer lifecycle wait, covered separately, leaves this task to
+    // runtime teardown. Explicitly cancel and join it in this fixture.
+    task.abort();
+    assert!(tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("aborted task exits promptly")
+        .expect_err("task is aborted")
+        .is_cancelled());
     drop(publication);
 }
 
