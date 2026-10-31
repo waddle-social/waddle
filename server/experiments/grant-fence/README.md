@@ -1,4 +1,4 @@
-# PostgreSQL grant-fence first-stage experiment
+# Grant-fence and canonical leaf recovery experiments
 
 This standalone, unpublished Linux test workspace is excluded from Waddle's
 production workspace and images. It implements a disposable experiment, not a
@@ -32,7 +32,7 @@ export FENCE_TEST_SHELL=/absolute/bash/bin/bash
 export FENCE_TEST_SLEEP=/absolute/coreutils/bin/sleep
 ```
 
-`src/binaries.rs` requires absolute existing paths and attests the exact versions
+`../native-fixture/src/binaries.rs` requires absolute existing paths and attests the exact versions
 of `postgres`, `initdb`, and `spicedb` before starting a fixture. The process
 cleanup regression also requires explicit shell/sleep executable paths; the Nix
 runner supplies pinned Bash and coreutils paths. A missing path,
@@ -43,15 +43,15 @@ All database settings are generated internally; these binary-path variables do
 not permit supplying a DSN, database directory, or credential.
 
 ```sh
-cargo test --locked -- --nocapture
-cargo clippy --all-targets --locked -- -D warnings
+cargo test --workspace --locked -- --nocapture
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 The explicit CI/formal-evidence invocation additionally rejects dirty or
 untracked source:
 
 ```sh
-FENCE_REQUIRE_PINNED=1 cargo test --locked -- --nocapture
+FENCE_REQUIRE_PINNED=1 cargo test --workspace --locked -- --nocapture
 ```
 
 Development runs record their exact Git HEAD, byte count and full SHA-256 digest of dirty/untracked status, and a
@@ -127,9 +127,9 @@ bytes occur. They contain nonsecret barrier observations and the following expli
 | Independent scope during a held lock | Implemented |
 | PostgreSQL lock timeout | Implemented, explicit SQLSTATE and no effect |
 | SpiceDB outage and same-database process restart | Implemented; checks fail closed, graph persistence checked |
-| SpiceDB-canonical variant and P/S comparison | **PENDING** |
-| Unknown accepted external writes and durable recovery | **PENDING** |
-| PostgreSQL restart, restore, graph loss/rebuild | **PENDING** |
+| Bounded canonical leaf P/S comparison | Implemented in #2051; full production authority selection/recovery remains **PENDING** |
+| Lost external write response | Bounded leaf caller-deadline scenarios below; production unknown-write recovery remains **PENDING** |
+| PostgreSQL restart, restore, full graph loss/rebuild | **PENDING**; controlled closed leaf/marker removal is covered separately |
 | Moves, all lifecycle writers, schema/dependency drift | **PENDING** |
 | Multi-edge graphs, actor/claim fences, codec migration | **PENDING** |
 | Frozen room-child acceptance and sink/byte drain | **PENDING** |
@@ -169,3 +169,212 @@ observed elapsed time, not crash-recovery correctness or formal proof. Kernel
 wait symbols and whitelisted numeric owned-process IO counters are diagnostic
 observations. These measurements do not retroactively identify the cause of
 any earlier failure whose first cause was not recorded.
+
+## Canonical authority recovery comparison (#2051)
+
+The runner preserves the original nine PostgreSQL guard scenarios and adds 23
+bounded recovery scenarios. This compares two leaf models; it does not select
+a production authority. Evidence independently names AdmissionClosed,
+CanonicalMutationCommitted, and ProjectionVerified, each grouped under the full
+candidate/scope/incarnation/generation/operation/digest identity. Facts describe
+what was observed, including historical commitment before deliberate corruption;
+they do not assert that corrupted canonical data remains present. Verification
+is separate from exact SQL activation.
+
+The PostgreSQL candidate stores the complete subject, relation, and grant/revoke
+polarity in its authoritative SQL journal. A fresh recovery process loads that
+exact current journal record before rebuilding. The SpiceDB candidate stores no
+canonical payload in SQL, and its fresh Recover request carries only identity,
+digest and pause control. It obtains payload from real SpiceDB. Both the marker
+and grant or positive revoke tombstone are committed in one acknowledged atomic
+write. Verification reads the whole bounded object in one FullyConsistent RPC,
+requires equal read_at revisions for every row, validates the two exact
+relationships and reconstructed digest, and never infers revoke from absence.
+The subsequent permission check uses that same exact snapshot.
+
+| Additional scenario | Evidence and boundary |
+| --- | --- |
+| Grant and revoke during SpiceDB outage, both candidates | Both close SQL admission; only PostgreSQL commits canonical intent during outage. No verification or success is inferred from failure. |
+| Closed marker loss and closed tuple/tombstone loss independently | PostgreSQL rebuilds from its exact current SQL journal; SpiceDB remains closed with canonical state missing. |
+| Worker death after acknowledged write, grant and revoke | Fresh process verifies committed marker+leaf. This is explicitly **not** a lost RPC-response test. |
+| Stale activation before and after newer revoke commit | Exact PostgreSQL blocker observation or postcommit CAS rejection; a pending closed operation can be superseded. |
+| Activation completes before revoke begins | It may activate first; the subsequent newer revoke closes it. |
+| Healthy independent scope while mutation lock held | Actual mutation and admission complete despite another scope's held exclusive lock. |
+| ACTIVE canonical deletion after allowed check | Expected unsafe negative control: SQL guard alone permits admission when canonical state is deleted without closing it. |
+
+Loss injection always observes an exact committed closed fence first, except
+the explicitly labeled ACTIVE negative control. The test does not establish
+arbitrary active-corruption detection, production lost-response recovery, multi-edge
+closure, schema immutability, restore safety, production writer/actor closure,
+accepted room-child behavior, final byte draining or federation readiness.
+The accepted-child contract needs separate tests through actual ingress/replay
+code. Global SpiceDB outage denies protected reads for both candidates;
+independent-scope progress is demonstrated only with healthy SpiceDB.
+
+
+## Lost write response and caller deadline
+
+The same native runner adds twelve leaf scenarios and one inverted-order negative control to the original 32. Each uses
+an owned, supervised proxy process listening only on an ephemeral loopback port.
+It accepts one authenticated `WriteRelationships` request, forwards its exact
+bounded protobuf bytes, and lets tonic validate the actual backend unary body
+and final successful gRPC status. Only then does the proxy record
+`BackendAcknowledged`; it withholds that success from the mutation worker.
+The control records `RequestNotForwarded` without invoking the backend write.
+An independent real read verifies presence or absence of the exact marker/leaf.
+Unauthenticated, unsupported-method and oversized requests are rejected before
+the one accepted write; all twelve positive schedules exercise those receiving boundaries.
+
+The writer captures an absolute two-second `CLOCK_MONOTONIC` deadline before
+starting the write and arms that exact deadline using Linux timerfd with
+`TFD_TIMER_ABSTIME`; recording a barrier never restarts the duration. The
+prescience endpoint timeout is ten seconds. Clock reads, arithmetic and timer
+setup fail closed. Evidence requires
+`CallerDeadlineExceeded`, not merely an unavailable service or a worker killed
+after acknowledgement. This is a local elapsed deadline, **not** a claimed
+remote gRPC `DeadlineExceeded` status: pinned tonic 0.12.3 maps its own transport
+timeout to `Cancelled`. Unexpected gRPC statuses are recorded separately and
+fail these scenarios. The controller releases the proxy only after the worker
+has exited with that local deadline and without acknowledgement, verification
+or activation. The proxy's eventual error is not the caller's observed result.
+The independently timestamped proxy fault observation must fall between the
+writer's armed time and its exact absolute deadline, strictly before expiry.
+The writer records actual timerfd expiration on the same shared monotonic clock.
+Checking absence of a completion file is not accepted as ordering evidence. The proxy's own waits,
+wire messages (8KiB), readbacks and native process cleanup are bounded; raw
+requests, metadata, credentials and responses never enter files or reports.
+It uses the existing stdin-only credential transfer, process-group ownership,
+cleanup latch and report secret scan. This is a fault fixture, not a production
+proxy or an external-write recovery service.
+
+Both candidates are tested for grant and revoke with committed-write response
+loss and never-forwarded controls. The SQL guard stays closed throughout the
+uncertainty. A separate healthy scope mutates and admits while the successful
+response remains withheld. Fresh recovery processes receive only identity and
+digest. PostgreSQL reconstructs from its canonical SQL intent in either control;
+SpiceDB recovers committed marker/leaf data after response loss and stays closed
+when the request never arrived. Neither candidate derives success from timeout.
+
+Four additional schedules commit a newer revoke while the old reply is withheld,
+then deliberately republish the exact older marker/leaf and run fresh recovery.
+The old operation remains stale and cannot admit; the newer revoked guard stays
+closed. This demonstrates bounded operation identity and activation fencing,
+not a production retry protocol. Reports distinguish proxy evidence, caller
+failure, historical canonical facts, recovery outcome and the newer identity.
+No production writer closure, arbitrary corruption recovery, PostgreSQL restart,
+restore safety, inherited/multi-edge policy, accepted-child contract change,
+byte draining or federation readiness is established by these cases.
+
+
+The inverted-order control deliberately pauses a real worker after its local
+absolute deadline but before its `done` observation. Only then is the proxy's
+one owned request task allowed to forward the write. The real backend commits,
+the marker/leaf is independently read back, and `done` is still absent, yet the
+monotonic ordering check must reject that schedule. The controller later releases
+the worker and recovers the actual committed state in a fresh process. The report
+labels this `AfterCallerDeadline` with `ordering_accepted: false`; it is not a
+passing pre-deadline response-loss observation. The bounded upstream task belongs
+to the supervised proxy process and survives downstream cancellation for this
+control. Explicit process-group stop and the sticky cleanup latch cover that
+runtime and all its tasks; no detached task can outlive verified process cleanup.
+
+
+## Shared native supervisor
+
+The standalone workspace now includes `../native-fixture`. The existing proof
+uses that single implementation for native services, worker supervision, settings,
+credential scans and cleanup; its SQL/Zed schemas remain here. See the sibling
+README for the live-permit and trusted process-group boundaries. The runner uses
+`--workspace`, so moved native cleanup regressions remain mandatory. Source
+provenance includes both source trees/manifests, the single workspace lock, schemas,
+runner and repository Nix/toolchain inputs. Early fixture shutdown with an
+outstanding child is now an explicit sticky failure that retains private data.
+
+## Finite synthetic multi-edge admission
+
+Thirty-two additional schedules test one channel, two possible parents, one subject
+and a direct alternative, using the extracted native fixture. This is a fixed
+experimental policy, not existing MUC admission: `direct OR (parent AND member)`.
+The graph exposes separate `direct_access` and `inherited` checks. A fixture-only
+denial relation is empty in ordinary schedules; one negative control sets it to
+prove that matching markers and edges do not allow a denied selected branch to
+borrow direct access. A separate malformed-marker control verifies graph errors
+fail the worker rather than becoming denials. A controlled stage failure after a
+real completed scenario verifies that its evidence remains in the caller-owned
+report; an incomplete scenario is never recorded as passed. No generic OR allow is accepted as
+evidence for either selected dependency branch.
+
+Every scope pre-creates retained current lifecycle, binding, ancestor-membership
+and direct-grant rows. The stable lifecycle row is keyed by logical channel ID
+and is required by both branches; embedding an incarnation only in old grant
+keys would not fence recreation. A witness contains its exact selected guard
+vector. Guard identity includes kind, key, monotonic version, operation UUID and
+typed payload. SQL stores these fields; each real graph version marker hashes
+the complete guard. Missing rows reject; no mutator deletes/reinserts a guard or
+infers authorization from an absent relation. The bounded model has no other
+writer or grant source.
+
+A positive lifecycle-marker read obtains an actual SpiceDB `read_at` token.
+Every dependency marker/edge read and the selected branch permission check uses
+that same `AtExactSnapshot`; row tokens must match. Unexpected edges or markers
+reject. A deterministic barrier after anchoring proves that a concurrent revoke
+still allows the historical graph check, followed by rejection at the current
+SQL fence. The schema is fixed for the entire fixture. Schema mutation and uncoordinated
+graph corruption are excluded from the authority proof; the explicitly injected
+malformed-marker case tests error handling only.
+
+Admission first reserves a unique durable effect key inside its SQL transaction.
+A conflicting insert waits for the previous transaction to resolve, then compares
+the complete principal/action/resource/witness/payload descriptor. Exact historical
+results return `AlreadyCommitted`, even after revoke; differing descriptors reject.
+For a new provisional row, graph verification precedes `FOR SHARE` acquisition
+in total `(kind, UUID)` order. Every selected current guard must match and be active
+through the same transaction's ledger commit. There are no remote effects. A
+provisional row that cannot authorize rolls back; an absent preliminary SELECT
+is never treated as proof that another transaction rolled back.
+
+The trusted test controller supplies exact synthetic mutation commands; it is
+not a production authority. A mutation locks and advances its existing guard
+with `FOR UPDATE`, commits closure before graph changes, atomically writes the
+real graph edge/version marker, verifies it, and activates only via an exact
+current-operation CAS. There is no canonical journal reconstruction or automatic
+regrant. Death after committed closure leaves the scope closed. A superseding
+mutation defeats an old completion and old activation CAS. Mutations in this
+finite model each change one guard; compound multi-row mutations are not tested.
+
+The inventory covers four single-omission unsafe controls and their guarded
+counterparts, both branches' lifecycle recreation, parent A→B→A and membership/
+direct revoke-regrant ABA (including three version-stamp-only omission controls
+with unchanged final target/polarity), independent direct access after ancestor revocation,
+anchored snapshot drift, admission-first and mutation-first schedules for both
+binding and ancestor guards, lock timeout, independent-scope progress, closed
+worker death, stale graph completion, exact/altered retries and actual unique
+insert waits. Move/revoke controls independently check both current branches at one fresh
+anchored revision and require both denied before releasing stale work. The
+unused parent has no membership; direct-revoke controls remove inherited access.
+ABA controls restore exactly the selected branch, then deliberately ignore only
+generation and operation identity while retaining the row lock, stable key,
+active-state and exact payload checks. Lifecycle recreation also preserves graph
+access deliberately: these controls prove stale lifecycle/version rejection,
+not current policy denial. This preservation is a synthetic fixture assumption,
+not a promise for production recreation.
+The complete multi-edge stage has a 180-second client deadline and each worker
+action a 30-second deadline, in addition to RPC, barrier and SQL lock/statement
+limits. Cancellation enters the existing supervised cleanup and retention path.
+`pg_blocking_pids` establishes actual conflicts; sleeps are polling intervals,
+not evidence of ordering.
+
+The ledger death schedules distinguish precommit rollback from worker death
+**after acknowledged PostgreSQL COMMIT but before publication of its caller
+result**. Fresh workers reconcile the durable effect identity; the committed
+schedule retains exactly one effect. This is not a dropped PostgreSQL COMMIT
+wire response. No canonical mutation recovery, production writer closure,
+arbitrary-depth graph, actor/claim fence, accepted-child change, SM custody,
+queue/socket delivery or federation activation is established.
+
+The existing pinned workspace runner and nonpublishing CI lanes execute these
+schedules together with all previous proofs and shared cleanup tests. The report
+requires the exact 32-case inventory and records their asserted outcomes. Source
+provenance recursively includes the new modules and schemas; credentials and
+cleanup use the unchanged shared supervisor. Any scenario error fails the full
+run; there is no prerequisite skip or separate opt-in for these cases.

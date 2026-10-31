@@ -1225,6 +1225,17 @@ where
                 self.retire_if_drained(identity).await;
             }
         }
+        self.readiness.mark_terminal_fence_finished();
+    }
+}
+
+/// Marks [`NodeLifecycle::mark_node_lease_exited`] when `run_node_lease`
+/// returns or its task is dropped.
+struct NodeLeaseExitLatch(NodeLifecycle);
+
+impl Drop for NodeLeaseExitLatch {
+    fn drop(&mut self) {
+        self.0.mark_node_lease_exited();
     }
 }
 
@@ -1292,6 +1303,9 @@ pub async fn run_node_lease<L>(
         claim_release_budget,
         shutdown_sm_drain,
     } = run_config;
+    // Records that this loop has exited, on every return path and if the
+    // task is dropped. Read-only signal for liveness.
+    let _exit_latch = NodeLeaseExitLatch(readiness.clone());
     let lease = Arc::new(lease);
     let fatal_fence = readiness.fatal_fence_token();
     let terminal_fence_context = TerminalFenceContext {
@@ -1669,6 +1683,11 @@ pub async fn run_node_lease<L>(
         mark_draining_bounded(lease.as_ref(), &identity, config.heartbeat_interval).await;
 
         if terminal_fence {
+            // The inline block above is this path's terminal demotion (the
+            // serving-node counterpart of `TerminalFenceContext::finish`,
+            // which must not run a second time). Mark it finished so
+            // liveness can restart the pod: nothing re-serves after this.
+            readiness.mark_terminal_fence_finished();
             return;
         }
 
@@ -2742,6 +2761,12 @@ mod tests {
     }
 
     async fn seed_detached_sm_session_row(db: &crate::db::Database, stream_id: &str) {
+        // This fixture also runs alone against a fresh PostgreSQL database;
+        // the claim-store schema does not create the SM persistence tables.
+        let _sm_storage =
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(db.database_url()))
+                .await
+                .expect("initialize SM persistence schema");
         let conn = db.guard().await.expect("guard");
         conn.execute(
             r#"
@@ -2786,7 +2811,7 @@ mod tests {
         use waddle_xmpp::ownership::ClaimStore as _;
 
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };
@@ -3608,6 +3633,7 @@ mod tests {
         ));
 
         tokio::task::yield_now().await;
+        assert!(!readiness.is_terminally_fenced());
         fatal_fence.cancel();
         task.await.expect("node lease exits after terminal fence");
 
@@ -3630,6 +3656,146 @@ mod tests {
         assert!(
             stop_token.is_cancelled(),
             "sibling clustering tasks stop only after local authority is demoted"
+        );
+        assert!(
+            readiness.is_terminally_fenced(),
+            "a finished fatal fence must be visible to liveness so the pod restarts"
+        );
+    }
+
+    /// Drive `run_node_lease` through a non-fatal self-fence (heartbeat CAS
+    /// miss) into re-registration, park the registration, then stop either
+    /// the clustering scope alone (as the swarm's keypair-slot self-fence
+    /// does) or the whole process, and return the lifecycle after the loop
+    /// has exited.
+    async fn stop_during_reregistration(stop_process: bool) -> NodeLifecycle {
+        let interval = Duration::from_millis(50);
+        let mut lease = FakeLease::new(Box::new(|| Ok(false)));
+        let registration_entered = Arc::new(tokio::sync::Notify::new());
+        let registration_release = Arc::new(tokio::sync::Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+
+        let readiness = NodeLifecycle::new();
+        let process_stop = CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        readiness.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            clustering_stop.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        assert!(
+            !readiness.is_clustering_stopped_while_process_runs(),
+            "the loop is still re-registering"
+        );
+        if stop_process {
+            process_stop.cancel();
+        } else {
+            clustering_stop.cancel();
+        }
+        registration_release.notify_one();
+        task.await
+            .expect("node lease exits after the stop during re-registration");
+
+        assert!(!readiness.is_ready());
+        assert!(clustering_stop.is_cancelled());
+        assert!(
+            !readiness.fatal_fence_token().is_cancelled(),
+            "neither stop takes a fatal fence"
+        );
+        assert!(!readiness.is_terminally_fenced());
+        readiness
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clustering_only_stop_during_reregistration_leaves_a_restartable_state() {
+        let readiness = stop_during_reregistration(false).await;
+        assert!(
+            readiness.is_clustering_stopped_while_process_runs(),
+            "clustering stopped without a process stop: nothing re-serves, liveness must restart"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_stop_during_reregistration_is_not_reported_to_liveness() {
+        let readiness = stop_during_reregistration(true).await;
+        assert!(
+            !readiness.is_clustering_stopped_while_process_runs(),
+            "an ordinary process stop must not fail liveness"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_node_lease_stop_is_not_terminally_fenced() {
+        let interval = Duration::from_millis(50);
+        let lease = FakeLease::new(Box::new(|| Ok(true)));
+        let readiness = NodeLifecycle::new();
+        let stop_token = CancellationToken::new();
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            identity(),
+            stop_token.clone(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    heartbeat_interval: interval,
+                    lease_ttl: Duration::from_secs(10),
+                    claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(NoLocallyClaimedEntities),
+                readiness: readiness.clone(),
+                live_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(identity()),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: TEST_CLAIM_RELEASE_BUDGET,
+                shutdown_sm_drain: None,
+            },
+        ));
+
+        tokio::task::yield_now().await;
+        stop_token.cancel();
+        task.await.expect("node lease exits after an ordinary stop");
+
+        assert!(!readiness.is_ready());
+        assert!(
+            !readiness.fatal_fence_token().is_cancelled(),
+            "an ordinary stop with the lease available takes no fatal fence"
+        );
+        assert!(
+            !readiness.is_terminally_fenced(),
+            "an ordinary clustering stop must not fail liveness"
         );
     }
 
@@ -3694,6 +3860,10 @@ mod tests {
             .expect("terminal latch exits after registration returns");
 
         assert!(!readiness.is_ready());
+        assert!(
+            readiness.is_terminally_fenced(),
+            "a fatal fence finished from the re-registration loop must be visible to liveness"
+        );
         assert!(stop_token.is_cancelled());
         let published = live_identity.current();
         assert_ne!(published, initial_identity);
@@ -3770,6 +3940,10 @@ mod tests {
             .expect("shutdown exits after terminally disabling publication");
 
         assert!(!readiness.is_ready());
+        assert!(
+            !readiness.is_terminally_fenced(),
+            "a stop that runs finish without a fatal fence is not terminal"
+        );
         assert!(!live_identity.current().is_active());
         let exact = exact_demoted_owners.lock().expect("lock");
         assert!(exact.contains(&initial_identity));
@@ -5101,7 +5275,7 @@ mod tests {
         use waddle_xmpp::ownership::EntityType;
 
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
             return;
         };

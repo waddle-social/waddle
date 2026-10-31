@@ -85,6 +85,14 @@ Primary database wiring is DSN/driver based for sqlx:
   — dedicated control-plane pool size for node/claim liveness statements
   (ADR-0017 element 4/12); only opened when `clustering.enabled` is true on a
   Postgres deployment.
+- `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (no chart value; set through
+  `containerExtraEnv`, default: `30`, accepted `1`–`300`) — how long a
+  caller of the global database's main pool waits for a connection before
+  failing with a pool timeout. It applies to that pool only: inbox, pubsub
+  and MAM stores opened by URL, and the clustering control-plane pool, keep
+  a fixed 30 s. Lowering it turns a stalled acquisition into a
+  client-visible timeout (a stream error for sessions without stream
+  management); measure first.
 
 Set DSNs with either:
 
@@ -357,17 +365,41 @@ a ConfigMap. The full procedure is in
 
 - `config.drainTimeoutSeconds` sets `WADDLE_DRAIN_TIMEOUT_SECS`.
 - `terminationGracePeriodSeconds` controls Kubernetes pod termination grace period.
-- The server bounds its whole shutdown by one deadline started at `SIGTERM`:
+- HTTP/Q6 shutdown and the lifecycle wait for clustering share a deadline
+  started at `SIGTERM`:
   `config.drainTimeoutSeconds` (connection and SM drain) +
-  `clustering.claimReleaseBudgetSeconds` (room drain) + 5 s identity
-  retirement + 2 s terminal sweep.
+  `clustering.claimReleaseBudgetSeconds` (room drain) + reserved tail time
+  (5 s for identity retirement + 2 s for the terminal sweep). The tail terms
+  are reservations; early or parallel drains can leave those stages more time.
 - The chart validates that `terminationGracePeriodSeconds` is at least
   `preStopSleepSeconds` plus that deadline plus a 5 s kill margin (52 s with
   the defaults).
+- A clustering terminal wait begun before `SIGTERM` can continue after the
+  lifecycle stops awaiting it. Telemetry shutdown and runtime teardown follow
+  the bounded waits, so this deadline does not establish an exact process-exit
+  bound; unfinished ownership remains on lease expiry.
 
 ## Probes
 
-- Liveness probe: `GET /health`
-- Readiness probe: `GET /ready`
+- Liveness probe: `GET /health` — fails only when a restart is the fix: a
+  stalled runtime heartbeat (`runtime_stalled`); a node that took a
+  clustering fatal fence and whose node-lease loop finished the terminal
+  demotion and exited (`terminally_fenced`), whether the fence hit while
+  serving or while re-registering; or a node whose clustering scope stopped
+  while the process keeps running and whose node-lease loop exited
+  (`clustering_stopped`, e.g. the swarm's keypair-slot lease self-fenced). It
+  never checks the database itself. The terminal demotion has no deadline of
+  its own, so a wedged publication guard or actor delays the restart.
+- Readiness probe: `GET /ready` — database, lineage and node lifecycle
+  (claims/self-fence, drain), answered within 1.5 s. During a Postgres
+  outage every pod goes unready (no Service endpoints). A non-clustered pod
+  stays live and becomes ready again in place when Postgres returns, as does
+  a clustered pod whose outage was shorter than the 30 s keypair-slot and
+  node-lease TTLs (in practice about 20–30 s, depending on where in the 10 s
+  renewal cycle the outage starts). A clustered outage longer than that
+  stops clustering, and liveness restarts the pod (`clustering_stopped` or
+  `terminally_fenced`). So "no restart storm" holds for clustered pods only
+  for outages shorter than the lease TTL.
 
-Both are configurable via `probes.*`.
+Both are configurable via `probes.*`. Keep `probes.readiness.timeoutSeconds`
+at 2 or more: readiness bounds itself at 1.5 s.

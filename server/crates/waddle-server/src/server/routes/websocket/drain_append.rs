@@ -81,12 +81,15 @@ impl DrainAuthority {
             Ok(()) if exhausted => Err(AppendAuthorityRejection::ServicesUnavailable),
             Ok(()) if stanza.is_some() => {
                 let reference = IngressAppendObligationRef::from_relayed(obligation.clone());
-                check_canonical_obligation(
+                let read = check_canonical_obligation(
                     state.deps.app_state.db_pool.global(),
                     stanza.expect("matched typed stanza"),
                     &reference,
-                )
-                .await
+                );
+                // W1.6c seam: a canonical-read outage at detach.
+                #[cfg(feature = "test-support")]
+                let read = super::characterization_seams::detach_canonical_read(read);
+                read.await
             }
             Ok(())
                 if [
@@ -99,12 +102,15 @@ impl DrainAuthority {
                 Err(AppendAuthorityRejection::CarbonObligationMismatch)
             }
             Ok(()) => {
-                check_canonical_sender(
+                let read = check_canonical_sender(
                     state.deps.app_state.db_pool.global(),
                     obligation.key.message_key,
                     &obligation.sender_bare,
-                )
-                .await
+                );
+                // W1.6c seam: a canonical-read outage at detach.
+                #[cfg(feature = "test-support")]
+                let read = super::characterization_seams::detach_canonical_read(read);
+                read.await
             }
         };
         match outcome {

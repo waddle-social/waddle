@@ -19,7 +19,7 @@ fn is_departure(frame: &str, occupant: &jid::FullJid) -> bool {
 
 #[tokio::test]
 async fn transferred_user_claim_routes_remote_departure_without_waiting_for_release() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping XEP-0045 remote cleanup retry: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

@@ -38,9 +38,9 @@ pub use user_actor::delivery::{
 pub use user_actor::GetResources;
 pub use user_registry::{
     DemoteUserActor, DemoteUserActorIfOwner, DemotedUserActor, DemotedUserResource,
-    GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers, ListUsersOwnedBy, ReapUserIfEmpty,
-    RecordPendingUserUnregister, RegisterUserResource, RegisterUserResourceIfOwnerOrAbsent,
-    RemoveUser, RetryUserRegistryConvergence, UnregisterAndReleaseIfEmpty,
-    UnregisterAndReleaseOutcome, UnregisterUserResource, UserCount, UserRegistryActor,
-    UserRegistryConvergenceReport, UserRegistryError, WireUserClusteringClaims,
+    EnqueueUserResourceUnregister, GetOrCreateUser, GetUser, GetUserForLocalClaim, ListUsers,
+    ListUsersOwnedBy, ReapUserIfEmpty, RecordPendingUserUnregister, RegisterUserResource,
+    RegisterUserResourceIfOwnerOrAbsent, RemoveUser, RetryUserRegistryConvergence,
+    UnregisterAndReleaseIfEmpty, UnregisterAndReleaseOutcome, UnregisterUserResource, UserCount,
+    UserRegistryActor, UserRegistryConvergenceReport, UserRegistryError, WireUserClusteringClaims,
 };

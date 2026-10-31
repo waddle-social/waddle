@@ -1550,7 +1550,7 @@ mod tests {
         // startup load.
         let _allowlist_guard = crate::clustering::allowlist_table_lock().lock().await;
         let _keypair_slot_guard = crate::clustering::keypair_slot_table_lock().lock().await;
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let (pool_entry, peer_id) = generated_pool_entry();

@@ -496,7 +496,7 @@ async fn sqlite_corrupt_ledger_is_error() {
 
 #[tokio::test]
 async fn postgres_keyed_append_storage_contract() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (portable keyed SM append contract)");
         return;
     };

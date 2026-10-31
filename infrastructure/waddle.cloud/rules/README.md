@@ -17,11 +17,28 @@ issue #1324):
 
 - **Every PR** touching `rules/**` runs `mimirtool rules lint` and
   `lokitool rules lint` (the `pullRequest` pipeline in `../env.cue`).
-  A broken rule file fails the PR, not the pager.
+  A broken rule file fails the PR, not the pager. The same pipeline's
+  `rulesTest` task runs `tests/run.sh` with `PROMETHEUS_BIN` set: promtool
+  checks and unit tests for every `mimir/*.yaml` and `tests/*.test.yaml`,
+  plus the real-translator OTLP name contract below (promtool and
+  prometheus come from the root dev shell).
+- **Loki rules are lint-only.** `lokitool rules lint` checks syntax;
+  nothing evaluates LogQL against synthetic logs (promtool cannot), so a
+  Loki rule whose expression never matches passes CI. Only the Mimir rules
+  have the behavioural tests described under "Ingress alert regression
+  tests".
 - **Every main push** syncs the trees to the Grafana Cloud rulers via
   `mimirtool rules sync` / `lokitool rules sync` (the `rulesSync` task
-  in the `default` pipeline). Sync is authoritative: rules deleted
-  here are deleted from the ruler (scoped to the `waddle` namespace).
+  in the `default` pipeline). The sync depends on `rulesLint` and
+  `rulesTest`, so rules that fail lint or their tests are never
+  published. Sync is authoritative: rules deleted here are deleted from
+  the ruler (scoped to the `waddle` namespace).
+- **Server PRs and main pushes** run the same `tests/run.sh` as
+  `checkAlertRules` in `server/env.cue`, which gates the server image
+  publish. It is what runs the contract when only a name fixture, an
+  instrument unit or the Prometheus version (`flake.nix`/`flake.lock`)
+  changes: the cloud pipelines select tasks by project-local inputs and
+  do not see those paths.
 
 ## Required credentials (operator setup, once)
 
@@ -104,8 +121,8 @@ docker run --rm --network none --entrypoint /bin/sh \
 
 The suite covers normal live unresolved attempts, flat aged obligations, the
 age threshold and hold/reset/resolution, primary failover, missing age telemetry,
-and independent per-kind backlog growth. Run it when changing ingress alerts;
-the existing PR pipeline lints rule syntax but does not run these behavioral tests.
+and independent per-kind backlog growth. CI runs it (cloud `rulesTest`, server
+`checkAlertRules`); run it locally when changing ingress alerts.
 
 The runner also evaluates `tests/push.test.yaml`. To verify the Rust-exported
 push gauge units through a real OTLP receiver and the same recording rules,
@@ -119,3 +136,15 @@ This contract uses annotation count units and checks the translated series and
 recording aliases. A dimensionless-unit control must produce `_ratio`, which
 guards against bypassing translation. No tools are downloaded or cloud writes
 performed. Check the actual Grafana/Mimir series again after deployment.
+
+The same contract covers the clustering instruments the alert rules read,
+from `server/crates/waddle-server/src/clustering/alert_metric_contract.json`:
+each `(name, unit)` must translate to exactly its `prometheus_name`, and no
+spelling listed in `unexported_rule_spellings` may appear. A unit test in
+`clustering/metrics.rs` binds that fixture to the exported instruments, and
+`tests/push_otlp_contract.py` checks the Prometheus-parsed selectors of every
+loaded Mimir rule against the fixture, and requires each contracted alert to
+read its exported series. Broad or regex metric-name selectors fail this check:
+all rules must use exact metric names so an uncontracted clustering series
+cannot be hidden inside a selector. Renaming an instrument or changing its
+unit breaks a CI check before the alert goes silent.

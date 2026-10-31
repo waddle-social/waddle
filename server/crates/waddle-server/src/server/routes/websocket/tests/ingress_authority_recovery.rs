@@ -531,7 +531,7 @@ where
     F: FnOnce(Arc<WebSocketState>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping PostgreSQL authority recovery: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

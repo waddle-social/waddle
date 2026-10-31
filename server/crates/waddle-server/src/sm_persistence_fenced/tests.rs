@@ -185,7 +185,7 @@ struct Fixture {
 /// `None` (skip, not fail) when `WADDLE_TEST_POSTGRES_URL` is unset,
 /// matching `clustering::claims`'s own Postgres-gated test convention.
 async fn fixture() -> Option<Fixture> {
-    let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+    let url = waddle_ws_test_support::require_test_postgres_url()?;
     // Acquire before touching any shared table — see `_table_lock`'s own
     // doc comment on `Fixture`.
     let table_lock = crate::clustering::claims::clustering_control_plane_table_lock()
@@ -1867,7 +1867,7 @@ async fn acknowledged_windows_require_exact_fence_and_settlement_before_source_d
 
 #[tokio::test]
 async fn fenced_only_initialization_creates_ack_journal_and_protects_attached_claims() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let admin = sqlx::PgPool::connect(&database_url).await.unwrap();

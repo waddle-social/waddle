@@ -55,7 +55,7 @@ fn serial_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 async fn clean_db() -> Option<Database> {
-    let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+    let url = waddle_ws_test_support::require_test_postgres_url()?;
     let db = Database::from_config(
         "xep0198-cross-node-resume-test",
         &DatabaseConfig::new(DatabaseDriver::Postgres, url)
@@ -1286,7 +1286,10 @@ async fn recipient_claim_move_retry_dedups_pending_delivery_delete() {
     // moves — standing in for a stanza queued for offline delivery that
     // was flushed to (and pushed by) the pre-resume connection.
     let pending_storage = DatabasePendingDeliveryStorage::open(
-        Some(&std::env::var("WADDLE_TEST_POSTGRES_URL").expect("checked by clean_db above")),
+        Some(
+            &waddle_ws_test_support::require_test_postgres_url()
+                .expect("checked by clean_db above"),
+        ),
         QuotaPolicy::Unlimited,
     )
     .await

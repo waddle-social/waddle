@@ -84,6 +84,9 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 mod lifecycle_tests;
 
 #[cfg(test)]
+mod resume_checkpoint_tests;
+
+#[cfg(test)]
 mod room_pin_tests;
 
 #[cfg(test)]

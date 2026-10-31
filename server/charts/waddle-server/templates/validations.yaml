@@ -54,9 +54,11 @@
   (`waddle_server::shutdown_deadline`): connection drain (at most half of
   drainTimeoutSeconds) and Q6 SM drain inside drainTimeoutSeconds, the room
   drain inside claimReleaseBudgetSeconds, then identity retirement (the
-  disable() barrier, exact-owner demotion and retire_after_shutdown) inside
-  $retireBudget, then the local terminal sweep and terminal departure write
-  inside $terminalSweepBudget. The server's deadline is exactly
+  disable() barrier, exact-owner demotion and retire_after_shutdown), then
+  the local terminal sweep and terminal departure write. $retireBudget and
+  $terminalSweepBudget reserve tail time for those stages; they are not
+  individual stage caps. Early or parallel drains can leave them more time.
+  The server's deadline is exactly
   drainTimeoutSeconds + claimReleaseBudgetSeconds + $retireBudget +
   $terminalSweepBudget, so this floor is preStop + that deadline + the kill
   margin. The kill margin is not free slack: it covers the post-deadline

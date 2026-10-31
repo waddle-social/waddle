@@ -1,6 +1,6 @@
 """The chart's terminationGracePeriodSeconds floor covers the whole shutdown.
 
-#2046 W1.10: the server bounds its shutdown by one enclosing deadline
+#2046 W1.10: the server bounds its shutdown waits by one enclosing deadline
 (`crates/waddle-server/src/shutdown_deadline.rs`). The chart floor in
 `templates/validations.yaml` must be preStop + every term of that deadline +
 the kill margin, and the two fixed terms must match the Rust constants.

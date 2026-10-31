@@ -1,0 +1,37 @@
+# Postgres-backed tests that may run outside nextest's `postgres` test group.
+#
+# Every test listed here connects to WADDLE_TEST_POSTGRES_URL only to create
+# its own uniquely named (UUID-suffixed) schema, runs against that schema via
+# search_path, and never resets or alters the shared `public` schema, so it
+# cannot observe or disturb the table-resetting tests serialized in the group.
+# scripts/check_postgres_test_group.py requires every other Postgres-backed
+# test to match the group filter in .config/nextest.toml, and fails on entries
+# here that no longer need listing.
+#
+# Format: one entry per line, relative to server/. `#` starts a comment.
+# - `<file>`: every Postgres-backed test declared in that file is isolated.
+# - `<file>::<Type or module>::<fn>`: a fixture that always creates and uses
+#   its own uniquely named schema; tests whose only route to the database is
+#   that fixture need no entry of their own, wherever they are declared
+#   (including through `include!`).
+
+# Fixtures.
+# IngressFixture::postgres_with_pool (and `postgres`, which calls it): creates
+# `waddle_test_ingress_<name>_<uuid>` on an admin pool that does nothing else
+# but `CREATE SCHEMA` / `DROP SCHEMA` of that name (`close`), and opens the
+# Database, MAM, inbox and activity stores with `search_path=<schema>`. Shared
+# by the integration binaries (`mod ingress_support;`) and the library
+# (`include!` in src/ingress/test_support.rs).
+crates/waddle-server/tests/ingress_support.rs::IngressFixture::postgres_with_pool
+
+# Library unit tests (fixture builds `<prefix>_<uuid>` schemas).
+crates/waddle-server/src/permissions/actor/tests.rs  # affiliation_swap_<uuid>
+crates/waddle-server/src/server/health.rs  # readiness colocation: per-test schemas
+crates/waddle-server/src/server/http.rs  # ingress_colocation_/mam_/inbox_colocation_<uuid>
+crates/waddle-server/src/server/routes/interpret/effects/delivery_immediate_offline_tests.rs  # immediate_offline_<uuid>
+crates/waddle-server/src/server/routes/websocket/muc_invites/tests.rs  # muc_invites_<uuid>
+crates/waddle-server/src/sm_promotion/tests.rs  # quota_bounce_<uuid>
+
+# Integration binaries.
+crates/waddle-server/tests/db_lineage_multiprocess.rs  # SchemaFixture: one UUID schema per test
+crates/waddle-server/tests/xep0313_mam_integration.rs  # waddle_test_xep0313_uow_<uuid>

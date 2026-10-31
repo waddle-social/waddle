@@ -1,0 +1,10 @@
+[
+  {
+    "name": "waddle.clustering.node_heartbeat_age",
+    "unit": "ms",
+    "prometheus_name": "waddle_clustering_node_heartbeat_age_milliseconds",
+    "alerts": ["ClusterHeartbeatStale", "ClusterHeartbeatMissing"],
+    "unexported_rule_spellings": ["waddle_clustering_node_heartbeat_age"],
+    "value": 1500
+  }
+]

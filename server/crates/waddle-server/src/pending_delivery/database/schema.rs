@@ -830,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_concurrent_receipt_bootstrap_is_serialized() {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let schema = format!("receipt_bootstrap_{}", uuid::Uuid::new_v4().simple());

@@ -413,7 +413,7 @@ async fn replacement_serializes_with_rollback_across_sqlite_actors() {
 #[tokio::test]
 async fn replacement_serializes_with_rollback_across_postgres_actors() {
     use crate::db::{DatabaseConfig, DatabaseDriver};
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

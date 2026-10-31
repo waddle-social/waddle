@@ -15,7 +15,7 @@ const TEST_NAME: &str =
 
 #[tokio::test(flavor = "multi_thread")]
 async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
-    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(postgres_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping XEP-0045 partial fanout: WADDLE_TEST_POSTGRES_URL not set");
         return;
     };

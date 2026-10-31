@@ -223,7 +223,7 @@ async fn versioned_push_pubsub_sqlite_orders_concurrent_retries_and_tombstones()
 
 #[tokio::test]
 async fn versioned_push_pubsub_postgres_orders_concurrent_retries_and_tombstones() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let schema = format!("pubsub_versioned_{}", uuid::Uuid::new_v4().simple());

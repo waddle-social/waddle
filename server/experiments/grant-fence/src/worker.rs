@@ -5,13 +5,19 @@ use sqlx::Connection;
 use uuid::Uuid;
 
 use crate::authority::{activate, check, client, delete_projection, guard_matches, publish};
-use crate::model::{barrier, event, Action, Work};
+use crate::model::{barrier, event, Action, Work, WorkerRequest};
 
 pub async fn run_worker() -> Result<()> {
     let mut bytes = Vec::new();
     std::io::stdin().take(4097).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 4096, "fixture worker input exceeds PIPE_BUF");
-    let work: Work = serde_json::from_slice(&bytes)?;
+    let request: WorkerRequest = serde_json::from_slice(&bytes)?;
+    let work = match request {
+        WorkerRequest::Guard(work) => work,
+        WorkerRequest::MultiEdge(work) => return crate::multi_edge::execute(&work).await,
+        WorkerRequest::Recovery(work) => return crate::recovery::execute(&work).await,
+        WorkerRequest::WriteProxy(work) => return crate::recovery::execute_proxy(&work).await,
+    };
     work.settings.validate()?;
     ensure!(
         work.barriers.starts_with(&work.settings.root),
