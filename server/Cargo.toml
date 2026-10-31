@@ -10,6 +10,8 @@ members = [
     "crates/waddle-xmpp-core",
     "crates/waddle-xmpp-client",
     "crates/waddle-xmpp-client-ffi",
+    "crates/waddle-flutter-runtime",
+    "crates/waddle-flutter-timeline",
     "crates/waddle-xmpp-client-wasm",
     "crates/waddle-client-session",
     "crates/waddle-ws-test-support",

@@ -7617,6 +7617,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -7716,6 +7717,38 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "xmpp-parsers",
+]
+
+[[package]]
+name = "waddle-flutter-runtime"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "jid",
+ "minidom",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "waddle-flutter-timeline",
+ "waddle-xmpp-client",
+ "waddle-xmpp-client-ffi",
+ "xmpp-parsers",
+]
+
+[[package]]
+name = "waddle-flutter-timeline"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jid",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "waddle-client-session",
 ]
 
 [[package]]
@@ -7956,6 +7989,7 @@ dependencies = [
  "chrono",
  "jid",
  "minidom",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
  "uniffi",
@@ -7983,11 +8017,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "waddle-flutter-timeline",
  "waddle-xmpp-client",
  "waddle-xmpp-core",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "xmpp-parsers",
 ]
 
 [[package]]

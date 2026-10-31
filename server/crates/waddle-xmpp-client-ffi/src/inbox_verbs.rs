@@ -22,6 +22,8 @@ use crate::{WaddleClient, WaddleError, WaddleInboxResult};
 ///
 /// `UnreadOnly` is `unread-only='true'`. `All` asks for every conversation.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleInboxReadFilter {
     /// Include both read and unread conversations.
     All,
@@ -33,6 +35,8 @@ pub enum WaddleInboxReadFilter {
 ///
 /// `Omit` is the XEP `messages='false'` form. `Include` asks for the bodies.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleInboxMessageContent {
     /// Include the latest archived message for each entry.
     Include,

@@ -999,6 +999,36 @@
             '';
           };
 
+          # Independent Flutter client: keep its SDK out of the existing
+          # Kotlin/server shell and omit server-only build and deployment tools.
+          flutter = pkgs.mkShell {
+            buildInputs = [
+              pkgs.openssl
+              pkgs.sqlite
+            ];
+            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+            env.JAVA_HOME = "${pkgs.temurin-bin-21}";
+            packages = [
+              rustToolchain
+              pkgs.flutter
+              pkgs.bun
+              pkgs.nodejs_22
+              pkgs.python3
+              pkgs.wasm-pack
+              pkgs.temurin-bin-21
+              pkgs.cargo-ndk
+              # WebCrypto's native-asset hook builds with CMake and Ninja.
+              pkgs.cmake
+              pkgs.ninja
+              pkgs.actionlint
+              pkgs.pkg-config
+              pkgs.git
+              pkgs.curl
+              pkgs.unzip
+              pkgs.perl
+            ];
+          };
+
           # Linux desktop client (apps/linux): its own shell so GTK never
           # enters the server's CI closure.
           linux = pkgs.mkShell {

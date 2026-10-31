@@ -18,6 +18,7 @@ uniffi::custom_type!(StanzaId, String, {
 });
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleConfig {
     pub server_url: String,
     pub jid: String,
@@ -33,6 +34,7 @@ pub struct WaddleConfig {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMessage {
     pub id: Option<String>,
     pub from: Option<String>,
@@ -138,6 +140,7 @@ pub struct WaddleMessage {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleCallThreadAnchor {
     pub kind: String,
     pub sid: String,
@@ -149,6 +152,7 @@ pub struct WaddleCallThreadAnchor {
 /// urn:waddle:call-thread:0 `<call-thread-ended/>` fastening. Mirrors
 /// `waddle_xmpp_client::xep::call_thread::CallThreadEnded` 1:1.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleCallThreadEnded {
     /// XEP-0422 `<apply-to id='…'/>` target: the anchor's stanza id.
     pub anchor_id: String,
@@ -163,6 +167,7 @@ pub struct WaddleCallThreadEnded {
 /// sender is already verified server-side: only a room broadcast (bare
 /// room JID, `type='groupchat'`) ever reaches this record.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSafetyScoresFastening {
     /// XEP-0422 `<apply-to id='…'/>` target origin-id.
     pub target_origin_id: String,
@@ -176,6 +181,7 @@ pub struct WaddleSafetyScoresFastening {
 
 /// One `<safety-scores/>` batch.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSafetyScores {
     /// Batch-level model identifier (`model-version`).
     pub model_version: String,
@@ -185,6 +191,7 @@ pub struct WaddleSafetyScores {
 
 /// One `<score/>`.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSafetyScore {
     pub category: WaddleSafetyCategory,
     /// In `0.0..=1.0`, validated by the parser.
@@ -195,6 +202,8 @@ pub struct WaddleSafetyScore {
 /// Judgment categories. Unknown wire categories never reach this enum:
 /// the parser skips them.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleSafetyCategory {
     IsQuestion,
     HateSpeech,
@@ -209,6 +218,7 @@ pub enum WaddleSafetyCategory {
 /// One XEP-0359 `<stanza-id/>` entry. Mirrors the core `StanzaId`
 /// shape: `by` is required by XEP-0359 and always present.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleStanzaId {
     pub id: String,
     /// JID (string form) of the archiving entity that assigned `id`.
@@ -218,6 +228,8 @@ pub struct WaddleStanzaId {
 /// XEP-0085 chat state notification states. Wire values outside these
 /// five are dropped to `None` at the conversion boundary.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleChatState {
     Active,
     Composing,
@@ -230,6 +242,8 @@ pub enum WaddleChatState {
 /// or `Reply` (thread + body). Wire values outside these two are
 /// dropped to `None` at the conversion boundary.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleForumPostKind {
     Topic,
     Reply,
@@ -239,6 +253,8 @@ pub enum WaddleForumPostKind {
 /// crate's `StanzaErrorType`; `Unknown` marks an unrecognised wire
 /// value so consumers can distinguish it from every defined type.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleStanzaErrorType {
     Auth,
     Cancel,
@@ -251,6 +267,8 @@ pub enum WaddleStanzaErrorType {
 /// RFC 6120 §6.5 SASL failure conditions. Mirrors the client crate's
 /// `SaslFailureCondition`; `Unknown` marks an unrecognised wire value.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleSaslCondition {
     Aborted,
     AccountDisabled,
@@ -270,6 +288,8 @@ pub enum WaddleSaslCondition {
 /// `MarkupSpanType`; `Link` is Waddle's `urn:waddle:markup:0` span
 /// extension (XEP-0394 defines no link span).
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleMarkupSpanType {
     Bold,
     Italic,
@@ -284,6 +304,7 @@ pub enum WaddleMarkupSpanType {
 /// scalar values; `end` is exclusive. `uri` is populated only for
 /// `Link` spans.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMarkupSpan {
     pub span_type: WaddleMarkupSpanType,
     pub start: u32,
@@ -295,6 +316,8 @@ pub struct WaddleMarkupSpan {
 /// values explicitly so extension references survive the boundary
 /// instead of being silently dropped or smuggled through a bare String.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleReferenceType {
     Mention,
     Data,
@@ -304,6 +327,7 @@ pub enum WaddleReferenceType {
 /// XEP-0372 `<reference/>`. `begin`/`end` are body offsets; `(0, 0)`
 /// is the "no body position" sentinel used by anchor-only references.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleReference {
     pub ref_type: WaddleReferenceType,
     pub uri: String,
@@ -317,6 +341,7 @@ pub struct WaddleReference {
 /// XEP-0511 link preview card produced by the server-side
 /// `urn:waddle:link-preview:0` pipeline.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreview {
     pub original_url: String,
     pub normalized_url: Option<String>,
@@ -334,6 +359,7 @@ pub struct WaddleLinkPreview {
 
 /// Cached preview image of a XEP-0511 link card.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreviewImage {
     pub url: String,
     pub media_type: String,
@@ -344,6 +370,7 @@ pub struct WaddleLinkPreviewImage {
 
 /// Native-playable `og:video` media surfaced from a XEP-0511 card.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreviewVideo {
     pub url: String,
     pub media_type: String,
@@ -351,6 +378,7 @@ pub struct WaddleLinkPreviewVideo {
 
 /// `og:video` iframe player embed of a XEP-0511 card.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreviewPlayer {
     pub url: String,
     pub width: Option<u32>,
@@ -360,6 +388,8 @@ pub struct WaddleLinkPreviewPlayer {
 /// Status of a composer-side `urn:waddle:link-preview:0` lookup IQ
 /// (`WaddleClient::lookup_link_preview`).
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleLinkPreviewLookupStatus {
     /// Preview resolved; the token in the paired preview payload is
     /// valid until its `expires_at` instant.
@@ -376,6 +406,7 @@ pub enum WaddleLinkPreviewLookupStatus {
 /// [`WaddleSendOptions::link_preview_token`] — but only while the
 /// RFC 3339 `expires_at` instant is still in the future.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreviewLookupPreview {
     pub token: String,
     pub original_url: String,
@@ -390,6 +421,7 @@ pub struct WaddleLinkPreviewLookupPreview {
 /// Typed outcome of the composer-side lookup: `preview` is present
 /// exactly when `status` is [`WaddleLinkPreviewLookupStatus::Ready`].
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLinkPreviewLookup {
     pub status: WaddleLinkPreviewLookupStatus,
     pub preview: Option<WaddleLinkPreviewLookupPreview>,
@@ -397,6 +429,8 @@ pub struct WaddleLinkPreviewLookup {
 
 /// urn:waddle:pin:0 pin/unpin action carried on a room system message.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddlePinAction {
     Pinned,
     Unpinned,
@@ -404,6 +438,7 @@ pub enum WaddlePinAction {
 
 /// Frozen preview snapshot of a pinned message, taken at pin time.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePinPreview {
     /// Bare JID of the message author at pin time.
     pub author_jid: String,
@@ -418,6 +453,7 @@ pub struct WaddlePinPreview {
 /// urn:waddle:pin:0 `<pin-event/>` room broadcast. Mirrors
 /// `waddle_xmpp_client::pin::PinEvent`.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePinEvent {
     pub action: WaddlePinAction,
     /// XEP-0359 stanza-id of the targeted message.
@@ -434,6 +470,7 @@ pub struct WaddlePinEvent {
 /// One `urn:waddle:pin:0` pinned-message entry returned by
 /// `fetch_room_pins`. Mirrors `waddle_xmpp_client::pin::PinEntry` 1:1.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePinEntry {
     /// XEP-0359 stanza-id of the pinned message in the room archive.
     pub target_stanza_id: String,
@@ -448,6 +485,8 @@ pub struct WaddlePinEntry {
 /// XEP-0280 carbon direction of an unwrapped forwarded copy. Always
 /// §11-verified by the runtime before it reaches this boundary.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleCarbonDirection {
     /// Mirror of a message another of our resources sent (`<sent/>`).
     Sent,
@@ -462,6 +501,7 @@ pub enum WaddleCarbonDirection {
 /// can correlate `chat_id` (PEP item id = the exact chat JID)
 /// with its locally-tracked conversation list directly.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMdsDisplayedEntry {
     /// PEP item id = bare for DMs/rooms, full occupant for MUC PMs.
     pub chat_id: String,
@@ -476,6 +516,7 @@ pub struct WaddleMdsDisplayedEntry {
 /// merged with its Waddle `urn:waddle:inbox:0` `<metadata/>`. Surfaced
 /// both from `fetch_inbox` pages and from live `InboxPush` events.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleInboxEntry {
     /// Conversation partner: contact bare JID (`kind == "direct"`) or
     /// room bare JID (`kind == "muc"`).
@@ -506,6 +547,7 @@ pub struct WaddleInboxEntry {
 /// Result of one streamed XEP-0430 `fetch_inbox` query: the folded
 /// entry stream plus the closing `<fin/>` counts.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleInboxResult {
     /// `<fin total/>` — number of conversations matched.
     pub total: u32,
@@ -518,6 +560,7 @@ pub struct WaddleInboxResult {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleArchivedMessage {
     pub mam_id: String,
     pub query_id: Option<String>,
@@ -593,6 +636,7 @@ pub struct WaddleArchivedMessage {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMamPage {
     pub messages: Vec<WaddleArchivedMessage>,
     pub first_id: Option<String>,
@@ -601,12 +645,15 @@ pub struct WaddleMamPage {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePresenceHat {
     pub uri: String,
     pub title: String,
 }
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleMucAffiliation {
     Owner,
     Admin,
@@ -616,6 +663,8 @@ pub enum WaddleMucAffiliation {
 }
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleMucRole {
     Moderator,
     Participant,
@@ -624,6 +673,7 @@ pub enum WaddleMucRole {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePresence {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -669,6 +719,7 @@ pub struct WaddlePresence {
 /// Typed payload of the `urn:xmpp:jingle:muji:0` MUC presence
 /// extension (XEP-0272).
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMujiPresence {
     /// True when the presence carried a `<preparing/>` child
     /// (XEP-0272 §Joining two-phase flow). UIs typically don't
@@ -684,6 +735,7 @@ pub struct WaddleMujiPresence {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSpace {
     pub id: String,
     pub service_jid: String,
@@ -692,6 +744,7 @@ pub struct WaddleSpace {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleChannel {
     pub id: String,
     pub room_jid: String,
@@ -714,6 +767,7 @@ pub struct WaddleChannel {
 }
 
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleTopology {
     pub spaces: Vec<WaddleSpace>,
     pub channels: Vec<WaddleChannel>,
@@ -723,6 +777,7 @@ pub struct WaddleTopology {
 ///
 /// `data` is the raw image bytes (base64-decoded) carried in-band by XMPP.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAvatar {
     /// Bare JID the avatar belongs to (string form).
     pub jid: String,
@@ -740,6 +795,7 @@ pub struct WaddleAvatar {
 /// NOT retrieve the image data") and the caller serves its cached
 /// bytes for `id` instead.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAvatarResult {
     pub id: String,
     pub avatar: Option<WaddleAvatar>,
@@ -747,6 +803,7 @@ pub struct WaddleAvatarResult {
 
 /// XEP-0446 / XEP-0447 shared-file metadata exposed to Swift.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSharedFile {
     pub url: String,
     pub name: Option<String>,
@@ -770,6 +827,7 @@ pub struct WaddleSharedFile {
 /// XEP-0448 cipher/key/iv/hashes envelope for encrypted Stateless File
 /// Sharing payloads.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleEncryptedFile {
     /// Cipher URN, e.g. `urn:xmpp:ciphers:aes-256-gcm-nopadding:0`.
     pub cipher: String,
@@ -784,6 +842,7 @@ pub struct WaddleEncryptedFile {
 
 /// XEP-0300 hash entry nested under an `<encrypted/>` envelope.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleEncryptedFileHash {
     pub algo: String,
     pub value_b64: String,
@@ -791,6 +850,7 @@ pub struct WaddleEncryptedFileHash {
 
 /// Header the client must include when uploading to a XEP-0363 slot.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleUploadHeader {
     pub name: String,
     pub value: String,
@@ -798,6 +858,7 @@ pub struct WaddleUploadHeader {
 
 /// XEP-0363 upload slot with PUT/GET URLs and required PUT headers.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleUploadSlot {
     pub put_url: String,
     pub get_url: String,
@@ -806,6 +867,7 @@ pub struct WaddleUploadSlot {
 
 /// XEP-0461 reply target attached to an outbound message.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleReplyTarget {
     /// JID (string form) of the author of the message being replied to.
     /// For MUC this is the occupant full JID; for 1:1 the bare JID.
@@ -817,6 +879,7 @@ pub struct WaddleReplyTarget {
 /// XEP-0428 fallback range identifying the quoted-prefix inside the body.
 /// Offsets count Unicode scalar values and `end` is exclusive.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleFallbackRange {
     pub start: u32,
     pub end: u32,
@@ -824,6 +887,7 @@ pub struct WaddleFallbackRange {
 
 /// XEP-0201 thread reference with optional parent for nested threads.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleThreadTarget {
     pub id: String,
     pub parent: Option<String>,
@@ -835,6 +899,7 @@ pub struct WaddleThreadTarget {
 /// algorithm name (only `sha-256` is accepted by the typed layer in
 /// v1; anything else is rejected on conversion).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleStickerHash {
     pub algo: String,
     pub value_b64: String,
@@ -845,6 +910,7 @@ pub struct WaddleStickerHash {
 /// dimensions pair flattened to optional width/height and suggest
 /// entries flattened to their texts.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePackSticker {
     /// Mandatory lang-less textual fallback (usually emoji).
     pub desc: String,
@@ -864,6 +930,7 @@ pub struct WaddlePackSticker {
 /// `urn:xmpp:stickers:0` node; the item id is the pack id derived from
 /// the pack hash).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleStickerPack {
     /// Pack id = first 24 Base64 chars of the pack hash. On publish
     /// the id is recomputed from the pack content server-side of this
@@ -881,6 +948,7 @@ pub struct WaddleStickerPack {
 /// `pack_node` locate packs hosted outside the sender's own PEP
 /// `urn:xmpp:stickers:0` node.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleStickerRef {
     pub pack_id: String,
     pub pack_jid: Option<String>,
@@ -889,6 +957,7 @@ pub struct WaddleStickerRef {
 
 /// Options bag attached to an outbound chat or groupchat send.
 #[derive(uniffi::Record, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleSendOptions {
     pub stanza_id: Option<String>,
     /// RFC 6121 `<subject/>`, used by forum topic posts.
@@ -917,6 +986,7 @@ pub struct WaddleSendOptions {
 
 /// Who a typed `@label` can address in this conversation.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMentionDirectory {
     pub targets: Vec<WaddleMentionTarget>,
     /// Resolve `@everyone` / `@here` to broadcast mention URIs.
@@ -925,6 +995,7 @@ pub struct WaddleMentionDirectory {
 
 /// One mentionable entity: the label typed after `@` and its real bare JID.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMentionTarget {
     pub label: String,
     pub jid: String,
@@ -935,6 +1006,8 @@ pub struct WaddleMentionTarget {
 /// transport/protocol failures; this keeps Swift-side control flow
 /// explicit without moving human diagnostics out of `on_error`.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleSendMessageOutcome {
     Sent { stanza_id: String },
     NotConnected,
@@ -951,6 +1024,7 @@ pub enum WaddleSendMessageOutcome {
 /// `waddle_xmpp_client::messaging::CallMedia` 1:1 so the Swift side
 /// can read the boolean flags directly without a wrapper enum.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleCallMedia {
     pub audio: bool,
     pub video: bool,
@@ -961,6 +1035,7 @@ pub struct WaddleCallMedia {
 /// session-initiate / session-accept. The Swift app feeds these
 /// straight to the LiveKit iOS/macOS SDK.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleLiveKitJoin {
     pub url: String,
     pub room: String,
@@ -973,6 +1048,8 @@ pub struct WaddleLiveKitJoin {
 /// chat client — flattened for UniFFI (no nested struct payloads
 /// per variant).
 #[derive(uniffi::Enum, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleCallEventKind {
     /// XEP-0353 §5.1.1 `<propose/>` — the ringing UI start signal.
     Propose { media: WaddleCallMedia },
@@ -1023,6 +1100,8 @@ pub enum WaddleCallEventKind {
 /// re-parse via `FromStr` and inbound events are emitted only when
 /// the wire value resolves to one of these variants.
 #[derive(uniffi::Enum, Clone, Debug, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleJingleReason {
     AlternativeSession,
     Busy,
@@ -1050,6 +1129,7 @@ pub enum WaddleJingleReason {
 /// recipient when available; `sid` is the Jingle session id used to
 /// correlate every later event in the call.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleCallEvent {
     pub from: String,
     pub to: Option<String>,
@@ -1062,6 +1142,8 @@ pub struct WaddleCallEvent {
 /// still send the XEP-0353 `<finish/>` bookend after a terminate the
 /// server refused only because it already lost the call registry.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleCallSessionTerminateOutcome {
     /// The server acked the terminate with an `<iq type='result'/>`.
     Ok,
@@ -1081,6 +1163,8 @@ pub enum WaddleCallSessionTerminateOutcome {
 /// TLS-protected TURN (XEP-0215 §3.6.5) — the shape Waddle's own server
 /// advertises.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleExternalServiceType {
     Stun,
     Turn,
@@ -1089,6 +1173,8 @@ pub enum WaddleExternalServiceType {
 
 /// Transport of a XEP-0215 `<service transport='…'/>` entry.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleExternalServiceTransport {
     Udp,
     Tcp,
@@ -1101,6 +1187,7 @@ pub enum WaddleExternalServiceTransport {
 /// `ice-servers.ts` parity). Credentials are present only on
 /// TURN/TURNS entries.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExternalService {
     pub service_type: WaddleExternalServiceType,
     pub host: String,
@@ -1122,6 +1209,8 @@ pub struct WaddleExternalService {
 
 /// Result of looking up the Push Service's VAPID key.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddlePushVapidLookup {
     /// The active key: `public_key` is the base64url (no padding)
     /// uncompressed P-256 point a Web Push subscription binds to; `kid`
@@ -1143,6 +1232,7 @@ pub enum WaddlePushVapidLookup {
 /// matching `disable_push_device` opt-out so a per-device unsubscribe
 /// doesn't take down push for sibling devices on the same node.
 #[derive(uniffi::Record, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleRegisterDeviceResult {
     pub node: String,
     pub device_id: String,
@@ -1152,6 +1242,8 @@ pub struct WaddleRegisterDeviceResult {
 /// `apns_development` endpoint from `apns_production`; Web Push and
 /// FCM accept only `Production` today.
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddlePushEnvironment {
     Production,
     Sandbox,
@@ -1171,6 +1263,8 @@ impl From<WaddlePushEnvironment> for waddle_xmpp_client::push::PushEnvironment {
 /// associated-value enum that the Apple client populates per
 /// platform.
 #[derive(uniffi::Enum, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddlePushDeviceCredentials {
     WebPush {
         endpoint: String,
@@ -1220,6 +1314,8 @@ impl From<WaddlePushDeviceCredentials> for waddle_xmpp_client::push::PushDeviceC
 
 /// `waddle#command_scope` — where a command may be offered.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleExtensionCommandScope {
     /// Offered everywhere (DMs and rooms).
     Global,
@@ -1229,6 +1325,7 @@ pub enum WaddleExtensionCommandScope {
 
 /// One discovered extension command with its composer metadata.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommand {
     pub service_jid: String,
     pub node: String,
@@ -1244,6 +1341,8 @@ pub struct WaddleExtensionCommand {
 
 /// XEP-0050 §3 `action` attribute.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleAdhocAction {
     Execute,
     Cancel,
@@ -1254,6 +1353,8 @@ pub enum WaddleAdhocAction {
 
 /// XEP-0050 §3 `status` attribute on responses.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleAdhocStatus {
     Executing,
     Completed,
@@ -1263,6 +1364,8 @@ pub enum WaddleAdhocStatus {
 /// XEP-0004 §3.3 field types. Unknown or absent wire types map to
 /// `TextSingle` per the XEP's default.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleExtensionFieldType {
     Boolean,
     Fixed,
@@ -1278,6 +1381,7 @@ pub enum WaddleExtensionFieldType {
 
 /// One `<option/>` of a list field.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionFieldOption {
     pub label: Option<String>,
     pub value: String,
@@ -1285,6 +1389,7 @@ pub struct WaddleExtensionFieldOption {
 
 /// One `<field/>` of a command-response form.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommandFormField {
     /// The `var` attribute; empty only for `fixed` fields.
     pub var: String,
@@ -1300,6 +1405,7 @@ pub struct WaddleExtensionCommandFormField {
 
 /// The XEP-0004 form of a command response.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommandForm {
     pub title: Option<String>,
     pub instructions: Option<String>,
@@ -1308,6 +1414,8 @@ pub struct WaddleExtensionCommandForm {
 
 /// XEP-0050 §3 `<note/>` severity; unknown types map to `Info`.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleExtensionNoteType {
     Info,
     Warn,
@@ -1316,6 +1424,7 @@ pub enum WaddleExtensionNoteType {
 
 /// One `<note/>` diagnostic from a command response.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommandNote {
     pub note_type: WaddleExtensionNoteType,
     pub value: String,
@@ -1323,6 +1432,7 @@ pub struct WaddleExtensionCommandNote {
 
 /// A parsed extension command response.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionCommandResult {
     pub status: WaddleAdhocStatus,
     /// XEP-0050 `sessionid`, threaded verbatim into follow-up
@@ -1336,6 +1446,7 @@ pub struct WaddleExtensionCommandResult {
 
 /// One submitted field value pair (`var` → `<value/>` children).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleExtensionFormField {
     pub var: String,
     pub values: Vec<String>,
@@ -1347,6 +1458,8 @@ pub struct WaddleExtensionFormField {
 /// added as enum variants, which keeps the callback protocol itself
 /// stable across FFI releases.
 #[derive(uniffi::Enum, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleClientEvent {
     /// Session is bound and ready (fires on `SessionReady`).
     Connected,
@@ -1365,6 +1478,7 @@ pub enum WaddleClientEvent {
     /// Explicit message rejection. Consumers must match both the id and
     /// addresses against a retained outbound send before changing its state.
     MessageRejected {
+        #[cfg_attr(feature = "serde", serde(with = "crate::serde_support::stanza_id"))]
         stanza_id: StanzaId,
         from: Jid,
         to: Option<Jid>,

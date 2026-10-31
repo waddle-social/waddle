@@ -1,5 +1,9 @@
 //! Conversion and delivery of typed client events to JavaScript callbacks.
 
+use std::cell::Cell;
+
+use crate::lifecycle::RetiredOnDrop;
+
 use super::{
     bare_jid, call_event_to_js, inbound_to_js, inbox_push_to_js, mpsc, presence_to_js,
     pubsub_event_to_js, to_js_value, ClientEvent, ConnectionEvent, DriverEvent, JsMessageRejection,
@@ -11,7 +15,9 @@ use super::{
 pub(crate) async fn event_dispatch_loop(
     inner: Rc<RefCell<WaddleClientInner>>,
     mut event_rx: mpsc::Receiver<DriverEvent>,
+    retired: Rc<Cell<bool>>,
 ) {
+    let _retirement = RetiredOnDrop::new(retired);
     while let Some(event) = event_rx.next().await {
         match event {
             DriverEvent::Client(client_event) => dispatch_client_event(&inner, *client_event),
@@ -74,6 +80,15 @@ pub(crate) fn dispatch_client_event(inner: &Rc<RefCell<WaddleClientInner>>, even
         }
         ClientEvent::Connection(ConnectionEvent::StreamError { condition, detail }) => {
             emit_stream_error_callback(inner, condition, detail);
+        }
+        ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure)) => {
+            let callback = inner.borrow().on_authentication_failed.clone();
+            if let (Some(callback), Ok(value)) = (
+                callback,
+                to_js_value(&authentication_failure_to_js(failure)),
+            ) {
+                let _ = callback.call1(&JsValue::NULL, &value);
+            }
         }
         ClientEvent::Messaging(waddle_xmpp_client::MessagingEvent::Message(message)) => {
             let mut message = *message;
@@ -227,6 +242,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn authentication_failure_payload_keeps_the_typed_sasl_condition() {
+        let failure = waddle_xmpp_client::SaslFailure {
+            condition: waddle_xmpp_client::SaslFailureCondition::CredentialsExpired,
+        };
+        assert_eq!(
+            serde_json::to_value(authentication_failure_to_js(failure)).expect("payload"),
+            serde_json::json!({"condition":"credentials-expired"})
+        );
+    }
+
+    #[test]
     fn failed_stream_management_event_invokes_one_closed_callback_payload() {
         let event = ClientEvent::Connection(ConnectionEvent::StreamManagement(
             StreamManagementEvent::Failed,
@@ -252,6 +278,19 @@ mod tests {
             serde_json::to_value(payload).expect("serializable payload"),
             serde_json::json!({ "jid": "bob@waddle.test", "avatar_id": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d" })
         );
+    }
+}
+
+#[derive(Serialize)]
+struct JsAuthenticationFailure {
+    condition: String,
+}
+
+fn authentication_failure_to_js(
+    failure: waddle_xmpp_client::SaslFailure,
+) -> JsAuthenticationFailure {
+    JsAuthenticationFailure {
+        condition: failure.condition.to_string(),
     }
 }
 

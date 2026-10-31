@@ -55,6 +55,8 @@ impl CommandDriver for TimeoutCommandDriver {
 /// XEP-0492 §2.1 fallback notification setting (no `identity-*`
 /// attrs). FFI mirror of [`NotifyMode`].
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleNotifyMode {
     /// `<always/>` — notify for every message.
     Always,
@@ -89,6 +91,7 @@ impl From<WaddleNotifyMode> for NotifyMode {
 /// fallback `<notify/>` setting — the caller resolves against the
 /// XEP-0492 §3 conversation-kind default.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleBookmarkItem {
     /// The bookmarked room's bare JID (XEP-0402 §2 item id).
     pub jid: String,
@@ -113,6 +116,7 @@ pub struct WaddleBookmarkItem {
 /// identity-scoped siblings; resolve against the §3 direct-chat
 /// default (`always`).
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleDmBookmarkItem {
     /// The contact's bare JID (PEP item id).
     pub jid: String,
@@ -127,6 +131,8 @@ pub struct WaddleDmBookmarkItem {
 /// boundary's tagged shape) so callers branch without parsing
 /// diagnostics.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleSetRoomNotificationModeOutcome {
     /// The merged bookmark was published. Carries the surfaced item so
     /// the caller reconciles its store without a follow-up fetch.
@@ -145,6 +151,8 @@ pub enum WaddleSetRoomNotificationModeOutcome {
 /// extra variant: the DM node is sparse / override-only, so returning
 /// a DM to the XEP-0492 §3 direct-chat default RETRACTS the item.
 #[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "snake_case"))]
 pub enum WaddleSetDmNotificationModeOutcome {
     /// The DM carried an override; the item was published.
     Ok { item: WaddleDmBookmarkItem },

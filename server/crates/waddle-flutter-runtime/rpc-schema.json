@@ -1,0 +1,778 @@
+{
+  "connect": {
+    "args": {
+      "server_url": "URL",
+      "jid": "BareJid",
+      "access_token": "String",
+      "resource": "String",
+      "resumable": "bool (default false)"
+    },
+    "result": "()"
+  },
+  "disconnect": {
+    "args": {},
+    "result": "()"
+  },
+  "admin_channels_affiliations": {
+    "args": {
+      "args": "WaddleAdminChannelsAffiliationsArgs"
+    },
+    "result": "Result<WaddleAdminChannelsAffiliationsPage, WaddleError>"
+  },
+  "admin_channels_create": {
+    "args": {
+      "args": "WaddleAdminChannelsCreateArgs"
+    },
+    "result": "Result<WaddleAdminChannelRef, WaddleError>"
+  },
+  "admin_channels_delete": {
+    "args": {
+      "channel_jid": "String"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "admin_channels_kick": {
+    "args": {
+      "channel_jid": "String",
+      "occupant_jid": "String",
+      "reason": "Option<String>"
+    },
+    "result": "Result<WaddleAdminChannelsKickResult, WaddleError>"
+  },
+  "admin_channels_list": {
+    "args": {
+      "args": "WaddleAdminChannelsListArgs"
+    },
+    "result": "Result<WaddleAdminChannelsListPage, WaddleError>"
+  },
+  "admin_channels_occupants": {
+    "args": {
+      "args": "WaddleAdminChannelsOccupantsArgs"
+    },
+    "result": "Result<WaddleAdminChannelsOccupantsPage, WaddleError>"
+  },
+  "admin_channels_set_affiliation": {
+    "args": {
+      "channel_jid": "String",
+      "member_jid": "String",
+      "affiliation": "WaddleMucAffiliation",
+      "reason": "Option<String>"
+    },
+    "result": "Result<WaddleAdminChannelsSetAffiliationResult, WaddleError>"
+  },
+  "admin_channels_update": {
+    "args": {
+      "args": "WaddleAdminChannelsUpdateArgs"
+    },
+    "result": "Result<WaddleAdminChannelRef, WaddleError>"
+  },
+  "admin_spaces_create": {
+    "args": {
+      "args": "WaddleAdminSpacesCreateArgs"
+    },
+    "result": "Result<WaddleAdminSpaceRef, WaddleError>"
+  },
+  "admin_spaces_delete": {
+    "args": {
+      "space_jid": "String",
+      "space_node": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "admin_spaces_list": {
+    "args": {
+      "args": "WaddleAdminSpacesListArgs"
+    },
+    "result": "Result<WaddleAdminSpacesListPage, WaddleError>"
+  },
+  "admin_spaces_members": {
+    "args": {
+      "args": "WaddleAdminSpacesMembersArgs"
+    },
+    "result": "Result<WaddleAdminSpacesMembersPage, WaddleError>"
+  },
+  "admin_spaces_set_role": {
+    "args": {
+      "space_jid": "String",
+      "space_node": "Option<String>",
+      "member_jid": "String",
+      "role": "WaddleSpaceRole"
+    },
+    "result": "Result<WaddleAdminSpacesSetRoleResult, WaddleError>"
+  },
+  "admin_spaces_update": {
+    "args": {
+      "args": "WaddleAdminSpacesUpdateArgs"
+    },
+    "result": "Result<WaddleAdminSpaceRef, WaddleError>"
+  },
+  "admin_users_list": {
+    "args": {
+      "prefix": "Option<String>",
+      "page_size": "Option<u32>",
+      "after_cursor": "Option<String>"
+    },
+    "result": "Result<WaddleAdminUsersPage, WaddleError>"
+  },
+  "consistent_color_hue": {
+    "args": {
+      "input": "String"
+    },
+    "result": "f64"
+  },
+  "create_group_dm": {
+    "args": {
+      "name": "String",
+      "member_jids": "Vec<String>"
+    },
+    "result": "Result<String, WaddleError>"
+  },
+  "create_room": {
+    "args": {
+      "localpart": "String",
+      "nick": "String",
+      "patch": "WaddleRoomConfigPatch"
+    },
+    "result": "Result<String, WaddleError>"
+  },
+  "destroy_room": {
+    "args": {
+      "room_jid": "String",
+      "reason": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "disable_avatar": {
+    "args": {},
+    "result": "Result<(), WaddleError>"
+  },
+  "disable_push_device": {
+    "args": {
+      "push_service_jid": "String",
+      "node": "String",
+      "device_id": "String"
+    },
+    "result": "bool"
+  },
+  "disable_push_notifications": {
+    "args": {
+      "push_service_jid": "String",
+      "node": "Option<String>"
+    },
+    "result": "bool"
+  },
+  "discover_extension_commands": {
+    "args": {},
+    "result": "Result<Vec<WaddleExtensionCommand>, WaddleError>"
+  },
+  "discover_topology": {
+    "args": {},
+    "result": "WaddleTopology"
+  },
+  "discover_upload_service": {
+    "args": {},
+    "result": "Option<String>"
+  },
+  "enable_push_notifications": {
+    "args": {
+      "push_service_jid": "String",
+      "node": "String"
+    },
+    "result": "bool"
+  },
+  "fetch_dm_bookmarks": {
+    "args": {},
+    "result": "Result<Vec<WaddleDmBookmarkItem>, WaddleError>"
+  },
+  "fetch_dm_history": {
+    "args": {
+      "peer_jid": "String",
+      "max_messages": "u32",
+      "before_id": "Option<String>"
+    },
+    "result": "WaddleMamPage"
+  },
+  "fetch_external_services": {
+    "args": {},
+    "result": "Result<Vec<WaddleExternalService>, WaddleError>"
+  },
+  "fetch_inbox": {
+    "args": {
+      "read_filter": "WaddleInboxReadFilter",
+      "message_content": "WaddleInboxMessageContent"
+    },
+    "result": "Result<WaddleInboxResult, WaddleError>"
+  },
+  "fetch_mds_displayed": {
+    "args": {},
+    "result": "Result<Vec<WaddleMdsDisplayedEntry>, WaddleError>"
+  },
+  "fetch_push_vapid_public_key": {
+    "args": {
+      "push_service_jid": "String"
+    },
+    "result": "WaddlePushVapidLookup"
+  },
+  "fetch_room_config": {
+    "args": {
+      "room_jid": "String"
+    },
+    "result": "Result<WaddleRoomConfig, WaddleError>"
+  },
+  "fetch_room_history": {
+    "args": {
+      "room_jid": "String",
+      "max_messages": "u32",
+      "before_id": "Option<String>"
+    },
+    "result": "WaddleMamPage"
+  },
+  "fetch_room_pins": {
+    "args": {
+      "room_jid": "String"
+    },
+    "result": "Result<Vec<WaddlePinEntry>, WaddleError>"
+  },
+  "fetch_room_thread_history": {
+    "args": {
+      "room_jid": "String",
+      "thread_id": "String",
+      "max_messages": "u32",
+      "before_id": "Option<String>"
+    },
+    "result": "Result<WaddleMamPage, WaddleError>"
+  },
+  "fetch_status_preference": {
+    "args": {},
+    "result": "Result<WaddleStatusPreference, WaddleError>"
+  },
+  "fetch_sticker_pack": {
+    "args": {
+      "owner_jid": "String",
+      "node": "Option<String>",
+      "pack_id": "String"
+    },
+    "result": "Result<Option<WaddleStickerPack>, WaddleError>"
+  },
+  "fetch_sticker_packs": {
+    "args": {
+      "owner_jid": "Option<String>"
+    },
+    "result": "Result<Vec<WaddleStickerPack>, WaddleError>"
+  },
+  "fetch_user_bookmarks": {
+    "args": {},
+    "result": "Result<Vec<WaddleBookmarkItem>, WaddleError>"
+  },
+  "fetch_user_pep_profile": {
+    "args": {
+      "jid": "String"
+    },
+    "result": "Result<WaddlePepProfile, WaddleError>"
+  },
+  "fetch_vcard4": {
+    "args": {
+      "jid": "String"
+    },
+    "result": "Result<Option<WaddleVCard4>, WaddleError>"
+  },
+  "invite_to_group_dm": {
+    "args": {
+      "room_jid": "String",
+      "invitee_jid": "String",
+      "history": "WaddleGroupDmHistoryAccess"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "invoke_extension_command": {
+    "args": {
+      "service_jid": "String",
+      "node": "String",
+      "room_jid": "Option<String>"
+    },
+    "result": "Result<WaddleExtensionCommandResult, WaddleError>"
+  },
+  "is_community_owner": {
+    "args": {},
+    "result": "bool"
+  },
+  "join_room": {
+    "args": {
+      "room_jid": "String",
+      "nick": "String"
+    },
+    "result": "()"
+  },
+  "kick_occupant": {
+    "args": {
+      "room_jid": "String",
+      "nick": "String",
+      "reason": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "leave_group_dm": {
+    "args": {
+      "room_jid": "String"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "leave_room": {
+    "args": {
+      "room_jid": "String",
+      "nick": "String"
+    },
+    "result": "()"
+  },
+  "list_room_bots": {
+    "args": {
+      "room_jid": "String"
+    },
+    "result": "Result<Vec<WaddleRoomBot>, WaddleError>"
+  },
+  "list_room_members": {
+    "args": {
+      "room_jid": "String",
+      "affiliation": "WaddleMucAffiliation"
+    },
+    "result": "Result<Vec<WaddleRoomMemberEntry>, WaddleError>"
+  },
+  "lookup_link_preview": {
+    "args": {
+      "url": "String",
+      "scope_jid": "String"
+    },
+    "result": "Result<WaddleLinkPreviewLookup, WaddleError>"
+  },
+  "mark_inbox_read": {
+    "args": {
+      "partner_jid": "String",
+      "thread_id": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "parse_jid": {
+    "args": {
+      "input": "String"
+    },
+    "result": "Option<WaddleJidParts>"
+  },
+  "pin_direct_message": {
+    "args": {
+      "peer_jid": "String",
+      "target_stanza_id": "String"
+    },
+    "result": "bool"
+  },
+  "pin_message": {
+    "args": {
+      "room_jid": "String",
+      "target_stanza_id": "String"
+    },
+    "result": "bool"
+  },
+  "ping_server": {
+    "args": {},
+    "result": "Result<(), WaddleError>"
+  },
+  "publish_activity": {
+    "args": {
+      "general": "String",
+      "specific": "Option<String>",
+      "text": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "publish_avatar": {
+    "args": {
+      "data": "Vec<u8>",
+      "mime_type": "String",
+      "width": "u32",
+      "height": "u32"
+    },
+    "result": "Result<String, WaddleError>"
+  },
+  "publish_mds_displayed": {
+    "args": {
+      "chat_jid": "String",
+      "stanza_id": "String",
+      "stanza_id_by": "String"
+    },
+    "result": "bool"
+  },
+  "publish_mood": {
+    "args": {
+      "kind": "String",
+      "text": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "publish_sticker_pack": {
+    "args": {
+      "pack": "WaddleStickerPack"
+    },
+    "result": "Result<String, WaddleError>"
+  },
+  "publish_tune": {
+    "args": {
+      "tune": "WaddleTune"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "publish_vcard4": {
+    "args": {
+      "vcard": "WaddleVCard4"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "register_push_device": {
+    "args": {
+      "push_service_jid": "String",
+      "app_id": "String",
+      "environment": "WaddlePushEnvironment",
+      "credentials": "WaddlePushDeviceCredentials"
+    },
+    "result": "Option<WaddleRegisterDeviceResult>"
+  },
+  "rename_group_dm": {
+    "args": {
+      "room_jid": "String",
+      "name": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "request_avatar": {
+    "args": {
+      "jid": "String",
+      "known_ids": "Vec<String>"
+    },
+    "result": "Result<Option<WaddleAvatarResult>, WaddleError>"
+  },
+  "request_upload_slot": {
+    "args": {
+      "service_jid": "String",
+      "filename": "String",
+      "size": "u64",
+      "content_type": "String"
+    },
+    "result": "Option<WaddleUploadSlot>"
+  },
+  "retract_activity": {
+    "args": {},
+    "result": "Result<(), WaddleError>"
+  },
+  "retract_mood": {
+    "args": {},
+    "result": "Result<(), WaddleError>"
+  },
+  "retract_sticker_pack": {
+    "args": {
+      "pack_id": "String"
+    },
+    "result": "bool"
+  },
+  "retract_tune": {
+    "args": {},
+    "result": "Result<(), WaddleError>"
+  },
+  "search_dm_history": {
+    "args": {
+      "peer_jid": "String",
+      "query": "String",
+      "max_messages": "u32"
+    },
+    "result": "WaddleMamPage"
+  },
+  "search_room_history": {
+    "args": {
+      "room_jid": "String",
+      "query": "String",
+      "max_messages": "u32"
+    },
+    "result": "WaddleMamPage"
+  },
+  "search_users": {
+    "args": {
+      "query": "String"
+    },
+    "result": "Result<Vec<WaddleUserSearchEntry>, WaddleError>"
+  },
+  "send_call_finish": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_finish_migrated": {
+    "args": {
+      "peer_full_jid": "String",
+      "old_sid": "String",
+      "new_sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_finish_with_reason": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String",
+      "reason": "WaddleJingleReason"
+    },
+    "result": "bool"
+  },
+  "send_call_proceed": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_propose": {
+    "args": {
+      "peer_bare_jid": "String",
+      "sid": "String",
+      "audio": "bool",
+      "video": "bool"
+    },
+    "result": "bool"
+  },
+  "send_call_reject": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_reject_tie_break": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_retract": {
+    "args": {
+      "peer_bare_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_retract_tie_break": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_ringing": {
+    "args": {
+      "peer_bare_jid": "String",
+      "sid": "String"
+    },
+    "result": "bool"
+  },
+  "send_call_session_accept": {
+    "args": {
+      "peer_full_jid": "String",
+      "responder_full_jid": "String",
+      "sid": "String",
+      "audio": "bool",
+      "video": "bool"
+    },
+    "result": "bool"
+  },
+  "send_call_session_initiate": {
+    "args": {
+      "peer_full_jid": "String",
+      "initiator_full_jid": "String",
+      "sid": "String",
+      "audio": "bool",
+      "video": "bool"
+    },
+    "result": "bool"
+  },
+  "send_call_session_terminate": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String",
+      "reason": "Option<WaddleJingleReason>"
+    },
+    "result": "bool"
+  },
+  "send_call_session_terminate_with_outcome": {
+    "args": {
+      "peer_full_jid": "String",
+      "sid": "String",
+      "reason": "Option<WaddleJingleReason>"
+    },
+    "result": "WaddleCallSessionTerminateOutcome"
+  },
+  "send_chat_message": {
+    "args": {
+      "peer_jid": "String",
+      "body": "String",
+      "options": "Option<WaddleSendOptions>"
+    },
+    "result": "WaddleSendMessageOutcome"
+  },
+  "send_chat_state": {
+    "args": {
+      "peer_jid": "String",
+      "state": "WaddleChatState",
+      "audience": "WaddleMessageAudience"
+    },
+    "result": "bool"
+  },
+  "send_correction": {
+    "args": {
+      "peer_jid": "String",
+      "target_id": "String",
+      "new_body": "String",
+      "audience": "WaddleMessageAudience",
+      "options": "Option<WaddleSendOptions>"
+    },
+    "result": "WaddleSendMessageOutcome"
+  },
+  "send_displayed": {
+    "args": {
+      "peer_jid": "String",
+      "stanza_id": "String",
+      "audience": "WaddleMessageAudience"
+    },
+    "result": "bool"
+  },
+  "send_groupchat_message": {
+    "args": {
+      "room_jid": "String",
+      "body": "String",
+      "options": "Option<WaddleSendOptions>"
+    },
+    "result": "WaddleSendMessageOutcome"
+  },
+  "send_moderation": {
+    "args": {
+      "room_jid": "String",
+      "target_stanza_id": "String",
+      "reason": "Option<String>"
+    },
+    "result": "bool"
+  },
+  "send_muji_session_initiate": {
+    "args": {
+      "room_jid": "String",
+      "initiator_full_jid": "String",
+      "sid": "String",
+      "video": "bool"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "send_muji_session_terminate": {
+    "args": {
+      "room_jid": "String",
+      "sid": "String"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "send_presence": {
+    "args": {
+      "status": "Option<String>",
+      "show": "Option<String>",
+      "idle_since": "Option<String>"
+    },
+    "result": "()"
+  },
+  "send_reaction": {
+    "args": {
+      "target_jid": "String",
+      "target_stanza_id": "String",
+      "emojis": "Vec<String>",
+      "audience": "WaddleMessageAudience"
+    },
+    "result": "bool"
+  },
+  "send_retraction": {
+    "args": {
+      "peer_jid": "String",
+      "target_stanza_id": "String",
+      "audience": "WaddleMessageAudience"
+    },
+    "result": "bool"
+  },
+  "set_dm_notification_mode": {
+    "args": {
+      "dm_jid": "String",
+      "mode": "WaddleNotifyMode",
+      "rich_payload_opt_in": "bool"
+    },
+    "result": "Result<WaddleSetDmNotificationModeOutcome, WaddleError>"
+  },
+  "set_room_affiliation": {
+    "args": {
+      "room_jid": "String",
+      "target_jid": "String",
+      "affiliation": "WaddleMucAffiliation",
+      "reason": "Option<String>"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "set_room_notification_mode": {
+    "args": {
+      "room_jid": "String",
+      "mode": "WaddleNotifyMode",
+      "name": "Option<String>",
+      "rich_payload_opt_in": "bool"
+    },
+    "result": "Result<WaddleSetRoomNotificationModeOutcome, WaddleError>"
+  },
+  "submit_extension_command_form": {
+    "args": {
+      "service_jid": "String",
+      "node": "String",
+      "session_id": "Option<String>",
+      "fields": "Vec<WaddleExtensionFormField>",
+      "action": "WaddleAdhocAction",
+      "room_jid": "Option<String>"
+    },
+    "result": "Result<WaddleExtensionCommandResult, WaddleError>"
+  },
+  "submit_room_config": {
+    "args": {
+      "room_jid": "String",
+      "patch": "WaddleRoomConfigPatch"
+    },
+    "result": "Result<(), WaddleError>"
+  },
+  "subscribe_mds_displayed": {
+    "args": {},
+    "result": "bool"
+  },
+  "supports_mds_publish_options": {
+    "args": {},
+    "result": "bool"
+  },
+  "unpin_direct_message": {
+    "args": {
+      "peer_jid": "String",
+      "target_stanza_id": "String"
+    },
+    "result": "bool"
+  },
+  "unpin_message": {
+    "args": {
+      "room_jid": "String",
+      "target_stanza_id": "String"
+    },
+    "result": "bool"
+  },
+  "update_muji_presence": {
+    "args": {
+      "room_jid": "String",
+      "nick": "String",
+      "active": "bool",
+      "preparing": "bool",
+      "video": "bool",
+      "flags": "WaddleInCallPresenceFlags"
+    },
+    "result": "Result<(), WaddleError>"
+  }
+}

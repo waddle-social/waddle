@@ -1,0 +1,62 @@
+name: waddle_flutter
+description: An independent Waddle Flutter client powered directly by Rust.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.10.0 <4.0.0'
+  flutter: '>=3.47.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.4
+  livekit_client: ^2.13.2
+  file_picker: ^13.3.0
+  file_selector: ^1.1.0
+  http: ^1.6.0
+  cryptography: ^2.9.0
+  image: ^4.5.4
+  url_launcher: ^6.3.2
+  permission_handler: ^12.0.1
+  path_provider: ^2.1.5
+  open_filex: ^4.7.0
+  pasteboard: ^0.5.0
+  web: ^1.1.1
+  flutter_secure_storage: ^11.2.0
+  shared_preferences: ^2.5.4
+  dynamic_color: ^1.8.1
+  flutter_local_notifications: ^21.0.0
+  unifiedpush: ^6.2.0
+  flutter_background: ^1.3.1
+
+dev_dependencies:
+  integration_test:
+    sdk: flutter
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/brand/
+    - assets/fonts/manrope-OFL.txt
+    - assets/fonts/fredoka-OFL.txt
+  fonts:
+    - family: Manrope
+      fonts:
+        - asset: assets/fonts/Manrope-400.ttf
+          weight: 400
+        - asset: assets/fonts/Manrope-500.ttf
+          weight: 500
+        - asset: assets/fonts/Manrope-600.ttf
+          weight: 600
+        - asset: assets/fonts/Manrope-700.ttf
+          weight: 700
+        - asset: assets/fonts/Manrope-800.ttf
+          weight: 800
+    - family: Fredoka
+      fonts:
+        - asset: assets/fonts/Fredoka-600.ttf
+          weight: 600

@@ -25,6 +25,7 @@ pub struct WaddleConfig {
     pub(crate) jid: String,
     pub(crate) access_token: String,
     pub(crate) resource: String,
+    pub(crate) resumable: bool,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 
@@ -44,7 +45,17 @@ impl WaddleConfig {
             jid,
             access_token,
             resource,
+            resumable: true,
             resume_state: None,
+        }
+    }
+
+    /// Control XEP-0198 resumption. Disable it when a host does not persist and
+    /// reuse resume state, so the server does not hold an unreachable session.
+    pub fn set_resumable(&mut self, enabled: bool) {
+        self.resumable = enabled;
+        if !enabled {
+            self.resume_state = None;
         }
     }
 
@@ -211,6 +222,7 @@ pub(crate) struct StoredConfig {
     pub(crate) jid: String,
     pub(crate) access_token: String,
     pub(crate) resource: String,
+    pub(crate) resumable: bool,
     pub(crate) resume_state: Option<waddle_xmpp_client::SmResumeState>,
 }
 
@@ -221,6 +233,7 @@ impl From<&WaddleConfig> for StoredConfig {
             jid: value.jid.clone(),
             access_token: value.access_token.clone(),
             resource: value.resource.clone(),
+            resumable: value.resumable,
             resume_state: value.resume_state.clone(),
         }
     }
@@ -330,6 +343,8 @@ pub struct WaddleClient {
 
 pub(crate) struct WaddleClientInner {
     pub(crate) config: StoredConfig,
+    pub(crate) ownership: crate::lifecycle::BrowserOwnership,
+    pub(crate) retirement_promise: Option<js_sys::Promise>,
     /// The sole admission lane for commands submitted by browser callers.
     ///
     /// Unlike an async channel receiver, the lane is also visible to the
@@ -346,6 +361,7 @@ pub(crate) struct WaddleClientInner {
     pub(crate) on_session_lifecycle: Option<Function>,
     pub(crate) on_disconnected: Option<Function>,
     pub(crate) on_error: Option<Function>,
+    pub(crate) on_authentication_failed: Option<Function>,
     pub(crate) on_message_delivery_acked: Option<Function>,
     pub(crate) on_message_delivery_failed: Option<Function>,
     pub(crate) on_message_rejected: Option<Function>,
@@ -742,6 +758,36 @@ pub(crate) struct WasmDriverTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xep0198_non_resuming_browser_hosts_keep_acks_without_parking_sessions() {
+        let mut config = WaddleConfig::new(
+            "wss://xmpp.example.org".into(),
+            "david@example.org".into(),
+            "token".into(),
+            "flutter".into(),
+        );
+        assert!(
+            config.resumable,
+            "the existing browser's resumption default is preserved"
+        );
+        config.resume_state = Some(
+            waddle_xmpp_client::SmResumeState::try_new(
+                waddle_xmpp_client::StreamId::new("old-stream"),
+                1,
+                2,
+            )
+            .expect("resume state"),
+        );
+        config.set_resumable(false);
+        let client =
+            crate::helpers::build_client_config(&StoredConfig::from(&config)).expect("config");
+        let stream = &client.session.stream_management;
+        assert!(stream.enable_stream_management);
+        assert!(!stream.allow_resume);
+        assert!(stream.resume_max.is_none());
+        assert!(stream.resume_state.is_none());
+    }
 
     fn persisted_entry(xml: &str, sent_at: &str) -> JsUnhandledOutboundEntry {
         JsUnhandledOutboundEntry {

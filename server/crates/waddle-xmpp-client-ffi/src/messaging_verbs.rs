@@ -73,6 +73,8 @@ use crate::{
 /// `Muc` selects `type='groupchat'` and requires a bare room JID.
 /// `Direct` selects `type='chat'` and accepts a bare or full JID.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleMessageAudience {
     /// One-to-one chat (`type='chat'`).
     Direct,
