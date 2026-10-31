@@ -1,0 +1,22 @@
+{
+  "compressed_bytes": 9475,
+  "guest_execution": "not_performed",
+  "host_isolation": "unverified",
+  "init": {
+    "bytes": 21456,
+    "dt_needed": false,
+    "entry": 4199197,
+    "format": "elf64-little-endian",
+    "machine": "x86_64",
+    "pt_interp": false,
+    "sha256": "553fd4f2ebc192e9e515f5e8730d991d83797fa2dc6942f67f20bf71c6325d5f",
+    "type": "ET_EXEC"
+  },
+  "initramfs_sha256": "9a5e0e8555f64f492b78e7b121267411c1fa3a766f5d4daf035e03a3152435a1",
+  "inventory": [
+    "dev/",
+    "init"
+  ],
+  "schema_version": 1,
+  "uncompressed_bytes": 21812
+}

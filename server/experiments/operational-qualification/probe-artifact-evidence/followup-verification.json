@@ -1,0 +1,28 @@
+{
+  "artifact_path": "/nix/store/panydppps9i75gx398aq89las6kkn8ai-waddle-isolation-probe-artifact-1",
+  "checks": {
+    "nix_offline_rebuild_same_derivation": "passed",
+    "old_vs_new_report_fixture_cases": 3,
+    "old_vs_new_report_fixture_sha256": "1491eea0a8d9d772fefb593ef5511bedb6efd6dc757009ddf52f40414dddc3c5",
+    "pinned_nix_build": "passed",
+    "pure_c_model_fixtures": "passed",
+    "python_tests": 15
+  },
+  "date": "2026-10-31",
+  "init_sha256": "553fd4f2ebc192e9e515f5e8730d991d83797fa2dc6942f67f20bf71c6325d5f",
+  "initramfs_sha256": "9a5e0e8555f64f492b78e7b121267411c1fa3a766f5d4daf035e03a3152435a1",
+  "limits": {
+    "different_host_reproduction": "not_performed",
+    "guest_execution": "not_performed",
+    "host_isolation": "unverified",
+    "hosted_sonar": "pending",
+    "independent_review": "clean",
+    "kernel_toolchain_independent_rebuild": "not_performed",
+    "qualification": "not_assessed"
+  },
+  "nix_derivation": "/nix/store/jh0cd6djavljcfnjky5jcds7aabmg0y2-waddle-isolation-probe-artifact-1.drv",
+  "previous_reviewed_head": "177f41f9f8460504deae7fd879c995ce388c84ce",
+  "purpose": "Nix-only guest build and non-variadic report follow-up for the SonarCloud findings on #2112",
+  "schema_version": 1,
+  "toolchain_closure_sha256": "b03917467aa2f265ae0fe3c2404a680db5da938652f5f0c109411dcfc7976e9f"
+}

@@ -1,0 +1,57 @@
+{
+  "compiler": {
+    "flags": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-static",
+      "-no-pie",
+      "-fno-pie",
+      "-fno-ident",
+      "-fstack-protector-strong",
+      "-D_FORTIFY_SOURCE=2",
+      "-frandom-seed=waddle-isolation-probe-v1",
+      "-s",
+      "-Wl,--build-id=none,-z,noexecstack,-z,relro,-z,now"
+    ],
+    "path": "/nix/store/cn1drziywixrw4x47hv3wxrz0pgjyrmb-x86_64-unknown-linux-musl-gcc-wrapper-15.3.0/bin/x86_64-unknown-linux-musl-cc",
+    "sha256": "c2ae4e1b991f9ca8537cf597654709324e7bd1f5a680cf04a55fb3c1ac7ba529"
+  },
+  "files_sha256": {
+    "bzImage": "ff7c52cc769863642ea7fa27e04c01131d27be1f7e1ca195adf387a890eb108f",
+    "init": "553fd4f2ebc192e9e515f5e8730d991d83797fa2dc6942f67f20bf71c6325d5f",
+    "initramfs.cpio.gz": "9a5e0e8555f64f492b78e7b121267411c1fa3a766f5d4daf035e03a3152435a1",
+    "inspection.json": "d001b7893a23fe5a8363d4e60574c1d84422b36ac9c6a3acaf7140e8dd939fa6",
+    "kernel.config": "1677104c89e0da62afaa382036e1860d367a6e2b75ee80bf8a371e79a11f1f6e",
+    "toolchain-closure.json": "b03917467aa2f265ae0fe3c2404a680db5da938652f5f0c109411dcfc7976e9f"
+  },
+  "guest_execution": "not_performed",
+  "host_isolation": "unverified",
+  "kernel_source": {
+    "path": "/nix/store/izkbpb5ssbss6bl5s40fbzsahnlf3b7j-linux-6.18.50.tar.xz",
+    "sha256": "d2fc041dab4e11d9645e3ba53be058faa52b8ce28a8a97c889bb2cacee170461"
+  },
+  "nixpkgs": {
+    "nar_hash": "sha256-1CBkBf+Nhggykzlx0jvXrj5rk20btl+tK8Fa8Ml/BL4=",
+    "revision": "d5dfd8e6716dde34398bc14bc87c10dece9c8c68"
+  },
+  "qualification": "not_assessed",
+  "repository_lock_sha256": "94a464fbd69a9da5f284c3a43461585b0f7d2646064dba9181b5017ffb4d4940",
+  "reproducibility": "not_inferred_from_single_build",
+  "schema_version": 1,
+  "source_sha256": {
+    "archive.py": "198206e660e365155b5cde7c7ea5bfd75c14c6d0aa3717e55df60f2276ce0a14",
+    "build.py": "8184b062dc880253635f9fb85dbe385ee740cc70f3adb904f6be773edba3c6ff",
+    "compiler-flags.json": "0173fcfaf9d9bb95462eebdff531da3ae88f9eb4ee10908719d09f63ca0324d5",
+    "default.nix": "801a5c5f60975d8c5cd5cce9ba575f019bc3be323e1dfddd128e688baf015428",
+    "init.c": "da51b8d18f45ecf3d02847025a1af64a355bbeeee6d9a77e12adff14af817e10",
+    "inspect_artifact.py": "74358216c718dfbcbf907fa30175b82fa39a3648d3d9818aace99a3938bc9afe",
+    "model.c": "be45f742bf393077d1d6494e0d6864d66b6552431a63814c4b5bec2932f44730",
+    "model.h": "83019d443d52e251ce082e2b907d035e520674b17f490867c1db74b403160a81",
+    "model_test.c": "a7ff31b220b197f05189bc557463e85dce5b40a4174e46dd4291a2418078d1b7",
+    "test_artifact.py": "8f0df311f281b402ff258b72d61b56f4a9686dd7845d8052c55dd88d81bed7cb"
+  }
+}
