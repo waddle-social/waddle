@@ -4,6 +4,10 @@
 //! (`grant_locks`, `desired_grants`, `issued`) that several invariants
 //! here assert on directly.
 
+mod retirement;
+mod retirement_receipts;
+mod takeover_preparation;
+
 use super::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, DateTime, Identity, Jti, LiveKitSfu,
     MediaCapabilities, ObservedCallSids, ParticipantSid, RoomSid, Semaphore, SessionBinding,
@@ -571,7 +575,9 @@ fn revoke_issued_token_reports_a_guarded_eject_intent() {
             assert_eq!(identity, &alice);
             assert_eq!(participant_sid, &observed.participant_sid);
         }
-        TeardownTargetLite::Room => panic!("targeted rollback must not enqueue DeleteRoom"),
+        TeardownTargetLite::Room | TeardownTargetLite::DisplacedParticipant { .. } => {
+            panic!("targeted rollback must not enqueue DeleteRoom")
+        }
     }
 }
 
@@ -617,7 +623,9 @@ fn targeted_revocation_requeues_eject_when_the_holder_joins_late() {
             assert_eq!(identity, &alice);
             assert_eq!(participant_sid, &observed.participant_sid);
         }
-        TeardownTargetLite::Room => panic!("late join convergence must only enqueue eviction"),
+        TeardownTargetLite::Room | TeardownTargetLite::DisplacedParticipant { .. } => {
+            panic!("late join convergence must only enqueue eviction")
+        }
     }
 }
 
@@ -858,7 +866,9 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
             assert_eq!(identity, &alice);
             assert_eq!(participant_sid, &observed.participant_sid);
         }
-        TeardownTargetLite::Room => panic!("observe-path convergence must only enqueue eviction"),
+        TeardownTargetLite::Room | TeardownTargetLite::DisplacedParticipant { .. } => {
+            panic!("observe-path convergence must only enqueue eviction")
+        }
     }
 }
 
@@ -932,7 +942,7 @@ use std::sync::Mutex;
 
 use crate::admin::LiveKitAdmin;
 
-type ListedParticipants = Vec<(Identity, Option<ParticipantSid>)>;
+type ListedParticipants = Vec<crate::LiveParticipant>;
 
 #[derive(Default)]
 struct RecordingAdmin {
@@ -1025,7 +1035,11 @@ impl RecordingAdmin {
             call.clone(),
             identities
                 .into_iter()
-                .map(|identity| (identity, None))
+                .map(|identity| crate::LiveParticipant {
+                    identity,
+                    participant_sid: None,
+                    media_generation: None,
+                })
                 .collect(),
         );
     }
@@ -1035,10 +1049,17 @@ impl RecordingAdmin {
         call: &CallId,
         participants: Vec<(Identity, Option<ParticipantSid>)>,
     ) {
-        self.live
-            .lock()
-            .expect("recording lock")
-            .insert(call.clone(), participants);
+        self.live.lock().expect("recording lock").insert(
+            call.clone(),
+            participants
+                .into_iter()
+                .map(|(identity, participant_sid)| crate::LiveParticipant {
+                    identity,
+                    participant_sid,
+                    media_generation: None,
+                })
+                .collect(),
+        );
     }
 
     fn set_foreign_live(&self, call: &CallId, count: usize) {
@@ -2119,7 +2140,9 @@ fn unregister_requeues_eject_when_a_revoked_holder_rejoins_late() {
             assert_eq!(identity, &alice);
             assert_eq!(participant_sid, &second_join.participant_sid);
         }
-        TeardownTargetLite::Room => panic!("late rejoin convergence must only enqueue eviction"),
+        TeardownTargetLite::Room | TeardownTargetLite::DisplacedParticipant { .. } => {
+            panic!("late rejoin convergence must only enqueue eviction")
+        }
     }
 }
 
@@ -2955,7 +2978,11 @@ fn restored_participant_skips_the_first_empty_bucket_eject_after_adoption() {
     assert!(sfu.adopt_discovered_call(
         &call,
         Some(fixture_room_sid("RM_adopted")),
-        &[(alice.clone(), None)],
+        &[crate::LiveParticipant {
+            identity: alice.clone(),
+            participant_sid: None,
+            media_generation: None
+        }],
         Utc::now()
     ));
     let first_minted = sfu
@@ -3233,7 +3260,11 @@ fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(stale_listed_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(stale_listed_sid),
+                media_generation: None
+            }],
             Utc::now(),
             probe_started_at,
         ),
@@ -3347,7 +3378,11 @@ fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(twin_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(twin_sid),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -3411,7 +3446,11 @@ fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(first_sid.clone()))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(first_sid.clone()),
+                media_generation: None
+            }],
             Utc::now(),
             pre_contest_probe_boundary,
         ),
@@ -3428,7 +3467,11 @@ fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(first_sid))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(first_sid),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -3473,7 +3516,11 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
     assert_eq!(
         sfu.merge_live_identities(
             &call,
-            &[(alice.clone(), Some(fixture_participant_sid("PA_rearm")))],
+            &[crate::LiveParticipant {
+                identity: alice.clone(),
+                participant_sid: Some(fixture_participant_sid("PA_rearm")),
+                media_generation: None
+            }],
             Utc::now(),
             Utc::now(),
         ),
@@ -3487,7 +3534,9 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
     );
     match &intents[1].target {
         TeardownTargetLite::Participant { identity, .. } => assert_eq!(identity, &alice),
-        TeardownTargetLite::Room => panic!("eject convergence must only enqueue eviction"),
+        TeardownTargetLite::Room | TeardownTargetLite::DisplacedParticipant { .. } => {
+            panic!("eject convergence must only enqueue eviction")
+        }
     }
 }
 
@@ -4273,6 +4322,163 @@ fn captured_registration(
         .expect("LiveKit registration capture")
 }
 
+#[test]
+fn occupancy_replacement_revokes_only_the_displaced_generations_tokens() {
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("displaced-tokens@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let old_generation = fixture_occupancy_session();
+    let new_generation = fixture_occupancy_session();
+    let old_session = SessionBinding::try_new("old-session").expect("session");
+    let new_session = SessionBinding::try_new("new-session").expect("session");
+    let mint = |generation, session| {
+        sfu.issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            session,
+            generation,
+            captured_registration(&sfu, &call, &alice),
+        )
+        .expect("mint")
+        .expect("publish")
+    };
+    let old_token = mint(old_generation, &old_session);
+    let refreshed_token = mint(old_generation, &old_session);
+    assert!(
+        !sfu.is_revoked(&old_token.jti),
+        "same-generation refresh stays valid"
+    );
+    let replacement_token = mint(new_generation, &new_session);
+
+    assert!(
+        sfu.is_revoked(&old_token.jti),
+        "displaced token must be revoked"
+    );
+    assert!(sfu.is_revoked(&refreshed_token.jti));
+    assert!(!sfu.is_revoked(&replacement_token.jti));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(new_generation)
+    );
+    assert_eq!(
+        sfu.participant_session_binding(&call, &alice),
+        Some(new_session)
+    );
+}
+
+#[test]
+fn displaced_participant_webhooks_cannot_clear_the_connecting_successor() {
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("displaced-webhook@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let mint = |generation| {
+        sfu.issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &SessionBinding::try_new("session").expect("session"),
+            generation,
+            captured_registration(&sfu, &call, &alice),
+        )
+        .expect("mint")
+        .expect("publish")
+    };
+    let first = fixture_occupancy_session();
+    mint(first);
+    let mut old = observed_sids(Some("RM_live"), Some("PA_old"));
+    old.observed_event_at = Some(Utc::now());
+    old.media_generation = Some(first);
+    sfu.register_call_participant_observed(&call, &alice, &old);
+    let successor = fixture_occupancy_session();
+    let token = mint(successor);
+
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &old),
+        SidObservationDisposition::StaleSid
+    );
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&old)),
+        TeardownDisposition::StaleSid
+    );
+    assert!(sfu.has_call_participant(&call, &alice));
+    assert_eq!(
+        sfu.participant_occupant_session(&call, &alice),
+        Some(successor)
+    );
+    assert!(!sfu.is_revoked(&token.jti));
+
+    let mut new = observed_sids(Some("RM_live"), Some("PA_new"));
+    new.media_generation = Some(successor);
+    new.observed_event_at = old.observed_event_at.map(|at| at + Duration::seconds(1));
+    assert_eq!(
+        sfu.register_call_participant_observed(&call, &alice, &new),
+        SidObservationDisposition::Applied
+    );
+    assert_eq!(
+        sfu.note_participant_left(&call, &alice, Some(&old)),
+        TeardownDisposition::StaleSid
+    );
+    assert!(!sfu.is_revoked(&token.jti));
+    assert!(matches!(
+        sfu.note_participant_left(&call, &alice, Some(&new)),
+        TeardownDisposition::Applied(CallState::Ended)
+    ));
+}
+
+#[test]
+fn occupancy_replacement_reports_the_displaced_participant_for_retry() {
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let reported = Arc::clone(&pending);
+    let admin = Arc::new(RecordingAdmin::default());
+    let sfu = LiveKitSfu::with_admin(fixture_config(), admin).with_teardown_failure_sink(Arc::new(
+        move |intent| {
+            reported.lock().expect("reported intents").push(intent);
+            Box::pin(async {})
+        },
+    ));
+    let call = CallId::try_new("displaced-retry@muc.waddle.social").expect("call");
+    let alice = fixture_identity("alice");
+    let mint = |generation| {
+        sfu.issue_join_token_with_session(
+            &call,
+            &alice,
+            MediaCapabilities::direct_call_peer(),
+            &SessionBinding::try_new("session").expect("session"),
+            generation,
+            captured_registration(&sfu, &call, &alice),
+        )
+        .expect("mint")
+        .expect("publish")
+    };
+    let displaced = fixture_occupancy_session();
+    mint(displaced);
+    let mut observed = observed_sids(Some("RM_live"), Some("PA_old"));
+    observed.media_generation = Some(displaced);
+    sfu.register_call_participant_observed(&call, &alice, &observed);
+    // The initial tagged join separately requests canonical validation.
+    pending.lock().expect("reported intents").clear();
+    mint(fixture_occupancy_session());
+    let pending = pending.lock().expect("reported intents");
+    assert_eq!(
+        pending.len(),
+        1,
+        "retirement must survive unavailable or saturated inline execution"
+    );
+    assert_eq!(
+        pending[0].target,
+        TeardownTargetLite::DisplacedParticipant {
+            identity: alice,
+            participant_sid: Some(fixture_participant_sid("PA_old")),
+        }
+    );
+    assert_eq!(pending[0].occupant_session, Some(displaced));
+    assert_eq!(
+        pending[0].session,
+        Some(SessionBinding::try_new("session").expect("session"))
+    );
+}
+
 enum RegistrationAfterPublication {
     Unchanged,
     WebhookReplacement,
@@ -4306,11 +4512,9 @@ async fn assert_initiate_rollback_fences_its_publication(after: RegistrationAfte
     match after {
         RegistrationAfterPublication::Unchanged => {}
         RegistrationAfterPublication::WebhookReplacement => {
-            sfu.register_call_participant_observed(
-                &call,
-                &alice,
-                &observed_sids(Some("RM_live"), Some("PA_replacement")),
-            );
+            let mut observed = observed_sids(Some("RM_live"), Some("PA_replacement"));
+            observed.media_generation = Some(occupant);
+            sfu.register_call_participant_observed(&call, &alice, &observed);
         }
         RegistrationAfterPublication::NewSignalingPublication => {
             let replacement = captured_registration(&sfu, &call, &alice);
@@ -4542,11 +4746,12 @@ fn captured_unbound_participant_accepts_unchanged_duplicate_observation() {
     let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
     let call = CallId::try_new("unchanged-unbound").expect("call");
     let alice = fixture_identity("alice");
-    let observed = observed_sids(Some("RM_live"), Some("PA_live"));
+    let occupant = fixture_occupancy_session();
+    let mut observed = observed_sids(Some("RM_live"), Some("PA_live"));
+    observed.media_generation = Some(occupant);
     sfu.register_call_participant_observed(&call, &alice, &observed);
     let expected = captured_registration(&sfu, &call, &alice);
     sfu.register_call_participant_observed(&call, &alice, &observed);
-    let occupant = fixture_occupancy_session();
     let session = SessionBinding::try_new("authorized").expect("session");
     assert!(sfu
         .issue_join_token_with_session(

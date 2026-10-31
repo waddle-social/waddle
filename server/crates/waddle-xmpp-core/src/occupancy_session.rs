@@ -10,7 +10,9 @@
 //! presented by every connection-scoped leave and SFU teardown so a stale
 //! cleanup can never evict the replacement's occupancy or media.
 //!
-//! It is internal state: never serialized onto an XMPP stanza.
+//! XMPP clients cannot choose this authority. The server may carry it inside
+//! signed SFU token attributes to identify observed media after a restart;
+//! provider observations never grant or replace MUC occupancy authority.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

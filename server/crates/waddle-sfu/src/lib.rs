@@ -9,8 +9,8 @@
 //!
 //! 1. The [`SfuService`] trait — the abstract surface consumed by
 //!    [`waddle_xmpp`]'s Jingle / `extdisco:2` handlers. It is sync
-//!    because every operation is CPU-bound (HMAC / JWT signing) plus a
-//!    constant-time [`dashmap`] update.
+//!    except for an explicit preparation seam that discovers connected media
+//!    before Muji authorization. Publication itself uses a synchronous CAS.
 //! 2. The [`LiveKitSfu`] impl — the concrete bridge that signs JWTs
 //!    against the `livekit-sfu-api-keys` Secret and tracks MUC focus
 //!    state in-memory.
@@ -34,11 +34,15 @@ mod token;
 mod turn;
 mod webhook;
 
-pub use admin::{AdminCallObserver, AdminOp, ListedRoom, LiveKitAdmin, RoomOccupancy};
+pub use admin::{
+    AdminCallObserver, AdminOp, ListedRoom, ListedRoomName, LiveKitAdmin, LiveParticipant,
+    RoomOccupancy,
+};
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
-    ObservedCallSids, ParticipantSid, RoomSid, SessionBinding, SessionScopedTeardown,
-    SidObservationDirection, SidObservationDisposition, TeardownDisposition, TeardownTargetLite,
+    ObservedCallSids, ParticipantAttributes, ParticipantSid, RoomSid, SessionBinding,
+    SessionScopedTeardown, SidObservationDirection, SidObservationDisposition, TeardownDisposition,
+    TeardownTargetLite,
 };
 pub use config::{ApiKey, ApiSecret, FromEnvError, SfuConfig, TurnSharedSecret, WebsocketUrl};
 pub use correlation::{CallCorrelationId, CORRELATION_ID_HEX_LEN};
@@ -56,7 +60,10 @@ pub use webhook::{
 
 mod service;
 pub use service::LiveParticipantsFuture;
+pub use service::ParticipantPreparationError;
+pub use service::ParticipantPreparationFuture;
 pub use service::ParticipantRegistrationExpectation;
+pub use service::PendingMediaRetirement;
 pub use service::ReconcileFuture;
 pub use service::ReconcilePassSummary;
 pub use service::SfuReconciler;
