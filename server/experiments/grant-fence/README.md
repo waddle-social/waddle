@@ -289,3 +289,92 @@ README for the live-permit and trusted process-group boundaries. The runner uses
 provenance includes both source trees/manifests, the single workspace lock, schemas,
 runner and repository Nix/toolchain inputs. Early fixture shutdown with an
 outstanding child is now an explicit sticky failure that retains private data.
+
+## Finite synthetic multi-edge admission
+
+Thirty-two additional schedules test one channel, two possible parents, one subject
+and a direct alternative, using the extracted native fixture. This is a fixed
+experimental policy, not existing MUC admission: `direct OR (parent AND member)`.
+The graph exposes separate `direct_access` and `inherited` checks. A fixture-only
+denial relation is empty in ordinary schedules; one negative control sets it to
+prove that matching markers and edges do not allow a denied selected branch to
+borrow direct access. A separate malformed-marker control verifies graph errors
+fail the worker rather than becoming denials. A controlled stage failure after a
+real completed scenario verifies that its evidence remains in the caller-owned
+report; an incomplete scenario is never recorded as passed. No generic OR allow is accepted as
+evidence for either selected dependency branch.
+
+Every scope pre-creates retained current lifecycle, binding, ancestor-membership
+and direct-grant rows. The stable lifecycle row is keyed by logical channel ID
+and is required by both branches; embedding an incarnation only in old grant
+keys would not fence recreation. A witness contains its exact selected guard
+vector. Guard identity includes kind, key, monotonic version, operation UUID and
+typed payload. SQL stores these fields; each real graph version marker hashes
+the complete guard. Missing rows reject; no mutator deletes/reinserts a guard or
+infers authorization from an absent relation. The bounded model has no other
+writer or grant source.
+
+A positive lifecycle-marker read obtains an actual SpiceDB `read_at` token.
+Every dependency marker/edge read and the selected branch permission check uses
+that same `AtExactSnapshot`; row tokens must match. Unexpected edges or markers
+reject. A deterministic barrier after anchoring proves that a concurrent revoke
+still allows the historical graph check, followed by rejection at the current
+SQL fence. The schema is fixed for the entire fixture. Schema mutation and uncoordinated
+graph corruption are excluded from the authority proof; the explicitly injected
+malformed-marker case tests error handling only.
+
+Admission first reserves a unique durable effect key inside its SQL transaction.
+A conflicting insert waits for the previous transaction to resolve, then compares
+the complete principal/action/resource/witness/payload descriptor. Exact historical
+results return `AlreadyCommitted`, even after revoke; differing descriptors reject.
+For a new provisional row, graph verification precedes `FOR SHARE` acquisition
+in total `(kind, UUID)` order. Every selected current guard must match and be active
+through the same transaction's ledger commit. There are no remote effects. A
+provisional row that cannot authorize rolls back; an absent preliminary SELECT
+is never treated as proof that another transaction rolled back.
+
+The trusted test controller supplies exact synthetic mutation commands; it is
+not a production authority. A mutation locks and advances its existing guard
+with `FOR UPDATE`, commits closure before graph changes, atomically writes the
+real graph edge/version marker, verifies it, and activates only via an exact
+current-operation CAS. There is no canonical journal reconstruction or automatic
+regrant. Death after committed closure leaves the scope closed. A superseding
+mutation defeats an old completion and old activation CAS. Mutations in this
+finite model each change one guard; compound multi-row mutations are not tested.
+
+The inventory covers four single-omission unsafe controls and their guarded
+counterparts, both branches' lifecycle recreation, parent A→B→A and membership/
+direct revoke-regrant ABA (including three version-stamp-only omission controls
+with unchanged final target/polarity), independent direct access after ancestor revocation,
+anchored snapshot drift, admission-first and mutation-first schedules for both
+binding and ancestor guards, lock timeout, independent-scope progress, closed
+worker death, stale graph completion, exact/altered retries and actual unique
+insert waits. Move/revoke controls independently check both current branches at one fresh
+anchored revision and require both denied before releasing stale work. The
+unused parent has no membership; direct-revoke controls remove inherited access.
+ABA controls restore exactly the selected branch, then deliberately ignore only
+generation and operation identity while retaining the row lock, stable key,
+active-state and exact payload checks. Lifecycle recreation also preserves graph
+access deliberately: these controls prove stale lifecycle/version rejection,
+not current policy denial. This preservation is a synthetic fixture assumption,
+not a promise for production recreation.
+The complete multi-edge stage has a 180-second client deadline and each worker
+action a 30-second deadline, in addition to RPC, barrier and SQL lock/statement
+limits. Cancellation enters the existing supervised cleanup and retention path.
+`pg_blocking_pids` establishes actual conflicts; sleeps are polling intervals,
+not evidence of ordering.
+
+The ledger death schedules distinguish precommit rollback from worker death
+**after acknowledged PostgreSQL COMMIT but before publication of its caller
+result**. Fresh workers reconcile the durable effect identity; the committed
+schedule retains exactly one effect. This is not a dropped PostgreSQL COMMIT
+wire response. No canonical mutation recovery, production writer closure,
+arbitrary-depth graph, actor/claim fence, accepted-child change, SM custody,
+queue/socket delivery or federation activation is established.
+
+The existing pinned workspace runner and nonpublishing CI lanes execute these
+schedules together with all previous proofs and shared cleanup tests. The report
+requires the exact 32-case inventory and records their asserted outcomes. Source
+provenance recursively includes the new modules and schemas; credentials and
+cleanup use the unchanged shared supervisor. Any scenario error fails the full
+run; there is no prerequisite skip or separate opt-in for these cases.

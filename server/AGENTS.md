@@ -37,6 +37,7 @@
 - Run a specific XEP test: `cargo nextest run -p waddle-xmpp --test xep0172_pep_nick`
 - Run `waddle-xmpp` integration tests: `cargo nextest run -p waddle-xmpp --tests`
 - Run doctests (nextest cannot): `cargo test --doc --workspace --all-features`
+- The `waddle-server` library unit-test crate needs about 6 GB of rustc memory to compile (about 5.7 GB even with one job, no incremental build and no debuginfo; about 10 GB in the Nix `ci-test` profile), and `cargo check --lib --tests` needs nearly as much. On smaller machines it cannot be built, so in-crate unit tests are verified only in CI. Prefer integration tests (`crates/waddle-server/tests/*.rs`, `--test <name>`) for new tests that can use the public or `test-support` API; they build in far less memory.
 - Dedicated tests may be inline unit tests in `crates/waddle-xmpp/src/xep/xepNNNN.rs` or `crates/waddle-xmpp-core/src/xepNNNN.rs` for parsing, building, or validation, integration tests in `crates/waddle-xmpp/tests/xepNNNN_*.rs`, WebSocket tests in `crates/waddle-server/tests/xepNNNN_*.rs`, or a combination. Each suite must assert the behavior of the XEP it covers.
 - In-process server state for `tests/xepNNNN_*.rs` comes from `waddle_server::test_support` (feature `test-support`; suites that need it carry `#![cfg(feature = "test-support")]` and run in the `--all-features` lanes and the `waddle-server-xmpp-server-tests` lane, which enables the feature explicitly; never enabled in the release image).
 - The active C2S transport is WebSocket only; do not add TCP C2S harness tests.

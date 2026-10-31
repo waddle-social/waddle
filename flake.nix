@@ -599,9 +599,11 @@
               # silently skips in every nix test lane, including the
               # dedicated xmpp unit/XEP lanes built from testArgs (#1436).
               postUnpack = ''
+                # Copy every Mimir rule file, not only waddle-reliability.yaml,
+                # so a second rules file is not silently absent here.
                 mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
-                cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
-                  "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+                cp ${./infrastructure/waddle.cloud/rules/mimir}/*.yaml \
+                  "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/"
                 # The CNPG monitoring-query drift test (waddle-server, Postgres
                 # lane) reads the ConfigMap the same way (#1695).
                 mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server"
@@ -738,6 +740,11 @@
               '';
             }
           );
+          # Local entry point (`nix build .#checks.<system>.waddle-server-test`):
+          # the whole all-features Postgres suite in one derivation. No CI
+          # workflow builds it; CI runs the same suite as four sandboxed
+          # shards (mkServerTestShard), which inherit this derivation's
+          # preCheck, fixtures and environment, so keep it.
           waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {

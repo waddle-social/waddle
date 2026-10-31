@@ -604,7 +604,7 @@ impl WsXmppClient {
     }
 
     /// Receive the first frame matching a predicate under one overall
-    /// budget instead of the per-frame [`RECV_TIMEOUT`].
+    /// budget instead of the 10-second per-frame receive timeout.
     ///
     /// For load-sensitive multi-node suites (issue #1627): the budget
     /// spans the whole wait, and a timeout error carries every frame

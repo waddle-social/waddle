@@ -22,6 +22,11 @@ issue #1324):
   checks and unit tests for every `mimir/*.yaml` and `tests/*.test.yaml`,
   plus the real-translator OTLP name contract below (promtool and
   prometheus come from the root dev shell).
+- **Loki rules are lint-only.** `lokitool rules lint` checks syntax;
+  nothing evaluates LogQL against synthetic logs (promtool cannot), so a
+  Loki rule whose expression never matches passes CI. Only the Mimir rules
+  have the behavioural tests described under "Ingress alert regression
+  tests".
 - **Every main push** syncs the trees to the Grafana Cloud rulers via
   `mimirtool rules sync` / `lokitool rules sync` (the `rulesSync` task
   in the `default` pipeline). The sync depends on `rulesLint` and
