@@ -67,6 +67,28 @@ let _AndroidTestReports = schema.#Contributor & {
 	}]
 }
 
+// Signing material is available only to trusted main-branch runs. It lives
+// outside the checkout/caches and is removed even when the pipeline fails.
+let _AndroidPreviewSigning = schema.#Contributor & {
+	id: "androidPreviewSigning"
+	tasks: [
+		{
+			id: "android.prepareSigning"
+			label: "Prepare private Android preview signing"
+			priority: 11
+			ci: github: tasks: ["publishApk"]
+			env: {
+				WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64: "${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64 || '' }}"
+				WADDLE_ANDROID_PREVIEW_STORE_PASSWORD: "${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && secrets.WADDLE_ANDROID_PREVIEW_STORE_PASSWORD || '' }}"
+			}
+			provider: github: {
+				uses: "./.github/actions/android-preview-signing"
+				if: "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
+			}
+		},
+	]
+}
+
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
@@ -85,6 +107,8 @@ let _ffiInputs = [
 let _gradleInputs = [
 	"env.cue",
 	"../../scripts/android-ci-gradle.sh",
+	"../../scripts/android-preview-signing.sh",
+	"../../.github/actions/android-preview-signing/**",
 	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
@@ -119,6 +143,7 @@ schema.#Project & {
 		_NamespaceAndroidCache,
 		_AndroidTestReports,
 		_AndroidCiMemory,
+		_AndroidPreviewSigning,
 		wc.#CuenvRelease,
 	]
 
@@ -139,7 +164,7 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: {contents: "write", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.publishApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.previewSigningContract, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
 			when: {
@@ -147,7 +172,7 @@ schema.#Project & {
 				manual:      true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.previewSigningContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
@@ -272,6 +297,12 @@ schema.#Project & {
 			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
 		}
 
+		previewSigningContract: schema.#Task & {
+			command: "python3"
+			args: ["../../scripts/test_android_preview_signing.py"]
+			inputs: ["../../scripts/android-preview-signing.sh", "../../scripts/test_android_preview_signing.py"]
+		}
+
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).
 		// API 34: the aosp-atd image line trails the newest platform; 34
 		// matches minSdk and has stable ATD images. Configuration cache is
@@ -323,6 +354,7 @@ schema.#Project & {
 			command: "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
+				WADDLE_ANDROID_PREVIEW_SIGNING_DIR: schema.#EnvPassthrough & {name: "WADDLE_ANDROID_PREVIEW_SIGNING_DIR"}
 			}
 			args: ["-c", #"""
 				set -euo pipefail
@@ -340,12 +372,18 @@ schema.#Project & {
 				# gradle's app-foss-preview.apk.
 				apk="waddle-android.apk"
 				cp app/build/outputs/apk/foss/preview/app-foss-preview.apk "${apk}"
+				# Validate signatures and pin the private signer before publishing.
+				sdk_dir="$(sed -n 's/^sdk.dir=//p' local.properties)"
+				apksigner="${sdk_dir}/build-tools/36.0.0/apksigner"
+				"${apksigner}" verify --print-certs "${apk}" > "${apk}.certs"
+				grep -Fx 'Signer #1 certificate SHA-256 digest: ae705e4a0f2f14946a712b21373589680ffe8871ded17ecadb60beacc504de0d' "${apk}.certs"
+				rm "${apk}.certs"
 				# Unique per build (never reused -> never hits the immutable
 				# tag-name lock); versionCode prefix keeps tags sortable.
 				tag="android-b${version_code}-${sha}"
 				gh release create "${tag}" --latest \
 				  --title "Android ${sha}" \
-				  --notes "commit ${sha} — optimised preview build (R8, opt-level 3 core). Install: adb install -r waddle-android.apk (stable URL: releases/latest/download/waddle-android.apk; shared install-in-place signature, upgrades earlier rolling and debug builds without an uninstall)" \
+				  --notes "commit ${sha} — optimised preview build (R8, opt-level 3 core). Install: adb install -r waddle-android.apk (stable URL: releases/latest/download/waddle-android.apk; private signing key; older public-key installations require uninstalling first, which erases local app data)" \
 				  "${apk}"
 				# Prune older rolling releases beyond the newest 10, tag and
 				# all (--cleanup-tag): the tags are never reused, so there

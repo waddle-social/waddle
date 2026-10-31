@@ -1,0 +1,7 @@
+name: Private Android preview signing
+description: Prepare private signing files and remove them after the job
+runs:
+  using: node24
+  main: run.cjs
+  post: run.cjs
+  post-if: always()

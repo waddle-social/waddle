@@ -14,7 +14,15 @@ for android_ci_memory_file in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.cu
   fi
 done
 
+signing_flags=()
+# SigningConfig holds the decrypted password; never serialize it into Gradle's
+# configuration cache on the persistent runner volume.
+if [[ -n "${WADDLE_ANDROID_PREVIEW_SIGNING_DIR:-}" ]]; then
+  signing_flags+=(--no-configuration-cache)
+fi
+
 exec ./gradlew \
+  "${signing_flags[@]}" \
   --no-daemon --no-parallel --max-workers=2 \
   -Pkotlin.compiler.execution.strategy=in-process \
   '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC' \

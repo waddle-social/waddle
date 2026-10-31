@@ -67,7 +67,7 @@ class AndroidCiGradleTests(unittest.TestCase):
         )
         cls.tasks = {task["name"]: task["node"] for task in json.loads(result.stdout)}
 
-    def run_entrypoint(self, name, exit_code=0):
+    def run_entrypoint(self, name, exit_code=0, private_signing=False):
         with tempfile.TemporaryDirectory(prefix="waddle-android-ci-contract-") as directory:
             root = Path(directory)
             android = root / "apps/android"
@@ -102,6 +102,8 @@ class AndroidCiGradleTests(unittest.TestCase):
                 "WADDLE_TEST_GRADLE_RECORD": str(record),
                 "WADDLE_TEST_GRADLE_EXIT_CODE": str(exit_code),
             }
+            if private_signing:
+                env["WADDLE_ANDROID_PREVIEW_SIGNING_DIR"] = str(root / "private-signing")
             result = subprocess.run(
                 [task["command"], *task["args"]],
                 cwd=android,
@@ -116,6 +118,11 @@ class AndroidCiGradleTests(unittest.TestCase):
                 else []
             )
             return result, calls
+
+    def test_private_signing_disables_configuration_cache(self):
+        result, calls = self.run_entrypoint("build", private_signing=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--no-configuration-cache", calls[0])
 
     def assert_policy(self, args):
         self.assertLessEqual(POLICY, set(args), f"Missing bounded CI flags: {POLICY - set(args)}")

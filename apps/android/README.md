@@ -40,27 +40,45 @@ cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
 
 ## Install-in-place artifacts
 
-Every APK — local or CI — is signed with the **checked-in**
-`debug.keystore` (deliberately not a secret; never used for a store
-release), so `adb install -r` upgrades in place without uninstalling (app
-data survives). Every merge to main builds the **preview** variant —
-release code with R8, the baseline profile, and the Rust core at
-`opt-level = 3` (`--profile mobile`) — as `waddle-android.apk`
-(versionCode = commit-timestamp minutes, so upgrades are always
-monotonic) and publishes it as the repo's **latest** release under a
-unique `android-b<versionCode>-<sha>` tag:
+Local debug APKs use the checked-in `debug.keystore` for development only.
+Distributed GitHub previews use a separate private RSA-4096 key, stored in
+GitHub Actions secrets. The preview build refuses to build without private
+signing material, and publication verifies the APK signature and pinned
+certificate fingerprint before upload.
+
+**Migration:** previews signed with the old public debug key cannot upgrade
+in place to the private key. Uninstall the old app first; uninstalling erases
+local app data. Subsequent privately signed previews upgrade in place.
+The signing change does not establish or resolve Play Protect's detection reason.
+
+Every merge to main builds `fossPreview` (R8, baseline profile, mobile-profile
+Rust) as `waddle-android.apk`, with a monotonic commit-timestamp version code:
 
 ```sh
-gh release download --pattern waddle-android.apk   # latest release
+gh release download --pattern waddle-android.apk
 adb install -r waddle-android.apk
-# or straight from the browser/curl on the phone:
-#   https://github.com/waddle-social/waddle/releases/latest/download/waddle-android.apk
 ```
 
-Build it locally with `bash ../../scripts/build-android-rust.sh` (mobile
-profile) then `./gradlew :app:assembleFossPreview`. A Play upload key, when
-one exists, is read from `WADDLE_ANDROID_UPLOAD_*` environment variables
-for the `release` build type.
+GitHub repository secrets:
+
+- `WADDLE_ANDROID_PREVIEW_KEYSTORE_BASE64`: base64-encoded PKCS12 keystore,
+  alias `waddle-preview`.
+- `WADDLE_ANDROID_PREVIEW_STORE_PASSWORD`: the keystore and key password.
+
+The workflow materializes the key under `RUNNER_TEMP` with private file
+permissions and removes it in an always-run Actions post-step. Never commit the
+keystore or password. Keep a separate encrypted backup: losing this key
+prevents updates to installed private-key previews.
+
+The public preview certificate SHA-256 is
+`ae705e4a0f2f14946a712b21373589680ffe8871ded17ecadb60beacc504de0d`.
+For a local preview build, set `WADDLE_ANDROID_PREVIEW_SIGNING_DIR` to a private
+directory containing `preview.p12` and `store-password`, then run
+`./gradlew --no-configuration-cache :app:assembleFossPreview`. Configuration
+caching is disabled when private preview signing is configured, so Gradle
+cannot persist signing credentials in its configuration cache.
+Play store releases continue to use the
+separate `WADDLE_ANDROID_UPLOAD_*` credentials.
 
 (A single reused tag like `android-latest` is deliberately avoided:
 GitHub's immutable releases permanently reserve a tag name once it has
