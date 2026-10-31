@@ -745,7 +745,7 @@ async fn postgres_connection_reply_receipt_with_remote(
     nested_owner: bool,
     remote_owner: bool,
 ) {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping PostgreSQL connection reply receipt test: WADDLE_TEST_POSTGRES_URL not set"
         );

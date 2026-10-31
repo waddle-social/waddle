@@ -2964,7 +2964,7 @@ mod tests {
     }
 
     async fn clean_store() -> Option<PostgresClaimStore> {
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let db = Database::from_config(
             "clustering-claims-test",
             &DatabaseConfig::new(DatabaseDriver::Postgres, url)
@@ -3217,7 +3217,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_claimed_concurrent_first_writes_both_succeed_exactly_one_row() {
         let _guard = clustering_control_plane_table_lock().lock().await;
-        let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let db = Database::from_config(

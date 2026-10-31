@@ -68,20 +68,12 @@ workflow: {
 				{
 					name:  "Validate CI helper contracts"
 					shell: "bash"
-					run: """
-						python3 tests/ci-timings-test.py
-						python3 server/scripts/test_check_nextest_shards.py
-						python3 server/scripts/test_nextest_archive_transfer.py
-						python3 server/scripts/test_build_nextest_archive.py
-						python3 server/scripts/test_plan_nextest_binary_shards.py
-						python3 server/scripts/test_pin_nextest_shard.py
-						python3 server/scripts/test_run_nextest_shards.py
-						"""
+					run:   "bash server/scripts/check-ci-helper-contracts.sh"
 				},
 				{
-					name:                "Compile and run four isolated test shards"
-					shell:               "bash"
-					run:                 "\(_testTask.command) \(_testTask.args[0])"
+					name:  "Compile and run four isolated test shards"
+					shell: "bash"
+					run: strings.Join(list.Concat([[_testTask.command], _testTask.args]), " ")
 					"working-directory": "server"
 				},
 				{

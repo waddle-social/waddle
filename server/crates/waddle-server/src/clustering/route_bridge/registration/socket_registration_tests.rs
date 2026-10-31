@@ -27,7 +27,7 @@ struct RegistrationLeaseFixture {
 
 impl RegistrationLeaseFixture {
     async fn try_new() -> Option<Self> {
-        let url = std::env::var("WADDLE_TEST_POSTGRES_URL").ok()?;
+        let url = waddle_ws_test_support::require_test_postgres_url()?;
         let database = crate::db::Database::from_config(
             "registration-demand-expiry",
             &crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url)

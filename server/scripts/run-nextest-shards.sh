@@ -28,7 +28,20 @@ nix build --print-build-logs --no-link --json --keep-going \
 for partition in 1 2 3 4; do
   output="$(nix eval --raw "../#waddle-server-test-shard-$partition.outPath")"
   mkdir -p "$diagnostics/shard-$partition"
-  for report in whole-inventory.json shared-inventory.json whole-coverage.json shared-coverage.json; do
+  for report in whole-inventory.json shared-inventory.json whole-coverage.json shared-coverage.json \
+    junit-whole.xml junit-shared.xml; do
     cp "$output/$report" "$diagnostics/shard-$partition/$report"
   done
 done
+
+# A passing exit code does not show which tests ran: a filter or feature gate
+# can drop a test, and an early return reports as a pass. Emit every executed
+# test name and fail unless each required test ran and passed in some shard.
+junit_reports=()
+for partition in 1 2 3 4; do
+  junit_reports+=("$diagnostics/shard-$partition/junit-whole.xml" "$diagnostics/shard-$partition/junit-shared.xml")
+done
+python3 "$(dirname "${BASH_SOURCE[0]}")/check_required_tests.py" \
+  --required .config/required-cluster-tests.txt \
+  --executed-out "$diagnostics/executed-tests.txt" \
+  "${junit_reports[@]}"

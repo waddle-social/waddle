@@ -122,7 +122,7 @@ async fn seed(
 #[tokio::test]
 #[ignore = "requires native PostgreSQL; dedicated space_fanout_postgres lane"]
 async fn postgres_space_fanout_outcast_after_capture_negative_control() {
-    let url = std::env::var("WADDLE_TEST_POSTGRES_URL")
+    let url = waddle_ws_test_support::require_test_postgres_url()
         .expect("native PostgreSQL prerequisite is mandatory");
     assert!(
         url.starts_with("postgres://") || url.starts_with("postgresql://"),

@@ -45,7 +45,7 @@ impl IngressFixture {
     }
 
     pub async fn postgres_with_pool(test_name: &str, pool_size: u32) -> Option<Self> {
-        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping {test_name}: WADDLE_TEST_POSTGRES_URL not set");
             return None;
         };

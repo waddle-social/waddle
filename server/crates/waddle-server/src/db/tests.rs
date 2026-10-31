@@ -91,7 +91,7 @@ async fn control_plane_guard_errors_when_not_configured() {
 // mirroring `clustering::lease`'s test convention.
 #[tokio::test]
 async fn control_plane_pool_is_distinct_from_main_pool() {
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let config = DatabaseConfig::new(DatabaseDriver::Postgres, url)

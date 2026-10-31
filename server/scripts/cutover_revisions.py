@@ -17,6 +17,7 @@ SERVER_INPUTS = [
     ':(top,glob)server/**/env.cue',
     ':(top,glob)server/.cargo/**',
     'server/.config/nextest.toml',
+    'server/.config/required-cluster-tests.txt',
     'server/Cargo.lock',
     'server/Cargo.toml',
     'server/README.md',

@@ -523,7 +523,7 @@ async fn xep0424_tx_archive_retry_after_tombstone_returns_tombstone_hit() {
     use waddle_xmpp_core::types::{Affiliation, Role};
     use waddle_xmpp_core::xep0359::OriginId;
 
-    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping XEP-0424 Postgres tx-write test: WADDLE_TEST_POSTGRES_URL is unset");
         return;
     };
