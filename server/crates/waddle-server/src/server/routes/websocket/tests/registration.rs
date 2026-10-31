@@ -275,7 +275,7 @@ async fn busy_registration_sends_resource_constraint_and_rolls_back() {
 async fn paused_local_mirror_releases_the_only_main_pool_connection() {
     use super::super::registration::LOCAL_PUBLICATION_GATE;
     use crate::db::{DatabaseConfig, DatabaseDriver, DatabasePool, PoolConfig};
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     let admin = sqlx::PgPool::connect(&database_url).await.expect("admin");

@@ -54,7 +54,7 @@ schema.#Project & {
 
 		clippy: schema.#Task & {
 			command: "bash"
-			args: ["-euo", "pipefail", "-c", "python3 scripts/check-poison-recovery.py && python3 scripts/check-rust-structure.py --server-only && exec cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"]
+			args: ["-euo", "pipefail", "-c", "python3 scripts/check-poison-recovery.py && python3 scripts/check-rust-structure.py --server-only && python3 scripts/check-test-postgres-env.py && exec cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"]
 			dir: {from: "module", path: "server"}
 			inputs: _serverRustInputs
 			env:    _nativeRustEnv

@@ -119,6 +119,18 @@ pub(super) async fn handle_disco_info_iq(
         }
     };
 
+    if let Some(reply) = phase.bound_jid().and_then(|sender| {
+        super::remote_destination::remote_iq_error(
+            ctx.iq,
+            ctx.domain,
+            &state.deps.service_domains,
+            sender,
+        )
+    }) {
+        info!(id = %ctx.id, target = %target, handler = "remote_destination", "disco#info answered");
+        return disco_info_xml(DiscoInfoResponse::iq(reply));
+    }
+
     // The per-handler "answered" debug below is the load-bearing trace
     // for #750-style silent-drops: every disco#info that reaches this
     // dispatcher ends in exactly one such line (one of the ten arms or

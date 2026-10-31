@@ -925,7 +925,7 @@ async fn migration_apply_error_names_the_failing_migration_and_preserves_its_sou
 
 #[tokio::test]
 async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger adoption)");
         return;
     };
@@ -982,7 +982,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
 #[tokio::test]
 async fn postgres_single_runner_refuses_to_reapply_global_initial_migration_when_schema_exists_but_ledger_is_empty(
 ) {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger global)"
         );
@@ -1020,7 +1020,7 @@ async fn postgres_single_runner_refuses_to_reapply_global_initial_migration_when
 #[tokio::test]
 async fn postgres_single_runner_refuses_to_reapply_waddle_initial_migration_when_only_waddle_ledger_rows_are_missing(
 ) {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres schema without ledger waddle)"
         );
@@ -1068,7 +1068,7 @@ async fn postgres_single_runner_refuses_to_reapply_waddle_initial_migration_when
 
 #[tokio::test]
 async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pending_migrations() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set (postgres pure migration ledger adoption)"
         );
@@ -1105,7 +1105,7 @@ async fn postgres_single_runner_backfills_checksums_when_legacy_ledger_has_no_pe
 
 #[tokio::test]
 async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger lock)");
         return;
     };
@@ -1158,7 +1158,7 @@ async fn postgres_migration_runner_blocks_until_the_advisory_lock_is_released() 
 
 #[tokio::test]
 async fn postgres_concurrent_migration_runners_record_one_complete_ledger() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (migration ledger race)");
         return;
     };
@@ -1202,7 +1202,7 @@ async fn postgres_concurrent_migration_runners_record_one_complete_ledger() {
 
 #[tokio::test]
 async fn postgres_incompatible_ingress_schema_drift_fails_without_recording_new_migrations() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (incompatible ingress schema drift)");
         return;
     };
@@ -1328,7 +1328,7 @@ struct MonitoringQuery {
 
 #[tokio::test]
 async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress monitoring queries)");
         return;
     };
@@ -1948,7 +1948,7 @@ fn indentation(line: &str) -> usize {
 
 #[tokio::test]
 async fn postgres_migration_runner_succeeds_with_a_single_connection_pool() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (single connection migration pool)");
         return;
     };
@@ -2264,7 +2264,7 @@ fn postgres_link_preview_refs_current_index_is_partial() {
 
 #[tokio::test]
 async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for upload_slots.size_bytes BIGINT)"
@@ -2694,7 +2694,7 @@ async fn sqlite_v0011_adds_auth_context_reference_to_existing_sessions() {
 
 #[tokio::test]
 async fn postgres_v0011_adds_auth_context_reference_to_existing_sessions() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for auth-context reference)"
@@ -2835,7 +2835,7 @@ async fn sqlite_v0012_makes_auth_context_total() {
 
 #[tokio::test]
 async fn postgres_v0012_makes_auth_context_total() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for total auth contexts)"
@@ -2876,7 +2876,7 @@ async fn sqlite_v0014_keys_accounts_and_prunes_roster_contacts() {
 
 #[tokio::test]
 async fn postgres_v0014_keys_accounts_and_prunes_roster_contacts() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V0014 account keys)");
         return;
     };
@@ -3011,7 +3011,7 @@ async fn query_text_pairs(db: &Database, sql: &str) -> Vec<(String, Option<Strin
 
 #[tokio::test]
 async fn postgres_v0007_tracks_link_preview_media_refs() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for link_preview_media_refs)"
@@ -3160,7 +3160,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
 
 #[tokio::test]
 async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for repairing drifted global tables)"
@@ -3257,7 +3257,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
 
 #[tokio::test]
 async fn postgres_v1003_widens_existing_attachment_size_bytes() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!(
             "skipping: WADDLE_TEST_POSTGRES_URL not set \
              (postgres-backed migration regression for attachments.size_bytes BIGINT)"
@@ -4067,7 +4067,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
 
 #[tokio::test]
 async fn postgres_v1012_resets_epoch_zero_soak_rows() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1012 soak reset)");
         return;
     };
@@ -4148,7 +4148,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
 
 #[tokio::test]
 async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1014 fenced reset)");
         return;
     };
@@ -4495,7 +4495,7 @@ async fn migration_v1012_recreates_sql_sm_store_sqlite() {
 
 #[tokio::test]
 async fn migration_v1012_recreates_sql_sm_store_postgres() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (SQL SM cutover recovery)");
         return;
     };
@@ -4662,7 +4662,7 @@ async fn sqlite_v1012_concurrent_sm_initializers_use_migrated_schema() {
 
 #[tokio::test]
 async fn postgres_v1012_concurrent_sm_initializers_use_migrated_schema() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (concurrent SM startup)");
         return;
     };
@@ -4772,7 +4772,7 @@ async fn sqlite_v1019_custody_cutover_drops_only_legacy_proofs() {
 
 #[tokio::test]
 async fn postgres_v1019_custody_cutover_drops_only_legacy_proofs() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (custody cutover)");
         return;
     };
@@ -4969,7 +4969,7 @@ async fn sqlite_v1023_stamps_existing_observer_history_at_migration_time() {
 
 #[tokio::test]
 async fn postgres_v1023_stamps_existing_observer_history_at_migration_time() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1023 observer retention)");
         return;
     };
@@ -4982,7 +4982,7 @@ async fn postgres_v1023_stamps_existing_observer_history_at_migration_time() {
 
 #[tokio::test]
 async fn postgres_observer_inspection_queries_run_as_pg_monitor() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (observer inspection queries)");
         return;
     };
@@ -5206,7 +5206,7 @@ async fn sqlite_v1025_adopts_only_matching_pending_publication_authority() {
 
 #[tokio::test]
 async fn postgres_v1025_adopts_only_matching_pending_publication_authority() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1025 adoption)");
         return;
     };
@@ -5357,7 +5357,7 @@ async fn sqlite_v1026_preserves_envelopes_and_expands_versions() {
 
 #[tokio::test]
 async fn postgres_v1026_preserves_envelopes_and_expands_versions() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1026 envelopes)");
         return;
     };
@@ -5471,7 +5471,7 @@ async fn sqlite_v1027_preserves_sm_sources_and_adopts_existing_ack_journal() {
 
 #[tokio::test]
 async fn postgres_v1027_preserves_sm_sources_and_adopts_existing_ack_journal() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
     for preexisting in [false, true] {

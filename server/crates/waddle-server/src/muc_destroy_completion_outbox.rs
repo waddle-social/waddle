@@ -201,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_has_expected_catalog_shape() {
-        let Some(url) = std::env::var("WADDLE_TEST_POSTGRES_URL").ok() else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             return;
         };
         let db = Database::from_config(

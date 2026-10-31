@@ -211,7 +211,7 @@ async fn sqlite_unoffered_recovery_survives_restart_and_fences_offered_claims() 
 
 #[tokio::test]
 async fn postgres_unoffered_recovery_survives_restart_and_fences_offered_claims() {
-    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+    let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (pending recovery restart)");
         return;
     };

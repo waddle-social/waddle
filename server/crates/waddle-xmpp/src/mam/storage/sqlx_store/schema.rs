@@ -563,7 +563,7 @@ mod cutover_tests {
 
     #[tokio::test]
     async fn postgres_schema_cutover_drops_origin_dedupe_and_preserves_origin_lookup() {
-        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
             eprintln!("skipping Postgres MAM schema test: WADDLE_TEST_POSTGRES_URL is unset");
             return;
         };

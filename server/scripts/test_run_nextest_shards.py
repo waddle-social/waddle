@@ -9,6 +9,14 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("run-nextest-shards.sh")
 REPORTS = ("whole-inventory.json", "shared-inventory.json", "whole-coverage.json", "shared-coverage.json")
+JUNIT = ("junit-whole.xml", "junit-shared.xml")
+BINARY = "waddle-server::clustering_cluster_e2e"
+
+
+def junit(test_name):
+    return (f'<testsuites><testsuite name="{BINARY}">'
+            f'<testcase name="{test_name}" classname="{BINARY}"/>'
+            "</testsuite></testsuites>")
 
 
 class LocalShardTests(unittest.TestCase):
@@ -31,6 +39,11 @@ class LocalShardTests(unittest.TestCase):
             output.mkdir()
             for name in REPORTS:
                 (output / name).write_text(f"verified shard {partition}")
+            for name in JUNIT:
+                (output / name).write_text(junit(f"{name[6:-4]}_{partition}"))
+        (self.root / ".config").mkdir()
+        self.required = self.root / ".config/required-cluster-tests.txt"
+        self.required.write_text(f"{BINARY} whole_1\n{BINARY} shared_4\n")
         nix = self.root / "nix"
         nix.write_text(
             f"#!{sys.executable}\n"
@@ -75,6 +88,27 @@ class LocalShardTests(unittest.TestCase):
             for name in REPORTS:
                 report = self.root / f".ci/nextest-archive/shard-{partition}/{name}"
                 self.assertEqual(report.read_text(), f"verified shard {partition}")
+
+    def test_executed_test_names_from_every_shard_are_emitted(self):
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        executed = (self.root / ".ci/nextest-archive/executed-tests.txt").read_text().splitlines()
+        self.assertEqual(executed, sorted(f"{BINARY} {selection}_{partition}"
+                                          for selection in ("whole", "shared")
+                                          for partition in range(1, 5)))
+        for partition in range(1, 5):
+            for name in JUNIT:
+                self.assertTrue((self.root / f".ci/nextest-archive/shard-{partition}/{name}").is_file())
+
+    def test_required_test_that_did_not_run_fails_the_lane(self):
+        self.required.write_text(f"{BINARY} whole_1\n{BINARY} returned_early_or_filtered\n")
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"required test did not run: {BINARY} returned_early_or_filtered", result.stderr)
+
+    def test_missing_shard_junit_report_cannot_report_success(self):
+        (self.root / "shard-2/junit-shared.xml").unlink()
+        self.assertNotEqual(self.run_shards().returncode, 0)
 
     def test_failed_shard_fails_the_job_and_preserves_compiler_diagnostics(self):
         self.env["SHARD_EXIT"] = "17"

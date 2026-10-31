@@ -320,10 +320,28 @@
                 ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_shards.py} --compare-partition \
                   ${archiveOutput}/shared-inventory.json.gz "$out/shared-inventory.json" \
                   > "$out/shared-coverage.json"
+                # Keep each run's JUnit report (the `ci` profile writes it to
+                # the remapped workspace's target/nextest/ci): the lane checks
+                # executed test names against required-cluster-tests.txt.
+                take_junit_report() {
+                  local roots=("$PWD" "$extracted")
+                  if [ -n "''${CARGO_TARGET_DIR:-}" ] && [ -d "$CARGO_TARGET_DIR" ]; then
+                    roots+=("$CARGO_TARGET_DIR")
+                  fi
+                  local reports
+                  mapfile -t reports < <(find "''${roots[@]}" -path '*/nextest/ci/junit.xml' -type f | sort -u)
+                  if [ "''${#reports[@]}" -ne 1 ]; then
+                    echo "expected exactly one nextest JUnit report, found ''${#reports[@]}: ''${reports[*]}" >&2
+                    return 1
+                  fi
+                  mv "''${reports[0]}" "$out/$1"
+                }
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=whole elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$whole_filter"
+                take_junit_report junit-whole.xml
                 ${pkgs.time}/bin/time -f 'WADDLE_CI_METRIC phase=tests shard=${toString partition} selection=shared elapsed_seconds=%e user_seconds=%U system_seconds=%S cpu=%P max_process_rss_kib=%M exit_code=%x' \
                   ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run "''${reused_args[@]}" --test-threads 8 -E "$shared_filter" --partition "hash:${toString partition}/4"
+                take_junit_report junit-shared.xml
                 runHook postCheck
               '';
             };
@@ -532,6 +550,7 @@
               ./server/capabilities.toml
               ./server/scripts/check-poison-recovery.py
               ./server/scripts/check-rust-structure.py
+              ./server/scripts/check-test-postgres-env.py
               ./server/crates
               ./server/extensions
               ./server/vendor
@@ -628,6 +647,10 @@
               pg_ctl -D "$PGDATA" -o "-k $PGHOST -p $PGPORT -c listen_addresses= -c deadlock_timeout=50ms" -w start
               createdb -h "$PGHOST" -p "$PGPORT" -U waddle_test waddle_test
               export WADDLE_TEST_POSTGRES_URL="postgresql:///waddle_test?user=waddle_test&host=$PGHOST&port=$PGPORT"
+              # Postgres is provisioned here, so a Postgres-backed test that
+              # finds no URL is a lane defect: require_test_postgres_url()
+              # panics instead of letting the test return early as a pass.
+              export WADDLE_TEST_REQUIRE_POSTGRES=1
             '';
           };
           # Lint/test derivations build with the `ci-test` cargo profile
@@ -711,6 +734,7 @@
               preBuild = baseArgs.preBuild + ''
                 ${pkgs.python3}/bin/python3 scripts/check-poison-recovery.py
                 ${pkgs.python3}/bin/python3 scripts/check-rust-structure.py --server-only
+                ${pkgs.python3}/bin/python3 scripts/check-test-postgres-env.py
               '';
             }
           );
@@ -928,6 +952,10 @@
               # on main push need mimirtool and lokitool.
               pkgs.mimir
               pkgs.grafana-loki
+              # Alert rule unit tests (promtool, in the `cli` output) and
+              # the OTLP name-translation contract (prometheus server).
+              pkgs.prometheus
+              pkgs.prometheus.cli
               # Android app (apps/android): JDK for sdkmanager/Gradle,
               # cargo-ndk for the jniLibs cross-build, gh for the release
               # APK upload task. The Android SDK itself is provisioned by

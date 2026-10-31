@@ -74,6 +74,7 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
     // AND clustering being enabled for this run.
     let mut db_config = db::DatabaseConfig::new(db_runtime.driver, db_runtime.database_url);
     db_config.pool_size = db_runtime.pool_size;
+    db_config.acquire_timeout = db_runtime.acquire_timeout;
     if db_runtime.driver == db::DatabaseDriver::Postgres && server_config.clustering.enabled {
         db_config = db_config.with_control_plane_pool(db_runtime.control_plane_pool_size);
     }

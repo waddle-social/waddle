@@ -162,6 +162,30 @@ pub enum StartupServingTransition {
 pub struct NodeLifecycle {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     pub(in crate::clustering) fatal_fence: CancellationToken,
+    /// Cancelled once a clustering terminal exit has finished its local
+    /// demotion: the end of `TerminalFenceContext::finish`, or the inline
+    /// fatal-fence exit of `run_node_lease`'s registered loop. Read-only
+    /// signal for liveness; it changes no fencing or shutdown behaviour.
+    /// The demotion awaits the identity publication barrier and actor asks
+    /// with no deadline, so a wedged guard or actor delays this signal.
+    pub(in crate::clustering) terminal_fence_finished: CancellationToken,
+    /// Cancelled when `run_node_lease` returns by any path (or its task is
+    /// dropped). Read-only signal for liveness.
+    pub(in crate::clustering) node_lease_exited: CancellationToken,
+    /// The process stop token and its clustering child, bound once at
+    /// clustering start. Unset when clustering is not running.
+    pub(in crate::clustering) clustering_scope:
+        std::sync::Arc<std::sync::OnceLock<ClusteringScope>>,
+}
+
+/// The two cancellation scopes liveness compares: the process-wide stop and
+/// the clustering child it derives (`clustering_scope_token`). The clustering
+/// scope can stop on its own (a keypair-slot lease self-fence cancels only
+/// the child) while the process keeps running.
+#[derive(Clone, Debug)]
+pub(in crate::clustering) struct ClusteringScope {
+    pub(in crate::clustering) process_stop: CancellationToken,
+    pub(in crate::clustering) clustering_stop: CancellationToken,
 }
 
 impl NodeLifecycle {
@@ -185,6 +209,9 @@ impl NodeLifecycle {
                 startup_blocked: false,
             })),
             fatal_fence: CancellationToken::new(),
+            terminal_fence_finished: CancellationToken::new(),
+            node_lease_exited: CancellationToken::new(),
+            clustering_scope: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -330,6 +357,55 @@ impl NodeLifecycle {
 
     pub(crate) fn fatal_fence_token(&self) -> CancellationToken {
         self.fatal_fence.clone()
+    }
+
+    /// Record that a clustering terminal exit finished its local demotion.
+    /// Called last in `TerminalFenceContext::finish` and on `run_node_lease`'s
+    /// inline fatal-fence exit. `finish` also runs on an ordinary clustering
+    /// stop, so [`Self::is_terminally_fenced`] also requires the fatal fence.
+    pub fn mark_terminal_fence_finished(&self) {
+        self.terminal_fence_finished.cancel();
+    }
+
+    /// The node took a fatal fence and its node-lease loop finished the
+    /// terminal demotion and returned: it can never serve again in this
+    /// process (`FencedRecovering` with no re-registration loop left), so
+    /// only a restart recovers it. Liveness reports this.
+    pub fn is_terminally_fenced(&self) -> bool {
+        self.fatal_fence.is_cancelled() && self.terminal_fence_finished.is_cancelled()
+    }
+
+    /// Bind the process stop token and the clustering child token derived
+    /// from it. Called once when clustering starts; later calls are ignored.
+    /// Read-only: it changes no cancellation.
+    pub fn bind_clustering_scope(
+        &self,
+        process_stop: CancellationToken,
+        clustering_stop: CancellationToken,
+    ) {
+        let _ = self.clustering_scope.set(ClusteringScope {
+            process_stop,
+            clustering_stop,
+        });
+    }
+
+    /// Record that the node-lease loop has returned. Set by a drop guard in
+    /// `run_node_lease`, so every exit (and a dropped task) records it.
+    pub fn mark_node_lease_exited(&self) {
+        self.node_lease_exited.cancel();
+    }
+
+    /// The clustering scope stopped while the process keeps running, and the
+    /// node-lease loop has exited. Nothing re-serves this node in this
+    /// process: no re-registration loop is left and nothing calls `serve()`,
+    /// so only a restart recovers it. Reached without a fatal fence, e.g.
+    /// when the swarm's keypair-slot lease self-fences the clustering scope
+    /// during a Postgres outage. False during an ordinary process stop.
+    pub fn is_clustering_stopped_while_process_runs(&self) -> bool {
+        self.node_lease_exited.is_cancelled()
+            && self.clustering_scope.get().is_some_and(|scope| {
+                scope.clustering_stop.is_cancelled() && !scope.process_stop.is_cancelled()
+            })
     }
 }
 
@@ -723,6 +799,7 @@ pub async fn start_if_enabled(
         // node-lease/self-fence loop) is driven off this child, never the
         // raw process-wide `stop_token` — see `clustering_scope_token`.
         let clustering_stop = super::clustering_scope_token(stop_token);
+        readiness.bind_clustering_scope(stop_token.clone(), clustering_stop.clone());
         let fatal_fence = readiness.fatal_fence_token();
         // ADR-0017 Phase 3 Slice 6: constructed empty (the `ConnectionRegistry`
         // doesn't exist yet at this point in startup) and wired to it later by

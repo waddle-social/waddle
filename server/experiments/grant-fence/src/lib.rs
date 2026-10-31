@@ -9,6 +9,7 @@ mod postgres_diagnostics;
 mod process;
 mod proof;
 mod provenance;
+mod recovery;
 mod shutdown_measurement;
 mod status_capture;
 mod worker;
