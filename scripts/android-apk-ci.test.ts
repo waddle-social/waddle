@@ -37,4 +37,5 @@ test("unexpected source runners or graph shapes require a reviewed update", () =
 
 test("checked-in workflow exactly matches its Android source", () => {
   expect(readFileSync(outputFile, "utf8")).toBe(render(source()));
+  expect(render(source())).not.toMatch(/[ \t]+$/m);
 });

@@ -33,7 +33,7 @@ export function hostedApkWorkflow(source: Record<string, any>): Record<string, a
 export function render(source: Record<string, any>): string {
   return "# Generated from the Android PR workflow; do not edit manually.\n" +
     "# Regenerate with: bun scripts/android-apk-ci.ts sync\n\n" +
-    Bun.YAML.stringify(hostedApkWorkflow(source), null, 2);
+    Bun.YAML.stringify(hostedApkWorkflow(source), null, 2).replace(/[ \t]+$/gm, "").trimEnd() + "\n";
 }
 
 if (import.meta.main) {
