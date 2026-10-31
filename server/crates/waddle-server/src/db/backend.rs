@@ -56,11 +56,11 @@ pub const MAIN_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Postgres returns, turning a survivable failover into a self-fence.
 pub(crate) const CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Startup budget for a pool's first connection: sqlx's 30 s default, so a
-/// pod booting during a short database failover keeps retrying refused
-/// connections for as long as it always has, even when the main-pool acquire
-/// bound is configured lower. The last attempt may overrun this by up to one
-/// acquire bound.
+/// Retry horizon for a pool's first connection: sqlx's 30 s default, so a pod
+/// booting during a short database failover keeps retrying refused connections
+/// even when the main-pool acquire bound is configured lower. This is not an
+/// outer timeout: the final attempt may overrun it by up to one acquire bound,
+/// including an override longer than 30 s.
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wait for a lazily built pool's first connection, retrying acquire

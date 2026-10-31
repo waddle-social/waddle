@@ -31,12 +31,13 @@ onBeforeUnmount(() => {
 
   <LoginScreen
     v-else-if="connectionStore.appState === 'signed-out'"
-    :default-server-url="connectionStore.activeServerUrl"
+    :default-server-url="connectionStore.defaultServerUrl"
     :active-server-url="connectionStore.activeServerUrl"
     :providers="connectionStore.providers"
     :error-message="connectionStore.appError"
     @login="(url, pid) => connectionStore.login(url, pid)"
     @fetch-providers="connectionStore.fetchProviders"
+    @invalidate-providers="connectionStore.invalidateProviders"
   />
 
   <LandingState

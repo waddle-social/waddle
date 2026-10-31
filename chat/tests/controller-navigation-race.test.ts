@@ -13,8 +13,10 @@ import { useSendOrchestration } from "../src/shell/controllers/use-send-orchestr
 import { useDirectMessageConversations } from "../src/dms/conversations";
 import { buildHref, matchLocation } from "../src/router";
 import type { UserSearchResult } from "../src/lib/chat-types";
-import type { BrowserXmppClient } from "../src/lib/xmpp-client";
+import { BrowserXmppClient } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
+import { nullResumePersistence } from "../src/lib/xmpp/resume-persistence";
+import { discoInfoXml, discoItemsXml, pubsubItemsXml, withFakeDomParser } from "./helpers/disco-xml";
 
 const topology = {
   spaces: [],
@@ -35,7 +37,7 @@ async function flush() {
   for (let i = 0; i < 30; i++) await nextTick();
 }
 
-function harness(initialPath = "/r/general", discoveredTopology = topology) {
+function harness(initialPath = "/r/general", discoveredTopology = topology, suppliedClient?: BrowserXmppClient) {
   const initialUrl = new URL(initialPath, "https://example.com");
   const location = { pathname: initialUrl.pathname, search: initialUrl.search };
   function move(_state: unknown, _title: string, href: string) {
@@ -73,7 +75,7 @@ function harness(initialPath = "/r/general", discoveredTopology = topology) {
   const searchUsers = mock(async (_query: string): Promise<UserSearchResult[]> => [
     { id: "bob@example.com", jid: "bob@example.com", username: "bob", display_name: null },
   ]);
-  const client = {
+  const client = suppliedClient ?? {
     discoverTopology,
     searchUsers,
     listRoomMembers: async () => [],
@@ -597,4 +599,111 @@ describe("leaving an active community surface", () => {
       );
     },
   );
+});
+
+// Real discovery/ambiguity publication, directory, room/route controllers and
+// connection bootstrap; only the transport and message-loading sink are fakes.
+const collidingRooms = ["general@muc.example.com", "general@rooms.example.com", "other@muc.example.com"];
+function discoveryClient(rooms = collidingRooms, delayed = false) {
+  const client = new BrowserXmppClient({
+    jid: "alice@example.com", username: "alice", session_id: "test",
+    xmpp_websocket_url: "wss://example.com/ws",
+  } as WaddleSession, nullResumePersistence);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const wire = mock(async (xml: string) => {
+    if (delayed) await gate;
+    if (xml.includes('xmlns="http://jabber.org/protocol/disco#items"')) {
+      if (xml.includes('to="example.com"')) return discoItemsXml([{ jid: "muc.example.com" }]);
+      if (xml.includes('to="muc.example.com"')) return discoItemsXml(rooms.map((jid) => ({ jid })));
+      return discoItemsXml([]);
+    }
+    if (xml.includes('xmlns="http://jabber.org/protocol/disco#info"')) {
+      return discoInfoXml({ identities: [{ category: "conference", type: "text" }], features: ["http://jabber.org/protocol/muc"] });
+    }
+    return pubsubItemsXml(rooms.map((id) => ({ id, autojoin: false })));
+  });
+  const internal = client as unknown as { connected: boolean; xmpp: unknown };
+  internal.connected = true;
+  internal.xmpp = { send_raw_iq: wire, list_room_members: async () => [], list_room_bots: async () => [] };
+  return { client, wire, release };
+}
+for (const delayed of [false, true]) {
+  for (const target of ["other", "general"]) {
+    test(`initial ${target} route survives only unrelated quarantine (delayed discovery: ${delayed})`, async () => {
+      await withFakeDomParser(async () => {
+        const { client, wire, release } = discoveryClient(collidingRooms, delayed);
+        const path = `/r/${target}`;
+        const h = harness(path, topology, client);
+        h.connectionStore.appState = "ready";
+        await flush();
+        if (delayed) {
+          expect(wire).toHaveBeenCalled();
+          expect(h.isApplyingRoute.value).toBe(true);
+          expect(h.waddles.activeChannelId.value).toBeNull();
+          expect(h.messaging.loadMessages).not.toHaveBeenCalled();
+          release();
+        }
+        for (let i = 0; i < 10 && (!h.waddles.hasLoadedStructure.value || h.isApplyingRoute.value); i++) await flush();
+        expect(client.isRoomIdAmbiguous("general")).toBe(true);
+        expect(h.waddles.channels.value.map((room) => room.id)).toEqual(["other"]);
+        expect(h.isApplyingRoute.value).toBe(false);
+        expect(h.location.pathname).toBe(path);
+        if (target === "other") {
+          expect(h.waddles.activeChannelId.value).toBe("other");
+          expect(h.messaging.loadMessages).toHaveBeenCalledTimes(1);
+          expect(h.messaging.loadMessages).toHaveBeenCalledWith("", "other", 0, [], { intent: "automatic" });
+        } else {
+          expect(h.waddles.activeChannelId.value).toBeNull();
+          expect(h.messaging.loadMessages).not.toHaveBeenCalled();
+          // Even a fresh explicit route cannot resurrect the quarantined ID.
+          await h.routeSync.applyRouteTarget(matchLocation(path, ""), h.routeSync.beginRouteRequest());
+          expect(h.waddles.activeChannelId.value).toBeNull();
+          expect(h.messaging.loadMessages).not.toHaveBeenCalled();
+        }
+      });
+    });
+  }
+}
+for (const target of ["other", "general"]) {
+  test(`parked ${target} room selection survives only unrelated quarantine`, async () => {
+    await withFakeDomParser(async () => {
+      const { client } = discoveryClient();
+      const h = harness("/", topology, client);
+      await h.roomSync.selectChannelByRoomJid(`${target}@muc.example.com`);
+      expect(h.roomSync.pendingChannelRoomJidSelection.value).toBe(`${target}@muc.example.com`);
+      await h.waddles.loadStructure(null, { noChannelSelect: true });
+      await flush();
+      expect(client.isRoomIdAmbiguous("general")).toBe(true);
+      expect(h.roomSync.pendingChannelRoomJidSelection.value).toBeNull();
+      expect(h.waddles.activeChannelId.value).toBe(target === "other" ? "other" : null);
+      expect(h.messaging.loadMessages).toHaveBeenCalledTimes(target === "other" ? 1 : 0);
+    });
+  });
+}
+test("quarantining the active room invalidates a delayed route before panel restoration", async () => {
+  await withFakeDomParser(async () => {
+    const { client } = discoveryClient([collidingRooms[0]!]);
+    const h = harness("/r/general", topology, client);
+    h.connectionStore.appState = "ready";
+    for (let i = 0; i < 10 && (!h.waddles.hasLoadedStructure.value || h.isApplyingRoute.value); i++) await flush();
+    expect(h.waddles.activeChannelId.value).toBe("general");
+    let release!: () => void;
+    h.messaging.loadMessages.mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
+    const requestId = h.routeSync.beginRouteRequest();
+    const pending = h.routeSync.applyRouteTarget({
+      id: "channelExtension", params: { channelId: "general", pluginId: "plugin", routeId: "route" },
+      search: { thread: ["stale-thread"], pinned: true },
+    }, requestId);
+    expect(release).toBeDefined();
+    expect(() => client.rememberRoomJidForChannel("general", collidingRooms[1]!)).toThrow();
+    expect(h.waddles.activeChannelId.value).toBeNull();
+    expect(h.routeSync.isCurrentRouteRequest(requestId)).toBe(false);
+    release();
+    await pending;
+    await flush();
+    expect(h.activeExtensionRouteKey.value).toBeNull();
+    expect(h.activeThreadStack.value).toEqual([]);
+    expect(h.messaging.backfillThread).not.toHaveBeenCalled();
+  });
 });

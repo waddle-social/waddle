@@ -212,7 +212,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     // When WADDLE_HTTP_PORT_FILE is set, write the bound port so test
     // harnesses can discover it after binding to port 0.
     if let Ok(path) = std::env::var("WADDLE_HTTP_PORT_FILE") {
-        if let Err(e) = std::fs::write(&path, addr.port().to_string()) {
+        if let Err(e) = tokio::fs::write(&path, addr.port().to_string()).await {
             warn!(path = %path, error = %e, "Failed to write HTTP port file");
         }
     }
@@ -343,9 +343,11 @@ async fn ensure_mam_ingress_colocation(storage: &SqlxMamStorage, global: &Databa
         .await?
         .ok_or(IngressColocationError::SqliteDatabase)?
         .get(2)?;
+    drop(rows);
+    drop(connection);
     if mam_file.is_empty()
         || global_file.is_empty()
-        || std::fs::canonicalize(mam_file)? != std::fs::canonicalize(global_file)?
+        || tokio::fs::canonicalize(mam_file).await? != tokio::fs::canonicalize(global_file).await?
     {
         return Err(IngressColocationError::SqliteDatabase.into());
     }
