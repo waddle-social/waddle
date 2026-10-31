@@ -110,3 +110,19 @@ waddle-server ingress_substrate::tests::epoch_guard_manifest_matches_rust_and_li
 # W1.2 (#2046): a real PostgreSQL outage must leave the server live, remove
 # readiness within the probe timeout, and recover without restarting.
 waddle-server::liveness_readiness_split postgres_outage_leaves_server_live_and_unready_then_recovers
+
+# --- W1.6a (#2046): bind characterization ---
+#
+# Native WebSocket characterization of resource binding, rebind and the
+# claim-store / UserActor registration delays that E0 changes. The suite is
+# gated on `test-support`, which the default-features publish `test` task
+# compiles out, so this lane is the only publish gate that runs it.
+waddle-server::characterization_bind fresh_bind_returns_requested_full_jid_and_registers_route_and_user_actor
+waddle-server::characterization_bind bind_without_resource_assigns_server_generated_ws_resource
+waddle-server::characterization_bind second_bind_on_bound_stream_is_refused_not_authorized_and_keeps_first_binding
+waddle-server::characterization_bind rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer
+waddle-server::characterization_bind rebind_after_clean_close_binds_without_conflict
+waddle-server::characterization_bind concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other
+waddle-server::characterization_bind concurrent_first_binds_serialize_node_wide_behind_parked_user_claim_acquire
+waddle-server::characterization_bind slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_constraint
+waddle-server::characterization_bind register_then_unregister_behind_a_busy_user_actor_retains_retry_and_serves_later_binds
