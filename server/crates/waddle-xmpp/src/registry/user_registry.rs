@@ -39,16 +39,14 @@ use crate::ownership::{
 /// pending child unregister and then issue its own child register ask.
 pub const CHILD_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Bound convergence retry work to keep one registry mailbox turn within the
-/// caller budgets that drive janitor sweeps. Each pending-unregister retry can
-/// spend a full [`CHILD_ACTOR_TIMEOUT`] on a wedged child actor, so processing
-/// more than two in one turn would exceed the server reaper's 5-second ask
-/// timeout before any other registry work can run.
+/// Limit how much convergence work one registry mailbox turn attempts.
+/// Each pending-unregister retry has separate admission and reply budgets of
+/// [`CHILD_ACTOR_TIMEOUT`], so even this batch can exceed the janitor's
+/// 5-second reply timeout. A timed-out caller does not cancel an admitted
+/// registry turn; unresolved work is retained for a later retry.
 const CONVERGENCE_RETRY_BATCH_LIMIT: usize = 2;
-/// Durable claim releases talk to the clustered claim store, so they need a
-/// much shorter cutoff than the child-actor timeout. Two pending-unregister
-/// retries plus two timed-out releases still fit within the janitor's
-/// 5-second ask budget.
+/// Durable claim releases talk to the clustered claim store, so bound each
+/// attempt independently with a shorter cutoff than child-actor operations.
 const CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Upper bound on waiting for stale-retirement force-detach
