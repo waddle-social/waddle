@@ -1,9 +1,9 @@
 package social.waddle.android.flutter
 
 import android.content.Intent
-import android.net.Uri
 import android.view.DragEvent
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -177,7 +177,7 @@ class FlutterBridge(
                 null
             }
             "link.open" -> {
-                val uri = Uri.parse(args.requiredString("url"))
+                val uri = args.requiredString("url").toUri()
                 require(uri.scheme == "https" || uri.scheme == "http") { "An HTTP URL is required" }
                 activity.startActivity(Intent(Intent.ACTION_VIEW, uri))
                 null
@@ -360,7 +360,7 @@ class FlutterBridge(
         scope.launch { login.uiState.collect { emit("login", loginSnapshot(it)) } }
         scope.launch {
             login.openVerificationUrl.collect { url ->
-                val uri = Uri.parse(url)
+                val uri = url.toUri()
                 if (uri.scheme == "https" || uri.scheme == "http") {
                     CustomTabsIntent.Builder().build().launchUrl(activity, uri)
                 }

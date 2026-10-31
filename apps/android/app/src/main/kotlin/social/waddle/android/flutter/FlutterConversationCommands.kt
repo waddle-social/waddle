@@ -1,9 +1,9 @@
 package social.waddle.android.flutter
 
 import android.content.Intent
-import android.net.Uri
 import android.view.DragEvent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -234,7 +234,7 @@ internal class FlutterConversationCommands(
                 if (file.encrypted != null) {
                     check(graph.encryptedAttachmentOpener.open(file)) { "Unable to open file" }
                 } else {
-                    val uri = Uri.parse(file.url)
+                    val uri = file.url.toUri()
                     require(uri.scheme == "https" || uri.scheme == "http") {
                         "Unsupported file URL"
                     }
@@ -249,7 +249,7 @@ internal class FlutterConversationCommands(
         if (data != null) {
             return contentInsertion.insertBytes(data, args.requiredString("mimeType"), vm)
         }
-        return contentInsertion.insert(Uri.parse(args.requiredString("uri")), vm)
+        return contentInsertion.insert(args.requiredString("uri").toUri(), vm)
     }
 
     private suspend fun queryCommand(method: String, args: Map<String, Any?>): Any? {
