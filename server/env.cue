@@ -139,6 +139,24 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
+		// The codec has its own workspace and must be checked without adding it
+		// to production tests, dependency graphs, or publishing task lists.
+		authzIdCodec: {
+			mode:        "expanded"
+			derivePaths: true
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
+			}
+			tasks: [_t.checkAuthzIdCodec]
+		}
 		default: {
 			mode: "expanded"
 			when: {
@@ -204,6 +222,61 @@ schema.#Project & {
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
+		}
+		// Native PostgreSQL characterization is independent of image publishing.
+		roomChildContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.roomChildContractPostgres]
+		}
+		// Test-only native experiment: do not add these inputs to the image
+		// publishing pipeline or its deployment-revision authority.
+		federationGrantFence: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		// Native SQL subscriber-capture characterization; no publishing task.
+		spaceFanoutContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token": "write"
+				contents:   "read"
+			}
+			tasks: [_t.spaceFanoutContractPostgres]
 		}
 		namespaceRustChecks: {
 			mode:        "expanded"
@@ -275,6 +348,59 @@ schema.#Project & {
 	}
 
 	tasks: {
+		roomChildContractPostgres: schema.#Task & {
+			// Provision an isolated native database and require the dedicated
+			// tests; an absent prerequisite must fail this lane.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/room-child/run-native.sh"]
+			inputs: list.Concat([_nixInputs, ["experiments/room-child/**"]])
+		}
+		federationGrantFenceProof: schema.#Task & {
+			// This native experiment needs a live checkout, Nix, /proc and
+			// isolated local PostgreSQL and SpiceDB processes; it cannot run
+			// inside the Nix build sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/grant-fence/run-native.sh"]
+			inputs: [
+				"experiments/grant-fence/**",
+				"../flake.lock",
+				"../flake.nix",
+				"rust-toolchain.toml",
+			]
+		}
+
+		checkAuthzIdCodec: schema.#Task & {
+			// Cargo needs the host cache; the inherited Nix runtime supplies Rust
+			// from rust-toolchain.toml. No production build or publishing task.
+			hermetic: false
+			command:  "bash"
+			args: ["-euo", "pipefail", "-c", """
+				cd experiments/authz-id-codec
+				cargo test --locked
+				cargo clippy --all-targets --locked -- -D warnings
+				cargo fmt --check
+				"""]
+			inputs: [
+				"experiments/authz-id-codec/**",
+				"rust-toolchain.toml",
+				".cargo/**",
+				"../flake.nix",
+				"../flake.lock",
+				"../cuenv.lock",
+				"../env.cue",
+				"../ci/contributors/*.cue",
+			]
+		}
+
+		spaceFanoutContractPostgres: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/space-fanout/run-native.sh"]
+			inputs: list.Concat([_nixInputs, [".cargo/**", "experiments/space-fanout/**"]])
+		}
+
 		checkCiDrift: schema.#Task & {
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
@@ -310,6 +436,9 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -317,6 +446,10 @@ schema.#Project & {
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
 				"../ci/contributors/*.cue",
+				"../scripts/integration-ci*",
+				"../scripts/test_integration_ci_project.py",
+				"../scripts/test_cuenv_bootstrap.py",
+				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
 				"../ci/cache-benchmark/**",
