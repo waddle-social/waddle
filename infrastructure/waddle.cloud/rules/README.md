@@ -137,7 +137,9 @@ from `server/crates/waddle-server/src/clustering/alert_metric_contract.json`:
 each `(name, unit)` must translate to exactly its `prometheus_name`, and no
 spelling listed in `unexported_rule_spellings` may appear. A unit test in
 `clustering/metrics.rs` binds that fixture to the exported instruments, and
-`server/crates/waddle-server/tests/clustering_alert_metric_contract.rs` fails
-when a rule reads a `waddle_clustering_*` series without a fixture entry, so
-renaming an instrument or changing its unit breaks a test before the alert
-goes silent.
+`tests/push_otlp_contract.py` checks the Prometheus-parsed selectors of every
+loaded Mimir rule against the fixture, and requires each contracted alert to
+read its exported series. Broad or regex metric-name selectors fail this check:
+all rules must use exact metric names so an uncontracted clustering series
+cannot be hidden inside a selector. Renaming an instrument or changing its
+unit breaks a CI check before the alert goes silent.

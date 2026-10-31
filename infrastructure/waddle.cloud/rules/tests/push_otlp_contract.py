@@ -15,11 +15,15 @@ import json
 import pathlib
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.dont_write_bytecode = True
+from alert_metric_contract import exercise_parser_controls, validate_rule_contract
 
 
 def read_json(url, payload=None):
@@ -74,6 +78,33 @@ def run(prometheus):
                         if time.monotonic() >= deadline:
                             raise RuntimeError("Prometheus startup exceeded 15 seconds")
                         time.sleep(0.1)
+                # Use the loaded rule set and Prometheus's parser rather than
+                # tokenizing YAML or PromQL: literals, comments and label names
+                # are not evidence that a rule reads a metric.
+                def parse_query(expression):
+                    url = base + "/api/v1/parse_query?" + urllib.parse.urlencode({"query": expression})
+                    result = read_json(url)
+                    if result.get("status") != "success" or not isinstance(result.get("data"), dict):
+                        raise AssertionError(f"unexpected PromQL parser response: {result}")
+                    return result["data"]
+
+                expected_files = {rule_path.name for rule_path in rule_paths}
+                deadline = time.monotonic() + 10
+                while True:
+                    result = read_json(base + "/api/v1/rules")
+                    if result.get("status") != "success" or not isinstance(result.get("data", {}).get("groups"), list):
+                        raise AssertionError(f"unexpected rules response: {result}")
+                    groups = result["data"]["groups"]
+                    loaded_files = {pathlib.Path(group["file"]).name for group in groups}
+                    if loaded_files == expected_files:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(f"rule files not loaded: expected={sorted(expected_files)} actual={sorted(loaded_files)}")
+                    time.sleep(0.1)
+                exercise_parser_controls(parse_query)
+                validate_rule_contract(groups, cluster_contract, parse_query)
+                print("PASS clustering alert selectors match the metric contract")
+
                 timestamp = time.time_ns()
                 metrics = []
                 expected = {}

@@ -720,9 +720,8 @@ mod tests {
     }
 
     /// One clustering instrument a Mimir alert rule reads, from the fixture
-    /// shared with `tests/clustering_alert_metric_contract.rs` (rules scan)
-    /// and `infrastructure/waddle.cloud/rules/tests/push_otlp_contract.py`
-    /// (real OTLP→Prometheus translation of `(name, unit)`).
+    /// shared with `infrastructure/waddle.cloud/rules/tests/push_otlp_contract.py`
+    /// (PromQL selector checks and real OTLP→Prometheus name translation).
     #[derive(serde::Deserialize)]
     struct AlertMetricContract {
         name: String,
