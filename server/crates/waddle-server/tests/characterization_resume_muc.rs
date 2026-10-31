@@ -588,6 +588,7 @@ mod seams {
     const BOB_PHONE: &str = "bob@localhost/phone";
     /// Failure detector for the concurrent peer; it stops long before this.
     const PEER_MESSAGE_LIMIT: u32 = 2_000;
+    const PEER_SENTINEL_ID: &str = "peer-delivery-sentinel";
 
     /// The hold seam's events file, in a directory the caller keeps alive.
     fn events_file(directory: &tempfile::TempDir) -> std::path::PathBuf {
@@ -649,6 +650,112 @@ mod seams {
         format!("peer-{sequence}")
     }
 
+    /// Keep every frame through a distinct message sent on the peer's same
+    /// delivery lane. Seeing the last data ID alone would miss a duplicate or
+    /// late replay queued behind it; a ping on bob's inbound stream does not
+    /// drain that outbound lane either.
+    #[derive(Debug, Default)]
+    struct PeerDeliveryTranscript {
+        received: Vec<(String, bool)>,
+    }
+
+    impl PeerDeliveryTranscript {
+        fn record(&mut self, element: &Element) -> Result<bool, &'static str> {
+            if !element.is("message", JABBER_CLIENT) {
+                return Err("only peer messages may follow <resumed/>");
+            }
+            let id = element.attr("id").ok_or("peer message needs an ID")?;
+            let replayed = match element.get_child("delay", NS_DELAY) {
+                Some(delay) if delay.attr("from") == Some(DOMAIN) => true,
+                Some(_) => return Err("replay stamp must identify this server"),
+                None => false,
+            };
+            self.received.push((id.to_owned(), replayed));
+            Ok(id == PEER_SENTINEL_ID)
+        }
+
+        fn verify(&self, last_sent: u32) -> Result<(), &'static str> {
+            let Some(((id, replayed), data)) = self.received.split_last() else {
+                return Err("missing delivery sentinel");
+            };
+            if id != PEER_SENTINEL_ID || *replayed {
+                return Err("the transcript must end with the live delivery sentinel");
+            }
+            let first_live = data
+                .iter()
+                .position(|(_, replayed)| !replayed)
+                .ok_or("a live data frame must follow the replay")?;
+            if first_live < 3 {
+                return Err("m1–m3 must be replayed");
+            }
+            if data[first_live..].iter().any(|(_, replayed)| *replayed) {
+                return Err("no replayed frame may follow the first live one");
+            }
+            let ids: Vec<&str> = data.iter().map(|(id, _)| id.as_str()).collect();
+            let expected: Vec<String> = (1..=last_sent).map(peer_message_id).collect();
+            if ids != expected {
+                return Err("every data ID must arrive exactly once, in send order");
+            }
+            Ok(())
+        }
+    }
+
+    /// Exercise the same recording/termination path as the wire test, with a
+    /// deterministic transcript that would fool a collector stopping at peer-5.
+    fn mutated_peer_transcript(
+        extra_before_sentinel: Option<(u32, bool)>,
+    ) -> PeerDeliveryTranscript {
+        let mut frames: Vec<(String, bool)> = (1..=5)
+            .map(|sequence| (peer_message_id(sequence), sequence <= 3))
+            .collect();
+        if let Some((sequence, replayed)) = extra_before_sentinel {
+            frames.push((peer_message_id(sequence), replayed));
+        }
+        frames.push((PEER_SENTINEL_ID.to_owned(), false));
+        let mut transcript = PeerDeliveryTranscript::default();
+        for (id, replayed) in frames {
+            let mut message = Message::new(None);
+            message.id = Some(Id(id));
+            message.type_ = MessageType::Chat;
+            if replayed {
+                message.payloads.push(
+                    Element::builder("delay", NS_DELAY)
+                        .attr(minidom::rxml::xml_ncname!("from").to_owned(), DOMAIN)
+                        .attr(
+                            minidom::rxml::xml_ncname!("stamp").to_owned(),
+                            "2026-10-31T00:00:00Z",
+                        )
+                        .build(),
+                );
+            }
+            if transcript.record(&message.into()).expect("peer message") {
+                break;
+            }
+        }
+        transcript
+    }
+
+    #[test]
+    fn peer_delivery_oracle_accepts_complete_replay_then_live_transcript() {
+        assert_eq!(mutated_peer_transcript(None).verify(5), Ok(()));
+    }
+
+    #[test]
+    fn peer_delivery_oracle_rejects_duplicate_final_data_before_sentinel() {
+        assert_eq!(
+            mutated_peer_transcript(Some((5, false))).verify(5),
+            Err("every data ID must arrive exactly once, in send order")
+        );
+    }
+
+    #[test]
+    fn peer_delivery_oracle_rejects_replay_after_final_data_before_sentinel() {
+        assert_eq!(
+            mutated_peer_transcript(Some((3, true))).verify(5),
+            Err("no replayed frame may follow the first live one")
+        );
+    }
+
     /// XEP-0198 §5 replay versus live delivery with a peer delivering to the
     /// resuming full JID before, during and after the resume.
     ///
@@ -661,7 +768,9 @@ mod seams {
     /// replay (live-written m1–m3 plus whatever the peer sent while detached)
     /// is a contiguous prefix, and the live frames all follow it. Only peer
     /// messages may follow `<resumed/>`, so the releasing stanza was a live
-    /// peer message.
+    /// peer message. After the peer stops and its final pacing ping completes,
+    /// a distinct sentinel from alice traverses the same full-JID delivery
+    /// lane, so all data frames before that sentinel belong to the assertion.
     #[tokio::test]
     async fn sm_replay_precedes_live_with_concurrently_delivering_peer() {
         let directory = tempfile::tempdir().expect("database directory");
@@ -716,42 +825,22 @@ mod seams {
         );
         assert_eq!(response.attr("h"), Some("0"));
         stop.send(true).expect("peer is running");
-        let (alice, last_sent) = peer.await.expect("peer task");
+        let (mut alice, last_sent) = peer.await.expect("peer task");
+        send_chat(&mut alice, &bob_jid, PEER_SENTINEL_ID).await;
 
-        let last_id = peer_message_id(last_sent);
-        let mut received = Vec::new();
+        let mut transcript = PeerDeliveryTranscript::default();
         loop {
             let element = recv_skipping_ack_requests(&mut resumed).await;
-            assert!(
-                element.is("message", JABBER_CLIENT),
-                "only peer messages after <resumed/>: {element:?}"
-            );
-            let id = element.attr("id").expect("message id").to_owned();
-            let replayed = match replay_delay_from(&element) {
-                Some(from) => {
-                    assert_eq!(from, DOMAIN, "replay stamp");
-                    true
-                }
-                None => false,
-            };
-            let done = id == last_id;
-            received.push((id, replayed));
-            if done {
+            if transcript
+                .record(&element)
+                .unwrap_or_else(|reason| panic!("{reason}: {element:?}"))
+            {
                 break;
             }
         }
-        let ids: Vec<&str> = received.iter().map(|(id, _)| id.as_str()).collect();
-        let expected: Vec<String> = (1..=last_sent).map(peer_message_id).collect();
-        assert_eq!(ids, expected, "exactly once, in send order");
-        let first_live = received
-            .iter()
-            .position(|(_, replayed)| !replayed)
-            .expect("a live frame follows the replay (the peer sends until <resumed/> arrives)");
-        assert!(first_live >= 3, "m1–m3 are replayed: {received:?}");
-        assert!(
-            received[first_live..].iter().all(|(_, replayed)| !replayed),
-            "no replayed frame after the first live one: {received:?}"
-        );
+        transcript
+            .verify(last_sent)
+            .unwrap_or_else(|reason| panic!("{reason}: {transcript:?}"));
         assert_held_once_then_released(&events, "sm-resumed");
         resumed.close().await.expect("resumed stream closes");
         alice.close().await.expect("alice closes");
