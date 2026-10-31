@@ -97,6 +97,24 @@ class DiscoveryContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify()
 
+    def test_continuing_independent_builds_is_scoped_to_android_pr(self):
+        config = self.metadata["instances"]["chat"]
+        config["ci"]["pipelines"]["pullRequest"]["continueOnError"] = True
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.summary["projects"][0].update(name="waddle-android", path="apps/android")
+        self.metadata["instances"]["apps/android"] = self.metadata["instances"].pop("chat")
+        config["name"] = "waddle-android"
+        result = module.verify_project(self.summary, self.metadata, self.root / "apps/android", "pullRequest")
+        self.assertEqual(result["task_names"], ["verify"])
+        config["ci"]["pipelines"]["deviceTests"] = copy.deepcopy(config["ci"]["pipelines"]["pullRequest"])
+        with self.assertRaises(ValueError):
+            module.verify_project(self.summary, self.metadata, self.root / "apps/android", "deviceTests")
+        for invalid in (1, "true", None):
+            config["ci"]["pipelines"]["pullRequest"]["continueOnError"] = invalid
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                module.verify_project(self.summary, self.metadata, self.root / "apps/android", "pullRequest")
+
 
 class ReportContracts(unittest.TestCase):
     def setUp(self):
@@ -106,6 +124,17 @@ class ReportContracts(unittest.TestCase):
 
     def verify(self, report):
         module.verify_report(report, self.result, "/fixture", self.context, "0.63.0", 10, 13)
+
+    def test_android_apk_success_cannot_hide_an_independent_check_failure(self):
+        self.result["task_names"] = ["lint", "build"]
+        self.report["tasks"] = [
+            {"name": "lint", "status": "failed", "exit_code": 1},
+            {"name": "build", "status": "success", "exit_code": 0},
+        ]
+        for status in ("failed", "success"):
+            self.report["status"] = status
+            with self.subTest(pipeline_status=status), self.assertRaises(ValueError):
+                self.verify(self.report)
 
     def test_exact_report_and_invalid_reports(self):
         self.verify(self.report)

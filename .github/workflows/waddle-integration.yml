@@ -150,6 +150,18 @@ jobs:
           GITHUB_REF_NAME: "${{ github.ref_name }}"
           WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
           WADDLE_CI_HEAD_SHA: "${{ github.sha }}"
+      - name: Upload Android APK (success)
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: waddle_android_pullrequest-waddle-android-apk
+          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
+          retention-days: 7
+      - name: Link Android APK download (success)
+        if: success()
+        run: bash scripts/android-apk-summary.sh
       - name: Upload Android test failure reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -158,6 +170,18 @@ jobs:
           name: waddle_android_pullrequest-android-test-failure-reports
           path: "apps/android/app/build/outputs/roborazzi/\napps/android/app/build/reports/roborazzi/\napps/android/app/build/test-results/\napps/android/app/build/reports/tests/"
           retention-days: 3
+      - name: Upload Android APK (failure)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: waddle_android_pullrequest-waddle-android-apk
+          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
+          retention-days: 7
+      - name: Link Android APK download (failure)
+        if: failure()
+        run: bash scripts/android-apk-summary.sh
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_android_pullrequest == 'true' }}"
