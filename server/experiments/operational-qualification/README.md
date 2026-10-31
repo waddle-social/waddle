@@ -3,10 +3,13 @@
 This standalone, unpublished experiment implements the first offline slice of
 #2046 W1.8b: validate typed workload and local-isolation declarations, expand
 deterministic proposals, and account for supplied observations. It has its own
-workspace and lockfile and no production consumers. It contains no network
-client, server launcher, credential
-handling, provisioning, process signalling, fault injection, or execution
-adapter. The examples contain synthetic observations, not measured evidence.
+workspace and lockfile and no production consumers. The offline Rust CLI remains
+networkless: it contains no network client, server launcher, credential handling,
+provisioning, process signalling, fault injection, or execution adapter. The
+separate [build-only guest artifact](PROBE-ARTIFACT.md) contains fixed future-only
+UDP loopback and no-route socket checks. It is compiled and inspected without
+running its PID 1 or booting a guest. The examples contain synthetic observations,
+not measured evidence.
 
 ## Commands
 
@@ -208,3 +211,16 @@ of the required integration aggregate: fork pull requests do not receive this
 push check in the base repository, and merge-group execution depends on the
 workflow being present in the candidate. Hosted execution remains separate
 evidence from the local results.
+
+That workflow also compiles and runs only the guest's pure model fixtures and
+tests its archive/ELF inspector. It compiles the guest source to an object without
+executing it; the independent static-link reproducibility test requires the
+pinned musl compiler and is skipped in this workflow. This CI uses its installed
+C compiler and establishes no pinned-kernel build, guest runtime, or host
+isolation evidence. A separate job in the same non-publishing workflow is
+configured to install the repository-pinned Determinate Nix action, build the
+actual artifact from `flake.lock`, run every static compiler fixture, inspect the
+archive, and repeat the derivation with Nix's deterministic-output check. It also
+runs on lock changes. Hosted execution of these new steps remains unverified.
+The standalone pinned build and its limitations are described in
+[PROBE-ARTIFACT.md](PROBE-ARTIFACT.md).
