@@ -2,6 +2,7 @@
 
 mod authority;
 mod model;
+mod multi_edge;
 mod proof;
 mod provenance;
 mod recovery;

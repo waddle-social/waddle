@@ -65,6 +65,7 @@ pub struct Work {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum WorkerRequest {
     Guard(Work),
+    MultiEdge(crate::multi_edge::Work),
     Recovery(crate::recovery::RecoveryWork),
     WriteProxy(crate::recovery::ProxyWork),
 }
