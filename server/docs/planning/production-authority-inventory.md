@@ -2,6 +2,9 @@
 
 Status: source inventory for #2047 F0; **production closure is not established**.
 Reviewed source baseline: `db6e5338170d71391b69bc80e57626eb13072365`.
+Post-baseline drift was manually reviewed through target main
+`a020a79c588a297fe8ff90418f8bc74cbf15b676`; the original baseline and its
+limits remain unchanged.
 The companion [source manifest](authority-inventory.json) binds the selected
 references to exact lines and whole-file SHA-256 values. This inventory adds no
 runtime behavior, authorization gate, schema, migration, CI job or activation.
@@ -37,10 +40,10 @@ or legacy projection the canonical authority.
 ## Writer and policy-input map
 
 **W1 — Graph backend and schema (concrete).** The permission actor owns a private
-SpiceDB backend. [Lifecycle backend selection](../../crates/waddle-server/src/server/lifecycle.rs#L105) chooses it from server
+SpiceDB backend. [Lifecycle backend selection](../../crates/waddle-server/src/server/lifecycle.rs#L114) chooses it from server
 configuration, except for the explicit missing-SpiceDB + enabled fixed-test-account
 branch; [that branch](../../crates/waddle-server/src/server/fixed_account.rs#L16) uses the local backend. Lifecycle also asks
-[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L116). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L32),
+[EnsureSchema](../../crates/waddle-server/src/server/lifecycle.rs#L125). The backend [writes the schema](../../crates/waddle-server/src/permissions/spicedb.rs#L32),
 [creates](../../crates/waddle-server/src/permissions/spicedb.rs#L64), [deletes](../../crates/waddle-server/src/permissions/spicedb.rs#L165), [replaces a relation family](../../crates/waddle-server/src/permissions/spicedb.rs#L79), and
 [conditionally swaps a family for rollback](../../crates/waddle-server/src/permissions/spicedb.rs#L106). Each RPC has its own external
 transaction/ACK. These methods return unit/status rather than a durable F0
@@ -51,7 +54,7 @@ revision. The [local test backend](../../crates/waddle-server/src/permissions/ac
 separate implementations; do not infer SpiceDB behavior from their tests. E1.
 
 **W2 — Startup/account reconciliation and topology (concrete, configuration-dependent).**
-[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1036) invokes account reconciliation behind its
+[WebSocket-state startup](../../crates/waddle-server/src/server/http.rs#L1057) invokes account reconciliation behind its
 lineage gate. [Provisioning](../../crates/waddle-server/src/server/bootstrap_membership.rs#L86) and [reconciliation](../../crates/waddle-server/src/server/bootstrap_membership.rs#L120) write
 server owner/member tuples from account identity and configured owner localparts.
 The existing-account wrapper logs a reconciliation failure; the batch is not one
@@ -189,7 +192,15 @@ The [actor-owned replay guard](../../crates/waddle-server/src/ingress/room_manif
 through inner acceptance so caller timeout cannot release ownership prematurely;
 the inner sink owns canonical rows. It is not a single F0 authorization-journal
 transaction. Existing [lock order](../../crates/waddle-server/src/ingress_uow/mod.rs#L3) is epoch → exact claim → fenced
-child rows. Cluster manifest activation remains dark in this source. E8/E9.
+child rows. On the immediate, non-planning fallback, the existing
+[pre-fanout ownership check](../../crates/waddle-server/src/server/routes/interpret/room_dispatch.rs#L131)
+now retries within a fixed budget and
+[bounces on backend uncertainty](../../crates/waddle-server/src/server/routes/interpret/room_dispatch.rs#L471)
+without fanout or actor demotion. That is an exact room-ownership availability
+backstop, not a new grant writer, grant store or cross-store authorization
+revision. Authenticated planned groupchat continues to assert the room claim in
+the ingress transaction. Cluster manifest activation remains dark in this
+source. E8/E9.
 
 ## Existing evidence and its limits
 
@@ -203,16 +214,18 @@ backend, common snapshots, race ordering or production closure.
 | E2 | [seed_owners_on_node_overrides_existing_outcast](../../crates/waddle-server/src/spaces_pubsub_seed.rs#L164) | The intentional seed override; in-memory PubSub test, no concurrent restart/revoke proof. |
 | E3 | [rollback_keeps_affiliation_committed_by_a_later_owner](../../crates/waddle-server/src/server/routes/websocket/handlers/iq/muc_admin.rs#L3284) | Conditional rollback behavior in the test fixture; not cross-store atomicity or F0 writer closure. |
 | E4 | [database_deliverable_subscribers_excludes_outcast](../../crates/waddle-server/src/pubsub/tests.rs#L997) | Storage filtering; no post-capture fanout guarantee. |
-| E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3190), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4952) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
+| E5 | [items authorization before backfill](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L3190), [repair only projected parent](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L4867) | Selected repair gates/selection; not all mutation interleavings or authority choice. |
 | E6 | [members-only join requires explicit affiliation](../../crates/waddle-server/src/server/routes/websocket/tests/muc.rs#L1145), [MAM denies non-member](../../crates/waddle-server/src/server/routes/websocket/tests/iq.rs#L5378) | Current action-specific entry semantics; test state uses local fixtures, not an inherited graph fence. |
 | E7 | [durable channel/Space users excluding outcasts](../../crates/waddle-server/src/server/durable_membership_tests.rs#L101) | Membership-source derivation; local permission actor, not a common snapshot. |
 | E8 | [stale admission but preserved accepted children](../../crates/waddle-server/src/ingress/xep0045_room_manifest_tests.rs#L486) | The current accepted-manifest contract; not a new revocation policy. |
-| E9 | [claim update blocked through commit](../../crates/waddle-server/src/ingress_uow/tests.rs#L543) | Claim lock lifetime when actually executed against PostgreSQL. [The fixture returns None without WADDLE_TEST_POSTGRES_URL](../../crates/waddle-server/src/ingress_uow/tests.rs#L1630), so source presence/aggregate success is not native execution evidence. |
+| E9 | [claim update blocked through commit](../../crates/waddle-server/src/ingress_uow/tests.rs#L543) | Claim lock lifetime when actually executed against PostgreSQL. [The fixture call](../../crates/waddle-server/src/ingress_uow/tests.rs#L1631) returns `None` without `WADDLE_TEST_POSTGRES_URL` in optional local mode, but panics when `WADDLE_TEST_REQUIRE_POSTGRES=1`; source presence or aggregate success outside required mode is not native execution evidence. |
 
-Later isolated #2050/#2051/#2052/#2057/#2059/#2060/#2061 work is not present at this
-baseline and is not silently imported as production evidence. Their leaf,
-accepted-child, lost-response, fixture, parent-move and finite multi-edge results
-must be assessed at their own exact heads and do not prove this inventory closed.
+Later isolated #2050/#2051/#2052/#2057/#2059/#2060/#2061 work was not present at
+this baseline. Some of its characterization and fixture sources are now present
+on target main, but are not silently promoted to production evidence. Their
+leaf, accepted-child, lost-response, fixture, parent-move and finite multi-edge
+results must be assessed at their own exact heads and do not prove this
+inventory closed.
 
 ## Manual drift check and safe next proof
 
@@ -230,6 +243,77 @@ Whole-file hashes and matched line numbers deliberately cause benign churn;
 review changed findings and anchors before refreshing them. No CI/publisher hook
 or production dependency invokes this checker. The manifest is reviewed evidence,
 not an authenticated runtime attestation or an automatically maintained call graph.
+
+The original source review remains based at
+`db6e5338170d71391b69bc80e57626eb13072365`. The selected fingerprints, anchors
+and lexical snapshot were refreshed only after manually reviewing their delta
+through target main `746765db0c3fdcd37d5e0505cde5b9e44b5d5a2b`:
+
+- #2058 changed `server/http.rs` filesystem operations to async equivalents and
+  released database guards before canonicalization. It did not change the
+  reconciliation writer, its lineage gate, acknowledgement or error behavior.
+  The same call moved from line 1036 to 1038, so its reviewed file fingerprint,
+  anchor and documentation link were refreshed.
+- The raw scan gained 21 records. Nineteen are confined to
+  `recovery_room_child_contract_tests.rs`, `room_subject.rs` tests and the
+  `space_fanout_postgres` test fixture/storage adapter. The other two are
+  comments in `muc_durable/implementation.rs` and `room_dispatch.rs` that name
+  the already-existing `assert_room_claim` ingress boundary. Six unchanged
+  records moved because tests and modules gained lines. No known-token
+  production invocation was added or removed.
+- #2079 changed the existing immediate room pre-fanout ownership check from
+  fail-open on backend error to bounded retry and fail-closed bounce without
+  demotion, as recorded in S5. It did not add a host-grant writer, storage plane
+  or canonical authorization decision.
+- #2054's [foreign Carbons control guard](../../../docs/planning/remote-carbons-2047.md)
+  is local routing policy: it rejects unsupported remote targets without
+  authenticating or contacting a peer and does not alter grant authority. The
+  merged [host-grant](host-grant-authority-2047.md),
+  [S2S handshake](s2s-handshake-2047.md) and
+  [verifier](s2s-verifier-2047.md) documents remain proposed designs with their
+  implementation and activation gates intact. They add no runtime remote
+  authority or federation readiness.
+
+No new production grant writer, grant store or acceptance authority was found
+in this target-main delta. This is a selected drift review, not proof that
+unknown vocabulary, external writers or unreviewed paths do not exist.
+
+The selected evidence was refreshed again after reviewing the subsequent delta
+through target main `a020a79c588a297fe8ff90418f8bc74cbf15b676`:
+
+- #2051, #2057, #2059, #2060 and #2061 add isolated characterization,
+  recovery, fixture and finite-fence tests. The raw scan gained 15 records:
+  every added match is in #2060's test-only parent-move harness or delegating
+  storage adapter. They exercise existing production implementations but add
+  no production caller or authority writer.
+- Three selected PostgreSQL tests now obtain their mandatory database URL
+  through `require_test_postgres_url`; this changes prerequisite enforcement,
+  not the tested permission/PubSub operations. #2091 only changes telemetry
+  assertions in selected MUC tests. The #2087 live-stanza queue seam is compiled
+  only with `test-support`.
+- #2082, #2085 and #2109 change liveness and bounded shutdown. Their edits
+  move the lifecycle/startup anchors but leave backend
+  selection, `EnsureSchema`, account reconciliation and their acknowledgement
+  behavior unchanged.
+- #2063 and #2064 reject unsupported foreign discovery/session controls, while
+  #2070 forwards replies only to local full JIDs. These destination/routing
+  guards neither authenticate a federation peer nor create a grant writer,
+  grant store or canonical application-authorization decision.
+- #2078 serializes owner-side remote-resource state updates per exact
+  registration through a bounded FIFO; `Unavailable` and late completion remain
+  possible. #2093 makes unregister-mirror ACK mean mailbox admission/custody,
+  retains retry ownership and does not claim child completion.
+- #2086 adds bounded node-identity retirement writes after an ordinary stop
+  during re-registration. A timeout remains an unknown write outcome. This
+  changes cluster-ownership lifecycle, not application-grant authority.
+- #2088, #2089 and #2105 add characterization/qualification contracts. #2103
+  raises the single SQLite resume-checkpoint transaction-acquisition bound from
+  100 ms to 1 s while admission remains owned; it does not add a retry. None of
+  these changes the selected grant writers or sinks.
+
+No new production grant writer, grant store or acceptance authority was found
+in this second target-main delta. This remains a selected static review: new
+vocabulary, external writers and unreviewed files can still escape it.
 
 Unknown spellings/aliases, new code outside the roots, external writers and changes
 to unmatched unreviewed files can escape detection. An explicit passing negative
