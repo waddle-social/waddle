@@ -65,7 +65,8 @@ been configured for this separate package; Google Play push is not advertised.
 
 ## Development
 
-Use the repository's pinned Rust/Nix toolchain and Flutter 3.47 (Dart 3.13),
+Enter `nix develop .#flutter` from the repository root for this app's independent
+toolchain. It includes Flutter 3.47 (Dart 3.13), the repository's pinned Rust,
 JDK 21, CMake and Ninja. Android builds use NDK `28.2.13676358` and Android API 26
 or newer. The SDK setup helper writes only this application's local configuration.
 

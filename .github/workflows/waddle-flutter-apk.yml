@@ -79,59 +79,59 @@ jobs:
       - id: tools
         name: Verify pinned Flutter and Rust toolchains
         run: |
-          nix develop . --command flutter --version
-          nix develop . --command rustc --version
-          nix develop . --command wasm-pack --version
-          nix develop . --command actionlint -shellcheck= -pyflakes= .github/workflows/waddle-flutter-apk.yml
-          nix develop . --command cmake --version
-          nix develop . --command ninja --version
+          nix develop .#flutter --command flutter --version
+          nix develop .#flutter --command rustc --version
+          nix develop .#flutter --command wasm-pack --version
+          nix develop .#flutter --command actionlint -shellcheck= -pyflakes= .github/workflows/waddle-flutter-apk.yml
+          nix develop .#flutter --command cmake --version
+          nix develop .#flutter --command ninja --version
       - id: sdk
         name: Provision standalone Android SDK
-        run: nix develop . --command bash scripts/setup-flutter-android.sh
+        run: nix develop .#flutter --command bash scripts/setup-flutter-android.sh
       - id: pub
         name: Resolve locked Flutter dependencies
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         working-directory: apps/flutter
-        run: nix develop ../.. --command flutter pub get --enforce-lockfile
+        run: nix develop ../..#flutter --command flutter pub get --enforce-lockfile
       - id: rust
         name: Rust formatting, warnings and unit tests
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: nix develop . --command bash scripts/flutter-ci.sh rust
+        run: nix develop .#flutter --command bash scripts/flutter-ci.sh rust
       - id: host
         name: Build direct Rust host library
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: nix develop . --command bash scripts/build-flutter-rust.sh --host
+        run: nix develop .#flutter --command bash scripts/build-flutter-rust.sh --host
       - id: analyze
         name: Flutter formatting and analysis
         if: ${{ !cancelled() && steps.pub.outcome == 'success' }}
-        run: nix develop . --command bash scripts/flutter-ci.sh analyze
+        run: nix develop .#flutter --command bash scripts/flutter-ci.sh analyze
       - id: tests
         name: Flutter tests and rendered design evidence
         if: ${{ !cancelled() && steps.pub.outcome == 'success' && steps.host.outcome == 'success' }}
-        run: nix develop . --command bash scripts/flutter-ci.sh test
+        run: nix develop .#flutter --command bash scripts/flutter-ci.sh test
       # Keep artifact production independent of lint/test outcomes, while those
       # failed steps still make the job (and aggregate integration lane) fail.
       - id: native
         name: Build direct Rust Android libraries for both ABIs
         if: ${{ !cancelled() && steps.sdk.outcome == 'success' && steps.pub.outcome == 'success' }}
-        run: nix develop . --command bash scripts/build-flutter-rust.sh --android
+        run: nix develop .#flutter --command bash scripts/build-flutter-rust.sh --android
       - id: apk
         name: Build independent Flutter debug APK
         if: ${{ !cancelled() && steps.native.outcome == 'success' && steps.pub.outcome == 'success' }}
-        run: nix develop . --command bash scripts/flutter-ci.sh apk
+        run: nix develop .#flutter --command bash scripts/flutter-ci.sh apk
       - id: wasm
         name: Build Rust browser JS and WASM together
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: nix develop . --command bash scripts/build-flutter-rust.sh --web
+        run: nix develop .#flutter --command bash scripts/build-flutter-rust.sh --web
       - id: web
         name: Build standalone Flutter web app
         if: ${{ !cancelled() && steps.wasm.outcome == 'success' && steps.pub.outcome == 'success' }}
-        run: nix develop . --command bash scripts/flutter-ci.sh web
+        run: nix develop .#flutter --command bash scripts/flutter-ci.sh web
       - id: browser
         name: Exercise actual Rust WASM in Chromium and verify browser contracts
         if: ${{ !cancelled() && steps.wasm.outcome == 'success' }}
         run: |
-          nix develop . --command env WADDLE_REQUIRE_WASM_ARTIFACT=1 WADDLE_REQUIRE_BROWSER_CONTRACT=1 bun test ./apps/flutter/test/transport/wasm_loader_test.cjs ./apps/flutter/test/transport/wasm_artifact_test.cjs ./apps/flutter/test/transport/wasm_browser_test.cjs
+          nix develop .#flutter --command env WADDLE_REQUIRE_WASM_ARTIFACT=1 WADDLE_REQUIRE_BROWSER_CONTRACT=1 bun test ./apps/flutter/test/transport/wasm_loader_test.cjs ./apps/flutter/test/transport/wasm_artifact_test.cjs ./apps/flutter/test/transport/wasm_browser_test.cjs
       - id: smoke
         name: Launch the production Flutter app and Rust ABI on Android
         if: ${{ !cancelled() && steps.apk.outcome == 'success' }}
@@ -139,7 +139,7 @@ jobs:
         run: |
           test -e /dev/kvm
           sudo chmod 666 /dev/kvm
-          nix develop . --command bash scripts/flutter-device-smoke.sh
+          nix develop .#flutter --command bash scripts/flutter-device-smoke.sh
       - id: apk_artifact
         name: Upload standalone Flutter APK
         if: ${{ always() && hashFiles('apps/flutter/build/artifacts/waddle-flutter.apk') != '' }}
