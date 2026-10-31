@@ -9,6 +9,8 @@ name: waddle-server-rustTests
       - .github/workflows/hestia-cache-gc.yml/**
       - .github/workflows/waddle-ci-cache-benchmark.yml
       - .github/workflows/waddle-ci-cache-benchmark.yml/**
+      - .github/workflows/waddle-integration.yml
+      - .github/workflows/waddle-integration.yml/**
       - .github/workflows/waddle-server-*.yml
       - .github/workflows/waddle-server-rusttests.yml
       - apps/apple/**/Tests/**
@@ -45,8 +47,13 @@ name: waddle-server-rustTests
       - scripts/*cache-benchmark*
       - scripts/ci-timings.py
       - scripts/ci-timings.py/**
+      - scripts/integration-ci*
       - scripts/sync-rust-tests.sh
       - scripts/sync-rust-tests.sh/**
+      - scripts/test_cuenv_bootstrap.py
+      - scripts/test_cuenv_bootstrap.py/**
+      - scripts/test_integration_ci_project.py
+      - scripts/test_integration_ci_project.py/**
       - server/**/env.cue
       - server/.config/nextest.toml
       - server/.config/nextest.toml/**
@@ -105,6 +112,8 @@ name: waddle-server-rustTests
       - server/scripts/test_check_required_tests.py/**
       - server/scripts/test_check_test_postgres_env.py
       - server/scripts/test_check_test_postgres_env.py/**
+      - server/scripts/test_default_publish_graph.py
+      - server/scripts/test_default_publish_graph.py/**
       - server/scripts/test_nextest_archive_transfer.py
       - server/scripts/test_nextest_archive_transfer.py/**
       - server/scripts/test_observer_release.py

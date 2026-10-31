@@ -17,7 +17,7 @@ function createAdmin(xmpp: MucAdminWasmClient) {
   const errors: XmppErrorEvent[] = [];
   const admin = new MucAdmin({
     requireConnectedXmpp: async () => xmpp,
-    roomJidForChannel: (channelId) => `${channelId}@muc.example.com`,
+    roomJidForChannel: (channelId, roomJid) => roomJid ?? `${channelId}@muc.example.com`,
     emitError: (event) => errors.push(event),
   });
   return { admin, errors };

@@ -60,14 +60,21 @@ mod dispatch;
 mod frame_parsing;
 mod ingress_authority;
 mod iq;
+mod iq_destination_support;
 mod keyed_detach_drain;
 mod messages;
 mod misc;
 mod muc;
 mod registration;
+mod rfc3921_session_destination;
+mod rfc6121_iq_reply;
 mod send;
+mod space_fanout_postgres;
 mod stream_features;
+mod xep0030_discovery_destination;
 mod xep0045_reconnect_contract;
+mod xep0199_ping;
+mod xep0280_carbons_destination;
 
 /// One stable `OccupancySessionGeneration` per simulated connection, keyed by
 /// the test's `WebSocketState` and full JID, so test joins, presence updates

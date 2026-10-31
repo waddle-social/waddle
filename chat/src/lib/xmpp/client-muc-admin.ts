@@ -82,7 +82,7 @@ export type MucAdminWasmClient = {
 
 type MucAdminDeps = {
   requireConnectedXmpp: () => Promise<MucAdminWasmClient>;
-  roomJidForChannel: (channelId: string) => string;
+  roomJidForChannel: (channelId: string, roomJid?: string) => string;
   emitError: (event: XmppErrorEvent) => void;
 };
 
@@ -91,7 +91,7 @@ export class MucAdmin {
 
   async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> {
     const xmpp = await this.deps.requireConnectedXmpp();
-    const roomJid = options?.roomJid ?? this.deps.roomJidForChannel(channelId);
+    const roomJid = this.deps.roomJidForChannel(channelId, options?.roomJid);
     const listMembers = xmpp.list_room_members
       ? async (affiliation: "owner" | "admin" | "member" | "outcast") => await xmpp.list_room_members?.(roomJid, affiliation)
       : null;
@@ -110,7 +110,7 @@ export class MucAdmin {
   async listRoomBots(channelId: string, options?: ListRoomMembersOptions): Promise<RoomBotSummary[]> {
     const xmpp = await this.deps.requireConnectedXmpp();
     if (!xmpp.list_room_bots) throw new Error("missing list_room_bots");
-    const bots = await xmpp.list_room_bots(options?.roomJid ?? this.deps.roomJidForChannel(channelId));
+    const bots = await xmpp.list_room_bots(this.deps.roomJidForChannel(channelId, options?.roomJid));
     return (bots ?? []).filter((bot) => bot.jid).map((bot) => ({ jid: bot.jid, name: bot.name || jidLocalpart(bot.jid) }));
   }
 

@@ -35,3 +35,6 @@ mod tests;
 
 mod implementation;
 pub use implementation::XmppStateMachine;
+
+#[cfg(test)]
+mod xep0191_tests;

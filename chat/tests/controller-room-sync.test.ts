@@ -196,6 +196,49 @@ describe("useRoomSync selectChannelByRoomJid", () => {
     h.scope.stop();
   });
 
+  test("a foreign room with a known localpart cannot select or load the local room", async () => {
+    const h = makeHarness();
+    h.channels.value = [{ id: "general", name: "General", jid: "general@muc.example.test" }];
+
+    await h.roomSync.selectChannelByRoomJid("general@rooms.other.example.test");
+
+    expect(h.activeChannelId.value).toBeNull();
+    expect(h.roomSync.pendingChannelRoomJidSelection.value).toBeNull();
+    expect(h.loadMessages).not.toHaveBeenCalled();
+    expect(h.reloadChannelMembers).not.toHaveBeenCalled();
+    expect(h.rememberRoomJidForChannel).not.toHaveBeenCalled();
+    h.scope.stop();
+  });
+
+  test("a discovered custom-service room keeps its exact destination", async () => {
+    const h = makeHarness();
+    const roomJid = "general@rooms.other.example.test";
+    h.channels.value = [{ id: "general", name: "Other General", jid: roomJid }];
+
+    await h.roomSync.selectChannelByRoomJid(roomJid);
+
+    expect(h.activeChannelId.value).toBe("general");
+    expect(h.rememberRoomJidForChannel).toHaveBeenCalledWith("general", roomJid);
+    expect(h.rememberChannelRoomJid).toHaveBeenCalledWith("general", roomJid);
+    expect(h.clearChannelActivity).toHaveBeenCalledWith(roomJid);
+    expect(h.loadMessages).toHaveBeenCalledTimes(1);
+    h.scope.stop();
+  });
+
+  test("colliding explicit room bindings cannot load either destination", async () => {
+    const h = makeHarness();
+    const roomJids = ["general@rooms.a.example.test", "general@rooms.b.example.test"];
+    h.channels.value = roomJids.map((jid) => ({ id: "general", name: jid, jid }));
+
+    for (const jid of roomJids) await h.roomSync.selectChannelByRoomJid(jid);
+
+    expect(h.activeChannelId.value).toBeNull();
+    expect(h.loadMessages).not.toHaveBeenCalled();
+    expect(h.reloadChannelMembers).not.toHaveBeenCalled();
+    expect(h.rememberRoomJidForChannel).not.toHaveBeenCalled();
+    h.scope.stop();
+  });
+
   test("selects immediately when the room maps to a known channel", async () => {
     const h = makeHarness();
     h.channels.value = [{ id: "general", name: "General" } as ChannelSummary];

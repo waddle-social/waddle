@@ -25,11 +25,13 @@
 //! recipient that enabled resumable stream management and does not ack
 //! therefore holds exactly [`SEND_WINDOW_HIGH`] written stanzas plus a full
 //! [`OUTBOUND_CAPACITY`]-slot channel, and the next producer finds the channel
-//! full. That is production behaviour, so no test seam is needed. Two
+//! full. That exhaustion uses production behaviour. The cycle test adds a
+//! `test-support` observer of the real IQ send future to prove both waits
+//! entered before recovery ACKs; it changes no scheduling or deadline. Two
 //! production deadlines bound the state and every test stays inside them: the
 //! loop-level pause closes the stream into detach-for-resume 15 s after the
 //! pause began (`SEND_WINDOW_LOOP_PAUSE_DEADLINE`), and a stanza handler is
-//! cancelled after [`STANZA_HANDLER_WEDGE_TIMEOUT`].
+//! cancelled after 15 s (`STANZA_HANDLER_WEDGE_TIMEOUT`).
 //!
 //! # Timing
 //!
@@ -38,9 +40,9 @@
 //! stanza under test) and XEP-0199 barriers. Timeouts are failure detectors,
 //! except [`HOLD_WINDOW`], an absence window showing a stream is held: on a
 //! very slow host it can pass when it should fail, never the reverse. Two
-//! tests take real time because no seam exists for what they pin: the cycle
+//! tests take real time because they retain the production deadlines: the cycle
 //! test waits for the 15 s wedge backstop, and the dropped-DM test waits for
-//! the ingress authority's background redelivery (about 60 s observed).
+//! the ingress authority's background redelivery across maintenance passes.
 
 use std::time::Duration;
 
@@ -68,12 +70,8 @@ const ACCOUNTS: [(&str, &str); 3] = [ALICE, BOB, CAROL];
 const RECV: Duration = Duration::from_secs(10);
 /// Absence window that shows a stream is held behind a blocked handler.
 const HOLD_WINDOW: Duration = Duration::from_secs(1);
-/// Failure detector for an answer that only the 15 s wedge backstop releases.
-const WEDGE_BUDGET: Duration = Duration::from_secs(45);
 /// Failure detector for the ingress authority's background redelivery.
 const INGRESS_REDELIVERY_BUDGET: Duration = Duration::from_secs(180);
-/// `STANZA_HANDLER_WEDGE_TIMEOUT` (`server/routes/websocket/frame_backstop.rs:73`).
-const STANZA_HANDLER_WEDGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// XEP-0198 send-window high watermark: 80% of the unacked queue
 /// (`send_window_high_for`, `waddle-xmpp/src/stream_management/state.rs`).
 const SEND_WINDOW_HIGH: usize = DEFAULT_MAX_UNACKED_QUEUE_SIZE / 5 * 4;
@@ -92,8 +90,6 @@ enum Frame {
     Presence(Box<Presence>),
     /// XEP-0198 §4 `<r/>`.
     SmRequest,
-    /// XEP-0198 §4 `<a h='…'/>`.
-    SmAck(usize),
 }
 
 fn classify(element: Element) -> Frame {
@@ -101,11 +97,7 @@ fn classify(element: Element) -> Frame {
         return Frame::SmRequest;
     }
     if element.is("a", SM_NS) {
-        let handled = element
-            .attr("h")
-            .and_then(|handled| handled.parse().ok())
-            .unwrap_or_else(|| panic!("XEP-0198 <a/> without a numeric h: {element:?}"));
-        return Frame::SmAck(handled);
+        panic!("unexpected XEP-0198 <a/> outside the cycle reader: {element:?}");
     }
     if element.is("iq", ns::DEFAULT_NS) {
         return Frame::Iq(Box::new(Iq::try_from(element).expect("typed IQ")));
@@ -142,30 +134,60 @@ fn into_presence(frame: Frame, expected: &str, who: &str) -> Presence {
     }
 }
 
-/// Next XMPP frame within `budget`. WebSocket control frames are skipped;
+#[derive(Debug, thiserror::Error)]
+enum FrameReadError {
+    #[error("timeout waiting for an XMPP frame")]
+    Timeout,
+    #[error("{0}")]
+    Transport(String),
+    #[error("unparseable frame: {0}")]
+    Xml(String),
+    #[error("unexpected WebSocket frame: {0:?}")]
+    Unexpected(raw_ws::Message),
+    #[error("WebSocket stream ended")]
+    Ended,
+}
+
+/// Next XMPP element within `budget`. WebSocket control frames are skipped;
 /// polling lets the client answer the server's RFC 7395 keepalive pings.
-async fn next_frame(client: &mut WsXmppClient, budget: Duration) -> Result<Frame, String> {
-    let deadline = Instant::now() + budget;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match client.recv_raw_timeout(remaining).await? {
-            Some(raw_ws::Message::Text(text)) => {
-                let element: Element = text
-                    .as_str()
-                    .parse()
-                    .map_err(|error| format!("unparseable frame {}: {error}", text.as_str()))?;
-                return Ok(classify(element));
+async fn next_element(
+    client: &mut WsXmppClient,
+    budget: Duration,
+) -> Result<Element, FrameReadError> {
+    // Own the deadline so an absence check cannot mistake a String-based
+    // harness transport error for a timeout. The inner deadline is longer.
+    tokio::time::timeout(budget, async {
+        loop {
+            match client
+                .recv_raw_timeout(budget + RECV)
+                .await
+                .map_err(FrameReadError::Transport)?
+            {
+                Some(raw_ws::Message::Text(text)) => {
+                    return text.as_str().parse().map_err(|error| {
+                        FrameReadError::Xml(format!("{}: {error}", text.as_str()))
+                    });
+                }
+                Some(raw_ws::Message::Ping(_) | raw_ws::Message::Pong(_)) => {}
+                Some(other) => return Err(FrameReadError::Unexpected(other)),
+                None => return Err(FrameReadError::Ended),
             }
-            Some(raw_ws::Message::Ping(_) | raw_ws::Message::Pong(_)) => {}
-            Some(other) => return Err(format!("unexpected WebSocket frame: {other:?}")),
-            None => return Err("WebSocket stream ended".to_owned()),
         }
-    }
+    })
+    .await
+    .map_err(|_| FrameReadError::Timeout)?
+}
+
+async fn next_frame(client: &mut WsXmppClient, budget: Duration) -> Result<Frame, FrameReadError> {
+    next_element(client, budget).await.map(classify)
 }
 
 /// Next frame other than the server's XEP-0198 `<r/>` requests, which it
 /// sends every few stanzas and on a send-window pause.
-async fn next_stanza_within(client: &mut WsXmppClient, budget: Duration) -> Result<Frame, String> {
+async fn next_stanza_within(
+    client: &mut WsXmppClient,
+    budget: Duration,
+) -> Result<Frame, FrameReadError> {
     let deadline = Instant::now() + budget;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -262,10 +284,6 @@ fn sm_enable_resumable() -> Element {
         .build()
 }
 
-fn sm_request() -> Element {
-    Element::builder("r", SM_NS).build()
-}
-
 fn sm_ack(handled: usize) -> Element {
     Element::builder("a", SM_NS)
         .attr(
@@ -323,8 +341,12 @@ async fn assert_quiet_barrier(client: &mut WsXmppClient, id: &str, who: &str) {
 
 /// Shows that `client`'s stream is held: nothing arrives for [`HOLD_WINDOW`].
 async fn assert_held(client: &mut WsXmppClient, who: &str) {
-    if let Ok(frame) = next_frame(client, HOLD_WINDOW).await {
-        panic!("{who}'s stream must be held behind its blocked stanza, got {frame:?}");
+    match next_frame(client, HOLD_WINDOW).await {
+        Err(FrameReadError::Timeout) => {}
+        Err(error) => panic!("{who}: absence check failed: {error}"),
+        Ok(frame) => {
+            panic!("{who}'s stream must be held behind its blocked stanza, got {frame:?}");
+        }
     }
 }
 
@@ -577,8 +599,9 @@ async fn full_jid_chat_reaches_only_that_resource_and_an_unbound_resource_falls_
     assert_quiet_barrier(&mut alice, "alice-done", "alice").await;
 }
 
-/// RFC 6121 §8.5.2.1.1: a chat message to a bare JID goes to the available
-/// resources with the highest non-negative priority, all of them on a tie.
+/// Waddle's policy among the options RFC 6121 §8.5.2.1.1 permits: a chat
+/// message to a bare JID goes to the available resources with the highest
+/// non-negative priority, all of them on a tie.
 /// When every available resource has negative priority nothing is delivered
 /// live and the sender sees nothing; the message is stored (RFC 6121
 /// §8.5.2.2) and flushed with an XEP-0203 offline-storage stamp to the next
@@ -685,9 +708,9 @@ async fn chat_to_an_offline_account_is_stored_and_flushed_in_order_at_initial_pr
 /// - a get to a bound full JID is forwarded verbatim with `from` stamped;
 /// - a get to an unbound resource or to a resource of an unknown account is
 ///   answered with `service-unavailable`/`cancel` from that JID (RFC 6121
-///   §8.5.3.2.2 and §8.5.1), echoing the request payload;
+///   §8.5.3.2.3 and §8.5.1), echoing the request payload;
 /// - a ping to a bare JID is answered by the server on behalf of the account
-///   (RFC 6120 §10.5.4), with no `to`;
+///   (RFC 6120 §10.5.3.2), with no `to`;
 /// - a chat message to an unknown local account bounces with
 ///   `service-unavailable`/`cancel` (RFC 6121 §8.5.1).
 #[tokio::test]
@@ -773,52 +796,65 @@ async fn iq_to_full_jid_is_forwarded_or_bounced_and_unknown_accounts_bounce_serv
     expect_marker(&mut web, "web-marker", &alice_jid, &web_jid, "web").await;
 }
 
-/// A client's IQ `result` and `error` addressed to another client's full JID
-/// are dropped: the IQ dispatcher ignores every inbound result/error
-/// (`handlers/iq/dispatch.rs`, "Ignoring IQ result/error stanza"), so the
-/// requester never gets the answer RFC 6120 §8.2.3 requires. Proven by an
-/// in-stream marker from the same sender arriving first.
-///
-/// Characterizes current behaviour; changes with: no #2046 slice (reported
-/// in the W1.6b notes as a follow-up).
+/// RFC 6120 §8.2.3 / RFC 6121 §8.5.3.2.3: authenticated clients complete
+/// real full-JID requests with a result and an error. Both replies keep their
+/// IDs, payloads and destination, replace a forged `from` with the responder's
+/// bound JID, and arrive in send order before the responder's later marker.
+/// The responder receives no reply to either response. This pins #2070's
+/// forwarding behavior alongside the other local routing characterizations.
 #[tokio::test]
-async fn iq_result_and_error_from_one_client_to_another_are_not_routed() {
+async fn iq_result_and_error_from_one_client_to_another_are_routed_in_order_with_authentic_identity(
+) {
     let server = TestServer::start_with_extra_accounts(&ACCOUNTS);
     let (mut web, web_jid) = connect(&server, BOB, "web").await;
     let (mut alice, alice_jid) = connect(&server, ALICE, "desk").await;
+    let payload: Element = Ping.into();
 
-    send(&mut alice, ping(web_jid.clone(), "request-1")).await;
-    let frame = next_stanza(&mut web, "web").await;
-    assert_forwarded_ping(frame, "request-1", &alice_jid, &web_jid, "web");
+    let requests = [
+        ping(web_jid.clone(), "request-result"),
+        ping(web_jid.clone(), "request-error"),
+    ];
+    for request in &requests {
+        send(&mut alice, request.clone()).await;
+    }
+    for mut expected in requests {
+        *expected.from_mut() = Some(alice_jid.clone().into());
+        let frame = next_stanza(&mut web, "web").await;
+        assert_eq!(into_iq(frame, expected.id(), "web"), expected);
+    }
 
-    send(
-        &mut web,
+    let forged_from = full("carol@localhost/forged");
+    let replies = [
         Iq::Result {
-            from: None,
+            from: Some(forged_from.clone().into()),
             to: Some(alice_jid.clone().into()),
-            id: "request-1".to_owned(),
-            payload: None,
+            id: "request-result".to_owned(),
+            payload: Some(payload.clone()),
         },
-    )
-    .await;
-    send(
-        &mut web,
         Iq::Error {
-            from: None,
+            from: Some(forged_from.into()),
             to: Some(alice_jid.clone().into()),
-            id: "request-2".to_owned(),
+            id: "request-error".to_owned(),
             error: StanzaError::new(
                 ErrorType::Cancel,
                 DefinedCondition::FeatureNotImplemented,
                 "en",
                 "characterization",
             ),
-            payload: None,
+            payload: Some(payload),
         },
-    )
-    .await;
+    ];
+    for reply in &replies {
+        send(&mut web, reply.clone()).await;
+    }
     send_marker(&mut web, &alice_jid, "web-marker").await;
+    for mut expected in replies {
+        *expected.from_mut() = Some(web_jid.clone().into());
+        let frame = next_stanza(&mut alice, "alice").await;
+        assert_eq!(into_iq(frame, expected.id(), "alice"), expected);
+    }
     expect_marker(&mut alice, "web-marker", &web_jid, &alice_jid, "alice").await;
+    assert_quiet_barrier(&mut web, "web-after-replies", "web").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,8 +1041,12 @@ async fn presence_into_a_full_outbound_channel_holds_the_sender_stream_in_order(
 /// is not held. A later DM from the same sender to the recovered recipient is
 /// not delivered live either: a marker forwarded after it arrives first. All
 /// three DMs arrive later through the ingress authority's background
-/// redelivery (about 60 s after the drop observed), in send order, with
-/// recipient stanza-ids and without an XEP-0203 delay stamp.
+/// redelivery, in send order, with recipient stanza-ids and without an
+/// XEP-0203 delay stamp. Each row has a 60 s eligibility grace; the later DM
+/// can need a separate 27–33 s maintenance tick, so all three reads share one
+/// bounded redelivery deadline rather than assuming a short inter-message gap.
+/// The next recipient-side marker bounds the duplicate check; this does not
+/// establish that no duplicate can arrive in a future maintenance pass.
 ///
 /// Characterizes current behaviour; changes with: no #2046 slice row names
 /// this path. D2b-e convert producers that await capacity, and this one
@@ -1051,22 +1091,18 @@ async fn dm_into_a_full_outbound_channel_is_not_delivered_live_and_later_dms_wai
     .await;
 
     let mut redelivered = Vec::new();
-    for (index, (id, to)) in [
+    let redelivery_deadline = Instant::now() + INGRESS_REDELIVERY_BUDGET;
+    for (id, to) in [
         ("dm-to-full-while-full", Jid::from(web_jid.clone())),
         ("dm-to-bare-while-full", Jid::from(bob.clone())),
         ("dm-after-recovery", Jid::from(web_jid.clone())),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let budget = if index == 0 {
-            INGRESS_REDELIVERY_BUDGET
-        } else {
-            RECV
-        };
-        let frame = next_stanza_within(&mut web, budget)
-            .await
-            .unwrap_or_else(|error| panic!("web: redelivery of {id}: {error}"));
+    ] {
+        let frame = next_stanza_within(
+            &mut web,
+            redelivery_deadline.saturating_duration_since(Instant::now()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("web: redelivery of {id}: {error}"));
         let message = assert_chat(frame, id, &alice_jid, &to, "web");
         assert!(
             delays(&message).is_empty(),
@@ -1079,129 +1115,20 @@ async fn dm_into_a_full_outbound_channel_is_not_delivered_live_and_later_dms_wai
         redelivered.push(message);
     }
     assert_eq!(redelivered.len(), 3);
+    send_marker(&mut alice, &web_jid, "redelivery-complete-marker").await;
+    expect_marker(
+        &mut web,
+        "redelivery-complete-marker",
+        &alice_jid,
+        &web_jid,
+        "web",
+    )
+    .await;
     assert_quiet_barrier(&mut alice, "alice-after-redelivery", "alice").await;
 }
 
-// ---------------------------------------------------------------------------
-// Connection-to-connection wait cycle
-// ---------------------------------------------------------------------------
-
-fn cycle_id(owner: &str, index: usize) -> String {
-    format!("{owner}-{index}")
-}
-
-/// Two connections each forwarding an IQ into the other's full outbound
-/// channel. Each IQ forward awaits capacity inside its connection's turn, and
-/// neither connection drains its own channel during that turn, so the two
-/// waits form a cycle (DEC-3 "connection-to-connection channel waits").
-/// Clients acking the send window cannot break it, because neither
-/// connection reads its socket while blocked. Only the 15 s stanza-handler
-/// wedge backstop ends it, on both sides:
-///
-/// - each blocked IQ is cancelled after `STANZA_HANDLER_WEDGE_TIMEOUT` and
-///   answered with `resource-constraint`/`wait` from the peer's full JID and
-///   no `to` (`frame_backstop.rs`), and the peer never receives it;
-/// - XEP-0198 counts the cancelled IQ as handled (`<a h='1057'/>`);
-/// - the reply waits in the inline send-window pause until the client acks,
-///   then the 256 queued IQs from the peer follow in FIFO order.
-///
-/// No test seam shortens the backstop, so this test takes about 16 s.
-///
-/// Characterizes current behaviour; changes with D2d (#2046), which converts
-/// the IQ-forward producer that forms this cycle. The D2p row records the
-/// class-wide exit: after D2p and D2b-e no producer awaits a connection
-/// channel, and this test changes to pass without the wedge backstop.
-#[tokio::test]
-async fn mutual_full_outbound_channels_wedge_both_iq_forwarders_until_the_backstop() {
-    let server = TestServer::start_with_extra_accounts(&ACCOUNTS);
-    let (mut alice, alice_jid) = connect(&server, ALICE, "desk").await;
-    let (mut bob, bob_jid) = connect(&server, BOB, "web").await;
-    enable_resumable_sm(&mut alice, "alice").await;
-    enable_resumable_sm(&mut bob, "bob").await;
-
-    // Pause both send windows; each connection's loop stays free.
-    for index in 0..SEND_WINDOW_HIGH {
-        send(&mut alice, ping(bob_jid.clone(), &cycle_id("alice", index))).await;
-    }
-    for index in 0..SEND_WINDOW_HIGH {
-        let frame = next_stanza(&mut bob, "bob").await;
-        assert_forwarded_ping(
-            frame,
-            &cycle_id("alice", index),
-            &alice_jid,
-            &bob_jid,
-            "bob",
-        );
-    }
-    for index in 0..SEND_WINDOW_HIGH {
-        send(&mut bob, ping(alice_jid.clone(), &cycle_id("bob", index))).await;
-    }
-    for index in 0..SEND_WINDOW_HIGH {
-        let frame = next_stanza(&mut alice, "alice").await;
-        assert_forwarded_ping(
-            frame,
-            &cycle_id("bob", index),
-            &bob_jid,
-            &alice_jid,
-            "alice",
-        );
-    }
-
-    // Each side fills the other's channel, then blocks on one more.
-    let blocked = SEND_WINDOW_HIGH + OUTBOUND_CAPACITY;
-    let started = Instant::now();
-    for index in SEND_WINDOW_HIGH..=blocked {
-        send(&mut alice, ping(bob_jid.clone(), &cycle_id("alice", index))).await;
-    }
-    for index in SEND_WINDOW_HIGH..=blocked {
-        send(&mut bob, ping(alice_jid.clone(), &cycle_id("bob", index))).await;
-    }
-    // Answered only once the connection's loop is free again.
-    send(&mut alice, sm_request()).await;
-    send(&mut bob, sm_request()).await;
-
-    for (client, who) in [(&mut alice, "alice"), (&mut bob, "bob")] {
-        match next_stanza_within(client, WEDGE_BUDGET).await {
-            Ok(Frame::SmAck(handled)) => assert_eq!(
-                handled,
-                blocked + 1,
-                "{who}: the cancelled IQ counts as handled"
-            ),
-            other => panic!("{who}: expected the wedge-released <a/>, got {other:?}"),
-        }
-    }
-    assert!(
-        started.elapsed() >= STANZA_HANDLER_WEDGE_TIMEOUT,
-        "only the wedge backstop releases the cycle (took {:?})",
-        started.elapsed()
-    );
-
-    // Neither side's backstop reply is written until its client acks.
-    send(&mut alice, sm_ack(SEND_WINDOW_HIGH)).await;
-    send(&mut bob, sm_ack(SEND_WINDOW_HIGH)).await;
-    for (client, own, own_jid, peer, peer_jid) in [
-        (&mut alice, "alice", &alice_jid, "bob", &bob_jid),
-        (&mut bob, "bob", &bob_jid, "alice", &alice_jid),
-    ] {
-        let frame = next_stanza(client, own).await;
-        assert_iq_error(
-            frame,
-            &cycle_id(own, blocked),
-            peer_jid.clone().into(),
-            None,
-            ErrorType::Wait,
-            DefinedCondition::ResourceConstraint,
-            own,
-        );
-        for index in SEND_WINDOW_HIGH..blocked {
-            let frame = next_stanza(client, own).await;
-            assert_forwarded_ping(frame, &cycle_id(peer, index), peer_jid, own_jid, own);
-        }
-    }
-
-    // The peer's cancelled IQ was never enqueued: a later marker is next.
-    send_marker(&mut alice, &bob_jid, "alice-marker").await;
-    send_marker(&mut bob, &alice_jid, "bob-marker").await;
-    expect_marker(&mut bob, "alice-marker", &alice_jid, &bob_jid, "bob").await;
-    expect_marker(&mut alice, "bob-marker", &bob_jid, &alice_jid, "alice").await;
-}
+// The send observer exists only in test-support builds. The all-features
+// publish gate requires the cycle test by its exact name.
+#[cfg(feature = "test-support")]
+#[path = "characterization_routing/cycle.rs"]
+mod cycle;

@@ -155,6 +155,7 @@ export type ClientEvents = {
   sessionLifecycle: [event: SessionLifecycleEvent];
   catchupFailure: [failure: CatchupConversationFailure];
   roomAccessChanged: [event: RoomAccessChangedEvent];
+  roomIdAmbiguous: [channelId: string];
   // Observe-only telemetry hooks (multi-listener, error-isolated via
   // `emitSafe`). Includes the background-tab RESULT_CODE_HUNG health
   // hooks (see docs/planning/hung-tab-investigation.md); the client

@@ -263,6 +263,17 @@ pub(super) async fn handle_disco_items_iq(
             }
         };
 
+        if let Some(reply) = phase.bound_jid().and_then(|sender| {
+            super::remote_destination::remote_iq_error(
+                request_iq,
+                domain,
+                &state.deps.service_domains,
+                sender,
+            )
+        }) {
+            return vec![iq_to_xml(reply)];
+        }
+
         // XEP-0045 §6.6 (#1265 item 10): disco to an occupant JID.
         if let Some(error) = muc_occupant_disco::muc_occupant_disco_error(
             state,
