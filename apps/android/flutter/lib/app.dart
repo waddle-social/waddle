@@ -631,61 +631,10 @@ class _CommunityState extends State<_Community> with RestorationMixin {
   }
 
   Future<void> _createRoom() async {
-    final name = TextEditingController();
-    final description = TextEditingController();
-    var forum = false;
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('New room'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: name,
-                  autofocus: true,
-                  decoration: const InputDecoration(labelText: 'Room name'),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: description,
-                  decoration: const InputDecoration(labelText: 'Description'),
-                  maxLines: 3,
-                ),
-                SwitchListTile.adaptive(
-                  title: const Text('Forum'),
-                  subtitle: const Text('Organize conversations into threads'),
-                  value: forum,
-                  onChanged: (value) => update(() => forum = value),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (name.text.trim().isNotEmpty) {
-                  Navigator.pop(context, {
-                    'name': name.text.trim(),
-                    'description': description.text.trim(),
-                    'forum': forum,
-                  });
-                }
-              },
-              child: const Text('Create'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => const _CreateRoomDialog(),
     );
-    name.dispose();
-    description.dispose();
     if (result == null || !mounted) {
       return;
     }
@@ -1096,4 +1045,71 @@ class _CommunityState extends State<_Community> with RestorationMixin {
       ],
     );
   }
+}
+
+class _CreateRoomDialog extends StatefulWidget {
+  const _CreateRoomDialog();
+
+  @override
+  State<_CreateRoomDialog> createState() => _CreateRoomDialogState();
+}
+
+class _CreateRoomDialogState extends State<_CreateRoomDialog> {
+  final _name = TextEditingController();
+  final _description = TextEditingController();
+  bool _forum = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('New room'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _name,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Room name'),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _description,
+            decoration: const InputDecoration(labelText: 'Description'),
+            maxLines: 3,
+          ),
+          SwitchListTile.adaptive(
+            title: const Text('Forum'),
+            subtitle: const Text('Organize conversations into threads'),
+            value: _forum,
+            onChanged: (value) => setState(() => _forum = value),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () {
+          if (_name.text.trim().isNotEmpty) {
+            Navigator.pop(context, {
+              'name': _name.text.trim(),
+              'description': _description.text.trim(),
+              'forum': _forum,
+            });
+          }
+        },
+        child: const Text('Create'),
+      ),
+    ],
+  );
 }

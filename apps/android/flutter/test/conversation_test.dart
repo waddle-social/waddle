@@ -14,6 +14,9 @@ class _ConversationHarness {
       events: const Stream<dynamic>.empty(),
       commandInvoker: (method, arguments) async {
         commands.add((method, Map<String, dynamic>.from(arguments)));
+        if (responses.containsKey(method)) {
+          return responses[method];
+        }
         if (method == 'conversation.mentionSearch') {
           return [
             {'jid': 'alex@example.org', 'name': 'alex'},
@@ -29,9 +32,14 @@ class _ConversationHarness {
 
   late final WaddleBridge bridge;
   final commands = <(String, Map<String, dynamic>)>[];
+  final responses = <String, dynamic>{};
   final navigator = GlobalKey<NavigatorState>();
 
-  void snapshot({bool social = false, bool messages = false}) {
+  void snapshot({
+    bool social = false,
+    bool messages = false,
+    bool manageRoom = false,
+  }) {
     bridge.acceptEvent({
       'topic': 'preferences',
       'data': {'timeline': social ? 'social' : 'chat'},
@@ -43,6 +51,7 @@ class _ConversationHarness {
         'loading': false,
         'reachedStart': true,
         'newestFirst': social,
+        'canConfigure': manageRoom,
         'messages': messages
             ? [
                 {
@@ -256,6 +265,36 @@ void main() {
     },
   );
 
+  testWidgets('room form controllers remain valid through dialog dismissal', (
+    tester,
+  ) async {
+    final harness = _ConversationHarness()..snapshot(manageRoom: true);
+    harness.responses['room.config'] = {
+      'name': 'General',
+      'description': '',
+      'forum': false,
+      'pinPermission': 'admins_only',
+    };
+    await _mount(tester, harness);
+    await tester.tap(find.byTooltip('Conversation options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Room settings'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'Name',
+      ),
+      'Renamed',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(harness.calls('room.save').single['name'], 'Renamed');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('returning from a same-JID thread restores its parent owner', (
     tester,
   ) async {
@@ -282,8 +321,7 @@ void main() {
     expect(harness.calls('conversation.open').last['threadId'], 'root-message');
 
     harness.navigator.currentState!.pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
     expect(harness.calls('conversation.open').last['viewId'], parentId);
     expect(
       harness.calls('conversation.close'),
@@ -303,9 +341,21 @@ void main() {
     expect(harness.calls('conversation.attach').single['viewId'], viewId);
     harness.commands.clear();
 
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    for (final state in [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
     await tester.pump();
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    for (final state in [
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
     await tester.pump();
     expect(harness.calls('conversation.open'), isEmpty);
     expect(harness.calls('conversation.close'), isEmpty);

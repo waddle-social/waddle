@@ -101,10 +101,8 @@ void main() {
       bridge.consumeNavigation();
       await Future<void>.delayed(Duration.zero);
       expect(bridge.topic('navigate'), isEmpty);
-      expect(commands.single, (
-        'navigation.consume',
-        {'jid': 'room@example.org'},
-      ));
+      expect(commands.single.$1, 'navigation.consume');
+      expect(commands.single.$2, {'jid': 'room@example.org'});
     },
   );
 

@@ -109,7 +109,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.byType(ConversationScreen), findsOneWidget);
       final conversationState = tester.state(find.byType(ConversationScreen));
-      await tester.enterText(find.byType(TextField), 'Draft before folding');
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(ConversationScreen),
+          matching: find.byType(TextField),
+        ),
+        'Draft before folding',
+      );
       tester.view.physicalSize = const Size(1200, 900);
       await tester.pump();
       expect(
@@ -181,7 +187,10 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: WaddleShell(bridge: bridge)));
     await tester.tap(find.text('Continue with Community'));
     await tester.pump();
-    expect(commands, contains(('login.select', {'id': 'community'})));
+    expect(
+      commands.where((command) => command.$1 == 'login.select').single.$2,
+      {'id': 'community'},
+    );
   });
 
   testWidgets(
@@ -252,11 +261,8 @@ void main() {
       await tester.tap(find.widgetWithText(SwitchListTile, 'Wallpaper colors'));
       await tester.pump();
       expect(
-        commands,
-        contains((
-          'preferences.set',
-          {'key': 'wallpaperColors', 'value': true},
-        )),
+        commands.where((command) => command.$1 == 'preferences.set').single.$2,
+        {'key': 'wallpaperColors', 'value': true},
       );
     },
   );

@@ -2099,14 +2099,12 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Future<void> _search() async {
-    final query = TextEditingController();
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => _SearchSheet(
         title: 'Search messages',
-        controller: query,
         search: (value) async =>
             _maps(await _command('conversation.search', {'query': value})),
         tile: (context, result) => ListTile(
@@ -2115,7 +2113,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         ),
       ),
     );
-    query.dispose();
   }
 
   Future<void> _members() async {
@@ -2227,71 +2224,76 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
     final save = await showDialog<String>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('Room settings'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: name,
-                  decoration: const InputDecoration(labelText: 'Name'),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: description,
-                  maxLines: 3,
-                  decoration: const InputDecoration(labelText: 'Description'),
-                ),
-                const SizedBox(height: 16),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Forum room'),
-                  subtitle: const Text(
-                    'Organize the conversation around threads',
+      builder: (context) => _DialogControllers(
+        controllers: [name, description],
+        builder: (context) => StatefulBuilder(
+          builder: (context, update) => AlertDialog(
+            title: const Text('Room settings'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: name,
+                    decoration: const InputDecoration(labelText: 'Name'),
                   ),
-                  value: forum,
-                  onChanged: (value) => update(() => forum = value),
-                ),
-                DropdownButtonFormField<String>(
-                  initialValue: pinPermission,
-                  decoration: const InputDecoration(
-                    labelText: 'Who can pin messages',
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: description,
+                    maxLines: 3,
+                    decoration: const InputDecoration(labelText: 'Description'),
                   ),
-                  items: [
-                    for (final permission in ['admins_only', 'anyone'])
-                      DropdownMenuItem(
-                        value: permission,
-                        child: Text(
-                          permission == 'admins_only'
-                              ? 'Owners and admins'
-                              : 'Everyone',
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Forum room'),
+                    subtitle: const Text(
+                      'Organize the conversation around threads',
+                    ),
+                    value: forum,
+                    onChanged: (value) => update(() => forum = value),
+                  ),
+                  DropdownButtonFormField<String>(
+                    initialValue: pinPermission,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Who can pin messages',
+                    ),
+                    items: [
+                      for (final permission in ['admins_only', 'anyone'])
+                        DropdownMenuItem(
+                          value: permission,
+                          child: Text(
+                            permission == 'admins_only'
+                                ? 'Owners and admins'
+                                : 'Everyone',
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
-                  ],
-                  onChanged: (value) =>
-                      update(() => pinPermission = value ?? pinPermission),
-                ),
-                const SizedBox(height: 16),
-                TextButton.icon(
-                  onPressed: () => Navigator.pop(context, 'destroy'),
-                  icon: const Icon(Icons.delete_forever_outlined),
-                  label: const Text('Delete room'),
-                ),
-              ],
+                    ],
+                    onChanged: (value) =>
+                        update(() => pinPermission = value ?? pinPermission),
+                  ),
+                  const SizedBox(height: 16),
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(context, 'destroy'),
+                    icon: const Icon(Icons.delete_forever_outlined),
+                    label: const Text('Delete room'),
+                  ),
+                ],
+              ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, 'save'),
+                child: const Text('Save'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, 'save'),
-              child: const Text('Save'),
-            ),
-          ],
         ),
       ),
     );
@@ -2315,48 +2317,46 @@ class _ConversationScreenState extends State<ConversationScreen>
         Navigator.of(context).pop();
       }
     }
-    name.dispose();
-    description.dispose();
   }
 
   Future<void> _renameGroup() async {
     final name = TextEditingController(text: widget.title);
     final rename = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Rename group'),
-        content: TextField(
-          controller: name,
-          maxLength: 100,
-          decoration: const InputDecoration(labelText: 'Group name'),
+      builder: (context) => _DialogControllers(
+        controllers: [name],
+        builder: (context) => AlertDialog(
+          title: const Text('Rename group'),
+          content: TextField(
+            controller: name,
+            maxLength: 100,
+            decoration: const InputDecoration(labelText: 'Group name'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
     if (rename == true) {
       await _command('group.rename', {'name': name.text.trim()});
     }
-    name.dispose();
   }
 
   Future<void> _inviteGroup() async {
-    final query = TextEditingController();
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (sheetContext) => _SearchSheet(
         title: 'Find someone to invite',
-        controller: query,
         search: (value) async =>
             _maps(await _command('directory.search', {'query': value})),
         tile: (context, person) => ListTile(
@@ -2407,7 +2407,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         ),
       ),
     );
-    query.dispose();
   }
 
   Future<void> _profile(Map<String, dynamic> message) async {
@@ -2486,14 +2485,12 @@ class _ConversationScreenState extends State<ConversationScreen>
   }
 
   Future<void> _gifPicker() async {
-    final query = TextEditingController();
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => _SearchSheet(
         title: 'Find a GIF',
-        controller: query,
         search: (value) async =>
             _maps(await _command('gif.search', {'query': value})),
         tile: (context, gif) => ListTile(
@@ -2514,7 +2511,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         ),
       ),
     );
-    query.dispose();
   }
 
   Future<void> _stickerPicker() async {
@@ -2628,45 +2624,50 @@ class _ConversationScreenState extends State<ConversationScreen>
     final formKey = GlobalKey<FormState>();
     final create = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        title: const Text('Create sticker pack'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: name,
-                decoration: const InputDecoration(labelText: 'Pack name'),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Enter a name'
-                    : null,
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: summary,
-                decoration: const InputDecoration(labelText: 'Description'),
-              ),
-              const SizedBox(height: 16),
-              const Text('Choose the images for your pack on the next screen.'),
-            ],
+      builder: (context) => _DialogControllers(
+        controllers: [name, summary],
+        builder: (context) => AlertDialog(
+          scrollable: true,
+          title: const Text('Create sticker pack'),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Pack name'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Enter a name'
+                      : null,
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: summary,
+                  decoration: const InputDecoration(labelText: 'Description'),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Choose the images for your pack on the next screen.',
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (formKey.currentState?.validate() == true) {
+                  Navigator.pop(context, true);
+                }
+              },
+              child: const Text('Choose images'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState?.validate() == true) {
-                Navigator.pop(context, true);
-              }
-            },
-            child: const Text('Choose images'),
-          ),
-        ],
       ),
     );
     if (create == true) {
@@ -2675,8 +2676,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         'summary': summary.text.trim(),
       });
     }
-    name.dispose();
-    summary.dispose();
   }
 
   Future<void> _slashCommands() async {
@@ -2770,169 +2769,174 @@ class _ConversationScreenState extends State<ConversationScreen>
         .toList();
     final action = await showDialog<String>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: Text(_str(form['title'], 'Command')),
-          content: Form(
-            key: formKey,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_str(form['instructions']).isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(_str(form['instructions'])),
-                    ),
-                  if (notes.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(notes),
-                    ),
-                  for (final field in fields)
-                    if (field['type'] != 'hidden')
+      builder: (context) => _DialogControllers(
+        controllers: controllers.values.toList(),
+        builder: (context) => StatefulBuilder(
+          builder: (context, update) => AlertDialog(
+            title: Text(_str(form['title'], 'Command')),
+            content: Form(
+              key: formKey,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_str(form['instructions']).isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: Builder(
-                          builder: (context) {
-                            final type = _str(field['type']);
-                            final name = _str(field['name']);
-                            final controller = controllers[name]!;
-                            final label = _str(field['label'], name);
-                            final options = _maps(field['options']);
-                            if (type == 'fixed') {
-                              return Text(controller.text);
-                            }
-                            if (type == 'boolean') {
-                              return SwitchListTile(
-                                contentPadding: EdgeInsets.zero,
-                                title: Text(label),
-                                value:
-                                    controller.text == '1' ||
-                                    controller.text == 'true',
-                                onChanged: (value) => update(
-                                  () => controller.text = value ? '1' : '0',
-                                ),
-                              );
-                            }
-                            if (type == 'list_single' && options.isNotEmpty) {
-                              return DropdownButtonFormField<String>(
-                                initialValue:
-                                    options.any(
-                                      (option) =>
-                                          option['value'] == controller.text,
-                                    )
-                                    ? controller.text
-                                    : null,
-                                decoration: InputDecoration(labelText: label),
-                                isExpanded: true,
-                                items: [
-                                  for (final option in options)
-                                    DropdownMenuItem(
-                                      value: _str(option['value']),
-                                      child: Text(
-                                        _str(
-                                          option['label'],
-                                          _str(option['value']),
+                        child: Text(_str(form['instructions'])),
+                      ),
+                    if (notes.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Text(notes),
+                      ),
+                    for (final field in fields)
+                      if (field['type'] != 'hidden')
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: Builder(
+                            builder: (context) {
+                              final type = _str(field['type']);
+                              final name = _str(field['name']);
+                              final controller = controllers[name]!;
+                              final label = _str(field['label'], name);
+                              final options = _maps(field['options']);
+                              if (type == 'fixed') {
+                                return Text(controller.text);
+                              }
+                              if (type == 'boolean') {
+                                return SwitchListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  title: Text(label),
+                                  value:
+                                      controller.text == '1' ||
+                                      controller.text == 'true',
+                                  onChanged: (value) => update(
+                                    () => controller.text = value ? '1' : '0',
+                                  ),
+                                );
+                              }
+                              if (type == 'list_single' && options.isNotEmpty) {
+                                return DropdownButtonFormField<String>(
+                                  initialValue:
+                                      options.any(
+                                        (option) =>
+                                            option['value'] == controller.text,
+                                      )
+                                      ? controller.text
+                                      : null,
+                                  decoration: InputDecoration(labelText: label),
+                                  isExpanded: true,
+                                  items: [
+                                    for (final option in options)
+                                      DropdownMenuItem(
+                                        value: _str(option['value']),
+                                        child: Text(
+                                          _str(
+                                            option['label'],
+                                            _str(option['value']),
+                                          ),
                                         ),
                                       ),
+                                  ],
+                                  onChanged: (value) =>
+                                      controller.text = value ?? '',
+                                  validator: (value) =>
+                                      field['required'] == true &&
+                                          (value == null || value.isEmpty)
+                                      ? 'Choose a value'
+                                      : null,
+                                );
+                              }
+                              if (type == 'list_multi' && options.isNotEmpty) {
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      label,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelLarge,
                                     ),
-                                ],
-                                onChanged: (value) =>
-                                    controller.text = value ?? '',
+                                    for (final option in options)
+                                      CheckboxListTile(
+                                        contentPadding: EdgeInsets.zero,
+                                        title: Text(
+                                          _str(
+                                            option['label'],
+                                            _str(option['value']),
+                                          ),
+                                        ),
+                                        value: controller.text
+                                            .split('\n')
+                                            .contains(option['value']),
+                                        onChanged: (checked) => update(() {
+                                          final values = controller.text
+                                              .split('\n')
+                                              .where(
+                                                (value) => value.isNotEmpty,
+                                              )
+                                              .toSet();
+                                          if (checked == true) {
+                                            values.add(_str(option['value']));
+                                          } else {
+                                            values.remove(option['value']);
+                                          }
+                                          controller.text = values.join('\n');
+                                        }),
+                                      ),
+                                  ],
+                                );
+                              }
+                              return TextFormField(
+                                controller: controller,
+                                maxLines:
+                                    type == 'text_multi' || type == 'jid_multi'
+                                    ? 4
+                                    : 1,
+                                obscureText: type == 'text_private',
+                                decoration: InputDecoration(
+                                  labelText: label,
+                                  helperText: field['required'] == true
+                                      ? 'Required'
+                                      : null,
+                                ),
                                 validator: (value) =>
                                     field['required'] == true &&
-                                        (value == null || value.isEmpty)
-                                    ? 'Choose a value'
+                                        (value == null || value.trim().isEmpty)
+                                    ? 'Enter a value'
                                     : null,
                               );
-                            }
-                            if (type == 'list_multi' && options.isNotEmpty) {
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    label,
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.labelLarge,
-                                  ),
-                                  for (final option in options)
-                                    CheckboxListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      title: Text(
-                                        _str(
-                                          option['label'],
-                                          _str(option['value']),
-                                        ),
-                                      ),
-                                      value: controller.text
-                                          .split('\n')
-                                          .contains(option['value']),
-                                      onChanged: (checked) => update(() {
-                                        final values = controller.text
-                                            .split('\n')
-                                            .where((value) => value.isNotEmpty)
-                                            .toSet();
-                                        if (checked == true) {
-                                          values.add(_str(option['value']));
-                                        } else {
-                                          values.remove(option['value']);
-                                        }
-                                        controller.text = values.join('\n');
-                                      }),
-                                    ),
-                                ],
-                              );
-                            }
-                            return TextFormField(
-                              controller: controller,
-                              maxLines:
-                                  type == 'text_multi' || type == 'jid_multi'
-                                  ? 4
-                                  : 1,
-                              obscureText: type == 'text_private',
-                              decoration: InputDecoration(
-                                labelText: label,
-                                helperText: field['required'] == true
-                                    ? 'Required'
-                                    : null,
-                              ),
-                              validator: (value) =>
-                                  field['required'] == true &&
-                                      (value == null || value.trim().isEmpty)
-                                  ? 'Enter a value'
-                                  : null,
-                            );
-                          },
+                            },
+                          ),
                         ),
-                      ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, 'cancel'),
-              child: const Text('Cancel'),
-            ),
-            if (actions.contains('prev'))
+            actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context, 'prev'),
-                child: const Text('Previous'),
+                onPressed: () => Navigator.pop(context, 'cancel'),
+                child: const Text('Cancel'),
               ),
-            for (final action in actions.where(
-              (action) => action == 'next' || action == 'complete',
-            ))
-              FilledButton(
-                onPressed: () {
-                  if (formKey.currentState?.validate() == true) {
-                    Navigator.pop(context, action);
-                  }
-                },
-                child: Text(action == 'next' ? 'Next' : 'Submit'),
-              ),
-          ],
+              if (actions.contains('prev'))
+                TextButton(
+                  onPressed: () => Navigator.pop(context, 'prev'),
+                  child: const Text('Previous'),
+                ),
+              for (final action in actions.where(
+                (action) => action == 'next' || action == 'complete',
+              ))
+                FilledButton(
+                  onPressed: () {
+                    if (formKey.currentState?.validate() == true) {
+                      Navigator.pop(context, action);
+                    }
+                  },
+                  child: Text(action == 'next' ? 'Next' : 'Submit'),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -2949,9 +2953,6 @@ class _ConversationScreenState extends State<ConversationScreen>
           },
       ],
     });
-    for (final controller in controllers.values) {
-      controller.dispose();
-    }
     if (mounted && action != null && action != 'cancel' && next != null) {
       await _commandForm(next, command);
     }
@@ -2980,17 +2981,39 @@ class _ConversationScreenState extends State<ConversationScreen>
   );
 }
 
+/// Owns temporary form controllers until the dialog's exit transition finishes.
+/// Navigator.pop completes the caller's future before the route is unmounted.
+class _DialogControllers extends StatefulWidget {
+  const _DialogControllers({required this.controllers, required this.builder});
+  final List<TextEditingController> controllers;
+  final WidgetBuilder builder;
+
+  @override
+  State<_DialogControllers> createState() => _DialogControllersState();
+}
+
+class _DialogControllersState extends State<_DialogControllers> {
+  @override
+  void dispose() {
+    for (final controller in widget.controllers) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
+}
+
 /// Shared search presentation stays on the existing XMPP history/directory
 /// paths; it deliberately does not create an HTTP search client.
 class _SearchSheet extends StatefulWidget {
   const _SearchSheet({
     required this.title,
-    required this.controller,
     required this.search,
     required this.tile,
   });
   final String title;
-  final TextEditingController controller;
   final Future<List<Map<String, dynamic>>> Function(String query) search;
   final Widget Function(BuildContext context, Map<String, dynamic> result) tile;
   @override
@@ -2998,6 +3021,7 @@ class _SearchSheet extends StatefulWidget {
 }
 
 class _SearchSheetState extends State<_SearchSheet> {
+  final _controller = TextEditingController();
   List<Map<String, dynamic>> _results = [];
   bool _loading = false;
   bool _searched = false;
@@ -3033,6 +3057,12 @@ class _SearchSheetState extends State<_SearchSheet> {
   }
 
   @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => Padding(
     padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
     child: SafeArea(
@@ -3048,14 +3078,14 @@ class _SearchSheetState extends State<_SearchSheet> {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
               child: SearchBar(
-                controller: widget.controller,
+                controller: _controller,
                 hintText: widget.title,
                 autoFocus: true,
                 leading: const Icon(Icons.search),
                 trailing: [
                   IconButton(
                     tooltip: 'Search',
-                    onPressed: () => _search(widget.controller.text),
+                    onPressed: () => _search(_controller.text),
                     icon: const Icon(Icons.arrow_forward),
                   ),
                 ],

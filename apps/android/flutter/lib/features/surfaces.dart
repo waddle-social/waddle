@@ -876,31 +876,10 @@ class _PeopleScreenState extends State<PeopleScreen> {
   }
 
   Future<void> _createGroup() async {
-    final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New group message'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 80,
-          decoration: const InputDecoration(labelText: 'Group name (optional)'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
+      builder: (_) => const _GroupNameDialog(),
     );
-    // The dialog can retain its controller while its closing transition runs.
-    Future<void>.delayed(const Duration(milliseconds: 300), controller.dispose);
     if (name == null || !mounted) {
       return;
     }
@@ -1063,6 +1042,44 @@ class _PeopleScreenState extends State<PeopleScreen> {
         ),
       );
     },
+  );
+}
+
+class _GroupNameDialog extends StatefulWidget {
+  const _GroupNameDialog();
+
+  @override
+  State<_GroupNameDialog> createState() => _GroupNameDialogState();
+}
+
+class _GroupNameDialogState extends State<_GroupNameDialog> {
+  final _name = TextEditingController();
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('New group message'),
+    content: TextField(
+      controller: _name,
+      autofocus: true,
+      maxLength: 80,
+      decoration: const InputDecoration(labelText: 'Group name (optional)'),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _name.text.trim()),
+        child: const Text('Create'),
+      ),
+    ],
   );
 }
 
