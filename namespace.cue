@@ -15,6 +15,8 @@ let _serverRustInputs = [
 	"server/crates/**",
 	"server/extensions/**",
 	"server/vendor/**",
+	"server/experiments/native-fixture/**",
+	"server/experiments/grant-fence/Cargo.toml",
 	"server/scripts/**",
 	"server/wit/**",
 	"server/charts/waddle-server/**",
