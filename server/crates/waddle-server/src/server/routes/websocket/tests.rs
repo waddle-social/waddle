@@ -66,6 +66,7 @@ mod messages;
 mod misc;
 mod muc;
 mod registration;
+mod resume_checkpoint;
 mod rfc3921_session_destination;
 mod rfc6121_iq_reply;
 mod send;
