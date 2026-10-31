@@ -147,15 +147,12 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
-				// The Postgres + all-features shard lane (nixTestLocal) needs
-				// the privileged 32-core Namespace runner the PR rustTests
-				// workflow uses: the all-features compile peaks at ~10 GB and
-				// the four Nix-sandboxed shards take eight CPUs each. cuenv
-				// 0.57.3 has no per-task runner (task resources are never
-				// compiled) and keeps only the first label of a runner list,
-				// so the two-label runner is one expression for the whole
-				// pipeline, which runs only on main and manual dispatch.
-				runner: "${{ fromJSON('[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]') }}"
+				// cuenv has no per-task runner. nixTestLocal depends on the
+				// helper but not on itself, so it alone selects the privileged
+				// 32-core builder. Publish depends on both and keeps its normal
+				// profile. The JSON round trip permits optional needs lookups;
+				// CI checks the generated graph and its default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -322,6 +319,12 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					# checkCiDrift is itself a direct publication gate. Verify the
+					# generated runner selector and both other direct gates here,
+					# independently of the helper job whose edge is under test.
+					if ! python3 server/scripts/test_default_publish_graph.py; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -331,6 +334,7 @@ schema.#Project & {
 				"../ci/contributors/*.cue",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
+				"scripts/test_default_publish_graph.py",
 				"../ci/cache-benchmark/**",
 				"../scripts/*cache-benchmark*",
 				"../.github/workflows/waddle-ci-cache-benchmark.yml",
@@ -524,6 +528,7 @@ schema.#Project & {
 		nixTestLocal: schema.#Task & {
 			command: "timeout"
 			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
+			dependsOn: [tasks.ciHelperContracts]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false
@@ -1277,7 +1282,8 @@ schema.#Project & {
 				tasks.nixBuildImageStream,
 				tasks.nixBuildExtensionModules,
 				// No image ships unless the Postgres + all-features lane ran
-				// every required cluster test on this exact commit.
+				// every required cluster test on this exact commit. Keep both
+				// direct gates, even though the shard lane also needs helpers.
 				tasks.ciHelperContracts,
 				tasks.nixTestLocal,
 			]

@@ -105,6 +105,8 @@ name: waddle-server-rustTests
       - server/scripts/test_check_required_tests.py/**
       - server/scripts/test_check_test_postgres_env.py
       - server/scripts/test_check_test_postgres_env.py/**
+      - server/scripts/test_default_publish_graph.py
+      - server/scripts/test_default_publish_graph.py/**
       - server/scripts/test_nextest_archive_transfer.py
       - server/scripts/test_nextest_archive_transfer.py/**
       - server/scripts/test_observer_release.py
