@@ -8,8 +8,12 @@
 
 Companion execution note to [ADR-0017](./0017-horizontal-scaling-remote-actors.md), the
 [Phase 1 completion note](./0017-phase1-completion-authoritative-registration.md), and the
-[Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md). Status: **planned, not yet implemented**.
-Tracking: issue #1195 (ADR-0017 horizontal-scaling epic), which lists this phase's
+[Phase 2 plan](./0017-phase2-plan-libp2p-swarm.md). Status:
+**Phase 3 implemented** (landed on `main` ahead of the Phase 4 GA merge `b50f62da`,
+#1218, 2026-07-09; the as-landed notes and numbered deviations below are the record, and
+the XEP-0397 ISR item was later removed, see the banner above).
+Tracking: issue #1195 (ADR-0017 horizontal-scaling epic, since superseded by the
+distributed-actors roadmap #1664), which lists this phase's
 checkboxes verbatim as:
 
 - [ ] Epoch-fenced Postgres ownership claims
@@ -3247,6 +3251,15 @@ record the retained work.
     regression holds two old-actor dispatches at this boundary, publishes a
     successor, then proves both messages bounce with no archive or occupant
     reflection and the successor remains registered.
+    *Update (#2046 W1.4, 2026-10-30):* the `Err` branch no longer fails
+    open. `dispatch_to_room` retries it a bounded number of times, then bounces
+    the sender with a retryable `wait`/`<resource-constraint/>` error without
+    fan-out and without demotion. This backstop runs only on the immediate
+    (non-ingress) interpreter path, so in production only the
+    `handlers::message::handle_message` fallback reaches it. Authenticated
+    client groupchat and relayed room submissions are planned, and their room
+    claim is asserted inside the ingress transaction (`ingress/commit_room.rs`,
+    `ClaimRepository::assert_room_claim`).
 66. **FIX 2 (critical) — every durable-relevant `RoomActor` mutation
     handler now runs a two-stage gate: verify ownership BEFORE mutating,
     surface a non-ownership persist failure typed AFTER mutating.**

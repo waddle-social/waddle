@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
 import { useSessionAuth } from "@/auth/session";
+import { subscribeSessionChanges } from "@/auth/redirect-session";
 import { BrowserXmppClient } from "@/lib/xmpp-client";
 import { createXmppBootstrapCoordinator } from "@/lib/xmpp/bootstrap-coordinator";
 import { connectionStore } from "@/lib/connection-store";
@@ -21,6 +22,7 @@ const props = defineProps<{
 
 const auth = useSessionAuth(props.serverBaseUrl);
 let disposePageLifecycle: (() => void) | null = null;
+let disposeSessionChanges: (() => void) | null = null;
 const bootstrapCoordinator = createXmppBootstrapCoordinator(
   () => connectionStore.client,
   (client) => { connectionStore.client = client; },
@@ -30,13 +32,16 @@ function syncStoreFromAuth() {
   connectionStore.appState = auth.appState.value;
   connectionStore.session = auth.session.value;
   connectionStore.appError = auth.appError.value;
+  connectionStore.defaultServerUrl = auth.defaultServerUrl;
   connectionStore.activeServerUrl = auth.activeServerUrl.value;
   connectionStore.providers = auth.providers.value;
 }
 
 async function bootstrap() {
   const generation = bootstrapCoordinator.begin();
-  await auth.bootstrap();
+  const pending = auth.bootstrap();
+  syncStoreFromAuth();
+  await pending;
   if (!bootstrapCoordinator.isCurrent(generation)) return;
   syncStoreFromAuth();
 
@@ -81,7 +86,14 @@ connectionStore.login = async (serverUrl?: string, providerId?: string) => {
 };
 
 connectionStore.fetchProviders = async (serverUrl: string) => {
-  await auth.fetchProviders(serverUrl);
+  const pending = auth.fetchProviders(serverUrl);
+  syncStoreFromAuth();
+  await pending;
+  syncStoreFromAuth();
+};
+
+connectionStore.invalidateProviders = () => {
+  auth.invalidateProviders();
   syncStoreFromAuth();
 };
 
@@ -92,6 +104,10 @@ connectionStore.logout = async () => {
   connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
   await auth.logout();
+  if (auth.appState.value === "ready") {
+    await bootstrap();
+    return;
+  }
   syncStoreFromAuth();
 };
 
@@ -103,6 +119,12 @@ function resumeXmppWhenVisible() {
 
 onMounted(() => {
   if (typeof window !== "undefined") {
+    disposeSessionChanges = subscribeSessionChanges(() => {
+      bootstrapCoordinator.detach();
+      connectionStore.selfFullJid = null;
+      $xmppStatus.set(OFFLINE_SNAPSHOT);
+      void bootstrap();
+    });
     disposePageLifecycle = installXmppPagehideLifecycle(
       window,
       () => connectionStore.client,
@@ -118,6 +140,8 @@ onUnmounted(() => {
   bootstrapCoordinator.detach();
   disposePageLifecycle?.();
   disposePageLifecycle = null;
+  disposeSessionChanges?.();
+  disposeSessionChanges = null;
   if (typeof document !== "undefined") document.removeEventListener("visibilitychange", resumeXmppWhenVisible);
   connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);

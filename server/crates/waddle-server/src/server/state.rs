@@ -13,6 +13,7 @@ use crate::db::Database;
 use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
+use crate::server::liveness::RuntimeProgress;
 #[cfg(any(test, feature = "test-support"))]
 use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
@@ -109,6 +110,9 @@ pub struct AppState {
     /// boundary. An entry that matched nothing is an operator typo (or a
     /// boundary that no longer exists) and must fail the startup gate loudly.
     lineage_adopt_matched: Mutex<HashSet<LineageUuid>>,
+    /// Runtime-progress heartbeat read by the `/health` liveness probe. The
+    /// router starts its heartbeat task; liveness never touches a database.
+    pub(crate) runtime_progress: Arc<RuntimeProgress>,
 }
 
 impl AppState {
@@ -210,6 +214,7 @@ impl AppState {
             lineage_startup: OnceLock::new(),
             lineage_latched: OnceLock::new(),
             lineage_adopt_matched: Mutex::new(HashSet::new()),
+            runtime_progress: Arc::new(RuntimeProgress::new()),
         }
     }
 }

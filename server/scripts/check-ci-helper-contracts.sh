@@ -24,3 +24,12 @@ for contract in \
   test_check_libp2p_rollout; do
   python3 "scripts/${contract}.py"
 done
+
+# The PR rustTests workflow runs this helper outside the dev shell. Use the
+# pinned CUE from the flake when the ambient CLI is absent or a different
+# version; evaluating this graph with CUE 0.17 can hang (#1763).
+if command -v cue >/dev/null 2>&1 && [[ "$(cue version 2>/dev/null)" == *$'\nCUE language version v0.16.1\n'* ]]; then
+  python3 scripts/test_default_publish_graph.py
+else
+  (cd .. && nix develop --no-write-lock-file --command python3 server/scripts/test_default_publish_graph.py)
+fi

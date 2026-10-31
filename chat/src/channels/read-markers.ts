@@ -97,6 +97,7 @@ export function useChannelReadMarkers(deps: UseChannelReadMarkersDeps) {
   }
 
   function persistLastSeen(channelId: string, messageId: string) {
+    if (xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return;
     setLastSeen(roomKey(channelId), messageId);
   }
 

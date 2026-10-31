@@ -12,6 +12,8 @@ use super::SqlitePool;
 use super::{connect_backend, DatabaseBackend};
 use super::{debug, info, instrument};
 use super::{ConnectionGuard, DatabaseDriver, Transaction};
+use super::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
+use std::time::Duration;
 
 /// Database-specific errors.
 #[derive(Error, Debug)]
@@ -67,9 +69,9 @@ pub enum DatabaseError {
 
     /// `DatabaseConfig::pool_size` or `ControlPlanePoolConfig::size` was 0.
     /// A zero-sized pool can never serve a connection: left unchecked, the
-    /// first query against it would instead hang for sqlx's ~30s
-    /// `acquire_timeout` before failing — this rejects the config at
-    /// construction time instead.
+    /// first query against it would instead hang for the pool's acquire
+    /// timeout before failing — this rejects the config at construction
+    /// time instead.
     #[error("{which} pool size must be at least 1 (got 0)")]
     PoolSizeZero { which: &'static str },
 }
@@ -114,6 +116,10 @@ pub struct DatabaseConfig {
     /// driver is Postgres AND clustering is enabled (see `main.rs`); no code
     /// path issues control-plane statements otherwise.
     pub control_plane_pool: Option<ControlPlanePoolConfig>,
+    /// Main-pool acquire timeout. Default [`MAIN_POOL_ACQUIRE_TIMEOUT`]
+    /// (sqlx's 30 s); production sets it from `WADDLE_DB_ACQUIRE_TIMEOUT_SECS`.
+    /// The control-plane pool keeps its own fixed bound.
+    pub acquire_timeout: Duration,
 }
 
 impl Default for DatabaseConfig {
@@ -123,6 +129,7 @@ impl Default for DatabaseConfig {
             database_url: "sqlite::memory:".to_string(),
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool: None,
+            acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
         }
     }
 }
@@ -134,6 +141,7 @@ impl DatabaseConfig {
             database_url: database_url.into(),
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool: None,
+            acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
         }
     }
 
@@ -277,13 +285,24 @@ impl Database {
         }
 
         debug!(driver = ?config.driver, "Opening database");
-        let backend =
-            connect_backend(config.driver, &config.database_url, config.pool_size).await?;
+        let backend = connect_backend(
+            config.driver,
+            &config.database_url,
+            config.pool_size,
+            config.acquire_timeout,
+        )
+        .await?;
 
         let control_plane_backend = match config.control_plane_pool {
-            Some(ControlPlanePoolConfig { size }) => {
-                Some(connect_backend(config.driver, &config.database_url, size).await?)
-            }
+            Some(ControlPlanePoolConfig { size }) => Some(
+                connect_backend(
+                    config.driver,
+                    &config.database_url,
+                    size,
+                    CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
+                )
+                .await?,
+            ),
             None => None,
         };
 
@@ -382,19 +401,19 @@ impl Database {
             "waddle.db.health_check.failed",
             "1",
             "Database health-check failures (failed probe query, unavailable \
-             connection, or unreachable DB actor), across the pool and direct \
-             liveness paths.",
+             connection, or unreachable DB actor), across the readiness and \
+             detailed-health paths.",
             1,
         );
     }
 
     #[instrument(skip_all, fields(name = %self.name), err)]
     pub async fn health_check(&self) -> Result<bool, DatabaseError> {
-        // The deepest common point of every health probe — the pool's
-        // actor ask and the direct /health `/healthz` liveness handlers
-        // both land here. The probe-driven `health_check` spans are
-        // suppressed as trace noise (#1438), so the counter is the
-        // alertable failure signal for all of them.
+        // The deepest common point of every database health probe — the
+        // pool's actor ask (readiness, detailed health) lands here;
+        // liveness (`/health`) never probes the database. The probe-driven
+        // `health_check` spans are suppressed as trace noise (#1438), so
+        // the counter is the alertable failure signal for all of them.
         let conn = match self.guard().await {
             Ok(conn) => conn,
             Err(e) => {

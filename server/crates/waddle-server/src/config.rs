@@ -8,6 +8,7 @@ use crate::db::lineage::LineageAction;
 use crate::db::DatabaseDriver;
 use crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE;
 use crate::db::DEFAULT_POOL_SIZE;
+use crate::db::MAIN_POOL_ACQUIRE_TIMEOUT;
 use crate::push_service::ApnsConfig;
 use crate::push_service::FcmConfig;
 use serde::{Deserialize, Serialize};
@@ -2569,6 +2570,10 @@ pub enum DatabaseRuntimeConfigError {
     /// condition that takes the default.
     #[error("{name} is set but empty; unset it to use the default, or provide a value")]
     EmptyVar { name: &'static str },
+    /// `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` is outside
+    /// `MIN_DB_ACQUIRE_TIMEOUT_SECS..=MAX_DB_ACQUIRE_TIMEOUT_SECS`.
+    #[error("WADDLE_DB_ACQUIRE_TIMEOUT_SECS={value} must be between 1 and 300")]
+    AcquireTimeoutOutOfRange { value: u64 },
 }
 
 /// Errors while parsing the explicit database-lineage operator configuration.
@@ -2779,7 +2784,18 @@ pub struct DatabaseRuntimeConfig {
     /// of driver (a fat-fingered value should still fail fast) but is simply
     /// unused by the SQLite path.
     pub control_plane_pool_size: u32,
+    /// Main-pool connection acquire timeout (`WADDLE_DB_ACQUIRE_TIMEOUT_SECS`,
+    /// default [`MAIN_POOL_ACQUIRE_TIMEOUT`] = sqlx's 30 s). Applies to the
+    /// global database's main pool only; the control-plane pool keeps its
+    /// fixed bound.
+    pub acquire_timeout: Duration,
 }
+
+/// Smallest accepted `WADDLE_DB_ACQUIRE_TIMEOUT_SECS`: zero would fail every
+/// acquisition that has to wait at all.
+const MIN_DB_ACQUIRE_TIMEOUT_SECS: u64 = 1;
+/// Largest accepted `WADDLE_DB_ACQUIRE_TIMEOUT_SECS`, a typo guard.
+const MAX_DB_ACQUIRE_TIMEOUT_SECS: u64 = 300;
 
 impl Default for DatabaseRuntimeConfig {
     fn default() -> Self {
@@ -2788,6 +2804,7 @@ impl Default for DatabaseRuntimeConfig {
             database_url: "sqlite::memory:".to_string(),
             pool_size: DEFAULT_POOL_SIZE,
             control_plane_pool_size: DEFAULT_CONTROL_PLANE_POOL_SIZE,
+            acquire_timeout: MAIN_POOL_ACQUIRE_TIMEOUT,
         }
     }
 }
@@ -2851,14 +2868,41 @@ impl DatabaseRuntimeConfig {
             "WADDLE_DB_CONTROL_PLANE_POOL_SIZE",
             DEFAULT_CONTROL_PLANE_POOL_SIZE,
         )?;
+        let acquire_timeout = db_acquire_timeout_var(&vars)?;
 
         Ok(Self {
             driver,
             database_url,
             pool_size,
             control_plane_pool_size,
+            acquire_timeout,
         })
     }
+}
+
+/// Read `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (whole seconds), treating unset or
+/// blank as [`MAIN_POOL_ACQUIRE_TIMEOUT`].
+fn db_acquire_timeout_var(
+    vars: &HashMap<String, String>,
+) -> Result<Duration, DatabaseRuntimeConfigError> {
+    const KEY: &str = "WADDLE_DB_ACQUIRE_TIMEOUT_SECS";
+    let Some(raw) = vars
+        .get(KEY)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(MAIN_POOL_ACQUIRE_TIMEOUT);
+    };
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| DatabaseRuntimeConfigError::NotAnInteger {
+            key: KEY,
+            value: raw.to_string(),
+        })?;
+    if !(MIN_DB_ACQUIRE_TIMEOUT_SECS..=MAX_DB_ACQUIRE_TIMEOUT_SECS).contains(&value) {
+        return Err(DatabaseRuntimeConfigError::AcquireTimeoutOutOfRange { value });
+    }
+    Ok(Duration::from_secs(value))
 }
 
 /// Read a `WADDLE_DB_*_POOL_SIZE` var as `u32`, treating unset/blank as the
@@ -2951,6 +2995,46 @@ mod database_runtime_config_tests {
             err,
             DatabaseRuntimeConfigError::NotAnInteger {
                 key: "WADDLE_DB_POOL_SIZE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn acquire_timeout_defaults_to_the_named_main_pool_value() {
+        let config = DatabaseRuntimeConfig::from_vars(std::iter::empty::<(&str, &str)>()).unwrap();
+        assert_eq!(config.acquire_timeout, crate::db::MAIN_POOL_ACQUIRE_TIMEOUT);
+        let config =
+            DatabaseRuntimeConfig::from_vars([("WADDLE_DB_ACQUIRE_TIMEOUT_SECS", " ")]).unwrap();
+        assert_eq!(config.acquire_timeout, crate::db::MAIN_POOL_ACQUIRE_TIMEOUT);
+    }
+
+    #[test]
+    fn parses_acquire_timeout_override() {
+        let config =
+            DatabaseRuntimeConfig::from_vars([("WADDLE_DB_ACQUIRE_TIMEOUT_SECS", "12")]).unwrap();
+        assert_eq!(config.acquire_timeout, Duration::from_secs(12));
+    }
+
+    #[test]
+    fn rejects_out_of_range_or_non_integer_acquire_timeout() {
+        for raw in ["0", "301"] {
+            let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_ACQUIRE_TIMEOUT_SECS", raw)])
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DatabaseRuntimeConfigError::AcquireTimeoutOutOfRange { .. }
+                ),
+                "{raw}: {err:?}"
+            );
+        }
+        let err = DatabaseRuntimeConfig::from_vars([("WADDLE_DB_ACQUIRE_TIMEOUT_SECS", "5s")])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DatabaseRuntimeConfigError::NotAnInteger {
+                key: "WADDLE_DB_ACQUIRE_TIMEOUT_SECS",
                 ..
             }
         ));

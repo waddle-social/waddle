@@ -53,7 +53,11 @@ use waddle_xmpp::ownership::{
     InProcessClaimStore, NodeIdentity, ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
 };
 use waddle_xmpp::registry::user_actor::test_support::GateMailbox;
-use waddle_xmpp::registry::{GetResources, GetUser, UserRegistryError, WireUserClusteringClaims};
+use waddle_xmpp::registry::user_registry::test_support::PendingUnregisterCount;
+use waddle_xmpp::registry::{
+    GetResources, GetUser, RetryUserRegistryConvergence, UserRegistryConvergenceReport,
+    UserRegistryError, WireUserClusteringClaims,
+};
 use xmpp_parsers::bind::{BindQuery, BindResponse};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::message::{Id, Lang, Message, MessageType};
@@ -1211,38 +1215,22 @@ async fn slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_co
     );
 }
 
-/// Characterizes current behaviour; changes with E0 (#2046).
+/// Regression for the unregister-tell registry death found by W1.6a (#2089).
+/// Before the narrow #2046 fix, the rollback's `Result`-returning tell stopped
+/// the whole registry when its child ask timed out. The unit-returning mirror
+/// now retains that exact owner-gated removal for retry and lets the same
+/// registry serve another user's bind while alice's mailbox remains parked.
 ///
-/// This router-only harness omits the production critical-registry watch.
-/// E0's row names this W1.6 case: it moves the `RegisterConnection` ask
-/// (`user_registry.rs:1090-1097`) out of the registry turn and orders
-/// register/unregister completions per resource, so this path changes there.
-/// The registry stopping when a `tell` handler returns `Err` is a defect this
-/// suite found; no §3 row names it yet.
-///
-/// alice/desk is bound, then alice's `UserActor` mailbox is parked so the
-/// `RegisterConnection` for alice/phone queues behind it. The registry's 2 s
-/// child budget (`CHILD_ACTOR_TIMEOUT`) expires, the bind maps
-/// `UserActorBusy` to `Busy`, phone's stream ends with
-/// `<resource-constraint/>` and `<close/>` (RFC 6120 §4.9.3.17) and the bind
-/// rolls back: route removed, then `mirror_unregister` sends an owner-gated
-/// `UnregisterUserResource` as a kameo `tell`. That turn asks the still
-/// parked `UserActor` and times out too, so the handler returns
-/// `Err(UserActorBusy)`; kameo treats an `Err` reply to a `tell` as an actor
-/// failure and the default `on_panic` stops the node-wide
-/// `UserRegistryActor` (vendor/kameo/src/message.rs:410-418,
-/// actor/kind.rs:168-170). Messages queued behind it fail with
-/// `ActorStopped`. This harness does not start the production critical-registry
-/// lifetime watch (`spawn_user_registry_lifetime_watch`), which marks the node
-/// failed and requests process stop when the registry terminates. Subsequent
-/// binds here therefore characterize the surviving router only, not production
-/// behaviour after that watch fires: they fail registration with
-/// `<internal-server-error/>` (RFC 6120 §4.9.3.8) and `<close/>`. The
-/// `UserActor` in this harness is not linked to the registry and survives: when its
-/// mailbox resumes it runs the late `RegisterConnection` and then the queued
-/// owner-gated unregister, so it ends with exactly desk (no phantom phone).
+/// The registration timeout and wire contract stay pinned: alice/phone's
+/// admitted `RegisterConnection` cannot finish behind the gate, so its bind
+/// still ends with `<resource-constraint/>` and `<close/>` (RFC 6120 §4.9.3.17).
+/// After release, the late register and unregister leave exactly alice/desk,
+/// and a convergence retry discharges the retained removal. E0's planned
+/// removal of child operations from registry turns remains separate.
+/// This router harness does not start the production registry lifetime watch;
+/// the registry-survival tests separately exercise that critical supervisor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn register_then_unregister_behind_a_busy_user_actor_stops_the_user_registry() {
+async fn register_then_unregister_behind_a_busy_user_actor_retains_retry_and_serves_later_binds() {
     let harness = start().await;
     harness.add_account("alice").await;
     harness.add_account("bob").await;
@@ -1276,29 +1264,65 @@ async fn register_then_unregister_behind_a_busy_user_actor_stops_the_user_regist
         .await
         .expect("park alice's UserActor mailbox");
     within("UserActor mailbox to park", parked.notified()).await;
+    let empty_capacity = actor
+        .mailbox_sender()
+        .capacity()
+        .expect("bounded child mailbox");
+    assert!(empty_capacity >= 2, "room for both admitted child asks");
 
     let mut phone_client = harness.authenticated("alice").await;
     send_bind(&mut phone_client, "bind-phone", Some("phone")).await;
+    // Capacity is an admission observation, unlike route visibility. The
+    // gate's entered notification proves no queued child work can execute.
+    within("phone RegisterConnection admission", async {
+        while actor.mailbox_sender().capacity() == Some(empty_capacity) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
     let phone_frames = frames_until_closed(&mut phone_client).await;
     assert_stream_error_then_close(&phone_frames, StreamCondition::ResourceConstraint, "phone");
     assert!(!harness.is_routed(&phone), "phone's route rolled back");
 
     // FIFO barrier: the rollback enqueued its unregister tell before the
-    // stream error was written, so this ask is answered (or dropped) only
+    // stream error was written, so this ask is answered only
     // after that turn ends.
     let lookup = registry
         .ask(GetUser {
             bare_jid: alice.clone(),
         })
-        .await;
-    assert!(
-        matches!(
-            lookup,
-            Err(SendError::ActorStopped | SendError::ActorNotRunning(_))
-        ),
-        "the registry stopped after its unregister tell returned Err: {lookup:?}"
+        .await
+        .expect("same registry must survive the busy unregister tell")
+        .expect("alice's UserActor remains published");
+    assert_eq!(lookup.id(), actor.id(), "original child actor survives");
+    assert!(registry.is_alive(), "original UserRegistryActor survives");
+    assert_eq!(
+        registry
+            .ask(PendingUnregisterCount)
+            .await
+            .expect("pending custody"),
+        1
     );
-    assert!(!registry.is_alive(), "UserRegistryActor stopped");
+    assert_eq!(
+        actor.mailbox_sender().capacity(),
+        Some(empty_capacity - 2),
+        "both the timed-out register and unregister are still admitted behind the gate"
+    );
+
+    // The exact registry that handled the failed bind must serve a later
+    // bind even before alice's child mailbox is released.
+    let mut bob_client = harness.authenticated("bob").await;
+    send_bind(&mut bob_client, "bind-laptop", Some("laptop")).await;
+    assert_eq!(
+        expect_bind_result(&mut bob_client, "bind-laptop").await,
+        laptop
+    );
+    assert!(harness.is_routed(&laptop));
+    assert_eq!(
+        harness.actor_resources(&bare("bob@example.com")).await,
+        vec![laptop]
+    );
+    assert!(registry.is_alive(), "same registry processed bob's bind");
 
     // `send` succeeds only while the parked `GateMailbox` handler still waits
     // on the receiver: the seam held the mailbox through the whole sequence.
@@ -1309,10 +1333,19 @@ async fn register_then_unregister_behind_a_busy_user_actor_stops_the_user_regist
     resources.sort();
     assert_eq!(resources, vec![desk.clone()], "no phantom phone resource");
     assert!(harness.is_routed(&desk), "desk's route is untouched");
-
-    let mut bob_client = harness.authenticated("bob").await;
-    send_bind(&mut bob_client, "bind-laptop", Some("laptop")).await;
-    let bob_frames = frames_until_closed(&mut bob_client).await;
-    assert_stream_error_then_close(&bob_frames, StreamCondition::InternalServerError, "bob");
-    assert!(!harness.is_routed(&laptop), "bob's route rolled back");
+    assert_eq!(
+        registry
+            .ask(RetryUserRegistryConvergence)
+            .await
+            .expect("retry retained cleanup"),
+        UserRegistryConvergenceReport::default()
+    );
+    assert_eq!(
+        registry
+            .ask(PendingUnregisterCount)
+            .await
+            .expect("pending drained"),
+        0
+    );
+    assert_eq!(harness.actor_resources(&alice).await, vec![desk]);
 }

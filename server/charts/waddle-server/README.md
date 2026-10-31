@@ -85,6 +85,14 @@ Primary database wiring is DSN/driver based for sqlx:
   — dedicated control-plane pool size for node/claim liveness statements
   (ADR-0017 element 4/12); only opened when `clustering.enabled` is true on a
   Postgres deployment.
+- `WADDLE_DB_ACQUIRE_TIMEOUT_SECS` (no chart value; set through
+  `containerExtraEnv`, default: `30`, accepted `1`–`300`) — how long a
+  caller of the global database's main pool waits for a connection before
+  failing with a pool timeout. It applies to that pool only: inbox, pubsub
+  and MAM stores opened by URL, and the clustering control-plane pool, keep
+  a fixed 30 s. Lowering it turns a stalled acquisition into a
+  client-visible timeout (a stream error for sessions without stream
+  management); measure first.
 
 Set DSNs with either:
 
@@ -361,7 +369,25 @@ a ConfigMap. The full procedure is in
 
 ## Probes
 
-- Liveness probe: `GET /health`
-- Readiness probe: `GET /ready`
+- Liveness probe: `GET /health` — fails only when a restart is the fix: a
+  stalled runtime heartbeat (`runtime_stalled`); a node that took a
+  clustering fatal fence and whose node-lease loop finished the terminal
+  demotion and exited (`terminally_fenced`), whether the fence hit while
+  serving or while re-registering; or a node whose clustering scope stopped
+  while the process keeps running and whose node-lease loop exited
+  (`clustering_stopped`, e.g. the swarm's keypair-slot lease self-fenced). It
+  never checks the database itself. The terminal demotion has no deadline of
+  its own, so a wedged publication guard or actor delays the restart.
+- Readiness probe: `GET /ready` — database, lineage and node lifecycle
+  (claims/self-fence, drain), answered within 1.5 s. During a Postgres
+  outage every pod goes unready (no Service endpoints). A non-clustered pod
+  stays live and becomes ready again in place when Postgres returns, as does
+  a clustered pod whose outage was shorter than the 30 s keypair-slot and
+  node-lease TTLs (in practice about 20–30 s, depending on where in the 10 s
+  renewal cycle the outage starts). A clustered outage longer than that
+  stops clustering, and liveness restarts the pod (`clustering_stopped` or
+  `terminally_fenced`). So "no restart storm" holds for clustered pods only
+  for outages shorter than the lease TTL.
 
-Both are configurable via `probes.*`.
+Both are configurable via `probes.*`. Keep `probes.readiness.timeoutSeconds`
+at 2 or more: readiness bounds itself at 1.5 s.

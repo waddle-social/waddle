@@ -139,6 +139,24 @@ schema.#Project & {
 	}
 
 	ci: pipelines: {
+		// The codec has its own workspace and must be checked without adding it
+		// to production tests, dependency graphs, or publishing task lists.
+		authzIdCodec: {
+			mode:        "expanded"
+			derivePaths: true
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				contents:   "read"
+				"id-token": "write"
+			}
+			tasks: [_t.checkAuthzIdCodec]
+		}
 		default: {
 			mode: "expanded"
 			when: {
@@ -147,15 +165,12 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: {
-				// The Postgres + all-features shard lane (nixTestLocal) needs
-				// the privileged 32-core Namespace runner the PR rustTests
-				// workflow uses: the all-features compile peaks at ~10 GB and
-				// the four Nix-sandboxed shards take eight CPUs each. cuenv
-				// 0.57.3 has no per-task runner (task resources are never
-				// compiled) and keeps only the first label of a runner list,
-				// so the two-label runner is one expression for the whole
-				// pipeline, which runs only on main and manual dispatch.
-				runner: "${{ fromJSON('[\"nscloud-ubuntu-24.04-amd64-32x64-with-features\",\"namespace-features:container.privileged=true;job.priority=1\"]') }}"
+				// cuenv has no per-task runner. nixTestLocal depends on the
+				// helper but not on itself, so it alone selects the privileged
+				// 32-core builder. Publish depends on both and keeps its normal
+				// profile. The JSON round trip permits optional needs lookups;
+				// CI checks the generated graph and its default-success gates.
+				runner: #"${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}"#
 				permissions: {
 					"id-token":      "write"
 					packages:        "write"
@@ -165,6 +180,7 @@ schema.#Project & {
 			tasks: [
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
+				_t.checkAlertRules,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -211,11 +227,78 @@ schema.#Project & {
 				"pull-requests": "none"
 			}
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram,
+				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.checkAlertRules,
 				_t.nixFmt, _t.nixClippy,
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
 			]
+		}
+		// Native PostgreSQL characterization is independent of image publishing.
+		roomChildContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.roomChildContractPostgres]
+		}
+		// Test-only native experiment: do not add these inputs to the image
+		// publishing pipeline or its deployment-revision authority.
+		federationGrantFence: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				manual:        true
+			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		federationGrantFencePullRequest: {
+			mode: "expanded"
+			when: pullRequest: true
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		// Native SQL subscriber-capture characterization; no publishing task.
+		spaceFanoutContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token": "write"
+				contents:   "read"
+			}
+			tasks: [_t.spaceFanoutContractPostgres]
 		}
 		namespaceRustChecks: {
 			mode:        "expanded"
@@ -287,6 +370,59 @@ schema.#Project & {
 	}
 
 	tasks: {
+		roomChildContractPostgres: schema.#Task & {
+			// Provision an isolated native database and require the dedicated
+			// tests; an absent prerequisite must fail this lane.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/room-child/run-native.sh"]
+			inputs: list.Concat([_nixInputs, ["experiments/room-child/**"]])
+		}
+		federationGrantFenceProof: schema.#Task & {
+			// This native experiment needs a live checkout, Nix, /proc and
+			// isolated local PostgreSQL and SpiceDB processes; it cannot run
+			// inside the Nix build sandbox.
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/grant-fence/run-native.sh"]
+			inputs: [
+				"experiments/grant-fence/**",
+				"../flake.lock",
+				"../flake.nix",
+				"rust-toolchain.toml",
+			]
+		}
+
+		checkAuthzIdCodec: schema.#Task & {
+			// Cargo needs the host cache; the inherited Nix runtime supplies Rust
+			// from rust-toolchain.toml. No production build or publishing task.
+			hermetic: false
+			command:  "bash"
+			args: ["-euo", "pipefail", "-c", """
+				cd experiments/authz-id-codec
+				cargo test --locked
+				cargo clippy --all-targets --locked -- -D warnings
+				cargo fmt --check
+				"""]
+			inputs: [
+				"experiments/authz-id-codec/**",
+				"rust-toolchain.toml",
+				".cargo/**",
+				"../flake.nix",
+				"../flake.lock",
+				"../cuenv.lock",
+				"../env.cue",
+				"../ci/contributors/*.cue",
+			]
+		}
+
+		spaceFanoutContractPostgres: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/space-fanout/run-native.sh"]
+			inputs: list.Concat([_nixInputs, [".cargo/**", "experiments/space-fanout/**"]])
+		}
+
 		checkCiDrift: schema.#Task & {
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
@@ -322,6 +458,15 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
+					# checkCiDrift is itself a direct publication gate. Verify the
+					# generated runner selector and both other direct gates here,
+					# independently of the helper job whose edge is under test.
+					if ! python3 server/scripts/test_default_publish_graph.py; then
+					  overall_status=1
+					fi
 					exit "${overall_status}"
 				"""#]
 			inputs: [
@@ -329,8 +474,13 @@ schema.#Project & {
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
 				"../ci/contributors/*.cue",
+				"../scripts/integration-ci*",
+				"../scripts/test_integration_ci_project.py",
+				"../scripts/test_cuenv_bootstrap.py",
+				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
+				"scripts/test_default_publish_graph.py",
 				"../ci/cache-benchmark/**",
 				"../scripts/*cache-benchmark*",
 				"../.github/workflows/waddle-ci-cache-benchmark.yml",
@@ -446,6 +596,39 @@ schema.#Project & {
 			]
 		}
 
+		// Alert evidence (#2046 W1.12): promtool checks and unit tests for
+		// every Mimir rule file, then the OTLP contract that pushes the
+		// Rust-pinned instrument names and units (the two fixtures below)
+		// through Prometheus's real OTLP translator and requires the
+		// Prometheus names the alert rules read. It lives here, not only in
+		// the cloud project, because a fixture, unit or Prometheus (flake)
+		// change ships with this image: these expanded pipelines run every
+		// listed task as its own job whenever the derived trigger paths
+		// match, so ../ inputs select it. Non-expanded `cuenv ci` matches
+		// changed files against inputs without resolving ../ and would skip
+		// it. Reads the rules from the live checkout, so not hermetic.
+		checkAlertRules: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					prometheus_bin="$(command -v prometheus)"
+					PROMETHEUS_BIN="${prometheus_bin}" sh ../infrastructure/waddle.cloud/rules/tests/run.sh
+					echo "Alert rule tests and OTLP name contract pass."
+				"""#]
+			inputs: [
+				// Rule and shipped metric-contract changes trigger the server
+				// lanes. Tests-only edits run through cloud rulesTest instead;
+				// this non-hermetic task still reads the current tests whenever
+				// an image publication runs.
+				"../infrastructure/waddle.cloud/rules/mimir/*.yaml",
+				"crates/waddle-server/src/clustering/alert_metric_contract.json",
+				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
+				"../flake.nix",
+				"../flake.lock",
+			]
+		}
+
 		nixFmt: schema.#Task & {
 			command: "nix"
 			args: ["build", "--print-build-logs", "../#checks.x86_64-linux.waddle-server-fmt"]
@@ -524,6 +707,7 @@ schema.#Project & {
 		nixTestLocal: schema.#Task & {
 			command: "timeout"
 			args: ["--kill-after=2m", "55m", "bash", "scripts/run-nextest-shards.sh"]
+			dependsOn: [tasks.ciHelperContracts]
 			inputs: tasks.nixTestArchive.inputs
 			outputs: ["server/.ci/nextest-archive"]
 			hermetic: false
@@ -1268,6 +1452,7 @@ schema.#Project & {
 			dependsOn: [
 				tasks.checkCiDrift,
 				tasks.checkSwitchableAlternativeProgram,
+				tasks.checkAlertRules,
 				tasks.fmt,
 				tasks.clippy,
 				tasks.test,
@@ -1277,7 +1462,8 @@ schema.#Project & {
 				tasks.nixBuildImageStream,
 				tasks.nixBuildExtensionModules,
 				// No image ships unless the Postgres + all-features lane ran
-				// every required cluster test on this exact commit.
+				// every required cluster test on this exact commit. Keep both
+				// direct gates, even though the shard lane also needs helpers.
 				tasks.ciHelperContracts,
 				tasks.nixTestLocal,
 			]

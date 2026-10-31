@@ -50,6 +50,7 @@ use crate::server::extension_host_tools::DeferredExtensionHostTools;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
+use crate::server::liveness::spawn_runtime_progress_heartbeat;
 use crate::server::profile_publish_route::TestSeamAuth;
 use crate::server::routes;
 use crate::server::routes::auth::AuthState;
@@ -211,7 +212,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
     // When WADDLE_HTTP_PORT_FILE is set, write the bound port so test
     // harnesses can discover it after binding to port 0.
     if let Ok(path) = std::env::var("WADDLE_HTTP_PORT_FILE") {
-        if let Err(e) = std::fs::write(&path, addr.port().to_string()) {
+        if let Err(e) = tokio::fs::write(&path, addr.port().to_string()).await {
             warn!(path = %path, error = %e, "Failed to write HTTP port file");
         }
     }
@@ -342,9 +343,11 @@ async fn ensure_mam_ingress_colocation(storage: &SqlxMamStorage, global: &Databa
         .await?
         .ok_or(IngressColocationError::SqliteDatabase)?
         .get(2)?;
+    drop(rows);
+    drop(connection);
     if mam_file.is_empty()
         || global_file.is_empty()
-        || std::fs::canonicalize(mam_file)? != std::fs::canonicalize(global_file)?
+        || tokio::fs::canonicalize(mam_file).await? != tokio::fs::canonicalize(global_file).await?
     {
         return Err(IngressColocationError::SqliteDatabase.into());
     }
@@ -556,6 +559,10 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
 
     // Well-known endpoints for XMPP service discovery (XEP-0156)
     let well_known_router = routes::well_known::router(auth_state.clone());
+
+    // `/health` reports runtime progress only; start its heartbeat before
+    // the listener can serve the first liveness probe.
+    spawn_runtime_progress_heartbeat(&state.runtime_progress);
 
     // Build the base router with operational health endpoints.
     let mut router = Router::new()
