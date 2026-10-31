@@ -1,52 +1,13 @@
 //! Foreign discovery rejection over actual WebSockets and SCRAM-bound sessions.
 
-use std::time::Duration;
-
-use jid::Jid;
 use minidom::Element;
+use waddle_ws_test_support::iq::{bound_jid as full_jid, receive_iq, round_trip, send_iq};
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType};
 
 const DOMAIN: &str = "localhost";
-
-async fn send_iq(client: &mut WsXmppClient, iq: Iq) {
-    let element: Element = iq.into();
-    let mut bytes = Vec::new();
-    element.write_to(&mut bytes).expect("serialize IQ");
-    client
-        .send(&String::from_utf8(bytes).expect("IQ UTF-8"))
-        .await
-        .expect("send IQ");
-}
-
-async fn receive_iq(client: &mut WsXmppClient, id: &str) -> Iq {
-    let frame = client
-        .recv_matching_within(Duration::from_secs(10), |frame| {
-            frame
-                .parse::<Element>()
-                .is_ok_and(|element| element.name() == "iq" && element.attr("id") == Some(id))
-        })
-        .await
-        .expect("correlated IQ");
-    Iq::try_from(frame.parse::<Element>().expect("IQ XML")).expect("typed IQ")
-}
-
-async fn round_trip(client: &mut WsXmppClient, iq: Iq) -> Iq {
-    let id = iq.id().to_owned();
-    send_iq(client, iq).await;
-    receive_iq(client, &id).await
-}
-
-fn full_jid(client: &WsXmppClient) -> Jid {
-    client
-        .full_jid
-        .as_deref()
-        .expect("bound client")
-        .parse()
-        .expect("bound JID")
-}
 
 fn query(namespace: &str, target: &str, id: &str) -> Iq {
     Iq::Get {

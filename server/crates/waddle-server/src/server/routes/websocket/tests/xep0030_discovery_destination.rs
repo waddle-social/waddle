@@ -10,21 +10,15 @@ use minidom::Element;
 use tokio::sync::mpsc;
 use waddle_xmpp::disco::{DISCO_INFO_NS, DISCO_ITEMS_NS};
 use waddle_xmpp::protocol::ConnectionPhase;
-use waddle_xmpp::registry::OutboundStanza;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
-use super::super::frame::handle_xmpp_frame;
-use super::super::state::WsConnState;
-use super::super::WebSocketState;
 use super::create_test_websocket_state_with_fixture_bot;
-use super::{
-    create_test_websocket_state, register_test_connection, seed_local_account, stanza_to_xml,
+use super::iq_destination_support::{
+    assert_reply_addressing, bound_connection as connection, dispatch, origin, DOMAIN, ORIGIN,
 };
-
-const DOMAIN: &str = "example.com";
-const ORIGIN: &str = "alice@example.com/web";
+use super::{create_test_websocket_state, register_test_connection, seed_local_account};
 
 #[derive(Clone, Copy, Debug)]
 enum Discovery {
@@ -41,19 +35,6 @@ impl Discovery {
     }
 }
 
-fn origin() -> FullJid {
-    ORIGIN.parse().expect("bound origin")
-}
-
-async fn connection(state: &WebSocketState) -> (WsConnState, mpsc::Receiver<OutboundStanza>) {
-    let (tx, rx) = mpsc::channel(8);
-    let owner = register_test_connection(state, &origin(), tx).await;
-    let mut conn = WsConnState::new();
-    conn.phase = ConnectionPhase::ready(origin(), false);
-    conn.registry_owner = Some(owner);
-    (conn, rx)
-}
-
 fn request(kind: Discovery, target: Option<&str>, node: Option<&str>, from: Option<&str>) -> Iq {
     let mut query = Element::builder("query", kind.namespace());
     if let Some(node) = node {
@@ -67,29 +48,8 @@ fn request(kind: Discovery, target: Option<&str>, node: Option<&str>, from: Opti
     }
 }
 
-async fn dispatch(state: &WebSocketState, conn: &mut WsConnState, iq: Iq) -> Vec<Iq> {
-    handle_xmpp_frame(
-        &stanza_to_xml(&Stanza::Iq(Box::new(iq))),
-        DOMAIN,
-        state,
-        conn,
-    )
-    .await
-    .into_iter()
-    .map(|frame| {
-        Iq::try_from(frame.parse::<Element>().expect("response XML")).expect("response IQ")
-    })
-    .collect()
-}
-
 fn assert_remote_error(reply: &Iq, request: &Iq) {
-    assert_eq!(reply.id(), request.id());
-    assert_eq!(reply.from(), request.to());
-    assert_eq!(
-        reply.to(),
-        Some(&Jid::from(origin())),
-        "bound origin, not client from"
-    );
+    assert_reply_addressing(reply, request);
     let Iq::Error { error, payload, .. } = reply else {
         panic!("foreign discovery cannot return local identity/items: {reply:?}")
     };

@@ -10,6 +10,8 @@
 //! still reachable public API of this crate, so per-binary `dead_code`
 //! warnings cannot fire and no lint suppressions are needed.
 
+pub mod iq;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
