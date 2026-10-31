@@ -68,6 +68,7 @@ mod registration;
 mod send;
 mod space_fanout_postgres;
 mod stream_features;
+mod xep0030_discovery_destination;
 mod xep0045_reconnect_contract;
 mod xep0199_ping;
 mod xep0280_carbons_destination;
