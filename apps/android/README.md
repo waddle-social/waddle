@@ -1,14 +1,26 @@
 # Waddle Android
 
-Native Android client (Kotlin + Jetpack Compose), driven by the shared Rust
-XMPP client via UniFFI — the sibling of `apps/apple`. CLI-only: no Android
-Studio required anywhere.
+Flutter presentation with Material 3 / Material You, hosted by the Android
+application and driven by the shared Rust XMPP client via the existing Kotlin
+session layer. The application id, session stores, notification receivers,
+push distributions, encrypted attachment handling and LiveKit media remain
+native. CLI-only: no Android Studio required.
+
+The Dart module lives in `flutter/`. Kotlin `FlutterBridge` exposes commands and
+state from the process-level `AppGraph`; it does not start another XMPP client.
+The remaining Compose sources support native feature surfaces and their existing
+tests while the Flutter interface is verified against the Android quality matrix.
 
 ## First-time setup (macOS)
 
 ```sh
 # JDK via sdkman (or use the repo nix devshell, which exports JAVA_HOME):
 sdk install java 21.0.7-tem
+
+# Install Flutter 3.44 or later on PATH, or use the repo nix
+# devshell, which provides Flutter. FLUTTER_ROOT selects an existing SDK.
+# Generate the ignored add-to-app wrapper and resolve Dart packages:
+bash scripts/setup-android-flutter.sh
 
 # Pinned SDK packages (honors an existing ~/Library/Android/sdk via ANDROID_HOME):
 bash scripts/setup-android-sdk.sh
@@ -29,14 +41,31 @@ adb connect <ip>:<connect-port>
 
 ```sh
 cd apps/android
-./gradlew :app:installFossDebug                    # Kotlin-only changes
+bash ../../scripts/setup-android-flutter.sh         # first checkout / dependency changes
+./gradlew :app:installFossDebug                    # host + Dart + native libraries
 bash ../../scripts/build-android-rust.sh --debug   # after Rust client changes
 ./gradlew :core:client:testDebugUnitTest :app:testFossDebugUnitTest :app:testPlayDebugUnitTest
 adb logcat --pid $(adb shell pidof -s social.waddle.android)
+
+cd flutter
+flutter analyze
+flutter test
+flutter attach                                   # hot reload an installed debug host
 ```
 
 cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
-`checkBindingsDrift`, `test`.
+`checkBindingsDrift`, `test`, `flutterCheck`. Gradle tasks depend on `setupFlutter`
+so the generated module exists before Gradle configures the host.
+
+Do not run `flutter build apk` in the module: its generated host does not contain
+Waddle's application graph or push flavours. Build and install through the
+existing Android Gradle host. `.android/`, `.dart_tool/` and module build outputs
+are generated locally; `pubspec.yaml` and the resolved lockfile describe the
+module dependencies. Gradle stops with a setup instruction if its generated
+Flutter loader is missing. SDK, Android package and Maven availability are
+required to validate an APK; Dart analysis alone does not prove host integration.
+Flutter 3.44+ is required for the host's AGP 9 toolchain. The locked Nix package
+currently provides Flutter 3.47.0 with Dart 3.13.0.
 
 ## Install-in-place artifacts
 
@@ -70,19 +99,20 @@ build sidestep that; older rolling releases are pruned to the newest
 
 ## Testing in CI
 
-Three layers, cheapest first:
+Validation layers:
 
-1. **JVM** (every PR, `test` task): unit tests for the bridge, stores,
+1. **Flutter** (`flutterCheck`): Dart analysis and widget/model tests.
+2. **JVM** (every PR, `test` task): unit tests for the bridge, stores,
    auth API (MockWebServer), and ViewModels — no emulator, no SDK quirks.
-2. **Instrumented smoke** (`deviceTests` pipeline, manual until the
-   runner's KVM support is proven): Gradle-managed headless ATD emulator
-   (`:app:atdApi34FossDebugAndroidTest`) boots the real APK — `.so` loading,
-   JNA, and first-frame composition on device.
-3. **On device**: `./gradlew :app:installFossDebug` against the S24 Ultra
+3. **Instrumented smoke** (`deviceTests` pipeline): Gradle-managed headless ATD
+   emulator (`:app:atdApi34FossDebugAndroidTest`) boots the real APK — `.so`
+   loading, JNA, native application setup and Flutter's first rendered frame.
+4. **On device**: `./gradlew :app:installFossDebug` against the S24 Ultra
    for anything interactive (calls, notifications, battery behavior).
 
 Screenshot goldens (Roborazzi, JVM, light and dark) live in
-`app/src/test/screenshots`. Record them on Linux x86_64, matching CI:
+`app/src/test/screenshots` and cover the retained Compose surfaces. They do not
+validate Flutter rendering. Record them on Linux x86_64, matching CI:
 native rendering on other platforms can differ by one or two RGB levels
 around glows even when layout and content match. After an intended visual
 change, re-record with
@@ -131,8 +161,10 @@ while another session of the account is online.
 
 ## Layout
 
-- `:app` — Compose UI (Material 3 driven by the generated
-  `WaddleTokens.kt`), navigation, notifications, calls, and push
+- `flutter/` / `:flutter` — Flutter add-to-app module, Material You UI and
+  channel client. `.android/` is generated by `flutter pub get`.
+- `:app` — Flutter activity, channel bridge, retained native feature surfaces,
+  notifications, calls, and push
   (`push/`: `PushCoordinator` picks UnifiedPush or FCM). Flavour code
   lives in `src/foss` and `src/play` (`flavour.Distribution`).
 - `:core:client` — the session core (`XmppSessionManager`,

@@ -174,6 +174,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(project(":flutter"))
     implementation(project(":core:client"))
     // FCM for push, and nothing else from Google (see the verify tasks below).
     "playImplementation"(libs.firebase.messaging)

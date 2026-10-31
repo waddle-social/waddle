@@ -26,6 +26,15 @@ on:
     - apps/android/detekt.yml/**
     - apps/android/env.cue
     - apps/android/env.cue/**
+    - apps/android/flutter/analysis_options.yaml
+    - apps/android/flutter/analysis_options.yaml/**
+    - apps/android/flutter/assets/**
+    - apps/android/flutter/lib/**
+    - apps/android/flutter/pubspec.lock
+    - apps/android/flutter/pubspec.lock/**
+    - apps/android/flutter/pubspec.yaml
+    - apps/android/flutter/pubspec.yaml/**
+    - apps/android/flutter/test/**
     - apps/android/gradle.properties
     - apps/android/gradle.properties/**
     - apps/android/gradle/**
@@ -37,12 +46,16 @@ on:
     - apps/android/settings.gradle.kts
     - apps/android/settings.gradle.kts/**
     - cue.mod/**
+    - flake.nix
+    - flake.nix/**
     - scripts/android-ci-gradle.sh
     - scripts/android-ci-gradle.sh/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
     - scripts/check-android-ffi-bindings.sh/**
+    - scripts/setup-android-flutter.sh
+    - scripts/setup-android-flutter.sh/**
     - scripts/setup-android-sdk.sh
     - scripts/setup-android-sdk.sh/**
     - server/.cargo/**
@@ -106,7 +119,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.3"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

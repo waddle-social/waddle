@@ -66,6 +66,26 @@ class CallStoreTest {
     }
 
     @Test
+    fun `answer delayed by permissions cannot accept a successor ring`() = runTest {
+        val f = Fixture()
+        f.store.start(backgroundScope)
+        f.store.onCallEvent(propose(PEER_FULL, "first"))
+        runCurrent()
+
+        // The first caller cancels while Android's permission prompt is open.
+        f.store.onCallEvent(retract(PEER_FULL, "first"))
+        f.store.onCallEvent(propose(PEER_FULL, "second"))
+        runCurrent()
+
+        assertFalse(f.store.acceptIncoming(expectedSid = "first"))
+        assertTrue(f.client.callVerbs.none { it is RecordedCallVerb.Proceed })
+        assertEquals(CallState.Incoming(PEER_FULL, "second", audio), f.store.state.value)
+
+        assertTrue(f.store.acceptIncoming(expectedSid = "second"))
+        assertTrue(RecordedCallVerb.Proceed(PEER_FULL, "second") in f.client.callVerbs)
+    }
+
+    @Test
     fun `decline sends reject to the proposer's full jid and clears the slot`() = runTest {
         val f = Fixture()
         f.store.start(backgroundScope)

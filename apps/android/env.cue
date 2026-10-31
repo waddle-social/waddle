@@ -85,6 +85,14 @@ let _ffiInputs = [
 let _gradleInputs = [
 	"env.cue",
 	"../../scripts/android-ci-gradle.sh",
+	"../../scripts/setup-android-flutter.sh",
+	"../../flake.nix",
+	"flutter/pubspec.yaml",
+	"flutter/pubspec.lock",
+	"flutter/analysis_options.yaml",
+	"flutter/lib/**",
+	"flutter/test/**",
+	"flutter/assets/**",
 	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
@@ -139,7 +147,7 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: {contents: "write", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.publishApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.flutterCheck, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
 			when: {
@@ -147,7 +155,7 @@ schema.#Project & {
 				manual:      true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.flutterCheck, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
@@ -174,6 +182,21 @@ schema.#Project & {
 			command: "bash"
 			args: ["../../scripts/setup-android-sdk.sh"]
 			inputs: ["../../scripts/setup-android-sdk.sh"]
+		}
+
+		// Flutter generates its ignored Android add-to-app module before Gradle
+		// configures the host, including for Kotlin-only checks.
+		setupFlutter: schema.#Task & {
+			command: "bash"
+			args: ["../../scripts/setup-android-flutter.sh"]
+			inputs: ["../../scripts/setup-android-flutter.sh", "../../flake.nix", "flutter/pubspec.yaml", "flutter/pubspec.lock"]
+		}
+
+		flutterCheck: schema.#Task & {
+			command: "bash"
+			args: ["-c", "cd flutter && flutter --suppress-analytics analyze && flutter --suppress-analytics test"]
+			dependsOn: [setupFlutter]
+			inputs: _gradleInputs
 		}
 
 		// Cross-compiles libwaddle_xmpp_client_ffi.so for arm64-v8a and
@@ -232,7 +255,7 @@ schema.#Project & {
 		build: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", ":app:assembleFossDebug", ":app:assemblePlayDebug", ":app:minifyPlayReleaseWithR8", "-PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder", "-PWADDLE_FIREBASE_APP_ID=1:0:android:0", "-PWADDLE_FIREBASE_API_KEY=ci-placeholder", "-PWADDLE_FIREBASE_SENDER_ID=0"]
-			dependsOn: [setupSdk, buildRustJni]
+			dependsOn: [setupSdk, setupFlutter, buildRustJni]
 			inputs: _gradleInputs
 			outputs: [
 				"app/build/outputs/apk/foss/debug/app-foss-debug.apk",
@@ -247,7 +270,7 @@ schema.#Project & {
 		test: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", ":core:client:testDebugUnitTest", ":app:testFossDebugUnitTest", ":app:testPlayDebugUnitTest", "-Proborazzi.test.verify=true"]
-			dependsOn: [setupSdk]
+			dependsOn: [setupSdk, setupFlutter]
 			inputs: _gradleInputs
 		}
 
@@ -260,7 +283,7 @@ schema.#Project & {
 		lint: schema.#Task & {
 			command: "bash"
 			args: ["../../scripts/android-ci-gradle.sh", "detekt", ":app:lintFossDebug", ":app:lintPlayDebug", ":app:verifyFossRuntimeClasspath", ":app:verifyPlayRuntimeClasspath"]
-			dependsOn: [setupSdk]
+			dependsOn: [setupSdk, setupFlutter]
 			inputs: _gradleInputs
 		}
 
@@ -293,7 +316,7 @@ schema.#Project & {
 				bash ../../scripts/android-ci-gradle.sh --no-configuration-cache :app:assembleFossDebug :app:assembleFossDebugAndroidTest
 				bash ../../scripts/android-ci-gradle.sh --no-configuration-cache :app:atdApi34FossDebugAndroidTest
 				"""#]
-			dependsOn: [setupSdk, buildRustJni]
+			dependsOn: [setupSdk, setupFlutter, buildRustJni]
 			// Include this definition so GMD-only changes are selected by affectedness.
 			inputs: _gradleInputs
 		}
@@ -361,7 +384,7 @@ schema.#Project & {
 				    done
 				} || true
 				"""#]
-			dependsOn: [setupSdk, buildRustJniMobile]
+			dependsOn: [setupSdk, setupFlutter, buildRustJniMobile]
 			// env.cue is in the input set so a change to THIS publish
 			// script (not just the app) re-runs the task — otherwise
 			// cuenv's incremental engine reports "no affected tasks" for
