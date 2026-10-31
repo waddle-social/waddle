@@ -259,9 +259,21 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		federationGrantFencePullRequest: {
+			mode: "expanded"
+			when: pullRequest: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"

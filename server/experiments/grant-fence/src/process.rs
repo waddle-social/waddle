@@ -116,7 +116,6 @@ impl Process {
         Ok(process)
     }
 
-    #[cfg(test)]
     pub fn id(&self) -> u32 {
         self.child.id()
     }

@@ -4,3 +4,12 @@ definition fence_generation {
     relation reader: fence_user
     permission read = reader
 }
+
+definition recovery_subject {}
+
+definition recovery_operation {
+    relation marker: recovery_subject
+    relation reader: recovery_subject
+    relation tombstone: recovery_subject
+    permission read = reader
+}
