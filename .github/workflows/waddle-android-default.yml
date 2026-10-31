@@ -24,8 +24,6 @@ on:
     - apps/android/core/client/lint.xml/**
     - apps/android/core/client/src/**
     - apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/**
-    - apps/android/debug.keystore
-    - apps/android/debug.keystore/**
     - apps/android/detekt.yml
     - apps/android/detekt.yml/**
     - apps/android/env.cue
@@ -67,16 +65,14 @@ on:
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
     - server/vendor/**
-  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
   waddle-android-default:
     permissions:
-      contents: write
+      contents: read
       checks: write
-      packages: none
       id-token: write
     name: waddle-android-default
     runs-on: namespace-profile-linux-x86

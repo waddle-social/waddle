@@ -22,6 +22,15 @@ val FIREBASE_CONFIG = listOf(
 fun firebaseValue(name: String): String =
     (project.findProperty(name) as String?) ?: System.getenv(name).orEmpty()
 
+val previewSigningKeystore = System.getenv("WADDLE_ANDROID_PREVIEW_KEYSTORE")
+    ?.takeIf { it.isNotBlank() }
+val previewSigningPassword = System.getenv("WADDLE_ANDROID_PREVIEW_KEYSTORE_PASSWORD")
+    ?.takeIf { it.isNotBlank() }
+require((previewSigningKeystore == null) == (previewSigningPassword == null)) {
+    "Preview signing requires both WADDLE_ANDROID_PREVIEW_KEYSTORE and " +
+        "WADDLE_ANDROID_PREVIEW_KEYSTORE_PASSWORD"
+}
+
 android {
     namespace = "social.waddle.android"
     compileSdk = 37
@@ -69,16 +78,14 @@ android {
     }
 
     signingConfigs {
-        // Shared, checked-in debug keystore (deliberately NOT a secret —
-        // it may never sign release builds): every machine and CI run
-        // produces identically-signed debug APKs, so `adb install -r`
-        // upgrades in place instead of demanding an uninstall (which
-        // wipes app data) whenever the APK came from a different builder.
-        getByName("debug") {
-            storeFile = rootProject.file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (previewSigningKeystore != null && previewSigningPassword != null) {
+            create("preview") {
+                storeFile = file(previewSigningKeystore)
+                storePassword = previewSigningPassword
+                keyAlias = "waddle-preview"
+                keyPassword = previewSigningPassword
+                storeType = "PKCS12"
+            }
         }
     }
 
@@ -152,22 +159,25 @@ android {
             }
         }
         // The sideloaded rolling build: release-optimised (R8, shrinking,
-        // non-debuggable, mobile-profile Rust core) but signed with the
-        // shared checked-in key so it installs in place over earlier
-        // rolling and debug builds without wiping app data. The key is
-        // public, so this APK proves nothing about its origin; store
-        // distribution uses `release` and the upload key instead.
+        // non-debuggable, mobile-profile Rust core). Trusted CI uses its
+        // repository-secret preview key so successive CI previews install
+        // in place. Local builds use the machine's debug key. Play
+        // distribution uses `release` and its separate upload key.
         create("preview") {
             initWith(getByName("release"))
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (previewSigningKeystore != null) {
+                signingConfigs.getByName("preview")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             matchingFallbacks += "release"
         }
     }
 }
 
 androidComponents {
-    // The Play build ships only as playRelease; the public preview key
-    // must never sign an APK with Play's FCM configuration.
+    // The Play build ships only as playRelease; the preview signer must
+    // never sign an APK with Play's FCM configuration.
     beforeVariants(selector().withFlavor("distribution" to "play").withBuildType("preview")) {
         it.enable = false
     }
