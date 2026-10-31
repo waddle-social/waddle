@@ -365,7 +365,19 @@ a ConfigMap. The full procedure is in
 
 - `config.drainTimeoutSeconds` sets `WADDLE_DRAIN_TIMEOUT_SECS`.
 - `terminationGracePeriodSeconds` controls Kubernetes pod termination grace period.
-- The chart validates `terminationGracePeriodSeconds >= config.drainTimeoutSeconds`.
+- HTTP/Q6 shutdown and the lifecycle wait for clustering share a deadline
+  started at `SIGTERM`:
+  `config.drainTimeoutSeconds` (connection and SM drain) +
+  `clustering.claimReleaseBudgetSeconds` (room drain) + reserved tail time
+  (5 s for identity retirement + 2 s for the terminal sweep). The tail terms
+  are reservations; early or parallel drains can leave those stages more time.
+- The chart validates that `terminationGracePeriodSeconds` is at least
+  `preStopSleepSeconds` plus that deadline plus a 5 s kill margin (52 s with
+  the defaults).
+- A clustering terminal wait begun before `SIGTERM` can continue after the
+  lifecycle stops awaiting it. Telemetry shutdown and runtime teardown follow
+  the bounded waits, so this deadline does not establish an exact process-exit
+  bound; unfinished ownership remains on lease expiry.
 
 ## Probes
 

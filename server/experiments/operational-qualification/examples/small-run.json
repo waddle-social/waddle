@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "run_id": 42,
+  "client_count": 3,
+  "rooms": [
+    { "id": 7, "senders": [1], "recipients": [2, 3] }
+  ],
+  "phases": { "warmup_ms": 100, "measurement_ms": 300, "drain_ms": 200 },
+  "offer_interval_ms": 100,
+  "payload_bytes": 512,
+  "delivery_timeout_ms": 100,
+  "max_generator_lag_ms": 0,
+  "retries": "disabled",
+  "repetitions": 1,
+  "cooldown_ms": 0
+}

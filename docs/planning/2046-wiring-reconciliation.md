@@ -1,8 +1,15 @@
 # #2046 A2: feature and config wiring against #1661, #1662, #1986 and #1948
 
-Status: reconciliation record. Written 2026-10-30 against `main@db6e533`.
-Nothing here was built, run or deployed, and nobody writing it had production
-access.
+Status: reconciliation record. Originally written 2026-10-30 against
+`main@db6e533`. **CI wiring and coverage references refreshed 2026-10-31 at
+`c5ae693ee281cb3e5f52722af11ac9c989f8b8d2`** after #2081/#2084; the health and
+alert rows also note their intervening changes. Other product/schema cells and
+their line references retain the original snapshot and need rechecking before
+implementation. This partial refresh is not a new whole-system audit.
+
+No build, runtime test, workload or deployment was performed for this refresh.
+Source wiring, earlier reported local checks, hosted CI execution and live
+deployment are separate evidence below. No production access was used.
 
 [#2046](https://github.com/waddle-social/waddle/issues/2046) package A asks for
 current feature and config wiring to be reconciled with #1661, #1662, #1986 and
@@ -19,7 +26,7 @@ Each row carries five evidence levels. They prove different things.
 | compiled | The code is in a build that ships. | A path in the tree and the build flags that include it. |
 | wired | A production caller reaches it when its gate is open. | A caller path in non-test code. |
 | enabled | The production configuration opens the gate. | `helmrelease.yaml`, chart defaults, or a non-test constant. |
-| tested | A named test lane exercises it. The lane is stated. | The workflow or flake target that runs it. |
+| tested | A named lane is configured to exercise it; execution needs that run's report. | The workflow/flake target establishes coverage wiring, not a successful run. |
 | live-verified | Observed working in the running production system. | Needs production access. |
 
 **live-verified is `unknown (no production access)` in every row.** Merged
@@ -31,44 +38,68 @@ config, not on an observation of the live database or fleet.
 
 ### Test lanes
 
-"Tested" names one of these lanes, because they differ in what they build and
-whether they gate the published image.
+"Tested" names one of these configured lanes. This table establishes the graph
+and prerequisites in source, not successful execution on this baseline SHA.
 
 | Lane | What it builds and runs | Postgres | Gates publish |
 | --- | --- | --- | --- |
-| **L-publish** | cuenv `test` task: `cargo nextest run --workspace --all-targets --locked --profile ci`, default features (`namespace.cue:46-52`). Runs on push to `main` (`waddle-server-default.yml`, a `needs:` of `publishContainerImage`, `:499-509`) and on PRs (`waddle-server-namespacerustchecks.yml`). | No (no `WADDLE_TEST_POSTGRES_URL`) | Yes |
-| **L-pr** | `waddle-server-test-shard-1..4`, all-features nextest archive (`flake.nix:143`, `:259-330`), run by `waddle-server-rusttests.yml`, whose only trigger is `pull_request`. | Yes (`serverPostgresTestArgs.preCheck`, `flake.nix:603-631`) | No, and it does not run on push to `main` |
-| **L-xmpp** | `waddle-server-xmpp-server-tests`, `--features test-support` without `clustering` (`flake.nix:816-845`), `waddle-server-xmppservercompliance.yml` on push to `main` and PRs. | Yes | No (not in the `needs:` list above) |
+| **L-publish** | Existing cuenv `test` task: `cargo nextest run --workspace --all-targets --locked --profile ci`, default features (`namespace.cue:48–58`). The main publication pipeline retains this gate alongside L-cluster. | No provisioned test Postgres | Yes |
+| **L-cluster** | `nixTestLocal` runs the immutable all-features nextest archive and four isolated shards through [`run-nextest-shards.sh`](../../server/scripts/run-nextest-shards.sh); `ciHelperContracts` runs first. Archive coverage is workspace `--lib --tests`, including `clustering`; default all-targets coverage and doctests remain separate gates. | Real Postgres in each shard; `WADDLE_TEST_REQUIRE_POSTGRES=1` (`flake.nix:645–655`) | **Yes**, both helper and shard tasks are direct publication dependencies (`server/env.cue:1482–1486`) |
+| **L-pr** | PR `rustTests` uses the same helper script and shard runner, then a stable `nixTest` result gate ([workflow](../../.github/workflows/waddle-server-rusttests.yml#L142-L196)). | Same required Postgres setup | PR evidence; main publication independently requires L-cluster |
+| **L-xmpp** | `waddle-server-xmpp-server-tests`, `--features test-support` without `clustering` (`flake.nix:847–870`), in the XMPP compliance workflow. | Same required Postgres pre-check | No direct publication dependency |
 
-Consequence: no lane that runs on push to `main` or gates publish compiles
-`clustering` and has Postgres. Cluster tests (5 files under `server/crates/waddle-server/tests/` carry
-`#![cfg(feature = "clustering")]`; 8 more gate individual items) therefore
-only run in L-pr, and several return success when `WADDLE_TEST_POSTGRES_URL` is unset
-(`clustering_cluster_e2e.rs:665-668` prints "skipping" and returns;
-`xep0198_cross_node_resume.rs:58` uses `.ok()?`). A pass in L-pr does not prove
-the Postgres precondition was present. This is the gap W1.1 addresses.
+The merged [#2081](https://github.com/waddle-social/waddle/pull/2081) and
+[#2084](https://github.com/waddle-social/waddle/pull/2084) wiring closes the
+previously documented *graph gap*: the main pipeline includes L-cluster at
+[`server/env.cue:192–195`](../../server/env.cue#L192-L195), and the generated
+[`publishContainerImage.needs`](../../.github/workflows/waddle-server-default.yml#L980-L1000)
+also names both gates. The workflow runs on matching-path pushes to `main`; this
+does not mean every documentation-only commit launches publication.
+
+The [shared Postgres helper](../../server/crates/waddle-ws-test-support/src/test_postgres.rs#L22-L38)
+fails if the required URL is missing/empty. Optional local runs can still skip
+without Postgres, so their passes alone cannot satisfy this gate. The environment
+[source guard](../../server/scripts/check-test-postgres-env.py) rejects literal
+reads outside that helper; source scanning is not proof against every possible
+alias or dynamically assembled access. The runner checks shard coverage and
+requires named tests in [the committed inventory](../../server/.config/required-cluster-tests.txt)
+to execute and pass in JUnit via
+[`check_required_tests.py`](../../server/scripts/check_required_tests.py).
+Each required test needs an executed result; skipped-only or missing results fail,
+as do failures and reported retry-flaky results. A JUnit name alone cannot detect
+a test body that returns early for another reason.
+
+**Execution status is separate.** The
+[#2046 continuation record](https://github.com/waddle-social/waddle/issues/2046#issuecomment-6541937295)
+reports local helper/graph checks, including #2084's 140-test helper/scanner/graph
+suite, and independent reviews. It also records hosted checks pending at merge
+and queued runner/canary work in that snapshot. Those are attributed historical
+reports, not fresh execution by this documentation change. Current hosted
+completion, publication and deployment were not checked here. Do not infer a
+green full lane, runner feasibility or a verified deployment from the merged
+graph or those local checks.
 
 ## A. Deployed clustering baseline
 
 | # | Feature or config | Compiled | Wired | Enabled in production | Tested | Live-verified |
 | --- | --- | --- | --- | --- | --- | --- |
-| A1 | Cargo feature `clustering = ["kameo/remote", "dep:libp2p"]` (`waddle-server/Cargo.toml`) | Yes in the image: `--features clustering` at `flake.nix:367` (the package build; `:673` and `:759` are the CI-only deps and `waddle-server-ci-build` targets). Off in a default `cargo` build, so L-publish does not compile it. | n/a (build switch) | Yes (the image carries it) | Compiled and unit-tested in L-pr only. | unknown (no production access) |
+| A1 | Cargo feature `clustering = ["kameo/remote", "dep:libp2p"]` (`waddle-server/Cargo.toml`) | Image build flags include `--features clustering` at `flake.nix:385`. Off in a default `cargo` build, so the default L-publish task does not compile it. | n/a (build switch) | Image configuration includes it; live image not inspected | Configured in L-cluster and L-pr; execution status above. | unknown (no production access) |
 | A2 | Runtime switch `WADDLE_CLUSTERING_ENABLED` (`config.rs:579`) rendered from `.Values.clustering.enabled` (`charts/waddle-server/templates/configmap.yaml:25`) | Yes | Yes | Yes: `replicaCount: 2`, `clustering.enabled: true`, `enrolledKeyCount: 4` (`infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml`). Chart defaults are `replicaCount: 1`, `clustering.enabled: false`. | Config parsing in L-publish (`config.rs:1754,1774`). | unknown (no production access) |
-| A3 | Postgres ownership claims, node leases, self-fence (ADR-0017 Phase 3): `PostgresClaimStore` (`clustering/claims.rs:267`), `clustering/lease.rs`, `clustering/self_fence.rs` | Yes | Yes, when clustering is enabled | Yes (via A2) | Unit tests in L-pr. Two-process e2e (`clustering_cluster_e2e.rs`) in L-pr only, and it skips silently without Postgres. | unknown (no production access) |
-| A4 | Ordered relay `deliver_ordered.v13` and the route bridge (`clustering/relay/implementation.rs:485`, `clustering/route_bridge/`) | Yes | Yes: 37 direct bridge call sites in 18 handler/interpret files plus about 12 inline claim-owner branches (counts from the routing audit, not re-derived here) | Yes (via A2) | `clustering_ordered_relay.rs` and the e2e harness, L-pr only. | unknown (no production access) |
-| A5 | Cross-node SM resume (`steal_for_resume`, `ResumeIdentityProof`; `waddle-xmpp/src/ownership/claims.rs:540`) | Yes | Yes | Yes (via A2) | `xep0198_cross_node_resume.rs` (needs `clustering` and Postgres; silent skip), L-pr only. | unknown (no production access) |
-| A6 | `muc_admin_query.v1` relay message (#1298) and `retire_after_shutdown` on graceful drain (#1295), merged in #1985 (`fe547218`) | Yes (`relay/implementation.rs:1237`, `clustering/self_fence.rs`) | Yes | Yes (via A2); a new message ID, so no Recreate was needed | Tests exist in `clustering/relay/tests.rs`, `self_fence.rs` and `websocket/tests/muc.rs::remote_owner_admin_list` (all `clustering`-gated: L-pr). | unknown (no production access). The post-deploy checks named in `TODO-ACTOR.md` are not recorded. |
+| A3 | Postgres ownership claims, node leases, self-fence (ADR-0017 Phase 3): `PostgresClaimStore` (`clustering/claims.rs:267`), `clustering/lease.rs`, `clustering/self_fence.rs` | Yes | Yes, when clustering is enabled | Yes (via A2) | Unit tests and native process harness `clustering_cluster_e2e.rs` are configured in L-cluster/L-pr. Required-Postgres and named-test gates apply. | unknown (no production access) |
+| A4 | Ordered relay `deliver_ordered.v13` and the route bridge (`clustering/relay/implementation.rs:485`, `clustering/route_bridge/`) | Yes | Yes; use the [W1.9 inventory](2046-caller-inventory.md#02-headline-counts-production-unless-stated) for historical counts and scope limits, not the earlier approximate audit counts. | Yes (via A2) | `clustering_ordered_relay.rs` and the e2e harness are configured in L-cluster/L-pr. | unknown (no production access) |
+| A5 | Cross-node SM resume (`steal_for_resume`, `ResumeIdentityProof`; `waddle-xmpp/src/ownership/claims.rs:540`) | Yes | Yes | Yes (via A2) | `xep0198_cross_node_resume.rs` is configured in L-cluster/L-pr with required Postgres; optional local runs can still skip. | unknown (no production access) |
+| A6 | `muc_admin_query.v1` relay message (#1298) and `retire_after_shutdown` on graceful drain (#1295), merged in #1985 (`fe547218`) | Yes (`relay/implementation.rs:1237`, `clustering/self_fence.rs`) | Yes | Yes (via A2); a new message ID, so no Recreate was needed | Clustering tests in `clustering/relay/tests.rs`, `self_fence.rs` and `websocket/tests/muc.rs` are configured in L-cluster/L-pr; later shutdown tests are in the required inventory. | unknown (no production access). The post-deploy checks named in `TODO-ACTOR.md` are not recorded. |
 | A7 | Remote-resource route/frame dual-version shim (#1804): live endpoint first, fallback to frozen `remote_resource_route.v8`/`frame.v3` on `UnknownMessage` | Yes (`relay/remote_resource_compat.rs`) | Yes | Yes | Unit tests beside it. | unknown (no production access) |
 | A8 | Cutover guard (`cutoverGuard.enabled`) | Yes (chart templates) | Yes | Yes in production, `false` in the chart default | `server/scripts/test_cutover_*.py` in the `renderDeployment` CI task | unknown (no production access) |
 | A9 | Rollout strategy | Chart default `Recreate` (`values.yaml:46-47`) | n/a | Production is `RollingUpdate`, `maxSurge: 1`, `maxUnavailable: 0` (restored by #1979, `e3a08248`) | Guard scripts, as A8 | unknown (no production access) |
-| A10 | `/health` liveness handler (`server/health.rs:114-151`) | Yes | Yes: chart liveness probe `/health` | Yes (production does not override probes) | none found for outage behaviour | unknown (no production access). The handler runs `Database::health_check` on the main pool, so a database outage fails liveness; whether that restarts pods is inference. W1.2 addresses it. |
+| A10 | `/health` liveness handler, refreshed for #2082 ([`health.rs:114–175`](../../server/crates/waddle-server/src/server/health.rs#L114-L175)) | Yes | Chart liveness probe `/health`; dependencies now belong to `/ready` (`health.rs:239–277`) | Committed probe configuration; live deployment not inspected | Liveness/readiness and self-fence tests are configured in the test lanes; this refresh did not run them. | unknown (no production access). The old DB-dependent liveness description is superseded by #2082; source separation does not prove live outage behavior. |
 
 ## B. Ingress authority, epoch guards and manifests (the P1 base that #1661 and #1948 build on)
 
 | # | Feature or config | Compiled | Wired | Enabled in production | Tested | Live-verified |
 | --- | --- | --- | --- | --- | --- | --- |
-| B1 | `IngressUnitOfWork` (`ingress_uow/mod.rs:87`), `open_ingress_authority` (`server/http.rs:653-679`) | Yes | Yes. It is `Clone` and coexists with the control-plane pool and per-store MAM/inbox pools. | Yes. Fencing is `Clustered` when clustering is enabled, else `SingleNode` (`ingress/contract.rs:148-172`). | L-pr (Postgres) | unknown (no production access) |
-| B2 | Epoch guards (V1009 and later enrolments), 12 tables (`ingress_substrate/substrate.rs:49-62`) | Yes | Triggers installed by migrations | **Inert**: the singleton is seeded at epoch 0 (`db/migrations/waddle.rs:251-258`) and the guard returns early at 0 (`:332`). `supported_protocol_epoch()` is 1. No code flips the epoch. | Catalog test (`ingress_substrate/tests.rs:2152-2184`) and `tests/ingress_schema_epoch0.rs`, both need Postgres: L-pr and L-xmpp. | unknown (no production access). That production is still at epoch 0 is inferred from the seed, the absence of any flip, and the open #1689. |
+| B1 | `IngressUnitOfWork` (`ingress_uow/mod.rs:87`), `open_ingress_authority` (`server/http.rs:653-679`) | Yes | Yes. It is `Clone` and coexists with the control-plane pool and per-store MAM/inbox pools. | Yes. Fencing is `Clustered` when clustering is enabled, else `SingleNode` (`ingress/contract.rs:148-172`). | L-cluster/L-pr (Postgres coverage wiring) | unknown (no production access) |
+| B2 | Epoch guards (V1009 and later enrolments), 12 tables (`ingress_substrate/substrate.rs:49-62`) | Yes | Triggers installed by migrations | **Inert**: the singleton is seeded at epoch 0 (`db/migrations/waddle.rs:251-258`) and the guard returns early at 0 (`:332`). `supported_protocol_epoch()` is 1. No code flips the epoch. | Catalog test (`ingress_substrate/tests.rs:2152-2184`) and `tests/ingress_schema_epoch0.rs`, both need Postgres: L-cluster/L-pr and L-xmpp. | unknown (no production access). That production is still at epoch 0 is inferred from the seed, the absence of any flip, and the open #1689. |
 | B3 | #1689 owner/runtime role split | No | No | No. The CNPG cluster has `owner: waddle` (`postgresql-cluster.yaml`), the same role the application uses. | n/a | unknown (no production access) |
 | B4 | Single-node frozen MUC manifests before `h` (#1945) | Yes | Yes | Only for `IngressFencing::SingleNode` (`ingress/commit_room.rs:13-21`); production is clustered | Local-room tests | unknown (no production access) |
 | B5 | Clustered frozen room manifests: `allow_clustered_room_manifests()` (`ingress/commit/commit_hooks.rs:23-35`) | Yes | Yes, through `new_manifests_enabled` (`ingress/commit_room.rs`) | **No**: returns `false` under `cfg(not(test))`. There is no config or environment switch. Already-sealed manifests stay authoritative. | Test-only enablement via `ALLOW_CLUSTERED_ROOM_MANIFESTS.scope(true, ...)` (`ingress/xep0045_room_manifest_tests.rs:149`). Test-scoped enablement does not establish production correctness. | n/a (disabled) |
@@ -94,22 +125,22 @@ the Postgres precondition was present. This is the gap W1.1 addresses.
 | D2 | P3 identity vocabulary: `ConnectionRef`, `NodeLeaseIdentity`, `SmBinding`, `WireStanzaBytes`, `UserClaimIdentity`, `SmPrevid` | **None exist.** Each has zero `-w` hits under `server/` (checked 2026-10-30). Present in production: `AuthenticatedPrincipalRef`, `ResumeIdentityProof`/`steal_for_resume`, `CleanupPending`. `UserClaimLease` exists but is private (`waddle-xmpp/src/registry/user_registry.rs:66-70`). | n/a | n/a | n/a | n/a |
 | D3 | `ConnectionGeneration` (the type #1662 P3.3 builds its fence on) | A **process-local** `AtomicU64` minted in `WsConnState::new` (`websocket/state.rs:1884-1893`), restarting at 1 on every boot. It tags ingress submissions. No table column named `connection_generation` exists under `server/`. It is not a durable fence. `OccupancySessionGeneration` (`waddle-xmpp-core/src/occupancy_session.rs`) is a separate logical identity that its own docs say survives XEP-0198 resumption. | Yes | Yes (tagging only) | L-publish | unknown (no production access) |
 | D4 | P3.2 `user_resources` rows | **No such table exists** in the tree. (A `git log -S` search of the available history only matches an unrelated function name; the local history is shallow.) The only durable per-resource authority is `xmpp_occupancy_authority(full_jid, generation)` (`db/migrations/global.rs:734`, read and written in `occupancy_authority.rs`). #1662's "existing substrate on main: partial `user_resources` rows" is not accurate; P3.2 is new DDL. | Yes (the occupancy table) | Yes (applied by migration) | n/a (a schema object; no lane asserts it beyond the migration ledger) | Applied migration is a ledger fact, not a live check: unknown (no production access) |
-| D5 | P3.3 durable SM lifecycle and opaque `SmPrevid` | **Partial.** `PostgresFencedSmPersistence` (`sm_persistence_fenced/`) is the fenced SM store. `sm_sessions` has no `lifecycle` column and the server emits `previd = stream_id`. It also runs `ALTER TABLE sm_sessions ...` on every boot (`sm_persistence_fenced/implementation.rs:241-253`), outside the migration ledger, which matters for #1689. | Yes | Yes | `xep0198_cross_node_resume.rs` (L-pr; needs `clustering` and Postgres, silent skip). `server/crates/waddle-xmpp/tests/xep0198_session_registry.rs` is a separate in-memory SM registry suite (L-publish) and does not exercise the fenced store. | unknown (no production access) |
+| D5 | P3.3 durable SM lifecycle and opaque `SmPrevid` | **Partial.** `PostgresFencedSmPersistence` (`sm_persistence_fenced/`) is the fenced SM store. `sm_sessions` has no `lifecycle` column and the server emits `previd = stream_id`. It also runs `ALTER TABLE sm_sessions ...` on every boot (`sm_persistence_fenced/implementation.rs:241-253`), outside the migration ledger, which matters for #1689. | Yes | Yes | `xep0198_cross_node_resume.rs` is configured in L-cluster/L-pr with required Postgres. `server/crates/waddle-xmpp/tests/xep0198_session_registry.rs` is a separate in-memory SM registry suite (also in L-publish) and does not exercise the fenced store. | unknown (no production access) |
 | D6 | P3.4 SASL2 (XEP-0388) and inline resume (XEP-0198 section 11) | **No.** `server/capabilities.toml` has no XEP-0388 entry and `urn:xmpp:sasl:2` appears in no Rust source. | n/a | n/a | n/a | n/a |
 
 ## E. Operations and evidence
 
 | # | Feature or config | Compiled | Wired | Enabled in production | Tested | Live-verified |
 | --- | --- | --- | --- | --- | --- | --- |
-| E1 | Cluster metrics: `clustering/metrics.rs` uses its own `meter()` with raw instruments, not the `counter_add!`/`gauge_record!`/`histogram_record!` macros. Admission, custody, uncertainty, mailbox bytes/depth/age metrics do not exist. | Yes | Yes | Yes | none found for exported names | unknown (no production access) |
-| E2 | Cluster alert rules (`ClusterHeartbeatStale`, `ClusterHeartbeatMissing`; `rules/mimir/waddle-reliability.yaml`) | Yes (rule files) | Uploaded by the rules process (not examined) | unknown | `infrastructure/waddle.cloud/rules/tests/run.sh` (promtool) exists, but no workflow, `env.cue` or `namespace.cue` entry runs it. W1.12. | unknown (no production access) |
+| E1 | Historical metric coverage snapshot: `clustering/metrics.rs` uses its own `meter()` with raw instruments; the new mailbox/endpoint telemetry remains later work. | Yes | Yes | Yes | #2080 adds the exported instrument contract at `clustering/metrics.rs:741–744` and the Prometheus translation check in E2. This refresh did not run either. | unknown (no production access) |
+| E2 | Cluster alert rules (`ClusterHeartbeatStale`, `ClusterHeartbeatMissing`; `rules/mimir/waddle-reliability.yaml`) | Yes (rule files) | Rule upload remains unverified; CI wiring is now `checkAlertRules` (`server/env.cue:617–634`) | unknown | #2080 wires promtool and the OTLP-to-Prometheus name contract into `checkAlertRules`, a publication dependency. This is source coverage, not an observed alert or collector-loss drill. | unknown (no production access) |
 | E3 | Production topology | n/a | n/a | One bare-metal node (`clusters/production.yaml`: `control-plane` pool `size: 1`), storage replica count 1, CNPG `instances: 2` on the same node, pod anti-affinity only preferred. Replicas buy rolling deploys and process isolation, not hardware fault tolerance. | n/a | unknown (no production access) |
 | E4 | Postgres backup and WAL archive | **No configuration.** `postgresql-cluster.yaml` sets `walStorage` only; it has no backup, barman or archive stanza. | n/a | No | n/a | unknown (no production access); the absence is a config fact, whether backups exist some other way is not known |
 
 ## Where this changes what #2046 and #1662 say
 
-- #2046's baseline anchors are from `c9be424`, which is not on `main`. This
-  table cites `main@db6e533` paths. The anchors that moved: `RoomRegistryActor`
+- #2046's baseline anchors are from `c9be424`, which is not on `main`. The
+  unrefreshed product cells cite `main@db6e533` paths. The anchors that moved: `RoomRegistryActor`
   is `room_registry_actor/implementation.rs:319`, `UserActor` is
   `user_actor/implementation.rs:22`, `WsConnState` is `websocket/state.rs:1720`,
   ingress authority is `server/http.rs:653-679`.
@@ -117,9 +148,9 @@ the Postgres precondition was present. This is the gap W1.1 addresses.
   that table is new DDL. P3.3's durable `ConnectionGeneration` is target design;
   the existing type of that name is a process-local counter and not that fence
   (D3). The transport and occupancy generations stay distinct.
-- "Tested" for the cluster rows A3 to A6 means L-pr, which only runs on
-  pull requests and tolerates a missing Postgres. None of those rows is covered
-  by a lane that gates publish.
+- The previous A3–A6 CI gap is superseded by #2081/#2084's L-cluster wiring.
+  Required Postgres and executed-name checks now gate the configured publication
+  graph. Current hosted execution and deployment remain unverified here.
 - Rows C2 to C6 and D1, D2, D4 and D6 are absent, not partially wired. Nothing in
   #1986, #1948, #1661 P2.3/P2.4 or #1662 P3.1/P3.2/P3.4 should be described as
   landed.
@@ -129,5 +160,7 @@ the Postgres precondition was present. This is the gap W1.1 addresses.
 Counts and `path:line` anchors drift quickly in this area (#2028 split large
 modules; #1893, #1985 and #2040 each added routing branches). When a row
 changes, re-check the cited path against the current `main` SHA and update the
-SHA in the header. Do not move a row to `live-verified` without a recorded
-observation of the running system.
+SHA in the header, explicitly identifying any rows left at an older snapshot.
+Do not move a row to `live-verified` without a recorded observation of the
+running system. The [identity proposal](2046-connection-identity-proposal.md)
+refreshes only the W1.3 identity seams and retains package A's decision gates.

@@ -6,10 +6,16 @@ publish = false
 
 # Deliberately separate from every production workspace and release image.
 [workspace]
+members = ["../native-fixture"]
+default-members = [".", "../native-fixture"]
 
 [dependencies]
+waddle-native-fixture = { path = "../native-fixture" }
 anyhow = "=1.0.104"
-tokio-stream = "=0.1.18"
+tokio-stream = { version = "=0.1.18", features = ["net"] }
+# Existing locked transport dependencies, exposed only for the fault proxy.
+tonic = { version = "=0.12.3", features = ["transport"] }
+bytes = "=1.12.1"
 hex = "=0.4.3"
 libc = "=0.2.186"
 prescience = { version = "=0.1.0", features = ["tls-rustls"] }
@@ -17,9 +23,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = "=0.10.9"
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid"] }
-tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["full"] }
-url = "=2.5.8"
 uuid = { version = "=1.23.1", features = ["v4", "serde"] }
 
 [[bin]]

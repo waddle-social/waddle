@@ -21,9 +21,14 @@ for contract in \
   test_check_required_tests \
   test_check_test_postgres_env \
   test_check_rust_structure \
-  test_check_libp2p_rollout; do
+  test_check_libp2p_rollout \
+  test_check_postgres_test_group; do
   python3 "scripts/${contract}.py"
 done
+
+# Check detected Postgres-backed tests against the serialized `postgres`
+# group or the schema-isolated allowlist. Review new fixtures and callers too.
+python3 scripts/check_postgres_test_group.py
 
 # The PR rustTests workflow runs this helper outside the dev shell. Use the
 # pinned CUE from the flake when the ambient CLI is absent or a different

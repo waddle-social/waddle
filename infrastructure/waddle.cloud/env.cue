@@ -90,14 +90,14 @@ schema.#Project & {
 		namespaceServerRustInputs: schema.#Task & {
 			command: "bash"
 			args: ["-euo", "pipefail", "-c", #"""
-				mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
-				mkdir -p target/cuenv/server-rust-inputs/rules/mimir
-				cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
-				cp rules/mimir/waddle-reliability.yaml target/cuenv/server-rust-inputs/rules/mimir/
-			"""#]
+					mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
+					mkdir -p target/cuenv/server-rust-inputs/rules/mimir
+					cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
+					cp rules/mimir/*.yaml target/cuenv/server-rust-inputs/rules/mimir/
+				"""#]
 			inputs: [
 				"gitops/waddle-server/postgresql-monitoring-ingress.yaml",
-				"rules/mimir/waddle-reliability.yaml",
+				"rules/mimir/*.yaml",
 			]
 			outputs: ["target/cuenv/server-rust-inputs/**"]
 			hermetic: sandbox: "dir"

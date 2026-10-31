@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/kameo", "vendor/libp2p-swarm"]
+exclude = ["vendor/kameo", "vendor/libp2p-swarm", "experiments/native-fixture"]
 members = [
     "crates/waddle-ecdysis",
     "crates/waddle-server",

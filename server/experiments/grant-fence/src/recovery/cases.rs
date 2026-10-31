@@ -58,13 +58,13 @@ pub struct RecoveryCase {
     notes: Vec<&'static str>,
 }
 
-async fn connection(fixture: &Fixture) -> Result<PgConnection> {
+pub(super) async fn connection(fixture: &Fixture) -> Result<PgConnection> {
     fixture
         .settings
         .connect("fence_app", "fence_app", "recovery-observer", 3000)
         .await
 }
-async fn closed(fixture: &Fixture, identity: &Identity) -> Result<()> {
+pub(super) async fn closed(fixture: &Fixture, identity: &Identity) -> Result<()> {
     let mut connection = connection(fixture).await?;
     ensure!(
         store::current(&mut connection, identity, false).await?,
@@ -130,14 +130,14 @@ async fn stage(
         outcome,
     })
 }
-fn completed(intent: &Intent) -> Outcome {
+pub(super) fn completed(intent: &Intent) -> Outcome {
     if intent.polarity == Polarity::Grant {
         Outcome::Activated
     } else {
         Outcome::VerifiedRevoke
     }
 }
-async fn mutate(
+pub(super) async fn mutate(
     binary: &Path,
     fixture: &Fixture,
     identity: &Identity,
@@ -152,11 +152,12 @@ async fn mutate(
             intent: intent.clone(),
             previous: previous.cloned(),
             pause: Pause::None,
+            write_proxy_port: None,
         },
     )?;
     worker.done(completed(intent)).await
 }
-async fn plan(
+pub(super) async fn plan(
     binary: &Path,
     fixture: &Fixture,
     candidate: Candidate,
@@ -171,7 +172,7 @@ async fn plan(
     let revoke = grant.revoke();
     Ok((first.next(&revoke)?, revoke, Some(first)))
 }
-async fn recover(
+pub(super) async fn recover(
     binary: &Path,
     fixture: &Fixture,
     identity: &Identity,
@@ -185,7 +186,11 @@ async fn recover(
     )?;
     recovery.done(expected).await
 }
-async fn assert_no_admission(binary: &Path, fixture: &Fixture, identity: &Identity) -> Result<()> {
+pub(super) async fn assert_no_admission(
+    binary: &Path,
+    fixture: &Fixture,
+    identity: &Identity,
+) -> Result<()> {
     let mut worker = Contender::spawn(
         binary,
         fixture,
@@ -244,6 +249,7 @@ async fn outage(fixture: &mut Fixture, binary: &Path, cases: &mut Vec<RecoveryCa
                     intent: intent.clone(),
                     previous: previous.clone(),
                     pause: Pause::None,
+                    write_proxy_port: None,
                 },
             )?;
             worker.done(Outcome::AuthorityUnavailable).await?;
@@ -308,6 +314,7 @@ async fn loss(
             intent: intent.clone(),
             previous,
             pause: Pause::AfterAcknowledgedWrite,
+            write_proxy_port: None,
         },
     )?;
     worker.wait("acknowledged").await?;
@@ -364,6 +371,7 @@ async fn acknowledged_death(
             intent: intent.clone(),
             previous,
             pause: Pause::AfterAcknowledgedWrite,
+            write_proxy_port: None,
         },
     )?;
     worker.wait("acknowledged").await?;
@@ -426,6 +434,7 @@ async fn stale(
             intent: grant.clone(),
             previous: None,
             pause: Pause::AfterAcknowledgedWrite,
+            write_proxy_port: None,
         },
     )?;
     initial.wait("acknowledged").await?;
@@ -462,6 +471,7 @@ async fn stale(
                 intent: revoke,
                 previous: Some(identity.clone()),
                 pause: Pause::BeforeFenceCommit,
+                write_proxy_port: None,
             },
         )?;
         let holder = revoker

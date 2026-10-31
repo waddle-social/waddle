@@ -43,6 +43,8 @@ pub mod room_effect_outbox;
 pub(crate) mod room_observation;
 pub mod room_policy;
 pub mod server;
+/// The one enclosing graceful-shutdown deadline every stage derives from.
+pub mod shutdown_deadline;
 pub mod sm_persistence;
 /// Postgres-fenced `SmPersistenceStorage` (ADR-0017 Phase 3 Slice 4).
 /// Gated behind the `clustering` Cargo feature, matching every other

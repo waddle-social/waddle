@@ -64,3 +64,18 @@ CREATE TABLE recovery_admission (
     operation UUID NOT NULL,
     digest TEXT NOT NULL
 );
+
+-- Finite synthetic multi-edge experiment, not a production policy or migration.
+CREATE TABLE multi_guard (
+    kind SMALLINT NOT NULL CHECK (kind BETWEEN 0 AND 3),
+    id UUID NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation > 0),
+    operation UUID NOT NULL,
+    payload TEXT NOT NULL,
+    active BOOLEAN NOT NULL,
+    PRIMARY KEY(kind,id)
+);
+CREATE TABLE multi_effect (
+    effect UUID PRIMARY KEY,
+    descriptor TEXT NOT NULL
+);

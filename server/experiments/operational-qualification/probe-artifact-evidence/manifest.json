@@ -1,0 +1,56 @@
+{
+  "compiler": {
+    "flags": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-static",
+      "-no-pie",
+      "-fno-pie",
+      "-fno-ident",
+      "-fstack-protector-strong",
+      "-D_FORTIFY_SOURCE=2",
+      "-frandom-seed=waddle-isolation-probe-v1",
+      "-s",
+      "-Wl,--build-id=none,-z,noexecstack,-z,relro,-z,now"
+    ],
+    "path": "/nix/store/cn1drziywixrw4x47hv3wxrz0pgjyrmb-x86_64-unknown-linux-musl-gcc-wrapper-15.3.0/bin/x86_64-unknown-linux-musl-cc",
+    "sha256": "c2ae4e1b991f9ca8537cf597654709324e7bd1f5a680cf04a55fb3c1ac7ba529"
+  },
+  "files_sha256": {
+    "bzImage": "ff7c52cc769863642ea7fa27e04c01131d27be1f7e1ca195adf387a890eb108f",
+    "init": "080efe4791e3bdb7c0f0b43ace3c7363109927892520a3c2c5e5b7d4edd99468",
+    "initramfs.cpio.gz": "424a16468692d70a33260d40e316cb4c98df07fed2a9326f51ad9e625f96c860",
+    "inspection.json": "39db81719e06f535663ff05d156fe584d40e0ebf4e8c0cfbfd3ca5158243aae5",
+    "kernel.config": "1677104c89e0da62afaa382036e1860d367a6e2b75ee80bf8a371e79a11f1f6e",
+    "toolchain-closure.json": "b03917467aa2f265ae0fe3c2404a680db5da938652f5f0c109411dcfc7976e9f"
+  },
+  "guest_execution": "not_performed",
+  "host_isolation": "unverified",
+  "kernel_source": {
+    "path": "/nix/store/izkbpb5ssbss6bl5s40fbzsahnlf3b7j-linux-6.18.50.tar.xz",
+    "sha256": "d2fc041dab4e11d9645e3ba53be058faa52b8ce28a8a97c889bb2cacee170461"
+  },
+  "nixpkgs": {
+    "nar_hash": "sha256-1CBkBf+Nhggykzlx0jvXrj5rk20btl+tK8Fa8Ml/BL4=",
+    "revision": "d5dfd8e6716dde34398bc14bc87c10dece9c8c68"
+  },
+  "qualification": "not_assessed",
+  "repository_lock_sha256": "94a464fbd69a9da5f284c3a43461585b0f7d2646064dba9181b5017ffb4d4940",
+  "reproducibility": "not_inferred_from_single_build",
+  "schema_version": 1,
+  "source_sha256": {
+    "archive.py": "198206e660e365155b5cde7c7ea5bfd75c14c6d0aa3717e55df60f2276ce0a14",
+    "build.py": "ea0272eeb40bc8b975b997e1e2a882e58c51642e03fc24556333de760f026894",
+    "default.nix": "1597fcfed6157f61bca2409502ce89420c7fa4873ea9036dd7ac1acffa9a147e",
+    "init.c": "da51b8d18f45ecf3d02847025a1af64a355bbeeee6d9a77e12adff14af817e10",
+    "inspect_artifact.py": "74358216c718dfbcbf907fa30175b82fa39a3648d3d9818aace99a3938bc9afe",
+    "model.c": "5af4281f4fa27e09f83864c0d996a80154d1be853d94a7f16c668ea6c0d9112f",
+    "model.h": "83019d443d52e251ce082e2b907d035e520674b17f490867c1db74b403160a81",
+    "model_test.c": "5a44f7a9b0ecda56582874315a0191844a9e8726431b63de8b90aa669f360cad",
+    "test_artifact.py": "4bced0fbdeec85be066a0657d3cb533ee35a4eec8a90c1f93178e0c418f947fe"
+  }
+}

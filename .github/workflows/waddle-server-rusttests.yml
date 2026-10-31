@@ -69,6 +69,8 @@ name: waddle-server-rustTests
       - server/crates/**
       - server/crates/**/tests/**
       - server/crates/waddle-server/src/server/routes/websocket/tests/**
+      - server/crates/waddle-server/src/shutdown_deadline.rs
+      - server/crates/waddle-server/src/shutdown_deadline.rs/**
       - server/crates/waddle-server/tests/server_capability_manifest.rs
       - server/crates/waddle-server/tests/server_capability_manifest.rs/**
       - server/deployment.cue
@@ -106,6 +108,8 @@ name: waddle-server-rustTests
       - server/scripts/run-nextest-shards.sh/**
       - server/scripts/test_build_nextest_archive.py
       - server/scripts/test_build_nextest_archive.py/**
+      - server/scripts/test_chart_shutdown_budget.py
+      - server/scripts/test_chart_shutdown_budget.py/**
       - server/scripts/test_check_nextest_shards.py
       - server/scripts/test_check_nextest_shards.py/**
       - server/scripts/test_check_required_tests.py

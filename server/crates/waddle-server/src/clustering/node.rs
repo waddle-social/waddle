@@ -17,7 +17,6 @@ use super::swarm;
 use super::Arc;
 use super::CancellationToken;
 use super::ClusteringConfig;
-use super::Duration;
 use super::{Database, DatabaseDriver};
 
 /// A node's per-process clustering identity: freshly generated on every
@@ -162,12 +161,13 @@ pub enum StartupServingTransition {
 pub struct NodeLifecycle {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<NodeLifecycleState>>,
     pub(in crate::clustering) fatal_fence: CancellationToken,
-    /// Cancelled once a clustering terminal exit has finished its local
-    /// demotion: the end of `TerminalFenceContext::finish`, or the inline
-    /// fatal-fence exit of `run_node_lease`'s registered loop. Read-only
-    /// signal for liveness; it changes no fencing or shutdown behaviour.
-    /// The demotion awaits the identity publication barrier and actor asks
-    /// with no deadline, so a wedged guard or actor delays this signal.
+    /// Cancelled once a clustering terminal exit reaches the end of
+    /// `TerminalFenceContext::finish`, or the inline fatal-fence exit of
+    /// `run_node_lease`'s registered loop. Read-only signal for liveness;
+    /// it changes no fencing or shutdown behaviour. Before process stop,
+    /// publication barriers and actor asks can delay this signal without
+    /// a deadline. Process-stop fencing may finish its bounded waits
+    /// without proving demotion completed; unfinished claims expire.
     pub(in crate::clustering) terminal_fence_finished: CancellationToken,
     /// Cancelled when `run_node_lease` returns by any path (or its task is
     /// dropped). Read-only signal for liveness.
@@ -359,7 +359,7 @@ impl NodeLifecycle {
         self.fatal_fence.clone()
     }
 
-    /// Record that a clustering terminal exit finished its local demotion.
+    /// Record that a clustering terminal exit finished its waits.
     /// Called last in `TerminalFenceContext::finish` and on `run_node_lease`'s
     /// inline fatal-fence exit. `finish` also runs on an ordinary clustering
     /// stop, so [`Self::is_terminally_fenced`] also requires the fatal fence.
@@ -367,8 +367,8 @@ impl NodeLifecycle {
         self.terminal_fence_finished.cancel();
     }
 
-    /// The node took a fatal fence and its node-lease loop finished the
-    /// terminal demotion and returned: it can never serve again in this
+    /// The node took a fatal fence and its node-lease loop finished its
+    /// terminal waits and returned: it can never serve again in this
     /// process (`FencedRecovering` with no re-registration loop left), so
     /// only a restart recovers it. Liveness reports this.
     pub fn is_terminally_fenced(&self) -> bool {
@@ -716,30 +716,30 @@ impl ClusteringHandles {
 /// its fields: `JoinHandle` is neither `Clone` nor meaningfully `Default`,
 /// and `ClusteringHandles` derives both for its many other call sites (it
 /// is cloned onto `AppState`, `WebSocketState`, and every janitor). This
-/// lets `server/mod.rs` await this node's per-entity graceful drain
-/// (`self_fence::run_node_lease`'s own exit, which runs the drain sequence
-/// on its way out) actually completing before process exit — "in parallel
-/// with connection drain but completing before process exit," per element
-/// 4's drain sequence text — rather than a fire-and-forget background task
-/// racing shutdown with no ordering guarantee at all.
+/// lets the server lifecycle await this node's per-entity graceful drain
+/// (`self_fence::run_node_lease`'s own exit) alongside connection shutdown,
+/// up to the enclosing deadline. Completion is preferred, but a timeout
+/// allows the lifecycle to proceed without proving that the task exited.
 pub struct ClusteringShutdown(pub(in crate::clustering) Option<tokio::task::JoinHandle<()>>);
 
 impl ClusteringShutdown {
-    /// Await the node-lease loop's own exit, bounded by `budget` so a
-    /// wedged drain task cannot hang process shutdown forever — a timeout
-    /// here is logged and the process proceeds to exit anyway: any
-    /// un-released claims are simply fenced-safe and reclaimed later by
-    /// another node's orphan reaper (`claims_abandoned_on_drain` already
-    /// counts them). A `None` inner handle (clustering disabled, or a
+    /// Await the node-lease loop's own exit, bounded by the enclosing
+    /// shutdown `deadline` (#2046 W1.10). Normal process-triggered shutdown
+    /// uses the same deadline, but terminal fencing started before process
+    /// stop can retain waits that outlast it. A timeout logs and stops waiting;
+    /// dropping the join handle detaches the task without cancelling it or
+    /// proving demotion completed. The task may continue until completion
+    /// or runtime teardown. Unfinished ownership is left to lease expiry,
+    /// not assumed retired. Telemetry shutdown and runtime teardown still
+    /// follow this await. A `None` inner handle (clustering disabled, or a
     /// build without the `clustering` feature) returns immediately.
-    pub async fn await_drain(self, budget: Duration) {
+    pub async fn await_drain_until(self, deadline: tokio::time::Instant) {
         let Some(handle) = self.0 else {
             return;
         };
-        if tokio::time::timeout(budget, handle).await.is_err() {
+        if tokio::time::timeout_at(deadline, handle).await.is_err() {
             tracing::warn!(
-                budget_ms = budget.as_millis() as u64,
-                "clustering: node-lease drain did not complete within the shutdown budget; \
+                "clustering: node-lease drain did not complete within the shutdown deadline; \
                  proceeding with process exit (fenced-safe: un-released claims are simply \
                  reclaimed later)"
             );
@@ -754,8 +754,9 @@ pub struct ShutdownSmDrain {
     pub complete: CancellationToken,
     /// Closure proof, separate from Q6 settlement (which may time out).
     pub connections_drained: Arc<std::sync::atomic::AtomicBool>,
-    pub budget: Duration,
-    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The process-wide enclosing shutdown deadline (#2046 W1.10), shared
+    /// with the Q6 drain and the HTTP server.
+    pub deadline: crate::shutdown_deadline::ShutdownDeadline,
 }
 
 /// Conditionally start the clustering swarm subsystem.

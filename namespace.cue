@@ -15,6 +15,8 @@ let _serverRustInputs = [
 	"server/crates/**",
 	"server/extensions/**",
 	"server/vendor/**",
+	"server/experiments/native-fixture/**",
+	"server/experiments/grant-fence/Cargo.toml",
 	"server/scripts/**",
 	"server/wit/**",
 	"server/charts/waddle-server/**",
@@ -27,8 +29,10 @@ let _serverRustInputs = [
 				to:   "infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml"
 			},
 			{
-				from: "target/cuenv/server-rust-inputs/rules/mimir/waddle-reliability.yaml"
-				to:   "infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+				// Every Mimir rule file, so a second rules file is visible to
+				// the rule-drift tests in this sandbox too.
+				from: "target/cuenv/server-rust-inputs/rules/mimir"
+				to:   "infrastructure/waddle.cloud/rules/mimir"
 			},
 		]
 	},
@@ -43,6 +47,10 @@ schema.#Project & {
 	runtime: {type: "nix", flake: "."}
 
 	tasks: {
+		// The no-Postgres, default-feature lane: no database is provisioned,
+		// so Postgres-backed tests return early, and `clustering` tests are
+		// not compiled. Postgres and all-features coverage is the shard lane
+		// (server `nixTestLocal`), which also gates publish.
 		test: schema.#Task & {
 			command: "cargo"
 			args: ["nextest", "run", "--workspace", "--all-targets", "--locked", "--profile", "ci"]

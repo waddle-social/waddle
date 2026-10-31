@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "manifest": {
+    "schema_version": 1,
+    "run_id": 42,
+    "client_count": 3,
+    "rooms": [
+      { "id": 7, "senders": [1], "recipients": [2, 3] }
+    ],
+    "phases": { "warmup_ms": 100, "measurement_ms": 300, "drain_ms": 200 },
+    "offer_interval_ms": 100,
+    "payload_bytes": 512,
+    "delivery_timeout_ms": 100,
+    "max_generator_lag_ms": 0,
+    "retries": "disabled",
+    "repetitions": 1,
+    "cooldown_ms": 0
+  },
+  "closed_at_ms": 600,
+  "offers": [
+    { "message": { "repetition": 1, "sequence": 0 }, "outcome": { "kind": "sent", "at_ms": 0 } },
+    { "message": { "repetition": 1, "sequence": 1 }, "outcome": { "kind": "sent", "at_ms": 100 } },
+    { "message": { "repetition": 1, "sequence": 2 }, "outcome": { "kind": "sent", "at_ms": 200 } },
+    { "message": { "repetition": 1, "sequence": 3 }, "outcome": { "kind": "sent", "at_ms": 300 } }
+  ],
+  "receipts": [
+    { "message": { "repetition": 1, "sequence": 0 }, "recipient": 2, "at_ms": 10 },
+    { "message": { "repetition": 1, "sequence": 0 }, "recipient": 3, "at_ms": 20 },
+    { "message": { "repetition": 1, "sequence": 1 }, "recipient": 2, "at_ms": 200 },
+    { "message": { "repetition": 1, "sequence": 1 }, "recipient": 3, "at_ms": 201 },
+    { "message": { "repetition": 1, "sequence": 2 }, "recipient": 2, "at_ms": 210 },
+    { "message": { "repetition": 1, "sequence": 2 }, "recipient": 2, "at_ms": 220 },
+    { "message": { "repetition": 1, "sequence": 3 }, "recipient": 3, "at_ms": 310 }
+  ]
+}

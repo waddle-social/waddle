@@ -66,13 +66,7 @@ impl Contender {
         }
         let mut command = Command::new(binary);
         command.env_clear();
-        let process = Process::spawn_tracked(
-            &mut command,
-            Some(&bytes),
-            false,
-            fixture.cleanup_latch(),
-            crate::cleanup::CleanupService::Worker,
-        )?;
+        let process = fixture.spawn_worker(&mut command, Some(&bytes))?;
         Ok(Self { process, work })
     }
 

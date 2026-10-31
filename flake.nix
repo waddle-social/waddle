@@ -360,6 +360,8 @@
                 (lib.fileset.difference ./server/crates testFiles)
                 ./server/extensions
                 ./server/vendor
+                ./server/experiments/native-fixture
+                ./server/experiments/grant-fence/Cargo.toml
                 ./server/wit
               ];
           };
@@ -373,6 +375,8 @@
               ./server/crates
               ./server/extensions
               ./server/vendor
+              ./server/experiments/native-fixture
+              ./server/experiments/grant-fence/Cargo.toml
               ./server/wit
             ];
           };
@@ -540,21 +544,34 @@
                 python3 observer/scripts/observer_release.py fetch > "$TMPDIR/jev.wasm"
                 cp "$TMPDIR/jev.wasm" "$out"
               '';
+          serverCheckFiles = lib.fileset.unions [
+            ./server/Cargo.toml
+            ./server/Cargo.lock
+            ./server/.config/nextest.toml
+            ./server/README.md
+            ./server/capabilities.toml
+            ./server/scripts/check-poison-recovery.py
+            ./server/scripts/check-rust-structure.py
+            ./server/scripts/check-test-postgres-env.py
+            ./server/crates
+            ./server/extensions
+            ./server/vendor
+            ./server/experiments/native-fixture
+            ./server/experiments/grant-fence/Cargo.toml
+            ./server/wit
+          ];
           serverCheckSrc = lib.fileset.toSource {
             root = ./server;
+            fileset = serverCheckFiles;
+          };
+          # cargo fmt --all follows the native fixture's owning workspace and
+          # visits its library, binary and integration-test targets as well.
+          serverFmtSrc = lib.fileset.toSource {
+            root = ./server;
             fileset = lib.fileset.unions [
-              ./server/Cargo.toml
-              ./server/Cargo.lock
-              ./server/.config/nextest.toml
-              ./server/README.md
-              ./server/capabilities.toml
-              ./server/scripts/check-poison-recovery.py
-              ./server/scripts/check-rust-structure.py
-              ./server/scripts/check-test-postgres-env.py
-              ./server/crates
-              ./server/extensions
-              ./server/vendor
-              ./server/wit
+              serverCheckFiles
+              ./server/experiments/grant-fence/src
+              ./server/experiments/grant-fence/tests
             ];
           };
           baseArgs = {
@@ -599,9 +616,11 @@
               # silently skips in every nix test lane, including the
               # dedicated xmpp unit/XEP lanes built from testArgs (#1436).
               postUnpack = ''
+                # Copy every Mimir rule file, not only waddle-reliability.yaml,
+                # so a second rules file is not silently absent here.
                 mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir"
-                cp ${./infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml} \
-                  "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml"
+                cp ${./infrastructure/waddle.cloud/rules/mimir}/*.yaml \
+                  "$sourceRoot/../infrastructure/waddle.cloud/rules/mimir/"
                 # The CNPG monitoring-query drift test (waddle-server, Postgres
                 # lane) reads the ConfigMap the same way (#1695).
                 mkdir -p "$sourceRoot/../infrastructure/waddle.cloud/gitops/waddle-server"
@@ -720,7 +739,7 @@
           waddle-server-fmt = craneLib.cargoFmt {
             pname = "waddle-server-fmt";
             version = "0.1.0";
-            src = serverCheckSrc;
+            src = serverFmtSrc;
             cargoExtraArgs = "--all";
           };
           waddle-server-clippy = craneLib.cargoClippy (
@@ -738,6 +757,11 @@
               '';
             }
           );
+          # Local entry point (`nix build .#checks.<system>.waddle-server-test`):
+          # the whole all-features Postgres suite in one derivation. No CI
+          # workflow builds it; CI runs the same suite as four sandboxed
+          # shards (mkServerTestShard), which inherit this derivation's
+          # preCheck, fixtures and environment, so keep it.
           waddle-server-test = craneLib.cargoNextest (
             serverPostgresTestArgs
             // {

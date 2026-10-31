@@ -5062,7 +5062,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
     drain_token: tokio_util::sync::CancellationToken,
     drain_notify: Arc<tokio::sync::Notify>,
     sm_drain_complete: tokio_util::sync::CancellationToken,
-    shutdown_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
     connections_drained: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tokio::spawn(super::run_graceful_shutdown_drain(
@@ -5070,8 +5070,7 @@ pub(crate) fn spawn_graceful_shutdown_drain(
         drain_token,
         drain_notify,
         sm_drain_complete,
-        shutdown_started,
-        max_drain_duration_from_env(),
+        shutdown_deadline,
         connections_drained,
     ));
 }
@@ -5081,8 +5080,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
     drain_token: tokio_util::sync::CancellationToken,
     drain_notify: Arc<tokio::sync::Notify>,
     sm_drain_complete: tokio_util::sync::CancellationToken,
-    shutdown_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
-    total_budget: std::time::Duration,
+    shutdown_deadline: crate::shutdown_deadline::ShutdownDeadline,
     connections_drained: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Always notify_one on exit (success or early-return) so
@@ -5121,7 +5119,10 @@ pub(crate) async fn run_graceful_shutdown_drain(
     if fatal_fence.is_cancelled() {
         return;
     }
-    let shutdown_started = *shutdown_started.get_or_init(tokio::time::Instant::now);
+    // #2046 W1.10: the connection and Q6 drains are the first stage of the
+    // one enclosing shutdown deadline, shared with the clustering drains.
+    let shutdown = shutdown_deadline.start();
+    let total_budget = shutdown.budget().drain();
     // ADR-0017 Phase 3 Slice 10: this task's own start-of-drain
     // timestamp, fed into the SAME `drain_duration_ms` histogram the
     // generic per-entity room drain records into (below, once the Q6
@@ -5145,7 +5146,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
     // promotion for sessions that already detached cleanly — the
     // stuck session itself falls back to its durable SM row on
     // next startup either way.
-    let drain_deadline = shutdown_started.into_std() + total_budget;
+    let drain_deadline = shutdown.drain_deadline().into_std();
     info!(
         active_connections = websocket_state.deps.shutdown.active_connections(),
         "Graceful shutdown: waiting for live sessions to close and detach"

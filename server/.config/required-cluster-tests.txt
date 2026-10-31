@@ -110,3 +110,56 @@ waddle-server ingress_substrate::tests::epoch_guard_manifest_matches_rust_and_li
 # W1.2 (#2046): a real PostgreSQL outage must leave the server live, remove
 # readiness within the probe timeout, and recover without restarting.
 waddle-server::liveness_readiness_split postgres_outage_leaves_server_live_and_unready_then_recovers
+
+# --- W1.6a (#2046): bind characterization ---
+#
+# Native WebSocket characterization of resource binding, rebind and the
+# claim-store / UserActor registration delays that E0 changes. The suite is
+# gated on `test-support`, which the default-features publish `test` task
+# compiles out, so this lane is the only publish gate that runs it.
+waddle-server::characterization_bind fresh_bind_returns_requested_full_jid_and_registers_route_and_user_actor
+waddle-server::characterization_bind bind_without_resource_assigns_server_generated_ws_resource
+waddle-server::characterization_bind second_bind_on_bound_stream_is_refused_not_authorized_and_keeps_first_binding
+waddle-server::characterization_bind rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_newcomer
+waddle-server::characterization_bind rebind_after_clean_close_binds_without_conflict
+waddle-server::characterization_bind concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_close_the_other
+waddle-server::characterization_bind concurrent_first_binds_serialize_node_wide_behind_parked_user_claim_acquire
+waddle-server::characterization_bind slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_constraint
+waddle-server::characterization_bind register_then_unregister_behind_a_busy_user_actor_retains_retry_and_serves_later_binds
+
+# --- W1.6b (#2046): prove the local capacity-wait cycle with test-support ---
+# Default builds retain the other routing tests; this one needs the Pending
+# observer to prove both handlers entered before attempting recovery ACKs.
+waddle-server::characterization_routing cycle::mutual_full_outbound_channels_hold_iq_forwarders_despite_recovery_acks_until_a_backstop
+waddle-server::characterization_routing cycle::staggered_full_outbound_channels_hold_both_iq_forwarders_despite_recovery_acks
+
+# W1.6c characterization (#2046): XEP-0198 resume and XEP-0045 join-burst
+# seams. They need the `test-support` feature. The default `test` lane builds
+# without it; the xmppServerCompliance lane (waddle-server-xmpp-server-tests,
+# `--features test-support`, no clustering) runs them but does not gate
+# publish, so this is the one publish-gating lane that runs them. The suite's
+# seam-free tests also run in the default `test` lane.
+waddle-server::characterization_resume_muc seams::muc_live_message_queued_during_join_burst_is_written_after_subject
+waddle-server::characterization_resume_muc seams::sm_replay_precedes_live_with_concurrently_delivering_peer
+waddle-server::characterization_resume_muc seams::sm_detach_canonical_read_outage_replays_unacked_ingress_frame_unkeyed
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_accepts_complete_replay_then_live_transcript
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_duplicate_final_data_before_sentinel
+waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_replay_after_final_data_before_sentinel
+
+# W1.10 (#2046): shutdown deadline, terminal ownership and pre-SIGTERM waits.
+# These regressions require `clustering`, so the default-feature publish test
+# task compiles them out. The all-features evidence lane must execute them.
+waddle-server::clustering_shutdown_deadline fatal_publication_wait_started_before_sigterm_outlasts_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline sigterm_during_a_clustering_only_room_drain_still_waits_for_q6
+waddle-server::clustering_shutdown_deadline sigterm_with_a_held_publication_guard_does_not_retire
+waddle-server::clustering_shutdown_deadline sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline terminal_departure_requires_both_exact_demotions
+
+# W1.10 follow-up (#2086): distinguish graceful re-registration shutdown
+# retirement from fatal terminal departure after socket drain settlement.
+waddle-server::clustering_shutdown_deadline sigterm_during_reregistration_retires_both_identities
+waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_retires_inside_the_deadline
+waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
+waddle-server::clustering_shutdown_deadline fatal_fence_terminal_departure_requires_a_completed_socket_drain
+waddle-server::clustering_shutdown_deadline fatal_fence_during_terminal_marking_prevents_graceful_retirement
+waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_prevents_second_admission

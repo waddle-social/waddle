@@ -1836,6 +1836,16 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) async fn handl
         );
         responses.push(stanza_to_xml(&Stanza::Message(subject_msg)));
 
+        // W1.6c seam: queue a live room stanza behind the unwritten burst.
+        #[cfg(feature = "test-support")]
+        crate::server::routes::websocket::characterization_seams::hold_until_live_stanza_queued(
+            state,
+            Some(sender_jid),
+            registry_owner,
+            crate::server::routes::websocket::characterization_seams::HeldBatch::MucJoin,
+        )
+        .await;
+
         return responses;
     }
 }

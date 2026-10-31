@@ -36,6 +36,7 @@ use super::claims::NodeLeaseStore;
 use super::metrics;
 use super::NodeLifecycle;
 use crate::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
+use crate::shutdown_deadline::{StartedShutdown, SHUTDOWN_TERMINAL_SWEEP_BUDGET};
 
 /// Readable snapshot of the swarm's current connected-peer count (Phase 2
 /// Slice 1's connected-peer gauge, reused here rather than inventing a
@@ -508,9 +509,10 @@ where
 }
 
 /// Retire this node's own disabled identity at the end of a graceful
-/// shutdown (#1295). Best-effort and bounded: on failure or timeout the row
-/// still ages out through its lapsed heartbeat and the orphan reaper, which
-/// is exactly the pre-#1295 behaviour.
+/// shutdown (#1295). Best-effort and bounded: failure or timeout does not
+/// prove that an already-dispatched database write rolled back. Any row
+/// that was not retired still ages out through its lapsed heartbeat and
+/// the orphan reaper, as before #1295.
 async fn retire_after_shutdown_bounded<L>(lease: &L, identity: &NodeIdentity, budget: Duration)
 where
     L: NodeLeaseStore + Send + Sync,
@@ -540,8 +542,8 @@ where
         Err(_) => {
             tracing::warn!(
                 node_id = %identity.node_id,
-                "clustering: retiring this node's identity after graceful shutdown timed out; \
-                 its claims age out via the lapsed heartbeat instead"
+                "clustering: graceful retirement timed out with an unknown write outcome; \
+                 any remaining claims age out via the lapsed heartbeat"
             );
         }
     }
@@ -909,10 +911,92 @@ struct TerminalFenceContext<'a, L> {
 
 const SM_DRAIN_WAIT_MARGIN: Duration = Duration::from_millis(100);
 
+/// Why a terminal path runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalCause {
+    /// The clustering stop token fired while the node was re-registering or
+    /// recovering after a fence (#1985 follow-up). That token is the
+    /// clustering scope, so this covers SIGTERM/SIGQUIT and also the
+    /// swarm's own scope cancellation on keypair-slot fencing loss
+    /// (`swarm.rs` slot-lease deadline / zero-row renewal), exactly as the
+    /// main loop's `shutdown()` already treats any scope stop. After the
+    /// `disable()` barrier and exact-owner demotion, the fenced identity is
+    /// retired as an ordinary shutdown retires its own (#1295), and so is
+    /// the fresh one if its registration has committed (otherwise the
+    /// retire CAS finds no row; the detached registration task marks the
+    /// late row draining, it holds no claims and ages out, as before).
+    Shutdown,
+    /// A fatal fence or lease loss skips early graceful retirement. A fully
+    /// drained process may still commit terminal departure after disabling
+    /// and demoting its identities.
+    Fatal,
+}
+
 impl<L> TerminalFenceContext<'_, L>
 where
     L: NodeLeaseStore + Send + Sync,
 {
+    /// The enclosing shutdown deadline (#2046 W1.10), once the process
+    /// itself is stopping; latches its start if this is the first observer.
+    /// A clustering-only stop has none, and every step keeps its own bound
+    /// as before.
+    fn process_deadline(&self) -> Option<StartedShutdown> {
+        self.shutdown_sm_drain
+            .filter(|sm| sm.process_stop.is_cancelled())
+            .map(|sm| sm.deadline.start())
+    }
+
+    /// A control-plane write's budget: `control_plane_budget`, clamped to
+    /// the enclosing deadline less `reserve` for the steps after it.
+    fn control_plane_budget_keeping(&self, reserve: Duration) -> Duration {
+        self.process_deadline()
+            .map_or(self.control_plane_budget, |deadline| {
+                deadline.stage_budget(self.control_plane_budget, reserve)
+            })
+    }
+
+    /// Run a local step to completion or, while the process is stopping,
+    /// until the enclosing deadline less `reserve`. `None` means the
+    /// deadline cut it off.
+    async fn within_deadline<F: Future>(&self, reserve: Duration, step: F) -> Option<F::Output> {
+        match self.process_deadline() {
+            None => Some(step.await),
+            Some(deadline) => tokio::time::timeout_at(deadline.deadline_before(reserve), step)
+                .await
+                .ok(),
+        }
+    }
+
+    /// Resolves at the end of the drain phase of the enclosing deadline, once
+    /// the process itself is stopping — including when process stop arrives
+    /// after a clustering-only stop. Never resolves without a process stop.
+    async fn drain_phase_bound(&self) {
+        match self.shutdown_sm_drain {
+            Some(sm) => {
+                sm.process_stop.cancelled().await;
+                tokio::time::sleep_until(
+                    sm.deadline
+                        .start()
+                        .drain_phase_deadline(SM_DRAIN_WAIT_MARGIN),
+                )
+                .await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Local cleanup only: demote whatever the broad sweep still finds.
+    async fn terminal_sweep(&self) {
+        let sweep = async {
+            for entity in self.local_claims.terminal_sweep().await {
+                self.local_claims.demote(&entity).await;
+            }
+        };
+        if self.within_deadline(Duration::ZERO, sweep).await.is_none() {
+            tracing::warn!("clustering: terminal sweep reached the shutdown deadline");
+        }
+    }
+
     async fn retire_if_drained(&self, identity: &NodeIdentity) {
         let drained = self.shutdown_sm_drain.is_some_and(|sm| {
             sm.process_stop.is_cancelled()
@@ -925,7 +1009,8 @@ where
             // stale-heartbeat expiry CAS commit its eventual departure.
             return;
         }
-        match tokio::time::timeout(self.control_plane_budget, self.lease.retire(identity)).await {
+        let budget = self.control_plane_budget_keeping(Duration::ZERO);
+        match tokio::time::timeout(budget, self.lease.retire(identity)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::warn!(%error, node_id = %identity.node_id, "terminal node retirement failed; deferring departure to lease expiry")
@@ -948,29 +1033,43 @@ where
         // admitting traffic and NEW claims first, but keep the current
         // identity authoritative while mailbox seal barriers complete the
         // final fenced writes for already-owned rooms and SM sessions.
-        // The two drains share a start instant set by whichever task observes
-        // process stop first. Bound their combined authority window by the
-        // larger budget, not their sum, even if Q6 starts later.
-        let sm_started = self.shutdown_sm_drain.and_then(|sm| {
-            sm.process_stop
-                .is_cancelled()
-                .then(|| *sm.started.get_or_init(tokio::time::Instant::now))
-        });
+        // The two drains share the enclosing shutdown deadline's start,
+        // latched by whichever task observes process stop first, and run in
+        // parallel: their combined authority window is the later of the two
+        // stages, never their sum, even if Q6 starts later (#2046 W1.10).
+        // "Process stopping" is re-checked lazily below, as before W1.10: a
+        // clustering-only stop followed by SIGTERM while the room drain runs
+        // still waits for Q6 before disable(), and is still bounded by the
+        // same deadline (its start is latched at SIGTERM).
+        let stopping_sm = self
+            .shutdown_sm_drain
+            .filter(|sm| sm.process_stop.is_cancelled());
         self.readiness.begin_fenced_recovery();
         if self.fatal_fence.is_cancelled() {
-            self.finish(identity, identity).await;
+            self.finish(identity, identity, TerminalCause::Fatal).await;
             return;
         }
+        // The room drain keeps its configured budget, clamped to its own
+        // stage of the enclosing deadline.
+        let claim_release_budget = stopping_sm.map_or(claim_release_budget, |sm| {
+            claim_release_budget.min(
+                sm.deadline
+                    .start()
+                    .claim_release_deadline()
+                    .saturating_duration_since(tokio::time::Instant::now()),
+            )
+        });
 
         let after_rooms = async {
             if let Some(sm) = self
                 .shutdown_sm_drain
                 .filter(|sm| sm.process_stop.is_cancelled())
             {
-                let started = sm_started
-                    .unwrap_or_else(|| *sm.started.get_or_init(tokio::time::Instant::now));
-                let deadline = started + sm.budget.max(claim_release_budget) + SM_DRAIN_WAIT_MARGIN;
-                if tokio::time::timeout_at(deadline, sm.complete.cancelled())
+                let phase_deadline = sm
+                    .deadline
+                    .start()
+                    .drain_phase_deadline(SM_DRAIN_WAIT_MARGIN);
+                if tokio::time::timeout_at(phase_deadline, sm.complete.cancelled())
                     .await
                     .is_err()
                 {
@@ -996,25 +1095,70 @@ where
         let outcome = tokio::select! {
             biased;
             _ = self.fatal_fence.cancelled() => {
-                self.finish(identity, identity).await;
+                self.finish(identity, identity, TerminalCause::Fatal).await;
                 return;
             }
             outcome = drain => outcome,
+            _ = self.drain_phase_bound() => {
+                // The room drain's inventory read or batch release overran
+                // its stage. Dropping it is safe: unreleased claims stay
+                // fenced under this identity, which retirement below hands
+                // to survivors once the barrier has closed.
+                tracing::warn!(
+                    node_id = %identity.node_id,
+                    "clustering: shutdown drain overran its stage of the shutdown deadline; \
+                     retiring the identity with unreleased claims"
+                );
+                ShutdownDrainOutcome::Completed
+            }
         };
         if outcome == ShutdownDrainOutcome::LeaseUnavailable {
             // Wake Q6's independent promotion task before waiting on the
             // identity publication barrier. Its armed guards preserve the
             // durable rows for successor recovery when that task is dropped.
             self.fatal_fence.cancel();
-            self.finish(identity, identity).await;
+            self.finish(identity, identity, TerminalCause::Fatal).await;
             return;
         }
 
         // Only after every successful seal has been released may the
         // publication barrier reject the remaining identity. Exact demotion
-        // retires anything the bounded drain deliberately abandoned.
-        self.live_identity.disable().await;
-        self.local_claims.demote_owned_by(identity).await;
+        // retires anything the bounded drain deliberately abandoned. Both
+        // run inside the retirement stage of the enclosing deadline; if
+        // either is cut off, the barrier is not proven and the identity is
+        // left to lease expiry rather than retired.
+        if self
+            .within_deadline(SHUTDOWN_TERMINAL_SWEEP_BUDGET, self.live_identity.disable())
+            .await
+            .is_none()
+        {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: identity publication barrier did not close before the shutdown \
+                 deadline; leaving the identity to lease expiry"
+            );
+            // The sweep and retire_if_drained are skipped too: this branch
+            // only runs while the process is stopping, and lifecycle exits
+            // at the deadline anyway, so local cleanup buys nothing.
+            return;
+        }
+        if self
+            .within_deadline(
+                SHUTDOWN_TERMINAL_SWEEP_BUDGET,
+                self.local_claims.demote_owned_by(identity),
+            )
+            .await
+            .is_none()
+        {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: exact-owner demotion did not finish before the shutdown deadline; \
+                 leaving the identity to lease expiry"
+            );
+            // Skips the sweep and retire_if_drained for the same reason as
+            // the barrier cut-off above.
+            return;
+        }
         // #1295: disable() is the authority barrier — no guard, claim-store
         // call or fenced write can run under this identity again — and the
         // exact-owner demotion has retired every actor it owned. Commit that
@@ -1023,23 +1167,39 @@ where
         // their next acquire instead of after a lease TTL plus an
         // orphan-reaper sweep. The terminal sweep below is local cleanup
         // only, and running it first could let process exit cut this off.
-        retire_after_shutdown_bounded(self.lease, identity, self.control_plane_budget).await;
-        for entity in self.local_claims.terminal_sweep().await {
-            self.local_claims.demote(&entity).await;
-        }
+        retire_after_shutdown_bounded(
+            self.lease,
+            identity,
+            self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+        )
+        .await;
+        self.terminal_sweep().await;
         self.retire_if_drained(identity).await;
     }
 
-    async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
+    async fn finish(
+        &self,
+        prior_identity: &NodeIdentity,
+        registered_identity: &NodeIdentity,
+        cause: TerminalCause,
+    ) {
         self.readiness.begin_fenced_recovery();
         self.stop_token.cancel();
+        let identities: &[&NodeIdentity] = if registered_identity == prior_identity {
+            &[prior_identity]
+        } else {
+            &[prior_identity, registered_identity]
+        };
 
         // A registration call is deliberately allowed to finish instead of
         // being cancellation-dropped: once it returns, rotate through a
         // publication barrier and retire both identities that might own work.
         // Disabled is a typed terminal state: publication guards and claim
         // stores both reject it for the rest of this clustering lifetime.
-        self.live_identity.disable().await;
+        let disabled = self
+            .within_deadline(SHUTDOWN_TERMINAL_SWEEP_BUDGET, self.live_identity.disable())
+            .await
+            .is_some();
         if let Some(sm) = self
             .shutdown_sm_drain
             .filter(|sm| sm.process_stop.is_cancelled())
@@ -1048,27 +1208,95 @@ where
             // when fatal fencing wakes it. Keep local inventory available
             // for that accounting after publication has been disabled, then
             // demote it. Bound the wait so a stuck Q6 cannot hold shutdown.
-            if tokio::time::timeout(Duration::from_secs(1), sm.complete.cancelled())
+            let q6_wait = sm
+                .deadline
+                .start()
+                .stage_budget(Duration::from_secs(1), SHUTDOWN_TERMINAL_SWEEP_BUDGET);
+            if tokio::time::timeout(q6_wait, sm.complete.cancelled())
                 .await
                 .is_err()
             {
-                tracing::warn!("clustering: Q6 did not settle after fatal fencing; demoting local claims with incomplete drain accounting");
+                tracing::warn!("clustering: Q6 did not settle after the terminal fence; demoting local claims with incomplete drain accounting");
             }
         }
-        self.local_claims.demote_owned_by(prior_identity).await;
-        if registered_identity != prior_identity {
-            self.local_claims.demote_owned_by(registered_identity).await;
+        let mut demoted = true;
+        for identity in identities {
+            if self
+                .within_deadline(
+                    SHUTDOWN_TERMINAL_SWEEP_BUDGET,
+                    self.local_claims.demote_owned_by(identity),
+                )
+                .await
+                .is_none()
+            {
+                demoted = false;
+                tracing::warn!(
+                    node_id = %identity.node_id,
+                    "clustering: exact-owner demotion did not finish before the shutdown deadline"
+                );
+            }
         }
-        for entity in self.local_claims.terminal_sweep().await {
-            self.local_claims.demote(&entity).await;
+        // #1985 follow-up: an ordinary stop during re-registration or
+        // recovery retires the fenced identity, and the fresh one if its
+        // registration has committed, once the barrier has closed and their
+        // actors are demoted, before the local sweep, exactly like
+        // `shutdown`. A fresh row registered after this point is marked
+        // draining by its registration task, holds no claims and ages out.
+        // An observed fatal fence stops new graceful-retirement admissions.
+        // Cancellation cannot retract an already-dispatched database write:
+        // keep its existing bound and allow its potentially committed result,
+        // then observe the fence before admitting the next identity. The
+        // disable and exact-owner demotion barriers precede every admission.
+        // A later terminal departure is still possible if the process,
+        // Q6, and socket drains have completed.
+        let retire = cause == TerminalCause::Shutdown
+            && disabled
+            && demoted
+            && !self.fatal_fence.is_cancelled();
+        if retire {
+            for identity in identities {
+                // Also observes fencing that arrived during the preceding
+                // identity's retirement, without cancelling that write.
+                if self.fatal_fence.is_cancelled() {
+                    break;
+                }
+                mark_draining_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+                )
+                .await;
+                if self.fatal_fence.is_cancelled() {
+                    break;
+                }
+                retire_after_shutdown_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(SHUTDOWN_TERMINAL_SWEEP_BUDGET),
+                )
+                .await;
+            }
         }
-        mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
-        if registered_identity != prior_identity {
-            mark_draining_bounded(self.lease, registered_identity, self.control_plane_budget).await;
+        self.terminal_sweep().await;
+        // A fence observed inside the graceful loop still takes the fatal
+        // path's advisory cleanup for both owners. Marking does not admit
+        // a retirement or restore authority; every call remains bounded.
+        if !retire || self.fatal_fence.is_cancelled() {
+            for identity in identities {
+                mark_draining_bounded(
+                    self.lease,
+                    identity,
+                    self.control_plane_budget_keeping(Duration::ZERO),
+                )
+                .await;
+            }
         }
-        self.retire_if_drained(prior_identity).await;
-        if registered_identity != prior_identity {
-            self.retire_if_drained(registered_identity).await;
+        // An empty broad sweep does not prove exact-owner demotion. Keep
+        // both identities on lease expiry if either demotion was cut off.
+        if disabled && demoted {
+            for identity in identities {
+                self.retire_if_drained(identity).await;
+            }
         }
         self.readiness.mark_terminal_fence_finished();
     }
@@ -1550,11 +1778,11 @@ pub async fn run_node_lease<L>(
             tokio::select! {
                 biased;
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                     return;
                 }
                 _ = fatal_fence.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                     return;
                 }
                 _ = tokio::time::sleep(backoff.next_delay()) => {}
@@ -1587,11 +1815,11 @@ pub async fn run_node_lease<L>(
             let registration_result = tokio::select! {
                 biased;
                 _ = fatal_fence.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                     return;
                 }
                 _ = stop_token.cancelled() => {
-                    terminal_fence_context.finish(&identity, &fresh).await;
+                    terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                     return;
                 }
                 joined = &mut registration => match joined {
@@ -1604,7 +1832,9 @@ pub async fn run_node_lease<L>(
             match registration_result {
                 Ok(()) => {
                     if fatal_fence.is_cancelled() {
-                        terminal_fence_context.finish(&identity, &fresh).await;
+                        terminal_fence_context
+                            .finish(&identity, &fresh, TerminalCause::Fatal)
+                            .await;
                         return;
                     }
                     let count_identity = fresh.clone();
@@ -1614,17 +1844,19 @@ pub async fn run_node_lease<L>(
                     let other_live = tokio::select! {
                         biased;
                         _ = fatal_fence.cancelled() => {
-                            terminal_fence_context.finish(&identity, &fresh).await;
+                            terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                             return;
                         }
                         _ = stop_token.cancelled() => {
-                            terminal_fence_context.finish(&identity, &fresh).await;
+                            terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                             return;
                         }
                         result = count_future => result.unwrap_or(usize::MAX),
                     };
                     if fatal_fence.is_cancelled() {
-                        terminal_fence_context.finish(&identity, &fresh).await;
+                        terminal_fence_context
+                            .finish(&identity, &fresh, TerminalCause::Fatal)
+                            .await;
                         return;
                     }
                     let reachable = usize::try_from(connected_peers.get().max(0)).unwrap_or(0);
@@ -1658,11 +1890,11 @@ pub async fn run_node_lease<L>(
                         let swept = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => {
-                                terminal_fence_context.finish(&identity, &fresh).await;
+                                terminal_fence_context.finish(&identity, &fresh, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
-                                terminal_fence_context.finish(&identity, &fresh).await;
+                                terminal_fence_context.finish(&identity, &fresh, TerminalCause::Shutdown).await;
                                 return;
                             }
                             swept = swept_future => swept,
@@ -1692,14 +1924,14 @@ pub async fn run_node_lease<L>(
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                 return;
                             }
                             _ = exact_demote => {}
@@ -1730,14 +1962,14 @@ pub async fn run_node_lease<L>(
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                 return;
                             }
                             _ = stop_token.cancelled() => {
                                 recovery_heartbeat_cancel.cancel();
                                 recovery_heartbeat.abort();
                                 let _ = (&mut recovery_heartbeat).await;
-                                terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                 return;
                             }
                             _ = expire_future => {}
@@ -1773,14 +2005,14 @@ pub async fn run_node_lease<L>(
                                     recovery_heartbeat_cancel.cancel();
                                     recovery_heartbeat.abort();
                                     let _ = (&mut recovery_heartbeat).await;
-                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Fatal).await;
                                     return;
                                 }
                                 _ = stop_token.cancelled() => {
                                     recovery_heartbeat_cancel.cancel();
                                     recovery_heartbeat.abort();
                                     let _ = (&mut recovery_heartbeat).await;
-                                    terminal_fence_context.finish(&superseded_identity, &identity).await;
+                                    terminal_fence_context.finish(&superseded_identity, &identity, TerminalCause::Shutdown).await;
                                     return;
                                 }
                                 result = reclaim => result.is_err(),
@@ -1800,7 +2032,7 @@ pub async fn run_node_lease<L>(
 
                         if fatal_fence.is_cancelled() {
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -1817,14 +2049,21 @@ pub async fn run_node_lease<L>(
                         let heartbeat_is_fresh = tokio::select! {
                             biased;
                             _ = fatal_fence.cancelled() => false,
-                            _ = stop_token.cancelled() => false,
+                            _ = stop_token.cancelled() => {
+                                // #1985 follow-up: an ordinary stop during
+                                // recovery retires, it is not a fatal fence.
+                                terminal_fence_context
+                                    .finish(&superseded_identity, &identity, TerminalCause::Shutdown)
+                                    .await;
+                                return;
+                            }
                             result = final_heartbeat => matches!(result, Ok(Ok(true))),
                         };
                         if !heartbeat_is_fresh {
                             readiness.begin_fenced_recovery();
                             fatal_fence.cancel();
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -1846,7 +2085,7 @@ pub async fn run_node_lease<L>(
                         if fatal_fence.is_cancelled() {
                             readiness.begin_fenced_recovery();
                             terminal_fence_context
-                                .finish(&superseded_identity, &identity)
+                                .finish(&superseded_identity, &identity, TerminalCause::Fatal)
                                 .await;
                             return;
                         }
@@ -1890,6 +2129,15 @@ mod tests {
     /// otherwise care about drain timing — kept well above every test's own
     /// timer/backoff constants so it never itself becomes the bottleneck.
     const TEST_CLAIM_RELEASE_BUDGET: Duration = Duration::from_secs(5);
+
+    fn test_shutdown_deadline(
+        drain: Duration,
+        claim_release: Duration,
+    ) -> crate::shutdown_deadline::ShutdownDeadline {
+        crate::shutdown_deadline::ShutdownDeadline::new(
+            crate::shutdown_deadline::ShutdownBudget::new(drain, claim_release),
+        )
+    }
 
     struct GatedShutdownBlocklist {
         entered: tokio::sync::Notify,
@@ -2054,6 +2302,9 @@ mod tests {
         /// `retire_probe` (when set) observed at that moment.
         retirements: RetirementLog,
         retire_probe: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+        /// #2046 W1.10: when set, `retire_after_shutdown` records its call
+        /// and then never returns, like a write stuck on the control plane.
+        retire_stalls: bool,
     }
 
     /// Each retired identity, with the probe's observation.
@@ -2082,6 +2333,7 @@ mod tests {
                 draining_release: None,
                 retirements: Arc::new(std::sync::Mutex::new(Vec::new())),
                 retire_probe: None,
+                retire_stalls: false,
             }
         }
     }
@@ -2145,6 +2397,9 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push((me.clone(), observed));
+            if self.retire_stalls {
+                std::future::pending::<()>().await;
+            }
             Ok(true)
         }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
@@ -2590,6 +2845,12 @@ mod tests {
     }
 
     async fn seed_detached_sm_session_row(db: &crate::db::Database, stream_id: &str) {
+        // This fixture also runs alone against a fresh PostgreSQL database;
+        // the claim-store schema does not create the SM persistence tables.
+        let _sm_storage =
+            crate::sm_persistence::DatabaseSmPersistence::open(Some(db.database_url()))
+                .await
+                .expect("initialize SM persistence schema");
         let conn = db.guard().await.expect("guard");
         conn.execute(
             r#"
@@ -3630,6 +3891,7 @@ mod tests {
         let registration_release = Arc::new(tokio::sync::Notify::new());
         lease.registration_entered = Some(Arc::clone(&registration_entered));
         lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = lease.retirements.clone();
 
         let initial_identity = identity();
         let live_identity =
@@ -3701,6 +3963,10 @@ mod tests {
             exact.iter().all(|owner| owner != &published),
             "the live identity must be terminally disabled, not either retired owner"
         );
+        assert!(
+            retirements.lock().expect("lock").is_empty(),
+            "a fatal fence never uses graceful retirement for either identity"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3711,10 +3977,13 @@ mod tests {
         let registration_release = Arc::new(tokio::sync::Notify::new());
         lease.registration_entered = Some(Arc::clone(&registration_entered));
         lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = lease.retirements.clone();
 
         let initial_identity = identity();
         let live_identity =
             waddle_xmpp::ownership::SharedNodeIdentity::new(initial_identity.clone());
+        let probe_identity = live_identity.clone();
+        lease.retire_probe = Some(Box::new(move || !probe_identity.current().is_active()));
         let exact_demoted_owners = Arc::new(std::sync::Mutex::new(Vec::new()));
         let local_claims = Arc::new(FakeLocalClaims {
             owned: Vec::new(),
@@ -3775,6 +4044,16 @@ mod tests {
             2,
             "both pre-fence and potentially registered owners retire"
         );
+        // #1985 follow-up: SIGTERM during re-registration is an ordinary
+        // shutdown, not a fatal fence. Both identities are retired, each
+        // only after the publication barrier closed, so their claims do
+        // not wait for the orphan reaper.
+        let retired = retirements.lock().expect("lock");
+        assert_eq!(retired.len(), 2, "both identities retire: {retired:?}");
+        for (retired_owner, disabled) in retired.iter() {
+            assert!(exact.contains(retired_owner));
+            assert_eq!(*disabled, Some(true), "retired only after disable()");
+        }
     }
 
     #[tokio::test]
@@ -3792,8 +4071,10 @@ mod tests {
             let coordination = ShutdownSmDrain {
                 process_stop: stop.clone(),
                 complete,
-                budget: Duration::from_millis(50),
-                started: Arc::new(std::sync::OnceLock::new()),
+                deadline: test_shutdown_deadline(
+                    Duration::from_millis(50),
+                    Duration::from_millis(50),
+                ),
                 connections_drained: Arc::new(AtomicBool::new(sockets_drained)),
             };
             let fatal_fence = readiness.fatal_fence_token();
@@ -3913,7 +4194,8 @@ mod tests {
 
         let process_stop = CancellationToken::new();
         let q6_complete = CancellationToken::new();
-        let sm_started = Arc::new(std::sync::OnceLock::new());
+        let shutdown_deadline =
+            test_shutdown_deadline(Duration::from_secs(4), Duration::from_millis(100));
         let heartbeat_calls = Arc::new(AtomicI64::new(0));
         let counted_heartbeats = heartbeat_calls.clone();
         let lease = FakeLease::new(Box::new(move || {
@@ -3927,8 +4209,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: q6_complete.clone(),
-            budget: Duration::from_secs(4),
-            started: sm_started.clone(),
+            deadline: shutdown_deadline.clone(),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -3946,8 +4227,7 @@ mod tests {
                 process_stop.clone(),
                 Arc::new(tokio::sync::Notify::new()),
                 q6_complete.clone(),
-                sm_started,
-                Duration::from_secs(4),
+                shutdown_deadline,
                 coordination.connections_drained.clone(),
             ),
         );
@@ -4036,8 +4316,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
-            budget: Duration::from_millis(80),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_millis(80), Duration::from_millis(20)),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -4194,6 +4473,169 @@ mod tests {
         );
     }
 
+    /// #2046 W1.10 test double: every local stage of shutdown stalls. The
+    /// room drain's inventory read never returns, and neither does the
+    /// terminal sweep; only exact-owner demotion completes.
+    struct StalledShutdownLocalClaims {
+        demoted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for StalledShutdownLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            std::future::pending().await
+        }
+        async fn terminal_sweep(&self) -> Vec<Entity> {
+            std::future::pending().await
+        }
+        async fn demote(&self, _entity: &Entity) {}
+        async fn demote_owned_by(&self, _owner: &NodeIdentity) {
+            self.demoted.store(true, Ordering::SeqCst);
+        }
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
+    /// #2046 W1.10: SIGTERM with every drain stage stalled — Q6 never
+    /// settles, the room drain's inventory read and the terminal sweep never
+    /// return — still retires the node's identity, which releases every
+    /// claim it holds to survivors, and the whole node-lease shutdown ends
+    /// inside the one enclosing deadline. Before W1.10 the stalled room
+    /// drain held shutdown forever and only the process exit cut it off.
+    #[tokio::test(start_paused = true)]
+    async fn sigterm_with_stalled_stages_releases_claims_inside_the_enclosing_deadline() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let deadline = test_shutdown_deadline(Duration::from_secs(2), Duration::from_secs(1));
+        let demoted = Arc::new(AtomicBool::new(false));
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        let probe_identity = live_identity.clone();
+        let probe_demoted = demoted.clone();
+        let probe_deadline = deadline.clone();
+        lease.retire_probe = Some(Box::new(move || {
+            !probe_identity.current().is_active()
+                && probe_demoted.load(Ordering::SeqCst)
+                && probe_deadline
+                    .started()
+                    .is_some_and(|shutdown| tokio::time::Instant::now() <= shutdown.deadline())
+        }));
+        let retirements = lease.retirements.clone();
+        let readiness = NodeLifecycle::new();
+        let process_stop = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: CancellationToken::new(),
+            connections_drained: Arc::new(AtomicBool::new(false)),
+            deadline: deadline.clone(),
+        };
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            owner.clone(),
+            process_stop.child_token(),
+            NodeLeaseRunConfig {
+                pod_template_hash: None,
+                lease_config: ClusteringNodeLeaseConfig {
+                    // Production-sized control plane: one write may take as
+                    // long as the whole retirement reservation.
+                    heartbeat_interval: Duration::from_secs(10),
+                    lease_ttl: Duration::from_secs(30),
+                    claim_release_budget: Duration::from_secs(1),
+                },
+                self_fence_config: ClusteringSelfFenceConfig {
+                    isolation_intervals: 1_000,
+                    reregister_backoff_base: Duration::from_millis(10),
+                    reregister_backoff_max: Duration::from_millis(20),
+                },
+                connected_peers: ConnectedPeerCount::new(),
+                local_claims: Arc::new(StalledShutdownLocalClaims {
+                    demoted: demoted.clone(),
+                }),
+                readiness: readiness.clone(),
+                live_identity: live_identity.clone(),
+                peer_id: None,
+                claim_store: Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new()),
+                claim_release_budget: Duration::from_secs(1),
+                shutdown_sm_drain: Some(coordination),
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        // SIGTERM.
+        process_stop.cancel();
+        let enclosing = deadline.start().deadline();
+        tokio::time::timeout_at(enclosing + Duration::from_millis(1), task)
+            .await
+            .expect("node-lease shutdown must end inside the enclosing deadline")
+            .expect("node-lease task");
+
+        assert!(tokio::time::Instant::now() <= enclosing);
+        assert!(!live_identity.current().is_active());
+        assert_eq!(
+            retirements.lock().expect("lock").as_slice(),
+            &[(owner, Some(true))],
+            "retired once, after disable and demotion, inside the deadline"
+        );
+    }
+
+    /// #2046 W1.10: a retirement write stuck on the control plane is cut at
+    /// its stage of the enclosing deadline, not after a full
+    /// `control_plane_budget` measured from whenever it started.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_retirement_write_cannot_outlast_the_enclosing_deadline() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let deadline = test_shutdown_deadline(Duration::from_secs(2), Duration::from_secs(1));
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        lease.retire_stalls = true;
+        let retirements = lease.retirements.clone();
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let coordination = ShutdownSmDrain {
+            process_stop: process_stop.clone(),
+            complete: CancellationToken::new(),
+            connections_drained: Arc::new(AtomicBool::new(false)),
+            deadline: deadline.clone(),
+        };
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_secs(10),
+            shutdown_sm_drain: Some(&coordination),
+        };
+        process_stop.cancel();
+        let sigterm = deadline.start().start();
+
+        context
+            .shutdown(
+                &claims,
+                &owner,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+                tokio::time::Instant::now(),
+            )
+            .await;
+
+        // Drain phase ends at 2.1 s (Q6 never settles); the retirement write
+        // then gets what is left before the terminal-sweep reservation, not
+        // its full 10 s.
+        let elapsed = tokio::time::Instant::now() - sigterm;
+        assert!(
+            elapsed <= deadline.budget().total() - SHUTDOWN_TERMINAL_SWEEP_BUDGET,
+            "retirement must leave the terminal-sweep reservation intact (took {elapsed:?})"
+        );
+        assert_eq!(retirements.lock().expect("lock").len(), 1);
+        assert!(!live_identity.current().is_active());
+    }
+
     #[tokio::test]
     async fn lost_shutdown_heartbeat_preempts_q6_and_disables_identity() {
         let owner = identity();
@@ -4215,8 +4657,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
-            budget: Duration::from_secs(2),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_secs(2), Duration::from_millis(20)),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -4307,8 +4748,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
-            budget: Duration::from_secs(2),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_secs(2), Duration::from_millis(100)),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -4469,8 +4909,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: CancellationToken::new(),
-            budget: Duration::from_secs(2),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_secs(2), Duration::from_millis(20)),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -4529,8 +4968,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
-            budget: Duration::from_secs(2),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_secs(2), Duration::from_millis(20)),
         };
         let context = TerminalFenceContext {
             lease: &lease,
@@ -4584,8 +5022,7 @@ mod tests {
             connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop,
             complete: CancellationToken::new(),
-            budget: Duration::from_secs(2),
-            started: Arc::new(std::sync::OnceLock::new()),
+            deadline: test_shutdown_deadline(Duration::from_secs(2), Duration::from_millis(20)),
         };
         let context = TerminalFenceContext {
             lease: &lease,

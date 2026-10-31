@@ -15,6 +15,7 @@ on:
     - flake.nix/**
     - server/env.cue
     - server/experiments/grant-fence/**
+    - server/experiments/native-fixture/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
     - server/schema/**
