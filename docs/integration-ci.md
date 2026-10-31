@@ -11,8 +11,10 @@ boundary and protected task contract remain open design blockers for production
 activation, not for the pre-production merge stack. Under the
 [2026-10-31 restart-order decision](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6537418568),
 this CI-changing PR may merge only after exact-head review, successful hosted CI,
-explicit human review, and the existing merge queue. No repository rules or
-runner settings are changed by this addition.
+and the existing merge queue. The later
+[CI review-gate override](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6542325475)
+removed the separate human-review prerequisite. No repository rules or runner
+settings are changed by this addition.
 
 ## Coverage and candidate identity
 
@@ -122,7 +124,7 @@ trigger is intentionally preserved alongside manual dispatch; publication itself
 is not run as local verification. No trigger suppression or implicit version
 fallback is used. Checksums provide release-integrity hardening, not the missing
 independent trusted-verifier boundary. Keep this PR draft until hosted exact-head
-execution and explicit human review of its CI changes are complete. The remaining
+execution and independent exact-head review are complete. The remaining
 architecture/authority work must be resolved before production activation.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
@@ -239,9 +241,11 @@ and [troubleshooting required checks](https://docs.github.com/en/pull-requests/h
 There is no production-activation sequence approved for this draft. The
 [restart-order decision](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6537418568)
 allows the pre-production federation stack to merge through exact-head review,
-hosted CI, and the existing merge queue; CI-changing PRs additionally require
-explicit human review. Production activation remains blocked until the trusted
-boundary and protected task contract are implemented and verified. A
+hosted CI, and the existing merge queue. The later
+[CI review-gate override](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6542325475)
+removed the additional human-review prerequisite for CI-changing PRs. Production
+activation remains blocked until the trusted boundary and protected task contract
+are implemented and verified. A
 same-repository context requirement must not be substituted for that work.
 
 Before production activation, the bootstrap must establish and read back the
