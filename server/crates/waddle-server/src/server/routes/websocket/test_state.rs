@@ -50,6 +50,9 @@ use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 #[derive(Default)]
 pub(crate) struct TestStateOverrides {
     pub(crate) db_pool: Option<Arc<DatabasePool>>,
+    /// Explicit production-backed dependencies for native characterization.
+    pub(crate) app_state: Option<Arc<AppState>>,
+    pub(crate) database_pubsub_storage: Option<Arc<DatabasePubSubStorage>>,
     pub(crate) call_sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
     pub(crate) clustering: Option<ClusteringHandles>,
     pub(crate) sm_session_registry: Option<Arc<InMemorySmSessionRegistry>>,
@@ -108,6 +111,8 @@ where
 {
     let TestStateOverrides {
         db_pool: db_pool_override,
+        app_state: app_state_override,
+        database_pubsub_storage: database_pubsub_storage_override,
         call_sfu,
         clustering: clustering_override,
         sm_session_registry: sm_session_registry_override,
@@ -149,11 +154,25 @@ where
 
     let server_config = ServerConfig::test_homeserver();
     let public_websocket_url = url::Url::parse("wss://example.com/ws").expect("test WebSocket URL");
-    let mut app_state_built = AppState::new(db_pool);
-    if let Some(clustering) = clustering_override {
-        app_state_built.clustering_claims = clustering;
-    }
-    let app_state = Arc::new(app_state_built);
+    let shared_pubsub = app_state_override
+        .as_ref()
+        .map(|state| Arc::clone(&state.pubsub_storage));
+    let app_state = match app_state_override {
+        Some(state) => {
+            assert!(
+                Arc::ptr_eq(&state.db_pool, &db_pool),
+                "explicit state must share the configured database pool"
+            );
+            state
+        }
+        None => {
+            let mut state = AppState::new(db_pool);
+            if let Some(clustering) = clustering_override {
+                state.clustering_claims = clustering;
+            }
+            Arc::new(state)
+        }
+    };
     let mut auth_state_inner = AuthState::new(
         app_state.clone(),
         &server_config,
@@ -186,11 +205,14 @@ where
             3478,
         );
     }
-    let pubsub_storage = Arc::new(
-        DatabasePubSubStorage::open(Some("sqlite::memory:"))
-            .await
-            .expect("pubsub storage"),
-    );
+    let pubsub_storage = match database_pubsub_storage_override {
+        Some(storage) => storage,
+        None => Arc::new(
+            DatabasePubSubStorage::open(Some("sqlite::memory:"))
+                .await
+                .expect("pubsub storage"),
+        ),
+    };
     let notification_settings_projection = notification_settings_projection_override
         .unwrap_or_else(|| {
             Arc::new(NotificationSettingsProjectionStore::new(
@@ -332,7 +354,7 @@ where
                     muji_pre_dispatch_action_rate_limit: Arc::new(
                         waddle_xmpp::protocol::handlers::session_initiate_rate_limit::MujiActionRateLimit::with_defaults(),
                     ),
-                    pubsub_storage,
+                    pubsub_storage: shared_pubsub.unwrap_or(pubsub_storage),
                     push_store: Arc::new(
                         DatabasePushRegistrationStore::try_new(
                             app_state.db_pool.global().clone(),
@@ -494,4 +516,25 @@ pub async fn register_test_connection(
         "test dual-registration should confirm the resource in the actor tree for {jid}"
     );
     owner
+}
+
+/// Drive the active frame entry with an explicitly authenticated and bound test
+/// session. This is dispatch evidence, not a SASL exchange or socket test.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) async fn dispatch_native_bound_iq(
+    state: &WebSocketState,
+    session: &Session,
+    bound: &jid::FullJid,
+    iq: xmpp_parsers::iq::Iq,
+) -> Vec<String> {
+    let (sender, _receiver) = mpsc::channel(8);
+    let mut conn = super::state::WsConnState::new();
+    conn.phase = waddle_xmpp::protocol::ConnectionPhase::ready(bound.clone(), false);
+    conn.authenticated_session = Some(session.clone());
+    conn.registry_owner = Some(register_test_connection(state, bound, sender).await);
+    let frame = super::element_to_xml(minidom::Element::from(iq));
+    let result = super::frame::handle_xmpp_frame(&frame, "example.com", state, &mut conn).await;
+    assert!(!conn.phase.is_closing(), "bound frame must remain open");
+    assert!(!conn.sm_inbound_completion.has_unhandled_hole());
+    result
 }

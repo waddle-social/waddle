@@ -68,3 +68,6 @@ impl From<DatabaseError> for PermissionError {
         PermissionError::DatabaseError(err.to_string())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod parent_move_native_tests;
