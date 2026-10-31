@@ -66,6 +66,7 @@ mod misc;
 mod muc;
 mod registration;
 mod send;
+mod space_fanout_postgres;
 mod stream_features;
 mod xep0045_reconnect_contract;
 mod xep0199_ping;

@@ -261,6 +261,22 @@ schema.#Project & {
 			}
 			tasks: [_t.federationGrantFenceProof]
 		}
+		// Native SQL subscriber-capture characterization; no publishing task.
+		spaceFanoutContract: {
+			mode: "expanded"
+			when: {
+				branch: ["main"]
+				defaultBranch: true
+				pullRequest:   true
+				manual:        true
+			}
+			provider: github: runner: "namespace-profile-linux-x86"
+			provider: github: permissions: {
+				"id-token": "write"
+				contents:   "read"
+			}
+			tasks: [_t.spaceFanoutContractPostgres]
+		}
 		namespaceRustChecks: {
 			mode:        "expanded"
 			derivePaths: true
@@ -375,6 +391,13 @@ schema.#Project & {
 				"../env.cue",
 				"../ci/contributors/*.cue",
 			]
+		}
+
+		spaceFanoutContractPostgres: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["experiments/space-fanout/run-native.sh"]
+			inputs: list.Concat([_nixInputs, [".cargo/**", "experiments/space-fanout/**"]])
 		}
 
 		checkCiDrift: schema.#Task & {
