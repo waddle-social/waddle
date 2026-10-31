@@ -145,3 +145,12 @@ waddle-server::characterization_resume_muc seams::sm_detach_canonical_read_outag
 waddle-server::characterization_resume_muc seams::peer_delivery_oracle_accepts_complete_replay_then_live_transcript
 waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_duplicate_final_data_before_sentinel
 waddle-server::characterization_resume_muc seams::peer_delivery_oracle_rejects_replay_after_final_data_before_sentinel
+
+# W1.10 (#2046): shutdown deadline, terminal ownership and pre-SIGTERM waits.
+# These regressions require `clustering`, so the default-feature publish test
+# task compiles them out. The all-features evidence lane must execute them.
+waddle-server::clustering_shutdown_deadline fatal_publication_wait_started_before_sigterm_outlasts_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline sigterm_during_a_clustering_only_room_drain_still_waits_for_q6
+waddle-server::clustering_shutdown_deadline sigterm_with_a_held_publication_guard_does_not_retire
+waddle-server::clustering_shutdown_deadline sigterm_with_stalled_stages_retires_inside_the_enclosing_deadline
+waddle-server::clustering_shutdown_deadline terminal_departure_requires_both_exact_demotions

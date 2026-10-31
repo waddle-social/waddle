@@ -861,6 +861,7 @@ schema.#Project & {
 
 					python3 -m unittest discover -s scripts -p 'test_cutover_*.py'
 					python3 -m unittest discover -s scripts -p 'test_publish_chart.py'
+					python3 -m unittest discover -s scripts -p 'test_chart_shutdown_budget.py'
 					python3 -m unittest discover -s scripts -p 'test_observer_release.py'
 
 					# Fail before merge when the chart changed but its version did not.
@@ -1234,7 +1235,7 @@ schema.#Project & {
 					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 				"""#]
-			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py", "scripts/*publish_chart.py"]])
+			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py", "scripts/*publish_chart.py", "scripts/test_chart_shutdown_budget.py", "crates/waddle-server/src/shutdown_deadline.rs"]])
 		}
 
 		buildContainerImage: schema.#Task & {

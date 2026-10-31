@@ -14,7 +14,6 @@
 use crate::config::ClusteringConfig;
 use crate::db::{Database, DatabaseDriver};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Peer-allowlist store. Public: the multi-process cluster harness

@@ -68,6 +68,8 @@ on:
     - server/crates/waddle-server/src/clustering/alert_metric_contract.json
     - server/crates/waddle-server/src/clustering/alert_metric_contract.json/**
     - server/crates/waddle-server/src/server/routes/websocket/tests/**
+    - server/crates/waddle-server/src/shutdown_deadline.rs
+    - server/crates/waddle-server/src/shutdown_deadline.rs/**
     - server/crates/waddle-server/tests/server_capability_manifest.rs
     - server/crates/waddle-server/tests/server_capability_manifest.rs/**
     - server/crates/waddle-xmpp/src/telemetry/push_gauge_contract.json
@@ -87,6 +89,8 @@ on:
     - server/scripts/*publish_chart.py
     - server/scripts/observer_release.py
     - server/scripts/observer_release.py/**
+    - server/scripts/test_chart_shutdown_budget.py
+    - server/scripts/test_chart_shutdown_budget.py/**
     - server/scripts/test_default_publish_graph.py
     - server/scripts/test_default_publish_graph.py/**
     - server/scripts/test_observer_release.py

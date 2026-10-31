@@ -80,12 +80,14 @@ podSecurityContext:
   fsGroup: 1000
 
 # Pod termination grace period (seconds).
-# Must cover the full shutdown budget: preStopSleepSeconds (endpoint
-# propagation) + config.drainTimeoutSeconds (connection drain) +
-# clustering.claimReleaseBudgetSeconds (ADR-0017 Phase 3 Slice 10's
-# per-entity claim-release drain) + a kill margin.
-# Default = 5 + 30 + 5 + 5. validations.yaml enforces the floor.
-terminationGracePeriodSeconds: 45
+# Must cover the configured shutdown waits: preStopSleepSeconds (endpoint
+# propagation) + the server's enclosing shutdown deadline (#2046 W1.10:
+# config.drainTimeoutSeconds for the connection + Q6 SM drain,
+# clustering.claimReleaseBudgetSeconds for the room claim-release drain,
+# 5 s reserved for identity retirement, 2 s reserved for the terminal sweep)
+# + a 5 s kill margin. The tail reservations are not individual stage caps.
+# Default = 5 + (30 + 5 + 5 + 2) + 5. validations.yaml enforces the floor.
+terminationGracePeriodSeconds: 52
 
 securityContext:
   runAsNonRoot: true
