@@ -86,6 +86,8 @@ class AndroidCiGradleTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "with open(os.environ['WADDLE_TEST_GRADLE_RECORD'], 'a') as output:\n"
                 "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "if int(os.environ['WADDLE_TEST_GRADLE_EXIT_CODE']):\n"
+                "    print('Gradle diagnostic fixture', file=sys.stderr)\n"
                 "sys.exit(int(os.environ['WADDLE_TEST_GRADLE_EXIT_CODE']))\n"
             )
             gradlew.chmod(0o755)
@@ -171,6 +173,12 @@ class AndroidCiGradleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"-PversionCode={1730000000 // 60}", calls[0])
         self.assertIn("-PversionName=pr-abc12345", calls[0])
+
+    def test_gradle_error_is_visible_when_ci_only_streams_stdout(self):
+        result, _ = self.run_entrypoint("build", exit_code=42)
+        self.assertEqual(result.returncode, 42)
+        self.assertIn("Gradle diagnostic fixture", result.stdout)
+        self.assertNotIn("Gradle diagnostic fixture", result.stderr)
 
     def test_apk_upload_finalizers_only_emit_for_build_pipeline(self):
         workflow = (REPO_ROOT / ".github/workflows/waddle-android-pullrequest.yml").read_text()

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -759,8 +758,6 @@ class _ConversationScreenState extends State<ConversationScreen>
                               older != null &&
                               older['author'] == message['author'] &&
                               sameDay &&
-                              date != null &&
-                              olderDate != null &&
                               date.difference(olderDate).inMinutes.abs() < 5;
                           final newerDate = index > 0
                               ? _date(rows[index - 1])

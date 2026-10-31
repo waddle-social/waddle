@@ -18,4 +18,4 @@ exec ./gradlew \
   --no-daemon --no-parallel --max-workers=2 \
   -Pkotlin.compiler.execution.strategy=in-process \
   '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC' \
-  "$@"
+  "$@" 2>&1
