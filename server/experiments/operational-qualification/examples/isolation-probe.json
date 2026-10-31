@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "run_id": 42,
+  "purpose": "isolation_probe",
+  "architecture": "x86_64",
+  "resources": {
+    "vcpus": 1,
+    "memory_mib": 256,
+    "disk_gib": 0
+  },
+  "artifacts": [
+    {
+      "role": "host_qemu_binary",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:4c9a54287e0aeb247271b4a8af67e283af45d6ffba3abab3df4cae8cfa0252b4"
+      }
+    },
+    {
+      "role": "guest_kernel",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:311c0e3c47d10823257ca69479f577abcf4b046ab6c317900581fee342e2cbda"
+      }
+    },
+    {
+      "role": "guest_initrd",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:12864211ed0b36f6fda9227c377a957bd4cb4d4f74e881873b6b8aa1e1b7fb68"
+      }
+    }
+  ],
+  "additional_artifacts": []
+}

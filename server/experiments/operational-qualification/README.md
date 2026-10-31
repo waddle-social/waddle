@@ -1,9 +1,10 @@
 # Offline operational qualification contract
 
 This standalone, unpublished experiment implements the first offline slice of
-#2046 W1.8b: validate a typed manifest, expand a deterministic workload plan, and
-account for supplied observations. It has its own workspace and lockfile and no
-production consumers. It contains no network client, server launcher, credential
+#2046 W1.8b: validate typed workload and local-isolation declarations, expand
+deterministic proposals, and account for supplied observations. It has its own
+workspace and lockfile and no production consumers. It contains no network
+client, server launcher, credential
 handling, provisioning, process signalling, fault injection, or execution
 adapter. The examples contain synthetic observations, not measured evidence.
 
@@ -14,17 +15,37 @@ From this directory, using an installed repository-compatible Rust toolchain:
 ```sh
 cargo run --offline --locked -- plan examples/small-run.json > /tmp/waddle-plan.json
 cargo run --offline --locked -- account examples/small-run.json examples/synthetic-observations.json > /tmp/waddle-accounting.json
+cargo run --offline --locked -- local-isolation < examples/local-isolation.json > /tmp/waddle-local-isolation.json
+cargo run --offline --locked -- local-isolation < examples/isolation-probe.json > /tmp/waddle-isolation-probe.json
 ```
 
-Both commands read bounded local JSON files and emit JSON to stdout. Each input
-is limited to 8 MiB. Unknown fields, malformed JSON and unknown enum variants
-are rejected; input contents and parser excerpts are never printed on errors.
+The workload commands read bounded local JSON files; each input is limited to
+8 MiB. `local-isolation` reads at most 64 KiB from stdin and accepts no path
+operand. All commands emit JSON to stdout. Unknown fields, malformed JSON and
+unknown enum variants are rejected; input contents and parser excerpts are never
+printed on errors.
 The schema has no free-text values, addresses, account names, endpoints, tokens,
 or secrets. Numeric client/room/run IDs are synthetic references only. Never add
 credentials or real user data to manifests or observation artifacts.
 
-An exit code of zero means contract processing succeeded. The result always has
-`qualification: "not_assessed"`. `accounting_status: "complete"` means collection
+The local-isolation command distinguishes a three-artifact, diskless
+`isolation_probe` from the `qualification` inventory. It accepts only a numeric
+run identity, explicit bounded CPU/memory/disk resources, typed architecture,
+required artifact roles and up to 64 typed additional immutable declarations.
+Qualification permits up to 16 vCPUs and 48 GiB memory. All-zero digest sentinels,
+positional record arrays and duplicate/unknown object fields are rejected.
+File-byte and OCI-manifest digests remain distinct, including for roles that
+permit either representation. It emits fixed no-NIC/no-host-share/
+no-passthrough/no-vsock requirements with a private fixed management policy.
+It never verifies bytes or complete transitive image/operator closure, inspects
+the host, or applies the policy. Output always marks execution `not_authorized`,
+and artifact closure, host confinement and isolation `unverified`. The examples'
+nonzero digests are synthetic fixtures, not verified artifacts. See [the exact
+declaration contract and remaining phases](LOCAL-ISOLATION.md) before interpreting
+the proposal.
+
+An exit code of zero means contract processing succeeded. An accounting report
+always has `qualification: "not_assessed"`. `accounting_status: "complete"` means collection
 covered the entire planned duration and generator observations were complete and
 within budget; it can still contain late pairs, timeouts, and duplicate receipts.
 It is not a performance, durability, UI visibility, or production qualification.
@@ -173,7 +194,13 @@ schedule/distribution, deterministic serialization, complete expected-pair
 denominators, inclusive deadline boundaries, late and duplicate receipts,
 censoring, missing/not-sent/lagged generator observations, warmup exclusion,
 invalid observation correlations and timestamps, and observation-order stability.
-These tests prove local contract/accounting behavior only.
+Local-isolation tests cover both purposes, inclusive and extreme resource/identity
+values, the 16-vCPU/48-GiB proposal, missing/duplicate/wrong artifact roles/types/
+digests, bounded additional inventory and matching architectures. Real-CLI tests
+also cover positional record arrays, duplicate fields, zero digest sentinels,
+unknown/injection fields, canonical inventory serialization, fixed boundary and
+management requirements, unverified assurances, stdin bounds and rejection of
+path operands. These tests prove local contract/accounting behavior only.
 
 The standalone `operational-qualification` workflow runs these checks on
 matching pushes and on merge-group candidates without publishing. It is not part

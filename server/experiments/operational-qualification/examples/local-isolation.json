@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "run_id": 42,
+  "purpose": "qualification",
+  "architecture": "x86_64",
+  "resources": {
+    "vcpus": 16,
+    "memory_mib": 49152,
+    "disk_gib": 32
+  },
+  "artifacts": [
+    {
+      "role": "host_qemu_binary",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:4c9a54287e0aeb247271b4a8af67e283af45d6ffba3abab3df4cae8cfa0252b4"
+      }
+    },
+    {
+      "role": "guest_kernel",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:311c0e3c47d10823257ca69479f577abcf4b046ab6c317900581fee342e2cbda"
+      }
+    },
+    {
+      "role": "guest_initrd",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:12864211ed0b36f6fda9227c377a957bd4cb4d4f74e881873b6b8aa1e1b7fb68"
+      }
+    },
+    {
+      "role": "guest_disk",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:978a7880af89ef1c4a2878b2fa68d440ddef493aaf4e333faf015519a5321eca"
+      }
+    },
+    {
+      "role": "kind_binary",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:49a1946659f44cf1aa75fe6940202e9012896a42bc1bf2f100cd8e24e600635e"
+      }
+    },
+    {
+      "role": "kind_node",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:fa4d6699d6bbb988ece06f78496bec47d1c9eab0e786a91c065a02b69d9aebee"
+      }
+    },
+    {
+      "role": "cni",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:d1f0c1fc5fb6d8fe9c22370fbb2e7f9f1867271a9e42d5a70aaa2aa406c33f27"
+      }
+    },
+    {
+      "role": "cnpg_operator",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:430043a45320915180b51b2643120b4b602cd4ea291e723dc49b102e26118388"
+      }
+    },
+    {
+      "role": "postgres",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:c90cf99f4c6145ecb19a87987766c358433dc3b2772cc99ed203336e3bd3b25f"
+      }
+    },
+    {
+      "role": "spicedb",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:89d178d63e944ab89e6082daf094975934ad735c51206f53ee535fa280304399"
+      }
+    },
+    {
+      "role": "object_store",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:a7c4769d6fece167bf17c36a3c59eaffe30f58e2c7e2ef586b9a8544d7349450"
+      }
+    },
+    {
+      "role": "colony",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:76dc4a3674013ae04176f81f982b7a13ee62262c67e3fba68fa4b5286c7438aa"
+      }
+    },
+    {
+      "role": "oidc",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:bb814040c05e70f9b6bc165514411ca4a09e1efa8771b5923df56dfa4b8cc9a5"
+      }
+    },
+    {
+      "role": "telemetry_collector",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:c36ed8a3daf6127af04079da74e674e4ca5c903b018a519b7c018885ac4ceecf"
+      }
+    },
+    {
+      "role": "telemetry_store",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:74d730772deed2ce0b11acb01b88a641e6a27152b78a257c2cae9b8826b7ca79"
+      }
+    },
+    {
+      "role": "waddle",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:ad77592838485d86a34f6a821ff6688f04f2c71d0c5ac3a71067b1a9197b5ba4"
+      }
+    },
+    {
+      "role": "generator",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:6009d1284559712309ea3a19eec3600469bf6fd1aa585205d4c813a6e96afb08"
+      }
+    }
+  ],
+  "additional_artifacts": [
+    {
+      "id": 1,
+      "role": "host_runtime_file",
+      "architecture": "x86_64",
+      "content": {
+        "type": "file_bytes",
+        "digest": "sha256:c1b88f984e7911eb6be412fd810a55d20757d787a0283bac5e91dec561cb891c"
+      }
+    },
+    {
+      "id": 2,
+      "role": "operator_image",
+      "architecture": "x86_64",
+      "content": {
+        "type": "oci_manifest",
+        "digest": "sha256:fc8f7982b980ac598e464e5398092e9c4fef25baf2fd2d98f0cf1ef9078f7f53"
+      }
+    }
+  ]
+}
