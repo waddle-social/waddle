@@ -53,7 +53,6 @@ on:
     - infrastructure/waddle.cloud/rules/mimir/*.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml
     - infrastructure/waddle.cloud/rules/mimir/waddle-reliability.yaml/**
-    - infrastructure/waddle.cloud/rules/tests/**
     - namespace.cue
     - namespace.cue/**
     - scripts/*cache-benchmark*

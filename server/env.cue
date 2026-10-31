@@ -455,10 +455,11 @@ schema.#Project & {
 					echo "Alert rule tests and OTLP name contract pass."
 				"""#]
 			inputs: [
-				// Rule files and the runner/contract only, so README, Loki
-				// or routing-policy edits do not trigger the server lanes.
+				// Rule and shipped metric-contract changes trigger the server
+				// lanes. Tests-only edits run through cloud rulesTest instead;
+				// this non-hermetic task still reads the current tests whenever
+				// an image publication runs.
 				"../infrastructure/waddle.cloud/rules/mimir/*.yaml",
-				"../infrastructure/waddle.cloud/rules/tests/**",
 				"crates/waddle-server/src/clustering/alert_metric_contract.json",
 				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
 				"../flake.nix",
