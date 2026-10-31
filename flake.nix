@@ -959,6 +959,10 @@
               # on main push need mimirtool and lokitool.
               pkgs.mimir
               pkgs.grafana-loki
+              # Alert rule unit tests (promtool, in the `cli` output) and
+              # the OTLP name-translation contract (prometheus server).
+              pkgs.prometheus
+              pkgs.prometheus.cli
               # Android app (apps/android): JDK for sdkmanager/Gradle,
               # cargo-ndk for the jniLibs cross-build, gh for the release
               # APK upload task. The Android SDK itself is provisioned by

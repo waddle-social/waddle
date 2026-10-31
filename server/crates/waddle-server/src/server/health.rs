@@ -2,6 +2,7 @@ use crate::clustering::NodeAdmissionError;
 use crate::clustering::NodeLifecycle;
 use crate::db::lineage::{LineageReport, LineageStatus};
 use crate::db::PoolHealth;
+use crate::server::liveness::{RuntimeProgress, RUNTIME_PROGRESS_STALL_LIMIT};
 use crate::server::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderName, Method, StatusCode};
@@ -110,11 +111,73 @@ impl From<PoolHealth> for DatabaseHealthStatus {
     }
 }
 
-/// Simple health check endpoint (for load balancers)
+/// Liveness endpoint (`/health`, `/healthz`).
+///
+/// Answers one question: can this process still recover by itself? It never
+/// touches a database, lineage or claims — a Postgres outage must take pods
+/// out of the endpoint set via `/ready` while they stay live; failing
+/// liveness on it would restart every replica at once and reconnect every
+/// client. It fails only for states a restart is the remedy for:
+/// - the runtime-progress heartbeat (`crate::server::liveness`) has stalled;
+/// - the node took a clustering fatal fence and its node-lease loop finished
+///   the terminal demotion ([`NodeLifecycle::is_terminally_fenced`]): it
+///   stays `FencedRecovering` with no re-registration loop left, so only a
+///   new incarnation can serve;
+/// - the clustering scope stopped while the process keeps running and the
+///   node-lease loop has exited
+///   ([`NodeLifecycle::is_clustering_stopped_while_process_runs`]), e.g. after
+///   the swarm's keypair-slot lease self-fenced during a Postgres outage
+///   longer than its TTL: the same unrecoverable state, reached without a
+///   fatal fence.
 pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Quick health check - just verify the global DB is accessible
-    match state.db_pool.global().health_check().await {
-        Ok(true) => (
+    liveness_response(&state.runtime_progress, &state.node_lifecycle)
+}
+
+/// Why liveness fails. Rendered as the `error` field at the HTTP boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivenessFailure {
+    TerminallyFenced,
+    /// Distinct from `TerminallyFenced` so operators can tell a fatal fence
+    /// from a clustering-scope stop (no fatal fence, e.g. keypair-slot lease
+    /// loss); both mean only a restart recovers the node.
+    ClusteringStopped,
+    RuntimeStalled {
+        stalled_ms: u64,
+    },
+}
+
+impl LivenessFailure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminallyFenced => "terminally_fenced",
+            Self::ClusteringStopped => "clustering_stopped",
+            Self::RuntimeStalled { .. } => "runtime_stalled",
+        }
+    }
+}
+
+fn liveness_failure(
+    progress: &RuntimeProgress,
+    lifecycle: &NodeLifecycle,
+) -> Option<LivenessFailure> {
+    if lifecycle.is_terminally_fenced() {
+        return Some(LivenessFailure::TerminallyFenced);
+    }
+    if lifecycle.is_clustering_stopped_while_process_runs() {
+        return Some(LivenessFailure::ClusteringStopped);
+    }
+    let stalled_for = progress.stalled_for();
+    (stalled_for > RUNTIME_PROGRESS_STALL_LIMIT).then(|| LivenessFailure::RuntimeStalled {
+        stalled_ms: u64::try_from(stalled_for.as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+fn liveness_response(
+    progress: &RuntimeProgress,
+    lifecycle: &NodeLifecycle,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(failure) = liveness_failure(progress, lifecycle) else {
+        return (
             StatusCode::OK,
             Json(json!({
                 "status": "healthy",
@@ -122,32 +185,19 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
                 "version": env!("CARGO_PKG_VERSION"),
                 "license": env!("CARGO_PKG_LICENSE")
             })),
-        ),
-        Ok(false) => {
-            warn!("Health check: database unhealthy");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unhealthy",
-                    "service": "waddle-server",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "error": "database unhealthy"
-                })),
-            )
-        }
-        Err(e) => {
-            warn!("Health check failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unhealthy",
-                    "service": "waddle-server",
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "error": format!("database error: {}", e)
-                })),
-            )
-        }
+        );
+    };
+    warn!(?failure, "Liveness check failed");
+    let mut body = json!({
+        "status": "unhealthy",
+        "service": "waddle-server",
+        "version": env!("CARGO_PKG_VERSION"),
+        "error": failure.as_str()
+    });
+    if let LivenessFailure::RuntimeStalled { stalled_ms } = failure {
+        body["stalled_ms"] = json!(stalled_ms);
     }
+    (StatusCode::SERVICE_UNAVAILABLE, Json(body))
 }
 
 async fn health_for_serving_generation<T>(
@@ -186,8 +236,11 @@ fn lifecycle_not_ready_response(
 
 /// Readiness check endpoint (for orchestrators).
 ///
-/// Readiness is stricter than liveness and validates overall DB pool health
-/// **and** the ADR-0017 Phase 3 Slice 2 clustering readiness signal: a node
+/// Readiness owns every dependency check — liveness (`/health`) reports
+/// process progress only. It validates DB pool health, per-store lineage
+/// **and** the ADR-0017 Phase 3 Slice 2 clustering readiness signal, all
+/// inside `LINEAGE_PROBE_TIMEOUT` so an unreachable database answers `503`
+/// before the kubelet's 2 s probe timeout: a node
 /// that has self-fenced its entity-ownership claims (node-lease heartbeat
 /// lost, or Postgres unreachable past the lease deadline) must not stay in
 /// the client Service/Ingress endpoint set — clients whose sockets it just
@@ -954,6 +1007,223 @@ mod readiness_generation_tests {
 
         assert_eq!(json["status"], "not_ready");
         assert_eq!(json["admission"], "FencedRecovering");
+    }
+
+    /// Global pool plus an attested lineage store on a separate database, so
+    /// readiness reaches its database arm and only the global pool's health
+    /// decides the outcome.
+    async fn attested_state_with_global(pool: Arc<DatabasePool>, name: &str) -> Arc<AppState> {
+        let lineage_db = Database::in_memory(name)
+            .await
+            .expect("open lineage database");
+        enroll(&lineage_db, &configured_lineage())
+            .await
+            .expect("enroll lineage");
+        let state = test_state(pool, false);
+        let mut registry = LineageRegistryBuilder::default();
+        registry.register_probe(
+            DurableStore::Global,
+            Arc::new(DatabaseLineageAttestor::new(lineage_db)),
+        );
+        let _ = state.lineage_registry.set(registry.seal());
+        crate::server::liveness::spawn_runtime_progress_heartbeat(&state.runtime_progress);
+        Arc::new(state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_reports_a_stalled_runtime() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+
+        tokio::time::advance(RUNTIME_PROGRESS_STALL_LIMIT + std::time::Duration::from_secs(1))
+            .await;
+        let (status, Json(body)) = liveness_response(&progress, &lifecycle);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "unhealthy");
+        assert_eq!(body["error"], "runtime_stalled");
+        assert_eq!(body["stalled_ms"], 11_000);
+
+        progress.record();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_fails_once_a_fatal_terminal_fence_has_finished() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+
+        // A fatal fence still being drained is not terminal yet.
+        lifecycle.fatal_fence_token().cancel();
+        lifecycle.begin_fenced_recovery();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+
+        lifecycle.mark_terminal_fence_finished();
+        let (status, Json(body)) = liveness_response(&progress, &lifecycle);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "unhealthy");
+        assert_eq!(body["error"], "terminally_fenced");
+        assert!(body.get("stalled_ms").is_none());
+    }
+
+    #[tokio::test]
+    async fn liveness_stays_up_after_an_ordinary_clustering_stop() {
+        // `TerminalFenceContext::finish` also runs when clustering stops
+        // without a fatal fence (process shutdown): that must not read as
+        // terminally fenced. Exception: a shutdown that finds the lease
+        // unavailable cancels the fatal fence before `finish`
+        // (`TerminalFenceContext::shutdown`), so `/health` returns 503 —
+        // harmless during a process stop, and the intended restart when only
+        // the clustering scope stopped.
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        lifecycle.begin_fenced_recovery();
+        lifecycle.mark_terminal_fence_finished();
+        assert!(!lifecycle.is_terminally_fenced());
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_fails_when_clustering_stopped_while_the_process_runs() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let process_stop = tokio_util::sync::CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        lifecycle.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+
+        // Clustering stopped but the node-lease loop is still draining.
+        clustering_stop.cancel();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+
+        lifecycle.mark_node_lease_exited();
+        let (status, Json(body)) = liveness_response(&progress, &lifecycle);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "unhealthy");
+        assert_eq!(body["error"], "clustering_stopped");
+    }
+
+    #[tokio::test]
+    async fn liveness_stays_up_when_the_process_itself_is_stopping() {
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let process_stop = tokio_util::sync::CancellationToken::new();
+        let clustering_stop = process_stop.child_token();
+        lifecycle.bind_clustering_scope(process_stop.clone(), clustering_stop.clone());
+
+        process_stop.cancel();
+        lifecycle.mark_node_lease_exited();
+        assert!(clustering_stop.is_cancelled());
+        assert!(!lifecycle.is_clustering_stopped_while_process_runs());
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_ignores_a_node_lease_exit_without_clustering() {
+        // No clustering scope bound (non-clustered deployment).
+        let progress = RuntimeProgress::new();
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        lifecycle.mark_node_lease_exited();
+        assert_eq!(liveness_response(&progress, &lifecycle).0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn liveness_handler_reads_the_app_state_lifecycle() {
+        let state = Arc::new(test_state(
+            sqlite_pool("liveness-terminal-fence").await,
+            false,
+        ));
+        crate::server::liveness::spawn_runtime_progress_heartbeat(&state.runtime_progress);
+        let live = health_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(live.status(), StatusCode::OK);
+
+        state.node_lifecycle.fatal_fence_token().cancel();
+        state.node_lifecycle.mark_terminal_fence_finished();
+        let live = health_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(live.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response_json(live).await["error"], "terminally_fenced");
+    }
+
+    #[tokio::test]
+    async fn liveness_ignores_a_closed_database_that_fails_readiness() {
+        let pool = sqlite_pool("liveness-closed-global").await;
+        let state = attested_state_with_global(pool, "liveness-closed-lineage").await;
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(
+            ready.status(),
+            StatusCode::OK,
+            "precondition: node is ready"
+        );
+
+        state
+            .db_pool
+            .global()
+            .sqlite_pool()
+            .expect("sqlite global pool")
+            .close()
+            .await;
+
+        let live = health_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(live.status(), StatusCode::OK);
+        assert_eq!(response_json(live).await["status"], "healthy");
+
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(ready).await;
+        assert_eq!(json["status"], "not_ready");
+        assert_eq!(json["database"]["global_healthy"], false);
+    }
+
+    #[tokio::test]
+    async fn stalled_database_acquisition_fails_readiness_inside_probe_timeout_only() {
+        let mut config = DatabaseConfig::new(
+            DatabaseDriver::Sqlite,
+            "sqlite:file:liveness-stalled-global?mode=memory&cache=shared",
+        );
+        config.pool_size = 1;
+        let pool = Arc::new(
+            DatabasePool::try_new(config, PoolConfig)
+                .await
+                .expect("single-connection sqlite pool"),
+        );
+        let state = attested_state_with_global(Arc::clone(&pool), "liveness-stalled-lineage").await;
+        let global = pool.global().clone();
+        // Hold the pool's only connection: every further acquisition waits
+        // for the main-pool acquire timeout, exactly like a Postgres outage.
+        let held = global.begin().await.expect("hold the only connection");
+
+        let started = std::time::Instant::now();
+        let ready = readiness_handler(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "readiness must answer inside the kubelet's 2 s probe timeout, took {elapsed:?}"
+        );
+        assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response_json(ready).await["database"]["status"], "timeout");
+
+        // Liveness never queues behind the database.
+        let live = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            health_handler(State(Arc::clone(&state))),
+        )
+        .await
+        .expect("liveness must not wait for a database connection")
+        .into_response();
+        assert_eq!(live.status(), StatusCode::OK);
+
+        held.rollback().await.expect("release the held connection");
     }
 
     #[tokio::test]

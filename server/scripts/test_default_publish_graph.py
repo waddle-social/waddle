@@ -20,6 +20,7 @@ RUNNER = (
 PUBLISH_GATES = {
     "checkCiDrift",
     "checkSwitchableAlternativeProgram",
+    "checkAlertRules",
     "fmt",
     "clippy",
     "test",
@@ -184,6 +185,7 @@ class PublishGraphTests(unittest.TestCase):
     def test_missing_or_added_dependency_is_rejected(self):
         for source, target, add in (
             ("nixTestLocal", "ciHelperContracts", False),
+            ("publishContainerImage", "checkAlertRules", False),
             ("publishContainerImage", "ciHelperContracts", False),
             ("publishContainerImage", "nixTestLocal", False),
             ("checkCiDrift", "ciHelperContracts", True),

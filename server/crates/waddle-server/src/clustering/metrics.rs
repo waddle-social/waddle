@@ -719,6 +719,46 @@ mod tests {
         );
     }
 
+    /// One clustering instrument a Mimir alert rule reads, from the fixture
+    /// shared with `infrastructure/waddle.cloud/rules/tests/push_otlp_contract.py`
+    /// (PromQL selector checks and real OTLP→Prometheus name translation).
+    #[derive(serde::Deserialize)]
+    struct AlertMetricContract {
+        name: String,
+        unit: String,
+        prometheus_name: String,
+    }
+
+    /// Every clustering instrument an alert reads is exported under the
+    /// pinned OTel name and unit, so renaming the instrument or changing
+    /// its unit (which changes the translated Prometheus suffix) fails here.
+    #[tokio::test]
+    async fn alerted_clustering_instruments_export_their_contract_name_and_unit() {
+        let guard = test_support::acquire().await;
+        record_every_instrument();
+
+        let contracts: Vec<AlertMetricContract> =
+            serde_json::from_str(include_str!("alert_metric_contract.json"))
+                .expect("alert_metric_contract.json is a list of contracts");
+        assert!(!contracts.is_empty());
+        let exported = guard.metric_names();
+        for contract in contracts {
+            assert!(
+                exported.contains(&contract.name),
+                "alerted instrument {} is no longer exported",
+                contract.name
+            );
+            assert_eq!(
+                guard.metric_unit(&contract.name).as_deref(),
+                Some(contract.unit.as_str()),
+                "alerted instrument {} changed unit; its Prometheus name {} \
+                 and the alert rules reading it must change together",
+                contract.name,
+                contract.prometheus_name
+            );
+        }
+    }
+
     #[tokio::test]
     async fn clustering_instrument_names_never_embed_their_unit() {
         let guard = test_support::acquire().await;

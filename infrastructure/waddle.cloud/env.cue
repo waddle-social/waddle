@@ -71,7 +71,7 @@ schema.#Project & {
 				packages:   "write"
 				"id-token": "write"
 			}
-			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesSync, _t.dashboardsSync]
+			tasks: [_t.helmPush, _t.gitopsPush, _t.deployAnnotation, _t.rulesLint, _t.rulesTest, _t.rulesSync, _t.dashboardsSync]
 		}
 		pullRequest: {
 			derivePaths: true
@@ -82,7 +82,7 @@ schema.#Project & {
 				checks:          "write"
 				"pull-requests": "write"
 			}
-			tasks: [_t.rulesLint, _t.dashboardsLint]
+			tasks: [_t.rulesLint, _t.rulesTest, _t.dashboardsLint]
 		}
 	}
 
@@ -90,11 +90,11 @@ schema.#Project & {
 		namespaceServerRustInputs: schema.#Task & {
 			command: "bash"
 			args: ["-euo", "pipefail", "-c", #"""
-				mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
-				mkdir -p target/cuenv/server-rust-inputs/rules/mimir
-				cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
-				cp rules/mimir/*.yaml target/cuenv/server-rust-inputs/rules/mimir/
-			"""#]
+					mkdir -p target/cuenv/server-rust-inputs/gitops/waddle-server
+					mkdir -p target/cuenv/server-rust-inputs/rules/mimir
+					cp gitops/waddle-server/postgresql-monitoring-ingress.yaml target/cuenv/server-rust-inputs/gitops/waddle-server/
+					cp rules/mimir/*.yaml target/cuenv/server-rust-inputs/rules/mimir/
+				"""#]
 			inputs: [
 				"gitops/waddle-server/postgresql-monitoring-ingress.yaml",
 				"rules/mimir/*.yaml",
@@ -267,6 +267,27 @@ schema.#Project & {
 				"""#]
 			inputs: ["rules/**", "env.cue"]
 		}
+		// Behavioural alert evidence (#2046 W1.12): promtool checks and
+		// unit tests for every Mimir rule file, then the real-translator
+		// OTLP contract over the Rust-pinned name fixtures under server/.
+		// Gates rulesSync on main. It reads those fixtures from the live
+		// checkout, so it is not hermetic. Inputs are project-local on
+		// purpose: this pipeline is not expanded, and `cuenv ci` selects
+		// tasks by matching repo-relative changed paths against inputs
+		// without resolving ../, so ../ inputs here would never select it.
+		// Fixture, unit and flake changes are covered by server's
+		// checkAlertRules, which gates the image publish.
+		rulesTest: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					prometheus_bin="$(command -v prometheus)"
+					PROMETHEUS_BIN="${prometheus_bin}" sh rules/tests/run.sh
+					echo "Alert rule tests and OTLP name contract pass."
+				"""#]
+			inputs: ["rules/**", "env.cue"]
+		}
 		// Validate every dashboard document on PRs. The skeleton exemption is
 		// declared in the dashboard's own tags rather than hidden in CI logic.
 		dashboardsLint: schema.#Task & {
@@ -279,8 +300,10 @@ schema.#Project & {
 		}
 		// Sync the rule trees to the Grafana Cloud rulers (main push
 		// only). Sync is authoritative within the `waddle` namespace;
-		// see rules/README.md for the required secrets.
+		// see rules/README.md for the required secrets. Never publishes
+		// rules that fail lint or their promtool/contract tests.
 		rulesSync: schema.#Task & {
+			dependsOn: [rulesLint, rulesTest]
 			command: "bash"
 			args: ["-c", #"""
 					set -euo pipefail

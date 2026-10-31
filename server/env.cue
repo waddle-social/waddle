@@ -180,6 +180,7 @@ schema.#Project & {
 			tasks: [
 				_t.checkCiDrift,
 				_t.checkSwitchableAlternativeProgram,
+				_t.checkAlertRules,
 				_t.fmt,
 				_t.clippy,
 				_t.test,
@@ -226,7 +227,7 @@ schema.#Project & {
 				"pull-requests": "none"
 			}
 			tasks: [
-				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram,
+				_t.checkCiDrift, _t.checkSwitchableAlternativeProgram, _t.checkAlertRules,
 				_t.nixFmt, _t.nixClippy,
 				_t.nixDoctest, _t.checkXmppClientFfiBindings, _t.renderDeployment,
 				_t.nixBuildExtensionModules, _t.nixBuildCi, _t.nixBuildImageStream,
@@ -258,9 +259,21 @@ schema.#Project & {
 			when: {
 				branch: ["main"]
 				defaultBranch: true
-				pullRequest:   true
 				manual:        true
 			}
+			provider: github: runner: "ubuntu-24.04"
+			provider: github: permissions: {
+				"id-token":      "write"
+				contents:        "read"
+				checks:          "write"
+				packages:        "read"
+				"pull-requests": "none"
+			}
+			tasks: [_t.federationGrantFenceProof]
+		}
+		federationGrantFencePullRequest: {
+			mode: "expanded"
+			when: pullRequest: true
 			provider: github: runner: "ubuntu-24.04"
 			provider: github: permissions: {
 				"id-token":      "write"
@@ -374,6 +387,7 @@ schema.#Project & {
 			args: ["experiments/grant-fence/run-native.sh"]
 			inputs: [
 				"experiments/grant-fence/**",
+				"experiments/native-fixture/**",
 				"../flake.lock",
 				"../flake.nix",
 				"rust-toolchain.toml",
@@ -445,6 +459,9 @@ schema.#Project & {
 					if ! bash scripts/sync-cache-benchmark.sh --check; then
 					  overall_status=1
 					fi
+					if ! bun scripts/integration-ci.ts --check; then
+					  overall_status=1
+					fi
 					# checkCiDrift is itself a direct publication gate. Verify the
 					# generated runner selector and both other direct gates here,
 					# independently of the helper job whose edge is under test.
@@ -458,6 +475,10 @@ schema.#Project & {
 				"deployment.cue",
 				"../.github/workflows/hestia-cache-gc.yml",
 				"../ci/contributors/*.cue",
+				"../scripts/integration-ci*",
+				"../scripts/test_integration_ci_project.py",
+				"../scripts/test_cuenv_bootstrap.py",
+				"../.github/workflows/waddle-integration.yml",
 				"../ci/rust-tests/**",
 				"../scripts/sync-rust-tests.sh",
 				"scripts/test_default_publish_graph.py",
@@ -589,6 +610,39 @@ schema.#Project & {
 				"../cuenv.lock",
 				"../xeps/xep-*.xml",
 				"env.cue",
+			]
+		}
+
+		// Alert evidence (#2046 W1.12): promtool checks and unit tests for
+		// every Mimir rule file, then the OTLP contract that pushes the
+		// Rust-pinned instrument names and units (the two fixtures below)
+		// through Prometheus's real OTLP translator and requires the
+		// Prometheus names the alert rules read. It lives here, not only in
+		// the cloud project, because a fixture, unit or Prometheus (flake)
+		// change ships with this image: these expanded pipelines run every
+		// listed task as its own job whenever the derived trigger paths
+		// match, so ../ inputs select it. Non-expanded `cuenv ci` matches
+		// changed files against inputs without resolving ../ and would skip
+		// it. Reads the rules from the live checkout, so not hermetic.
+		checkAlertRules: schema.#Task & {
+			hermetic: false
+			command:  "bash"
+			args: ["-c", #"""
+					set -euo pipefail
+					prometheus_bin="$(command -v prometheus)"
+					PROMETHEUS_BIN="${prometheus_bin}" sh ../infrastructure/waddle.cloud/rules/tests/run.sh
+					echo "Alert rule tests and OTLP name contract pass."
+				"""#]
+			inputs: [
+				// Rule and shipped metric-contract changes trigger the server
+				// lanes. Tests-only edits run through cloud rulesTest instead;
+				// this non-hermetic task still reads the current tests whenever
+				// an image publication runs.
+				"../infrastructure/waddle.cloud/rules/mimir/*.yaml",
+				"crates/waddle-server/src/clustering/alert_metric_contract.json",
+				"crates/waddle-xmpp/src/telemetry/push_gauge_contract.json",
+				"../flake.nix",
+				"../flake.lock",
 			]
 		}
 
@@ -1415,6 +1469,7 @@ schema.#Project & {
 			dependsOn: [
 				tasks.checkCiDrift,
 				tasks.checkSwitchableAlternativeProgram,
+				tasks.checkAlertRules,
 				tasks.fmt,
 				tasks.clippy,
 				tasks.test,

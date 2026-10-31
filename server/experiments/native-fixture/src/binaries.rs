@@ -52,7 +52,7 @@ impl Binaries {
             );
             versions.push(version);
         }
-        versions.push("prescience 0.1.0; PostgreSQL-canonical leaf-grant prototype".to_owned());
+        versions.push("prescience 0.1.0; native test fixture".to_owned());
         Ok(versions)
     }
 }

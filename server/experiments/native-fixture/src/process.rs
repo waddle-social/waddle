@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
 
-use crate::cleanup::{CleanupFailure, CleanupLatch, CleanupService, ProcessFault, StopPhase};
+use crate::cleanup::{
+    CleanupFailure, CleanupLatch, CleanupService, LivePermit, PreSpawnPermit, ProcessFault,
+    StopPhase,
+};
 
 /// Engineering margin for native filesystem flushes, not a proven upper bound.
 pub const POSTGRES_SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
@@ -17,6 +20,8 @@ pub const POSTGRES_SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
 pub struct Process {
     child: Child,
     reaped: bool,
+    cleanup_verified: bool,
+    permit: Option<LivePermit>,
     observed: Option<ExitStatus>,
     output: Option<ChildStdout>,
     postgres: bool,
@@ -29,7 +34,7 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn spawn(
+    pub(crate) fn spawn_probe(
         command: &mut Command,
         input: Option<&[u8]>,
         capture_version: bool,
@@ -37,7 +42,7 @@ impl Process {
         Self::spawn_inner(command, input, capture_version, None, |_| Ok(()))
     }
 
-    pub fn spawn_tracked(
+    pub(crate) fn spawn_tracked(
         command: &mut Command,
         input: Option<&[u8]>,
         capture_version: bool,
@@ -66,6 +71,28 @@ impl Process {
             input.is_none_or(|bytes| bytes.len() <= 4096),
             "fixture stdin exceeds PIPE_BUF"
         );
+        let permit = cleanup
+            .as_ref()
+            .map(|(gate, service)| gate.reserve(*service))
+            .transpose()?;
+        Self::spawn_reserved(
+            command,
+            input,
+            capture_version,
+            cleanup,
+            permit,
+            before_input,
+        )
+    }
+
+    fn spawn_reserved(
+        command: &mut Command,
+        input: Option<&[u8]>,
+        capture_version: bool,
+        cleanup: Option<(CleanupLatch, CleanupService)>,
+        permit: Option<PreSpawnPermit>,
+        before_input: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<Self> {
         command
             .process_group(0)
             .stdin(if input.is_some() {
@@ -79,13 +106,15 @@ impl Process {
                 Stdio::null()
             })
             .stderr(Stdio::null());
-        let mut child = command.spawn().context("spawn fixture process")?;
-        let output = child.stdout.take();
+        let child = command.spawn().context("spawn fixture process")?;
+        // No fallible operation or lock between successful spawn and ownership.
         let mut process = Self {
             child,
+            permit: permit.map(PreSpawnPermit::activate),
             reaped: false,
+            cleanup_verified: false,
             observed: None,
-            output,
+            output: None,
             postgres: false,
             measurement_armed: false,
             measurement_start: None,
@@ -94,6 +123,7 @@ impl Process {
             #[cfg(test)]
             inject_stop_failure: false,
         };
+        process.output = process.child.stdout.take();
         // The fixture latch was attached in infallible construction above,
         // before this test seam, stdin writes or any other fallible operation.
         before_input(&mut process)?;
@@ -109,14 +139,13 @@ impl Process {
         Ok(process)
     }
 
-    pub fn postgres(command: &mut Command, cleanup: &CleanupLatch) -> Result<Self> {
+    pub(crate) fn postgres(command: &mut Command, cleanup: &CleanupLatch) -> Result<Self> {
         let mut process =
             Self::spawn_tracked(command, None, false, cleanup, CleanupService::Postgres)?;
         process.postgres = true;
         Ok(process)
     }
 
-    #[cfg(test)]
     pub fn id(&self) -> u32 {
         self.child.id()
     }
@@ -136,6 +165,7 @@ impl Process {
             "PostgreSQL shutdown requires PostgreSQL supervisor"
         );
         if self.reaped {
+            ensure!(self.cleanup_verified, "reaped child lacks verified cleanup");
             return Ok(());
         }
         let pid = i32::try_from(self.child.id()).context("postmaster PID fits pid_t")?;
@@ -172,6 +202,8 @@ impl Process {
                 let status = self.child.wait()?;
                 self.observed = Some(status);
                 self.reaped = true;
+                ensure!(status.success(), "postmaster changed normal exit status");
+                self.cleanup_verified = true;
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -267,7 +299,8 @@ impl Process {
             Ok(Some(status)) => {
                 self.observed = Some(status);
                 self.reaped = true;
-                if status.success() {
+                if status.success() && self.postgres {
+                    self.cleanup_verified = true;
                     Ok(())
                 } else {
                     Err(ProcessFault::PostgresExit {
@@ -364,7 +397,17 @@ impl Process {
         self.record_cleanup(result)
     }
 
-    fn record_cleanup(&self, result: Result<()>) -> Result<()> {
+    fn record_cleanup(&mut self, result: Result<()>) -> Result<()> {
+        let result = result.and_then(|()| {
+            ensure!(
+                self.cleanup_verified,
+                "cleanup success lacks full completion evidence"
+            );
+            if let Some(permit) = self.permit.as_mut() {
+                permit.release_verified()?;
+            }
+            Ok(())
+        });
         if let (Err(error), Some((cleanup, service))) = (&result, &self.cleanup) {
             cleanup.record(CleanupFailure::capture(*service, error));
         }
@@ -380,6 +423,7 @@ impl Process {
             return self.stop_postgres_inner(POSTGRES_SHUTDOWN_BUDGET);
         }
         if self.reaped {
+            ensure!(self.cleanup_verified, "reaped child lacks verified cleanup");
             return Ok(());
         }
         let pid = i32::try_from(self.child.id()).context("child PID fits pid_t")?;
@@ -408,6 +452,7 @@ impl Process {
             if let Some(status) = self.child.try_wait()? {
                 self.observed.get_or_insert(status);
                 self.reaped = true;
+                self.cleanup_verified = true;
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -595,7 +640,7 @@ mod tests {
 
         let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
         command.env_clear().arg("0");
-        let mut completed = Process::spawn(&mut command, None, false)?;
+        let mut completed = Process::spawn_probe(&mut command, None, false)?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while completed.status()?.is_none() {
             ensure!(
@@ -604,6 +649,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        completed.postgres = true;
         completed.reap_measured_exit()?;
         ensure!(completed.reaped, "observed normal child must be reaped");
         Ok(())
@@ -614,7 +660,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
         let mut fixture = crate::fixture::Fixture::new()?;
-        fixture.start().await?;
+        fixture.start("", crate::TEST_SCHEMA).await?;
         let root = fixture.settings.root.clone();
         let pid = Arc::new(AtomicU32::new(0));
         let mut reap = ReapProbe(pid.clone());
@@ -630,6 +676,10 @@ mod tests {
         worker.inject_stop_failure = true;
         pid.store(worker.id(), Ordering::SeqCst);
         drop(worker);
+        ensure!(
+            fixture.cleanup_latch().outstanding() >= 1,
+            "failed worker Drop released LIVE count"
+        );
         let first = fixture
             .cleanup_failure()
             .context("worker Drop failure did not reach fixture")?;
@@ -685,6 +735,10 @@ mod tests {
             result.is_err() && pid.load(Ordering::SeqCst) != 0,
             "probe must fail after child actually starts"
         );
+        ensure!(
+            fixture.cleanup_latch().outstanding() == 1,
+            "failed postspawn Drop released LIVE count"
+        );
         let first = fixture
             .cleanup_failure()
             .context("postspawn cleanup failure did not reach fixture")?;
@@ -711,7 +765,7 @@ mod tests {
     fn opened_proc_stat_of_reaped_task_is_treated_as_vanished() -> Result<()> {
         let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
         command.env_clear().arg("30");
-        let mut child = Process::spawn(&mut command, None, false)?;
+        let mut child = Process::spawn_probe(&mut command, None, false)?;
         let pid = child.id();
         let mut stat = fs::File::open(format!("/proc/{pid}/stat"))?;
         child.stop()?;
@@ -750,7 +804,7 @@ mod tests {
             .env_clear()
             .args(["-c", "\"$1\" 30 & echo $!; exit 0", "cleanup-probe"])
             .arg(sleep);
-        let mut process = Process::spawn(&mut command, None, true)?;
+        let mut process = Process::spawn_probe(&mut command, None, true)?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         while process.status()?.is_none() {
             ensure!(
@@ -773,6 +827,153 @@ mod tests {
                 "descendant remained running after group cleanup"
             );
         }
+        Ok(())
+    }
+    #[test]
+    fn closed_fixture_rejects_spawn_and_failed_spawn_rolls_back() -> Result<()> {
+        let mut fixture = crate::fixture::Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        let mut missing = Command::new(root.join("binary-that-does-not-exist"));
+        ensure!(
+            fixture.spawn_worker(&mut missing, None).is_err(),
+            "missing binary must fail"
+        );
+        ensure!(
+            fixture.cleanup_latch().outstanding() == 0,
+            "failed spawn leaked pre-spawn count"
+        );
+        fixture.shutdown()?;
+        let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
+        command.env_clear().arg("30");
+        let error = match fixture.spawn_worker(&mut command, None) {
+            Ok(_) => anyhow::bail!("closed fixture spawned a child"),
+            Err(error) => error,
+        };
+        ensure!(
+            error.downcast_ref::<ProcessFault>() == Some(&ProcessFault::SpawnClosed),
+            "close must win at reservation before OS spawn"
+        );
+        ensure!(!root.exists(), "verified empty fixture root was retained");
+        Ok(())
+    }
+
+    #[test]
+    fn reservation_before_close_may_spawn_but_cannot_lose_private_root() -> Result<()> {
+        let mut fixture = crate::fixture::Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        let gate = fixture.cleanup_latch().clone();
+        let permit = gate.reserve(CleanupService::Worker)?;
+        ensure!(
+            fixture.shutdown().is_err(),
+            "outstanding pre-spawn reservation must retain root"
+        );
+        let mut command = Command::new(test_binary("FENCE_TEST_SLEEP")?);
+        command.env_clear().current_dir(&root).arg("30");
+        let mut child = Process::spawn_reserved(
+            &mut command,
+            None,
+            false,
+            Some((gate.clone(), CleanupService::Worker)),
+            Some(permit),
+            |_| Ok(()),
+        )?;
+        ensure!(
+            child.status()?.is_none() && gate.outstanding() == 1,
+            "late real child must remain counted"
+        );
+        drop(fixture);
+        ensure!(
+            root.join("fixture-id").is_file(),
+            "fixture Drop deleted live child's root"
+        );
+        child.stop()?;
+        child.stop()?;
+        drop(child);
+        ensure!(
+            gate.outstanding() == 0 && gate.failure().is_some() && root.exists(),
+            "later verified stop must not clear sticky retention"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_drop_before_exited_worker_with_live_descendant_retains_root() -> Result<()> {
+        let fixture = crate::fixture::Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        let gate = fixture.cleanup_latch().clone();
+        let mut command = Command::new(test_binary("FENCE_TEST_SHELL")?);
+        command
+            .env_clear()
+            .current_dir(&root)
+            .args(["-c", "\"$1\" 30 & exit 0", "owned-descendant"])
+            .arg(test_binary("FENCE_TEST_SLEEP")?);
+        let mut worker = fixture.spawn_worker(&mut command, None)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while worker.status()?.is_none() {
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "leader exit deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ensure!(
+            live_group_members(i32::try_from(worker.id())?)?,
+            "real descendant must still be live"
+        );
+        drop(fixture);
+        ensure!(
+            gate.outstanding() == 1 && root.exists(),
+            "exited leader hid live descendant from retention"
+        );
+        worker.stop()?;
+        ensure!(
+            worker.cleanup_verified && gate.outstanding() == 0,
+            "full group cleanup did not release permit"
+        );
+        drop(worker);
+        ensure!(
+            root.exists(),
+            "late worker completion removed retained root"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abnormal_measured_postgres_exit_cannot_release_on_idempotent_stop() -> Result<()> {
+        let fixture = crate::fixture::Fixture::new()?;
+        let root = fixture.settings.root.clone();
+        let gate = fixture.cleanup_latch().clone();
+        let mut command = Command::new(test_binary("FENCE_TEST_SHELL")?);
+        command.env_clear().args(["-c", "exit 7"]);
+        let mut process = fixture.spawn_worker(&mut command, None)?;
+        // Exercise the private measured-PG reap path with a real abnormal child
+        // exit, without killing a database and risking escaped backend leaks.
+        process.postgres = true;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while process.status()?.is_none() {
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "abnormal probe exit deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ensure!(
+            process.reap_measured_exit().is_err() && process.reaped,
+            "abnormal real exit must be reaped but unverified"
+        );
+        ensure!(
+            process.stop().is_err() && !process.cleanup_verified && gate.outstanding() == 1,
+            "idempotent stop released unverified PG ownership"
+        );
+        drop(process);
+        drop(fixture);
+        ensure!(
+            root.exists() && gate.outstanding() == 1 && gate.failure().is_some(),
+            "failed Drop discarded live permit accounting"
+        );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }
