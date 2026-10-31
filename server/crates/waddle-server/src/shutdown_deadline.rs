@@ -129,7 +129,7 @@ impl ShutdownDeadline {
     }
 
     /// Latch an explicit start, as if shutdown had begun at `started`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "clustering"))]
     pub(crate) fn start_at(&self, started: Instant) {
         let _ = self.started.set(started);
     }
