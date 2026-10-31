@@ -377,6 +377,15 @@ jobs:
         name: Build independent Flutter debug APK
         if: "${{ !cancelled() && steps.native.outcome == 'success' && steps.pub.outcome == 'success' }}"
         run: "nix develop .#flutter --command bash scripts/flutter-ci.sh apk"
+      - id: apk_artifact
+        name: Upload standalone Flutter APK
+        if: "${{ always() && hashFiles('apps/flutter/build/artifacts/waddle-flutter.apk') != '' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-apk
+          path: apps/flutter/build/artifacts/waddle-flutter.apk
+          if-no-files-found: error
+          retention-days: 7
       - id: wasm
         name: Build Rust browser JS and WASM together
         if: "${{ !cancelled() && steps.tools.outcome == 'success' }}"
@@ -394,15 +403,6 @@ jobs:
         if: "${{ !cancelled() && steps.apk.outcome == 'success' }}"
         timeout-minutes: 20
         run: "test -e /dev/kvm\nsudo chmod 666 /dev/kvm\nnix develop .#flutter --command bash scripts/flutter-device-smoke.sh\n"
-      - id: apk_artifact
-        name: Upload standalone Flutter APK
-        if: "${{ always() && hashFiles('apps/flutter/build/artifacts/waddle-flutter.apk') != '' }}"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: waddle_flutter_apk-waddle-flutter-apk
-          path: apps/flutter/build/artifacts/waddle-flutter.apk
-          if-no-files-found: error
-          retention-days: 7
       - id: preview_artifact
         name: Upload rendered Flutter previews
         if: "${{ always() && hashFiles('apps/flutter/build/design-previews/*.png') != '' }}"

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createContext, runInContext } from "node:vm";
@@ -26,6 +26,15 @@ function harness(helper: string) {
 import json, os, sys
 with open(os.environ["FLUTTER_TEST_RECORD"], "a") as output:
     output.write(json.dumps({"tool": "${tool}", "args": sys.argv[1:], "cwd": os.getcwd(), "library": os.environ.get("WADDLE_FLUTTER_RUNTIME_LIBRARY")}) + "\\n")
+if "${tool}" == "cargo" and sys.argv[1:2] == ["ndk"]:
+    from pathlib import Path
+    stage = Path(sys.argv[sys.argv.index("-o") + 1])
+    for abi in ("arm64-v8a", "x86_64"):
+        destination = stage / abi
+        destination.mkdir(parents=True, exist_ok=True)
+        if not (os.environ.get("FLUTTER_TEST_MISSING_RUNTIME") and abi == "x86_64"):
+            (destination / "libwaddle_flutter_runtime.so").write_bytes(abi.encode())
+        (destination / "libwaddle_xmpp_client_ffi.so").write_bytes(b"dependency-cdylib")
 if "${tool}" == "flutter" and sys.argv[1:3] == ["build", "apk"]:
     from pathlib import Path
     from zipfile import ZipFile
@@ -85,16 +94,37 @@ print("Signer #1 certificate SHA-256 digest: " + digest)
 describe("standalone Rust build contracts", () => {
   test("cross-build targets both ABIs into the new app only", () => {
     const h = harness("build-flutter-rust.sh");
+    for (const abi of ["arm64-v8a", "x86_64"]) {
+      const output = join(h.directory, "apps/flutter/android/app/src/main/jniLibs", abi);
+      mkdirSync(output, { recursive: true });
+      writeFileSync(join(output, "libwaddle_xmpp_client_ffi.so"), "stale dependency");
+    }
     expect(h.run("--android").exitCode).toBe(0);
     const [call] = h.calls();
     expect(call.cwd).toBe(join(h.directory, "server"));
     expect(call.args).toEqual([
       "ndk", "-t", "arm64-v8a", "-t", "x86_64", "--platform", "26", "-o",
-      join(h.directory, "apps/flutter/android/app/src/main/jniLibs"),
+      expect.any(String),
       "build", "--locked", "-p", "waddle-flutter-runtime", "--profile", "mobile",
     ]);
     expect(JSON.stringify(call)).not.toContain("apps/android");
     expect(JSON.stringify(call)).not.toContain("uniffi-bindgen");
+    expect(existsSync(call.args[8])).toBe(false);
+    for (const abi of ["arm64-v8a", "x86_64"]) {
+      const output = join(h.directory, "apps/flutter/android/app/src/main/jniLibs", abi);
+      expect(readdirSync(output)).toEqual(["libwaddle_flutter_runtime.so"]);
+      expect(readFileSync(join(output, "libwaddle_flutter_runtime.so"), "utf8")).toBe(abi);
+    }
+  });
+  test("failed or incomplete cargo-ndk output is never packaged and staging is cleaned", () => {
+    const failures: Record<string, string>[] = [{ FLUTTER_TEST_EXIT: "19" }, { FLUTTER_TEST_MISSING_RUNTIME: "1" }];
+    for (const failure of failures) {
+      const h = harness("build-flutter-rust.sh");
+      const result = h.run("--android", failure);
+      expect(result.exitCode).toBe(failure.FLUTTER_TEST_EXIT ? 19 : 1);
+      expect(existsSync(join(h.directory, "apps/flutter/android/app/src/main/jniLibs"))).toBe(false);
+      expect(existsSync(h.calls()[0].args[8])).toBe(false);
+    }
   });
   test("browser output is matched static web glue, independent of chat's bundler output", () => {
     const h = harness("build-flutter-rust.sh");
