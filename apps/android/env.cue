@@ -271,9 +271,9 @@ schema.#Project & {
 		}
 
 		checkCiDrift: schema.#Task & {
-			command: "cuenv"
-			args: ["sync", "ci", "--check", "-p", "."]
-			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml"]
+			command: "bash"
+			args: ["-c", "cuenv sync ci --check -p . && cd ../.. && bun scripts/android-apk-ci.ts --check && bun test scripts/android-apk-ci.test.ts"]
+			inputs: ["env.cue", "../../.github/workflows/waddle-android-*.yml", "../../scripts/android-apk-ci.ts", "../../scripts/android-apk-ci.test.ts"]
 		}
 
 		telemetryContract: schema.#Task & {

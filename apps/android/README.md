@@ -69,6 +69,13 @@ currently provides Flutter 3.47.0 with Dart 3.13.0.
 
 ## Install-in-place artifacts
 
+The **waddle-android-apk** check runs the Android PR build on a standard GitHub
+runner with independent concurrency, so it can produce the same APK while the
+Namespace runner pool is waiting. Its workflow is generated from the Android PR
+workflow with the same setup, build, validation and upload steps; only the
+Namespace volume cache is omitted. Regenerate with
+`bun scripts/android-apk-ci.ts sync`, then `bun scripts/integration-ci.ts sync`.
+
 Pull requests upload the FOSS debug APK as **waddle-android-apk**, retained for
 seven days. Open the PR's **waddle-android-pullRequest** check, then use the
 **Android APK** link in the run summary or download it from **Artifacts**. Sign

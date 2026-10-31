@@ -50,6 +50,10 @@ on:
     - cue.mod/**
     - flake.nix
     - flake.nix/**
+    - scripts/android-apk-ci.test.ts
+    - scripts/android-apk-ci.test.ts/**
+    - scripts/android-apk-ci.ts
+    - scripts/android-apk-ci.ts/**
     - scripts/android-apk-summary.sh
     - scripts/android-apk-summary.sh/**
     - scripts/android-ci-build.sh
