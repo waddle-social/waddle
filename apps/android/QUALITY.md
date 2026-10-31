@@ -1,23 +1,5 @@
 # Android quality matrix
 
-## Flutter migration verification
-
-The launcher now uses the Flutter module in `flutter/`. The existing native
-session/core, services, feature ViewModels and Compose reference components are
-retained. Existing churn tests and Compose screenshots below describe that
-native coverage; a passing Compose screenshot does not verify Flutter rendering.
-
-Flutter interaction tests cover bridge account invalidation, notification target
-acknowledgement, typed image bytes, listener disposal, provider selection,
-adaptive navigation and preference commands. See `flutter/test` and
-[`flutter/README.md`](flutter/README.md) for build commands and verification
-limits. At migration authoring time the environment had no Flutter/Android SDK,
-and the official Flutter download was blocked. Flutter analysis/tests, both APK
-builds, reviewed light/dark screenshots and on-device call/push/media checks
-remain required; feature parity is not yet runtime verified.
-
-## Native feature coverage
-
 Feature parity with the web client is no longer the bar; a feature counts
 when it keeps working under network churn and does not regress visually.
 Each row says what guards it today. Update the row in the same PR that

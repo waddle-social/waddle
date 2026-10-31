@@ -80,6 +80,8 @@ mod client_admin_v2;
 mod client_calls;
 mod client_core;
 mod client_extensions;
+mod client_flutter_account_parity;
+mod client_flutter_parity;
 mod client_history;
 mod client_messaging;
 mod client_rooms;
@@ -94,7 +96,10 @@ mod driver;
 mod encrypted;
 mod events;
 mod extension_routes;
+mod flutter_parity_types;
+mod flutter_timeline;
 mod helpers;
+mod lifecycle;
 mod options;
 mod rejection;
 mod state;
@@ -174,6 +179,7 @@ pub(crate) use rejection::JsMessageRejection;
 )]
 pub(crate) use state::*;
 
+pub use flutter_timeline::WaddleFlutterTimeline;
 pub use state::{WaddleClient, WaddleConfig};
 pub use types::*;
 

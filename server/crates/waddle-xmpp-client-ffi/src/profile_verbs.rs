@@ -43,6 +43,7 @@ use crate::{WaddleClient, WaddleError};
 /// XEP-0292 vCard4 profile fields (the subset the profile editor
 /// surfaces). `None` means the property is absent on the wire.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleVCard4 {
     pub full_name: Option<String>,
     pub nickname: Option<String>,
@@ -55,6 +56,7 @@ pub struct WaddleVCard4 {
 /// XEP-0107 user mood: `kind` is the defined mood element name
 /// (e.g. `happy`), `text` the optional free-form annotation.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleMood {
     pub kind: String,
     pub text: Option<String>,
@@ -63,6 +65,7 @@ pub struct WaddleMood {
 /// XEP-0108 user activity: `general` / `specific` are the defined
 /// category element names (e.g. `working` / `coding`).
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleActivity {
     pub general: String,
     pub specific: Option<String>,
@@ -72,6 +75,7 @@ pub struct WaddleActivity {
 /// XEP-0118 user tune. `rating` is 1–10 per §3.1; out-of-range values
 /// are clamped into that interval before publishing.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleTune {
     pub artist: Option<String>,
     pub title: Option<String>,
@@ -87,6 +91,7 @@ pub struct WaddleTune {
 /// parity). A node that is absent, empty, or answers with a stanza
 /// error surfaces as `None`.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddlePepProfile {
     pub mood: Option<WaddleMood>,
     pub activity: Option<WaddleActivity>,

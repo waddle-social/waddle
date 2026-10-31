@@ -260,10 +260,8 @@ class CallStore internal constructor(
      * Responder action: send XEP-0353 `<proceed/>` to the proposer's
      * full JID. The call turns active later, when the caller's Jingle
      * session-initiate lands (web `answerIncomingDmCallActivity`).
-     * [expectedSid] binds delayed UI actions (permission prompts or notifications)
-     * to the ring the user answered; a successor ring is never claimed.
      */
-    suspend fun acceptIncoming(expectedSid: String? = null): Boolean {
+    suspend fun acceptIncoming(): Boolean {
         val connection = signaling.captureActiveConnection() ?: return false
         var target: CallState.Incoming? = null
         var claimed = false
@@ -271,7 +269,6 @@ class CallStore internal constructor(
             synchronized(stateLock) {
                 val current = _state.value
                 if (current !is CallState.Incoming || current.accepting) return@applyIfCurrent
-                if (expectedSid != null && current.sid != expectedSid) return@applyIfCurrent
                 if (!current.connection.isSameActiveAttempt(connection)) return@applyIfCurrent
                 target = current
                 _state.value = checkNotNull(target).copyWithConnection(accepting = true)

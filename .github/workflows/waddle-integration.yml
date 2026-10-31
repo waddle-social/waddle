@@ -29,13 +29,13 @@ jobs:
     outputs:
       expected: "${{ steps.plan.outputs.expected }}"
       base: "${{ steps.plan.outputs.base }}"
-      waddle_android_apk: "${{ steps.plan.outputs.waddle_android_apk }}"
       waddle_android_devicetests: "${{ steps.plan.outputs.waddle_android_devicetests }}"
       waddle_android_pullrequest: "${{ steps.plan.outputs.waddle_android_pullrequest }}"
       waddle_apple_pullrequest: "${{ steps.plan.outputs.waddle_apple_pullrequest }}"
       waddle_chat_pullrequest: "${{ steps.plan.outputs.waddle_chat_pullrequest }}"
       waddle_cloud_pullrequest: "${{ steps.plan.outputs.waddle_cloud_pullrequest }}"
       waddle_colony_pullrequest: "${{ steps.plan.outputs.waddle_colony_pullrequest }}"
+      waddle_flutter_apk: "${{ steps.plan.outputs.waddle_flutter_apk }}"
       waddle_linux_pullrequest: "${{ steps.plan.outputs.waddle_linux_pullrequest }}"
       waddle_server_authzidcodec: "${{ steps.plan.outputs.waddle_server_authzidcodec }}"
       waddle_server_federationgrantfencepullrequest: "${{ steps.plan.outputs.waddle_server_federationgrantfencepullrequest }}"
@@ -64,94 +64,6 @@ jobs:
       - id: plan
         name: Select every applicable lane
         run: bun scripts/integration-ci.ts plan
-  waddle_android_apk__apk:
-    permissions:
-      contents: read
-    name: waddle-android-apk / Build downloadable Android APK
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          ref: "${{ github.sha }}"
-          persist-credentials: false
-      - name: Bound CUE evaluator memory
-        run: "# GITHUB_ENV applies to subsequent steps, including cuenv startup.\nprintf '%s\\n' 'GOGC=100' >> \"$GITHUB_ENV\""
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
-        with:
-          extra-conf: accept-flake-config = true
-      - name: Setup Hestia Nix Cache
-        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
-        with:
-          drain-timeout: "900"
-          upstream-cache-filter: "true"
-          version: v2.0.0
-      - name: Setup cuenv (release)
-        run: "set -euo pipefail\ncuenv_version=\"0.63.2\"\nif [ \"$cuenv_version\" != \"0.63.2\" ]; then\n  echo \"Unsupported cuenv version: $cuenv_version; reviewed digests are required\" >&2\n  exit 1\nfi\ncuenv_platform=\"$(uname -s)-$(uname -m)\"\ncase \"$cuenv_platform\" in\n  Darwin-arm64|Darwin-aarch64)\n    cuenv_asset=\"cuenv-darwin-arm64\"\n    cuenv_sha256=\"8ffe172f09390308b90378f64723b07a2689761351c37affec308aa656e0aaba\"\n    ;;\n  Linux-aarch64|Linux-arm64)\n    cuenv_asset=\"cuenv-linux-arm64\"\n    cuenv_sha256=\"0c6dd349b14a11d3740b07aecef566150ddc808dd95fdcc127feaa58df605519\"\n    ;;\n  Linux-x86_64|Linux-amd64)\n    cuenv_asset=\"cuenv-linux-x64\"\n    cuenv_sha256=\"5f9a363851b6031972c09e55e177753a7474de073d98ede5ecf2a2a4133197fa\"\n    ;;\n  *) echo \"Unsupported cuenv platform: $cuenv_platform\" >&2; exit 1 ;;\nesac\nif [[ ! \"$cuenv_sha256\" =~ ^[0-9a-f]{64}$ ]]; then\n  echo \"Missing or invalid cuenv SHA-256\" >&2\n  exit 1\nfi\ntest -d \"${RUNNER_TEMP:?RUNNER_TEMP is required}\"\n: \"${GITHUB_PATH:?GITHUB_PATH is required}\"\ncuenv_download=\"$(mktemp \"$RUNNER_TEMP/cuenv-download.XXXXXX\")\"\ntrap 'rm -f \"$cuenv_download\"' EXIT\ncuenv_url=\"https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}\"\ncurl --proto '=https' --proto-redir '=https' -fsSL -o \"$cuenv_download\" \"$cuenv_url\"\ncase \"$cuenv_platform\" in\n  Darwin-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | shasum -a 256 -c - ;;\n  Linux-*) printf '%s  %s\\n' \"$cuenv_sha256\" \"$cuenv_download\" | sha256sum -c - ;;\nesac\nchmod 0755 \"$cuenv_download\"\nif [ \"$(\"$cuenv_download\" --version)\" != \"cuenv 0.63.2\" ]; then\n  echo \"Downloaded cuenv version differs from the pinned release\" >&2\n  exit 1\nfi\ncuenv_bin=\"$(mktemp -d \"$RUNNER_TEMP/waddle-cuenv.XXXXXX\")\"\ninstall -m 0755 \"$cuenv_download\" \"$cuenv_bin/cuenv\"\nprintf '%s\\n' \"$cuenv_bin\" >> \"$GITHUB_PATH\"\n\"$cuenv_bin/cuenv\" sync vcs -p ."
-      - name: "Run pipeline: pullRequest"
-        run: "set -euo pipefail\ntest \"$(git rev-parse HEAD)\" = \"$WADDLE_CI_HEAD_SHA\"\ngit cat-file -e \"${WADDLE_CI_BASE_SHA}^{commit}\"\ngit merge-base --is-ancestor \"$WADDLE_CI_BASE_SHA\" \"$WADDLE_CI_HEAD_SHA\"\ngit -c diff.renames=false diff --no-renames --name-only -z \"$WADDLE_CI_BASE_SHA...$WADDLE_CI_HEAD_SHA\" > /dev/null\nWADDLE_TEST_ALL_CUENV=1 python3 scripts/test_integration_ci_project.py\npython3 scripts/integration-ci-project.py --path apps/android --pipeline pullRequest --run"
-        env:
-          GITHUB_ACTOR: "${{ github.actor }}"
-          GITHUB_REF_TYPE: "${{ github.ref_type }}"
-          GITHUB_REF_NAME: "${{ github.ref_name }}"
-          WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
-          WADDLE_CI_HEAD_SHA: "${{ github.sha }}"
-      - name: Upload Android APK (success)
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: error
-          name: waddle_android_apk-waddle-android-apk
-          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
-          retention-days: 7
-      - name: Upload Flutter design previews (success)
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: warn
-          name: waddle_android_apk-waddle-android-design-previews
-          path: apps/android/flutter/build/design-previews/
-          retention-days: 7
-      - name: Link Android APK download (success)
-        if: success()
-        run: bash scripts/android-apk-summary.sh
-      - name: Upload Android test failure reports
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          if-no-files-found: ignore
-          name: waddle_android_apk-android-test-failure-reports
-          path: "apps/android/app/build/outputs/roborazzi/\napps/android/app/build/reports/roborazzi/\napps/android/app/build/test-results/\napps/android/app/build/reports/tests/"
-          retention-days: 3
-      - name: Upload Android APK (failure)
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: error
-          name: waddle_android_apk-waddle-android-apk
-          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
-          retention-days: 7
-      - name: Upload Flutter design previews (failure)
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: warn
-          name: waddle_android_apk-waddle-android-design-previews
-          path: apps/android/flutter/build/design-previews/
-          retention-days: 7
-      - name: Link Android APK download (failure)
-        if: failure()
-        run: bash scripts/android-apk-summary.sh
-    timeout-minutes: 90
-    needs:
-      - plan
-    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_android_apk == 'true' }}"
   waddle_android_devicetests__waddle-android-devicetests:
     permissions:
       contents: read
@@ -239,27 +151,6 @@ jobs:
           GITHUB_REF_NAME: "${{ github.ref_name }}"
           WADDLE_CI_BASE_SHA: "${{ needs.plan.outputs.base }}"
           WADDLE_CI_HEAD_SHA: "${{ github.sha }}"
-      - name: Upload Android APK (success)
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: error
-          name: waddle_android_pullrequest-waddle-android-apk
-          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
-          retention-days: 7
-      - name: Upload Flutter design previews (success)
-        if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: warn
-          name: waddle_android_pullrequest-waddle-android-design-previews
-          path: apps/android/flutter/build/design-previews/
-          retention-days: 7
-      - name: Link Android APK download (success)
-        if: success()
-        run: bash scripts/android-apk-summary.sh
       - name: Upload Android test failure reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -268,27 +159,6 @@ jobs:
           name: waddle_android_pullrequest-android-test-failure-reports
           path: "apps/android/app/build/outputs/roborazzi/\napps/android/app/build/reports/roborazzi/\napps/android/app/build/test-results/\napps/android/app/build/reports/tests/"
           retention-days: 3
-      - name: Upload Android APK (failure)
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: error
-          name: waddle_android_pullrequest-waddle-android-apk
-          path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
-          retention-days: 7
-      - name: Upload Flutter design previews (failure)
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          compression-level: 0
-          if-no-files-found: warn
-          name: waddle_android_pullrequest-waddle-android-design-previews
-          path: apps/android/flutter/build/design-previews/
-          retention-days: 7
-      - name: Link Android APK download (failure)
-        if: failure()
-        run: bash scripts/android-apk-summary.sh
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_android_pullrequest == 'true' }}"
@@ -438,6 +308,139 @@ jobs:
     needs:
       - plan
     if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_colony_pullrequest == 'true' }}"
+  waddle_flutter_apk__flutter:
+    name: waddle-flutter-apk / Independent Flutter Android and web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ANDROID_HOME: "${{ runner.temp }}/waddle-flutter-sdk"
+      ANDROID_SDK_ROOT: "${{ runner.temp }}/waddle-flutter-sdk"
+      CARGO_BUILD_JOBS: 2
+      WADDLE_NATIVE_BASE_SHA: "${{ github.event.pull_request.base.sha || inputs.native_base_sha || '12fd7aa01dbef427c383fd16fed00b83badbb84f' }}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: "${{ github.sha }}"
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - name: Verify standalone boundary and CI contracts
+        run: "bash scripts/flutter-boundary-check.sh\nbun test scripts/flutter-ci.test.ts\nbun scripts/integration-ci.ts --check\n"
+      - id: nix
+        name: Install pinned Nix environment
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: accept-flake-config = true
+      - name: Setup Hestia Nix Cache
+        uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527
+        with:
+          drain-timeout: "900"
+          upstream-cache-filter: "true"
+          version: v2.0.0
+      - id: tools
+        name: Verify pinned Flutter and Rust toolchains
+        run: "nix develop . --command flutter --version\nnix develop . --command rustc --version\nnix develop . --command wasm-pack --version\nnix develop . --command cmake --version\nnix develop . --command ninja --version\n"
+      - id: sdk
+        name: Provision standalone Android SDK
+        run: nix develop . --command bash scripts/setup-flutter-android.sh
+      - id: pub
+        name: Resolve locked Flutter dependencies
+        if: "${{ !cancelled() && steps.tools.outcome == 'success' }}"
+        working-directory: apps/flutter
+        run: nix develop ../.. --command flutter pub get --enforce-lockfile
+      - id: rust
+        name: "Rust formatting, warnings and unit tests"
+        if: "${{ !cancelled() && steps.tools.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/flutter-ci.sh rust
+      - id: host
+        name: Build direct Rust host library
+        if: "${{ !cancelled() && steps.tools.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/build-flutter-rust.sh --host
+      - id: analyze
+        name: Flutter formatting and analysis
+        if: "${{ !cancelled() && steps.pub.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/flutter-ci.sh analyze
+      - id: tests
+        name: Flutter tests and rendered design evidence
+        if: "${{ !cancelled() && steps.pub.outcome == 'success' && steps.host.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/flutter-ci.sh test
+      - id: native
+        name: Build direct Rust Android libraries for both ABIs
+        if: "${{ !cancelled() && steps.sdk.outcome == 'success' && steps.pub.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/build-flutter-rust.sh --android
+      - id: apk
+        name: Build independent Flutter debug APK
+        if: "${{ !cancelled() && steps.native.outcome == 'success' && steps.pub.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/flutter-ci.sh apk
+      - id: wasm
+        name: Build Rust browser JS and WASM together
+        if: "${{ !cancelled() && steps.tools.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/build-flutter-rust.sh --web
+      - id: web
+        name: Build standalone Flutter web app
+        if: "${{ !cancelled() && steps.wasm.outcome == 'success' && steps.pub.outcome == 'success' }}"
+        run: nix develop . --command bash scripts/flutter-ci.sh web
+      - id: browser
+        name: Exercise actual Rust WASM in Chromium and verify browser contracts
+        if: "${{ !cancelled() && steps.wasm.outcome == 'success' }}"
+        run: "nix develop . --command env WADDLE_REQUIRE_WASM_ARTIFACT=1 WADDLE_REQUIRE_BROWSER_CONTRACT=1 bun test ./apps/flutter/test/transport/wasm_loader_test.cjs ./apps/flutter/test/transport/wasm_artifact_test.cjs ./apps/flutter/test/transport/wasm_browser_test.cjs\n"
+      - id: smoke
+        name: Launch the production Flutter app and Rust ABI on Android
+        if: "${{ !cancelled() && steps.apk.outcome == 'success' }}"
+        timeout-minutes: 20
+        run: "test -e /dev/kvm\nsudo chmod 666 /dev/kvm\nnix develop . --command bash scripts/flutter-device-smoke.sh\n"
+      - id: apk_artifact
+        name: Upload standalone Flutter APK
+        if: "${{ always() && hashFiles('apps/flutter/build/artifacts/waddle-flutter.apk') != '' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-apk
+          path: apps/flutter/build/artifacts/waddle-flutter.apk
+          if-no-files-found: error
+          retention-days: 7
+      - id: preview_artifact
+        name: Upload rendered Flutter previews
+        if: "${{ always() && hashFiles('apps/flutter/build/design-previews/*.png') != '' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-previews
+          path: apps/flutter/build/design-previews/
+          if-no-files-found: error
+          retention-days: 7
+      - id: web_artifact
+        name: Upload standalone Flutter web build
+        if: "${{ always() && steps.web.outcome == 'success' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-web
+          path: apps/flutter/build/web/
+          if-no-files-found: error
+          retention-days: 7
+      - id: smoke_artifact
+        name: Upload Android device smoke evidence
+        if: "${{ always() && hashFiles('apps/flutter/build/device-smoke/**') != '' }}"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: waddle_flutter_apk-waddle-flutter-device-smoke
+          path: apps/flutter/build/device-smoke/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Link standalone downloads in run summary
+        if: "${{ always() }}"
+        env:
+          FLUTTER_APK_URL: "${{ steps.apk_artifact.outputs.artifact-url }}"
+          FLUTTER_PREVIEWS_URL: "${{ steps.preview_artifact.outputs.artifact-url }}"
+          FLUTTER_WEB_URL: "${{ steps.web_artifact.outputs.artifact-url }}"
+        run: bash scripts/flutter-artifact-summary.sh
+    needs:
+      - plan
+    if: "${{ (success()) && needs.plan.result == 'success' && needs.plan.outputs.waddle_flutter_apk == 'true' }}"
+    permissions:
+      contents: read
   waddle_linux_pullrequest__waddle-linux-pullrequest:
     permissions:
       contents: read
@@ -1308,13 +1311,13 @@ jobs:
     if: "${{ always() }}"
     needs:
       - plan
-      - waddle_android_apk__apk
       - waddle_android_devicetests__waddle-android-devicetests
       - waddle_android_pullrequest__waddle-android-pullrequest
       - waddle_apple_pullrequest__apple-xmpp-client
       - waddle_chat_pullrequest__waddle-chat-pullrequest
       - waddle_cloud_pullrequest__waddle-cloud-pullrequest
       - waddle_colony_pullrequest__waddle-colony-pullrequest
+      - waddle_flutter_apk__flutter
       - waddle_linux_pullrequest__waddle-linux-pullrequest
       - waddle_server_authzidcodec__checkauthzidcodec
       - waddle_server_federationgrantfencepullrequest__federationgrantfenceproof

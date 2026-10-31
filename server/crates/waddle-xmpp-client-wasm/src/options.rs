@@ -4,8 +4,26 @@ use super::{
     encrypted_file_from_js, file_hashes_from_js, js_error, messaging, BareJid, FallbackRange, Jid,
     JsValue, LinkPreviewToken, MarkupSpanData, MentionDirectory, MentionTarget, ReferenceData,
     ReplyMarker, SendMessageOptions, SharedFileDisposition, StanzaId, ThreadRef,
-    WaddleMentionDirectory, WaddleSendOptions,
+    WaddleMentionDirectory, WaddleSendOptions, WaddleStickerRef,
 };
+use waddle_xmpp_client::stickers::{PackId, PackRef, StickerMarker};
+
+fn sticker_from_options(sticker: WaddleStickerRef) -> Result<StickerMarker, String> {
+    let id = PackId::try_new(sticker.pack_id)
+        .ok_or_else(|| "sticker pack ID must not be empty".to_string())?;
+    let jid = sticker
+        .pack_jid
+        .map(|jid| jid.parse::<BareJid>())
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    Ok(StickerMarker {
+        pack: Some(PackRef {
+            id,
+            jid,
+            node: sticker.pack_node,
+        }),
+    })
+}
 
 /// Build an optional `ThreadRef` from a pair of `Option<String>` wasm
 /// arguments. An empty/missing `thread_id` yields `None` so callers can
@@ -108,6 +126,11 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
         })
         .collect();
     outbound_options.mention_directory = options.mention_directory.map(mention_directory_from_js);
+    outbound_options.sticker = options
+        .sticker
+        .map(sticker_from_options)
+        .transpose()
+        .map_err(js_error)?;
     outbound_options.shared_files = options
         .shared_files
         .into_iter()
@@ -150,6 +173,32 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
 mod tests {
     use super::*;
     use crate::WaddleMentionTarget;
+
+    #[test]
+    fn xep0449_sticker_send_keeps_pack_identity_and_validates_owner() {
+        let marker = sticker_from_options(WaddleStickerRef {
+            pack_id: "pack-id".to_string(),
+            pack_jid: Some("alex@example.org".to_string()),
+            pack_node: Some("custom-node".to_string()),
+        })
+        .expect("valid sticker reference");
+        let payload = waddle_xmpp_client::stickers::build_sticker_marker_element(&marker);
+        assert_eq!(payload.attr("pack"), Some("pack-id"));
+        assert_eq!(payload.attr("jid"), Some("alex@example.org"));
+        assert_eq!(payload.attr("node"), Some("custom-node"));
+        assert!(sticker_from_options(WaddleStickerRef {
+            pack_id: String::new(),
+            pack_jid: None,
+            pack_node: None,
+        })
+        .is_err());
+        assert!(sticker_from_options(WaddleStickerRef {
+            pack_id: "pack".to_string(),
+            pack_jid: Some("bad JID".to_string()),
+            pack_node: None,
+        })
+        .is_err());
+    }
 
     #[test]
     fn mention_directory_drops_targets_without_a_bare_jid() {

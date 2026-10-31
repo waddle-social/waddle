@@ -9,6 +9,11 @@ use minidom::Element;
 use tokio::sync::Mutex;
 use url::Url;
 
+#[cfg(feature = "serde")]
+mod flutter_lifecycle;
+#[cfg(feature = "serde")]
+mod serde_support;
+
 mod boundary_convert;
 mod calls;
 mod community_admin;
@@ -79,18 +84,21 @@ pub use community_admin::{
     WaddleAdminSpacesMembersPage, WaddleAdminSpacesSetRoleResult, WaddleAdminSpacesUpdateArgs,
     WaddleAdminUserEntry, WaddleAdminUsersPage, WaddleSpaceRole,
 };
+pub use consistent_color::consistent_color_hue;
 pub use error::WaddleError;
 pub use group_dm::WaddleGroupDmHistoryAccess;
 pub use inbox_verbs::{WaddleInboxMessageContent, WaddleInboxReadFilter};
+pub use jid_parts::{parse_jid, WaddleJidParts};
 pub use messaging_verbs::WaddleMessageAudience;
+pub use muji::WaddleInCallPresenceFlags;
 pub use notify_settings::{
     WaddleBookmarkItem, WaddleDmBookmarkItem, WaddleNotifyMode, WaddleSetDmNotificationModeOutcome,
     WaddleSetRoomNotificationModeOutcome,
 };
 pub use profile_verbs::{WaddleActivity, WaddleMood, WaddlePepProfile, WaddleTune, WaddleVCard4};
 pub use room_admin::{
-    WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
-    WaddleUserSearchEntry,
+    WaddlePinPermission, WaddleRoomBot, WaddleRoomConfig, WaddleRoomConfigPatch,
+    WaddleRoomMemberEntry, WaddleUserSearchEntry,
 };
 pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
 pub use types::*;

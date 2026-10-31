@@ -29,6 +29,7 @@ pub struct ClientHandle {
     // The driver clones complete snapshots before publication and runs no
     // application callbacks under the watch lock.
     state: watch::Sender<SessionSnapshot>,
+    driver_lifetime: watch::Receiver<()>,
 }
 
 impl ClientHandle {
@@ -91,6 +92,15 @@ impl ClientHandle {
             .map_err(|_| ClientError::Disconnected)
     }
 
+    /// Wait for the transport-owning driver to finish and drop its transport.
+    ///
+    /// Session state and command rejection can precede a pending transport close;
+    /// this separate lifetime witness also covers task cancellation and panic.
+    pub async fn wait_for_driver_exit(&self) {
+        let mut lifetime = self.driver_lifetime.clone();
+        while lifetime.changed().await.is_ok() {}
+    }
+
     /// Construct a handle directly from its parts. Test-only — production code
     /// receives handles from [`ClientDriver::connect`] so that the accompanying
     /// driver task is guaranteed to be running.
@@ -104,6 +114,7 @@ impl ClientHandle {
             commands,
             events,
             state,
+            driver_lifetime: watch::channel(()).1,
         }
     }
 }
@@ -222,11 +233,13 @@ where
         let (cmd_tx, cmd_rx) = mpsc::channel::<XmppCommand>(64);
         let (evt_tx, _) = broadcast::channel::<ClientEvent>(256);
         let state = watch::Sender::new(self.runtime.snapshot().clone());
+        let (driver_lifetime, lifetime) = watch::channel(());
 
         let handle = ClientHandle {
             commands: cmd_tx,
             events: evt_tx.clone(),
             state: state.clone(),
+            driver_lifetime: lifetime,
         };
 
         let task = DriverTask {
@@ -239,6 +252,7 @@ where
             deferred_commands: VecDeque::new(),
             explicit_disconnect: false,
             last_resume_state: None,
+            _driver_lifetime: driver_lifetime,
         };
 
         tokio::spawn(task.run());
@@ -264,6 +278,10 @@ struct DriverTask {
     /// Last broadcast XEP-0198 resume snapshot; publishing is deduped
     /// against it so subscribers only see actual state transitions.
     last_resume_state: Option<SmResumeState>,
+    // Must remain the final field: fields drop in declaration order. The sole
+    // sender drops only after the transport and every other driver field, so
+    // receiver closure proves transport ownership ended even on abort/panic.
+    _driver_lifetime: watch::Sender<()>,
 }
 
 enum DeferredXmppCommand {

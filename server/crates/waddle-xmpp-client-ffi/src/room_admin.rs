@@ -35,6 +35,7 @@ use crate::{WaddleClient, WaddleError, WaddleMucAffiliation};
 
 /// One entry of a XEP-0045 §9.5 affiliation list.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleRoomMemberEntry {
     /// Bare JID of the affiliated user.
     pub jid: String,
@@ -47,6 +48,7 @@ pub struct WaddleRoomMemberEntry {
 
 /// An extension bot that has posted in a room.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleRoomBot {
     /// Bare JID of the bot.
     pub jid: String,
@@ -56,6 +58,8 @@ pub struct WaddleRoomBot {
 
 /// `urn:waddle:roomconfig:pinpermission` policy values.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddlePinPermission {
     AdminsOnly,
     Anyone,
@@ -75,6 +79,7 @@ impl From<WaddlePinPermission> for RoomPinPermission {
 /// the service did not offer that field (or reported no value), so
 /// UIs can distinguish "unset" from an explicit `false`/empty.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleRoomConfig {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -92,6 +97,7 @@ pub struct WaddleRoomConfig {
 /// round-trips unedited fields verbatim). `description: Some("")`
 /// clears the description.
 #[derive(uniffi::Record, Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleRoomConfigPatch {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -101,6 +107,7 @@ pub struct WaddleRoomConfigPatch {
 
 /// XEP-0055 user directory search hit (`jabber:iq:search`).
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleUserSearchEntry {
     pub jid: String,
     /// The `<nick/>` column — Waddle usernames.

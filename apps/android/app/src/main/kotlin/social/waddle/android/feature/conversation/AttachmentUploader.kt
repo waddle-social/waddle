@@ -42,18 +42,6 @@ class AttachmentUploader(
         ) { contentResolver.openInputStream(uri) }
     }
 
-    /** Flutter's IME adapter copies bytes before releasing its temporary URI grant. */
-    suspend fun uploadImageBytes(data: ByteArray, mediaType: String): UploadResult {
-        require(mediaType.startsWith("image/")) { "An image MIME type is required" }
-        val extension = mediaType.substringAfter('/').substringBefore('+')
-            .takeIf { it.matches(Regex("[A-Za-z0-9]+")) } ?: "image"
-        return pipeline.upload(
-            name = "keyboard-image.$extension",
-            declaredSize = data.size.toLong(),
-            mediaType = mediaType,
-        ) { data.inputStream() }
-    }
-
     private fun resolveMeta(uri: Uri): AttachmentMeta? = runCatching {
         var name: String? = null
         var size = -1L

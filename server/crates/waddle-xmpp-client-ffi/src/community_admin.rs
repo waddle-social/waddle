@@ -23,6 +23,7 @@ use crate::{WaddleClient, WaddleError, WaddleMucAffiliation, WaddleMucRole};
 
 /// V1 users-list row.
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminUserEntry {
     pub jid: String,
     pub display_name: Option<String>,
@@ -31,6 +32,7 @@ pub struct WaddleAdminUserEntry {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminUsersPage {
     pub entries: Vec<WaddleAdminUserEntry>,
     pub next_cursor: Option<String>,
@@ -38,6 +40,8 @@ pub struct WaddleAdminUsersPage {
 
 /// Space pubsub roster role (`urn:waddle:admin:spaces:*`).
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WaddleSpaceRole {
     Owner,
     Admin,
@@ -46,6 +50,7 @@ pub enum WaddleSpaceRole {
 }
 
 #[derive(uniffi::Record, Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesListArgs {
     pub prefix: Option<String>,
     pub page_size: Option<u32>,
@@ -53,6 +58,7 @@ pub struct WaddleAdminSpacesListArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpaceEntry {
     pub space_jid: String,
     pub space_node: String,
@@ -64,12 +70,14 @@ pub struct WaddleAdminSpaceEntry {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesListPage {
     pub entries: Vec<WaddleAdminSpaceEntry>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesCreateArgs {
     pub name: String,
     pub description: Option<String>,
@@ -77,6 +85,7 @@ pub struct WaddleAdminSpacesCreateArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpaceRef {
     pub space_jid: String,
     pub space_node: String,
@@ -86,6 +95,7 @@ pub struct WaddleAdminSpaceRef {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesUpdateArgs {
     pub space_jid: String,
     pub space_node: Option<String>,
@@ -95,6 +105,7 @@ pub struct WaddleAdminSpacesUpdateArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesMembersArgs {
     pub space_jid: String,
     pub space_node: Option<String>,
@@ -103,24 +114,28 @@ pub struct WaddleAdminSpacesMembersArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpaceMemberEntry {
     pub jid: String,
     pub role: WaddleSpaceRole,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesMembersPage {
     pub entries: Vec<WaddleAdminSpaceMemberEntry>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminSpacesSetRoleResult {
     pub member_jid: String,
     pub role: WaddleSpaceRole,
 }
 
 #[derive(uniffi::Record, Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsListArgs {
     pub space_jid: Option<String>,
     pub space_node: Option<String>,
@@ -130,6 +145,7 @@ pub struct WaddleAdminChannelsListArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelListEntry {
     pub channel_jid: String,
     pub name: String,
@@ -146,12 +162,14 @@ pub struct WaddleAdminChannelListEntry {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsListPage {
     pub entries: Vec<WaddleAdminChannelListEntry>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsCreateArgs {
     pub name: String,
     pub topic: Option<String>,
@@ -163,6 +181,7 @@ pub struct WaddleAdminChannelsCreateArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelRef {
     pub channel_jid: String,
     pub name: String,
@@ -173,6 +192,7 @@ pub struct WaddleAdminChannelRef {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsUpdateArgs {
     pub channel_jid: String,
     pub name: Option<String>,
@@ -183,6 +203,7 @@ pub struct WaddleAdminChannelsUpdateArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsOccupantsArgs {
     pub channel_jid: String,
     pub page_size: Option<u32>,
@@ -190,6 +211,7 @@ pub struct WaddleAdminChannelsOccupantsArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelOccupantEntry {
     pub nick: String,
     pub real_jid: String,
@@ -198,12 +220,14 @@ pub struct WaddleAdminChannelOccupantEntry {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsOccupantsPage {
     pub entries: Vec<WaddleAdminChannelOccupantEntry>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsAffiliationsArgs {
     pub channel_jid: String,
     /// Optional tier filter.
@@ -213,6 +237,7 @@ pub struct WaddleAdminChannelsAffiliationsArgs {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelAffiliationEntry {
     pub jid: String,
     pub affiliation: WaddleMucAffiliation,
@@ -220,18 +245,21 @@ pub struct WaddleAdminChannelAffiliationEntry {
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsAffiliationsPage {
     pub entries: Vec<WaddleAdminChannelAffiliationEntry>,
     pub next_cursor: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsSetAffiliationResult {
     pub member_jid: String,
     pub affiliation: WaddleMucAffiliation,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WaddleAdminChannelsKickResult {
     pub occupant_jid: String,
 }

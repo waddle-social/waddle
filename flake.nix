@@ -963,6 +963,9 @@
               pkgs.temurin-bin-21
               pkgs.cargo-ndk
               pkgs.flutter
+              # Flutter's WebCrypto native-asset hook uses CMake and Ninja.
+              pkgs.cmake
+              pkgs.ninja
               pkgs.gh
             ];
 

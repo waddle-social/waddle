@@ -7,6 +7,10 @@ use super::{
     PagehideSmAckEnqueueOutcome, Promise, Rc, RefCell, StoredConfig, WaddleClient,
     WaddleClientInner, WaddleConfig, WaddleResumeState, WasmCommandLane, WasmWebSocket,
 };
+use crate::lifecycle::{
+    admit_connect, begin_retirement, complete_startup, retire_and_wait, startup_allowed,
+    track_connection,
+};
 
 #[wasm_bindgen]
 impl WaddleClient {
@@ -17,6 +21,8 @@ impl WaddleClient {
         WaddleClient {
             inner: Rc::new(RefCell::new(WaddleClientInner {
                 config: StoredConfig::from(&config),
+                ownership: crate::lifecycle::BrowserOwnership::default(),
+                retirement_promise: None,
                 command_lane: None,
                 driver_core: None,
                 on_message: None,
@@ -25,6 +31,7 @@ impl WaddleClient {
                 on_session_lifecycle: None,
                 on_disconnected: None,
                 on_error: None,
+                on_authentication_failed: None,
                 on_message_delivery_acked: None,
                 on_message_delivery_failed: None,
                 on_message_rejected: None,
@@ -90,6 +97,12 @@ impl WaddleClient {
     /// Replace the callback receiving human-readable connection and stream error descriptions.
     pub fn set_on_error(&mut self, cb: Function) {
         self.inner.borrow_mut().on_error = Some(cb);
+    }
+
+    /// Receive a typed SASL authentication rejection as `{ condition }`.
+    /// The condition is the protocol token, independent of human diagnostics.
+    pub fn set_on_authentication_failed(&mut self, cb: Function) {
+        self.inner.borrow_mut().on_authentication_failed = Some(cb);
     }
 
     /// Replace the callback receiving outbound message IDs acknowledged by stream management.
@@ -170,32 +183,44 @@ impl WaddleClient {
     /// callbacks.
     pub fn connect(&self) -> Promise {
         let inner = self.inner.clone();
+        // Admission is synchronous: a subsequent close call must see even a
+        // connect Promise whose Rust future has not been polled yet.
+        let admission = admit_connect(&inner);
         future_to_promise(async move {
-            if inner.borrow().command_lane.is_some() {
-                return Err(js_error("client is already connected"));
-            }
-
-            let stored = inner.borrow().config.clone();
-            let config = build_client_config(&stored)?;
-            let ws = WasmWebSocket::connect(config.transport.endpoint.as_str())
-                .map_err(|err| js_error(format!("failed to open websocket: {:?}", err)))?;
-            let (wake_tx, wake_rx) = mpsc::channel(1);
-            let command_lane = Rc::new(RefCell::new(WasmCommandLane::new(wake_tx)));
-            let (event_tx, event_rx) = mpsc::channel(256);
-
-            inner.borrow_mut().command_lane = Some(command_lane.clone());
-
-            spawn_local(event_dispatch_loop(inner.clone(), event_rx));
-            spawn_local(driver_loop(
-                config,
-                ws,
-                wake_rx,
-                event_tx,
-                inner.clone(),
-                command_lane,
-            ));
-
-            Ok(JsValue::UNDEFINED)
+            let ticket = admission.map_err(js_error)?;
+            let result = (|| {
+                if !startup_allowed(&inner, ticket) {
+                    return Err(js_error(
+                        "client startup was retired before opening a transport",
+                    ));
+                }
+                let stored = inner.borrow().config.clone();
+                let config = build_client_config(&stored)?;
+                let ws = WasmWebSocket::connect(config.transport.endpoint.as_str())
+                    .map_err(|err| js_error(format!("failed to open websocket: {:?}", err)))?;
+                let retirements = track_connection(&inner, ws.web_socket().clone());
+                let (wake_tx, wake_rx) = mpsc::channel(1);
+                let command_lane = Rc::new(RefCell::new(WasmCommandLane::new(wake_tx)));
+                let (event_tx, event_rx) = mpsc::channel(256);
+                inner.borrow_mut().command_lane = Some(command_lane.clone());
+                spawn_local(event_dispatch_loop(
+                    inner.clone(),
+                    event_rx,
+                    retirements.events,
+                ));
+                spawn_local(driver_loop(
+                    config,
+                    ws,
+                    wake_rx,
+                    event_tx,
+                    inner.clone(),
+                    command_lane,
+                    retirements.driver,
+                ));
+                Ok(JsValue::UNDEFINED)
+            })();
+            complete_startup(&inner, ticket);
+            result
         })
     }
 
@@ -207,5 +232,26 @@ impl WaddleClient {
             disconnect_client(inner).await?;
             Ok(JsValue::UNDEFINED)
         })
+    }
+
+    /// Prove every owned browser WebSocket is CLOSED and both driver and event
+    /// tasks have retired before replacing an account/resource owner.
+    ///
+    /// The bounded Promise rejects if closure is not yet proven. Ownership stays
+    /// fenced and retained for retry; concurrent calls join the same operation.
+    pub fn disconnect_and_wait(&self) -> Promise {
+        let inner = self.inner.clone();
+        if let Some(promise) = inner.borrow().retirement_promise.clone() {
+            return promise;
+        }
+        begin_retirement(&inner);
+        let pending_inner = inner.clone();
+        let promise = future_to_promise(async move {
+            let result = retire_and_wait(pending_inner.clone()).await;
+            pending_inner.borrow_mut().retirement_promise = None;
+            result.map(|()| JsValue::UNDEFINED)
+        });
+        inner.borrow_mut().retirement_promise = Some(promise.clone());
+        promise
     }
 }

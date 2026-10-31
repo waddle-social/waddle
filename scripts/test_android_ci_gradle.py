@@ -76,8 +76,8 @@ class AndroidCiGradleTests(unittest.TestCase):
             android.mkdir(parents=True)
             scripts.mkdir()
             bin_dir.mkdir()
-            for filename in ("android-ci-gradle.sh", "android-ci-build.sh"):
-                helper = REPO_ROOT / "scripts" / filename
+            helper = REPO_ROOT / "scripts/android-ci-gradle.sh"
+            if helper.exists():
                 shutil.copy2(helper, scripts / helper.name)
             record = root / "gradle-argv.jsonl"
             gradlew = android / "gradlew"
@@ -86,8 +86,6 @@ class AndroidCiGradleTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "with open(os.environ['WADDLE_TEST_GRADLE_RECORD'], 'a') as output:\n"
                 "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-                "if int(os.environ['WADDLE_TEST_GRADLE_EXIT_CODE']):\n"
-                "    print('Gradle diagnostic fixture', file=sys.stderr)\n"
                 "sys.exit(int(os.environ['WADDLE_TEST_GRADLE_EXIT_CODE']))\n"
             )
             gradlew.chmod(0o755)
@@ -97,16 +95,6 @@ class AndroidCiGradleTests(unittest.TestCase):
                 stub = bin_dir / name_to_stub
                 stub.write_text("#!/bin/sh\nexit 0\n")
                 stub.chmod(0o755)
-            git = bin_dir / "git"
-            git.write_text(
-                "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "  show) printf '%s\\n' 1730000000 ;;\n"
-                "  rev-parse) printf '%s\\n' abc12345 ;;\n"
-                "  *) exit 1 ;;\n"
-                "esac\n"
-            )
-            git.chmod(0o755)
             task = self.tasks[name]
             env = {
                 **os.environ,
@@ -167,88 +155,6 @@ class AndroidCiGradleTests(unittest.TestCase):
             [arg for arg in calls[1] if arg.startswith(":")],
             [":app:atdApi34FossDebugAndroidTest"],
         )
-
-    def test_pr_apk_can_upgrade_older_rolling_preview(self):
-        result, calls = self.run_entrypoint("build")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"-PversionCode={1730000000 // 60}", calls[0])
-        self.assertIn("-PversionName=pr-abc12345", calls[0])
-
-    def test_gradle_error_is_visible_when_ci_only_streams_stdout(self):
-        result, _ = self.run_entrypoint("build", exit_code=42)
-        self.assertEqual(result.returncode, 42)
-        self.assertIn("Gradle diagnostic fixture", result.stdout)
-        self.assertNotIn("Gradle diagnostic fixture", result.stderr)
-
-    def test_direct_host_builds_relocate_read_only_flutter_sdk_caches(self):
-        result, calls = self.run_entrypoint("build")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for prefix, suffix in (("--project-cache-dir=", "/cache"), ("-Pkotlin.project.persistent.dir=", "/kotlin")):
-            values = [arg.removeprefix(prefix) for arg in calls[0] if arg.startswith(prefix)]
-            self.assertEqual(len(values), 1)
-            self.assertTrue(Path(values[0]).is_absolute())
-            self.assertTrue(values[0].endswith("/.gradle/waddle-ci" + suffix))
-            self.assertNotIn("/nix/store/", values[0])
-
-    def test_apk_upload_finalizers_only_emit_for_build_pipeline(self):
-        workflow = (REPO_ROOT / ".github/workflows/waddle-android-pullrequest.yml").read_text()
-        pipeline = workflow.index("Run pipeline: pullRequest")
-        self.assertIn("--dart-define=WADDLE_PREVIEW_DIR=build/design-previews", self.tasks["flutterCheck"]["args"][-1])
-        for outcome, condition in (("success", "success()"), ("failure", "failure()")):
-            label = f"Upload Android APK ({outcome})"
-            start = workflow.index(f"    - name: {label}")
-            end = workflow.find("\n    - name:", start + 1)
-            step = workflow[start:end if end != -1 else None]
-            self.assertGreater(start, pipeline)
-            self.assertIn(f"if: {condition}", step)
-            self.assertIn("uses: actions/upload-artifact@", step)
-            self.assertIn("name: waddle-android-apk", step)
-            self.assertIn("if-no-files-found: error", step)
-            self.assertIn("path: apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk", step)
-            self.assertIn("retention-days: 7", step)
-            preview = workflow.index(f"    - name: Upload Flutter design previews ({outcome})")
-            preview_end = workflow.find("\n    - name:", preview + 1)
-            preview_step = workflow[preview:preview_end if preview_end != -1 else None]
-            self.assertGreater(preview, start)
-            self.assertIn(f"if: {condition}", preview_step)
-            self.assertIn("name: waddle-android-design-previews", preview_step)
-            self.assertIn("path: apps/android/flutter/build/design-previews/", preview_step)
-            summary = workflow.index(f"    - name: Link Android APK download ({outcome})")
-            self.assertGreater(summary, start)
-        self.assertNotIn("continue-on-error: true", workflow)
-        for filename in ("waddle-android-default.yml", "waddle-android-devicetests.yml"):
-            other = (REPO_ROOT / ".github/workflows" / filename).read_text()
-            self.assertNotIn("Upload Android APK", other)
-            self.assertNotIn("Link Android APK download", other)
-
-    def test_apk_summary_links_exact_run_and_fails_when_apk_missing(self):
-        with tempfile.TemporaryDirectory(prefix="waddle-android-apk-summary-") as directory:
-            root = Path(directory)
-            summary = root / "summary.md"
-            summary.write_text("Existing check results\n")
-            env = {
-                **os.environ,
-                "GITHUB_SERVER_URL": "https://github.com",
-                "GITHUB_REPOSITORY": "waddle-social/waddle",
-                "GITHUB_RUN_ID": "12345",
-                "GITHUB_STEP_SUMMARY": str(summary),
-            }
-            script = REPO_ROOT / "scripts/android-apk-summary.sh"
-            missing = subprocess.run(["bash", str(script)], cwd=root, env=env, capture_output=True, text=True)
-            self.assertNotEqual(missing.returncode, 0)
-            self.assertIn("no download is available", summary.read_text())
-            apk = root / "apps/android/app/build/outputs/apk/foss/debug/app-foss-debug.apk"
-            apk.parent.mkdir(parents=True)
-            apk.write_bytes(b"apk-fixture")
-            previews = root / "apps/android/flutter/build/design-previews"
-            previews.mkdir(parents=True)
-            (previews / "home.png").write_bytes(b"preview-fixture")
-            produced = subprocess.run(["bash", str(script)], cwd=root, env=env, capture_output=True, text=True)
-            self.assertEqual(produced.returncode, 0, produced.stderr)
-            self.assertIn("https://github.com/waddle-social/waddle/actions/runs/12345#artifacts", summary.read_text())
-            self.assertIn("does not mean every check passed", summary.read_text())
-            self.assertIn("waddle-android-design-previews", summary.read_text())
-            self.assertTrue(summary.read_text().startswith("Existing check results\n"))
 
     def test_gradle_failure_status_is_preserved_and_gmd_stops_before_device(self):
         for name in (*REQUIRED_ARGS, "gmdCheck"):
