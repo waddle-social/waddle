@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { ChevronDown, ChevronUp } from "lucide-vue-next";
 import type { AuthProvider } from "@/lib/server-auth";
 import { button, kicker } from "styled-system/recipes";
@@ -17,6 +17,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   login: [serverUrl: string, providerId?: string];
   fetchProviders: [serverUrl: string];
+  invalidateProviders: [];
 }>();
 
 const showCustomServer = ref(false);
@@ -47,9 +48,7 @@ watch(
 );
 
 const activeServerUrl = computed(() =>
-  useCustom.value && customUrl.value.trim()
-    ? customUrl.value.trim()
-    : props.defaultServerUrl,
+  useCustom.value ? customUrl.value.trim() : props.defaultServerUrl,
 );
 
 const activeServerDisplay = computed(() => {
@@ -68,13 +67,16 @@ const singleProviderLabel = computed(
 );
 
 function selectDefault() {
+  if (fetchTimer) clearTimeout(fetchTimer);
   useCustom.value = false;
   customUrl.value = "";
   emit("fetchProviders", props.defaultServerUrl);
 }
 
 async function selectCustom() {
+  if (useCustom.value) return;
   useCustom.value = true;
+  emit("invalidateProviders");
 }
 
 let fetchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -82,12 +84,17 @@ let fetchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(customUrl, (url) => {
   if (!useCustom.value) return;
   if (fetchTimer) clearTimeout(fetchTimer);
+  emit("invalidateProviders");
   const trimmed = url.trim();
   if (!trimmed) return;
 
   fetchTimer = setTimeout(() => {
     emit("fetchProviders", trimmed);
   }, 500);
+});
+
+onBeforeUnmount(() => {
+  if (fetchTimer) clearTimeout(fetchTimer);
 });
 
 function handleLogin(providerId?: string) {
