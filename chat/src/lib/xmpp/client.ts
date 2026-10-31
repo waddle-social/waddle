@@ -1,3 +1,4 @@
+import { RoomIdBindings } from "./room-id-bindings";
 import { withSpan } from "@/lib/telemetry";
 import { stanzaErrorContext } from "@/lib/xmpp/stanza-error-context";
 import { inferredFileDisposition, type ExtensionLaunchDescriptor } from "@/lib/chat-ui";
@@ -541,6 +542,7 @@ export class BrowserXmppClient {
   private mucServiceJid = "";
   private readonly selectedMucPmPeers = new Set<string>();
   private discoveredRoomJids = new Map<string, string>();
+  private readonly roomIdBindings = new RoomIdBindings();
   private readonly reconnect: ReconnectScheduler;
   private readonly resume: ResumeStateStore;
   private readonly outboundQueue: OfflineSendQueue;
@@ -689,7 +691,7 @@ export class BrowserXmppClient {
         await this.connect();
         await this.switchRoom(spaceId, channelId);
       },
-      roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
+      roomJidForChannel: (channelId, roomJid?: string) => this.roomJidForChannel(channelId, roomJid),
       isCurrentConnected: (xmpp, sessionJid) =>
         this.xmpp === xmpp && this.connected && !this.destroying && this.session.jid === sessionJid,
       // XEP-0045 §7.5 (#1256): archived/catch-up DM re-emissions get the
@@ -700,7 +702,7 @@ export class BrowserXmppClient {
     });
     this.mucAdmin = new MucAdmin({
       requireConnectedXmpp: () => this.requireConnectedXmpp(),
-      roomJidForChannel: (channelId) => this.roomJidForChannel(channelId),
+      roomJidForChannel: (channelId, roomJid?: string) => this.roomJidForChannel(channelId, roomJid),
       emitError: (event) => this.emitError(event),
     });
     this.pubsub = new PubsubManager({
@@ -1508,13 +1510,45 @@ export class BrowserXmppClient {
     return this.disposePromise;
   }
 
-  private roomJidForChannel(channelId: string): string {
-    return this.discoveredRoomJids.get(channelId) ?? roomBareJidFor(this.session, channelId);
+  isRoomIdAmbiguous(channelId: string): boolean {
+    return this.roomIdBindings.isAmbiguous(channelId);
+  }
+
+  listAmbiguousRoomIds(): readonly string[] {
+    return this.roomIdBindings.ambiguousIds();
+  }
+
+  onRoomIdAmbiguous(hook: (channelId: string) => void) {
+    return this.events.on("roomIdAmbiguous", hook);
+  }
+
+  assertRoomIdAvailable(channelId: string): void {
+    this.roomIdBindings.assertAvailable(channelId);
+  }
+
+  private observeRoomId(channelId: string, roomJid: string): void {
+    if (this.roomIdBindings.observe(channelId, roomJid)) {
+      this.discoveredRoomJids.delete(channelId);
+      this.autoJoinRoomJids = this.autoJoinRoomJids.filter((jid) => jidLocalpart(jid) !== channelId);
+      this.events.emitSafe("roomIdAmbiguous", channelId);
+    }
+  }
+
+  private roomJidForChannel(channelId: string, explicitRoomJid?: string): string {
+    this.assertRoomIdAvailable(channelId);
+    const roomJid = explicitRoomJid ?? this.discoveredRoomJids.get(channelId) ?? this.roomIdBindings.knownAddress(channelId) ?? roomBareJidFor(this.session, channelId);
+    // A conventional local fallback is a guess, not catalog evidence. It
+    // must not quarantine a later unique custom-service discovery.
+    if (explicitRoomJid) this.observeRoomId(channelId, roomJid);
+    this.assertRoomIdAvailable(channelId);
+    return roomJid;
   }
 
   rememberRoomJidForChannel(channelId: string, roomJid: string): void {
     const normalizedRoomJid = barePeerJid(roomJid);
     if (!channelId || !normalizedRoomJid) return;
+    this.observeRoomId(channelId, normalizedRoomJid);
+    this.assertRoomIdAvailable(channelId);
     this.discoveredRoomJids.set(channelId, normalizedRoomJid);
   }
 
@@ -2736,7 +2770,14 @@ export class BrowserXmppClient {
   async setPresence(show: BroadcastShow, idleSince?: number | null): Promise<void> { return this.presence.setPresence(show, idleSince); }
   async listRosterContacts(): Promise<RosterContact[]> { const xmpp = await this.requireConnectedXmpp(); const roster = await xmpp.list_roster_contacts?.() as WasmRosterContact[]; return (roster ?? []).map((item) => { const jid = barePeerJid(item.jid); return { jid, name: item.name, username: item.name?.trim() || jidLocalpart(jid) || jid, subscription: (item.subscription ?? "none") as RosterContact["subscription"], groups: item.groups ?? [] }; }); }
   async getServerVersion(): Promise<WasmServerVersion | null> { const xmpp = await this.requireConnectedXmpp(); return await xmpp.get_server_version?.() as WasmServerVersion | null; }
-  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> { const xmpp = await this.requireConnectedXmpp(); return discoverChannels(xmpp as WasmClient, this.session.jid); }
+  async discoverSpaceChannels(): Promise<DiscoveredChannel[]> {
+    const xmpp = await this.requireConnectedXmpp();
+    const rooms = await discoverChannels(xmpp as WasmClient, this.session.jid);
+    for (const room of rooms) {
+      if (room.jid) this.observeRoomId(room.id, room.jid);
+    }
+    return rooms.filter((room) => !this.isRoomIdAmbiguous(room.id));
+  }
   async createGroupDm(name: string, memberJids: string[]): Promise<CreateGroupDmResult> {
     const xmpp = await this.requireConnectedXmpp();
     return createGroupDm(xmpp as WasmClient, {
@@ -2753,7 +2794,26 @@ export class BrowserXmppClient {
     // arriving while discovery is degraded or in flight must not inherit
     // an older pre-denial membership snapshot.
     this.currentRoomCatalogFingerprintEvidence.clear();
-    const topology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    const observedTopology = await discoverTopology(xmpp as WasmClient, this.session.jid);
+    // Observe before publishing any ID-indexed cache. Even incomplete discovery
+    // cannot replace a previously observed address under the same local ID.
+    for (const room of observedTopology.rooms) {
+      if (room.jid) this.observeRoomId(room.id, room.jid);
+    }
+    const rooms = observedTopology.rooms.filter((room) => !this.isRoomIdAmbiguous(room.id));
+    const topology = rooms.length === observedTopology.rooms.length ? observedTopology : {
+      ...observedTopology,
+      rooms,
+      roomCatalogComplete: false,
+      roomReconciliationAuthority: {
+        ...observedTopology.roomReconciliationAuthority,
+        // Quarantine is not authoritative room deletion or membership change.
+        absentRoomKeysAuthoritative: false,
+        roomFingerprints: observedTopology.roomReconciliationAuthority.roomFingerprints.filter(
+          ({ roomKey }) => rooms.some((room) => room.jid && bareJidKey(room.jid) === roomKey),
+        ),
+      },
+    };
     if (
       this.destroying
       || this.xmpp !== xmpp
@@ -2864,8 +2924,8 @@ export class BrowserXmppClient {
     this.discoveredRoomJids = discoveredRoomJids;
     this.autoJoinRoomJids = [...autoJoinRooms.values()];
   }
-  async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> { return this.mucAdmin.listRoomMembers(channelId, options); }
-  async listRoomBots(channelId: string, options?: ListRoomMembersOptions): Promise<RoomBotSummary[]> { return this.mucAdmin.listRoomBots(channelId, options); }
+  async listRoomMembers(channelId: string, options?: ListRoomMembersOptions): Promise<MemberSummary[]> { this.assertRoomIdAvailable(channelId); return this.mucAdmin.listRoomMembers(channelId, options); }
+  async listRoomBots(channelId: string, options?: ListRoomMembersOptions): Promise<RoomBotSummary[]> { this.assertRoomIdAvailable(channelId); return this.mucAdmin.listRoomBots(channelId, options); }
   async setRoomAffiliation(channelId: string, jid: string, affiliation: MemberSummary["affiliation"]): Promise<void> { return this.mucAdmin.setRoomAffiliation(channelId, jid, affiliation); }
   async isCommunityOwner(): Promise<boolean> { return this.mucAdmin.isCommunityOwner(); }
   async adminUsersList(opts: { prefix?: string | null; pageSize?: number | null; afterCursor?: string | null } = {}): Promise<AdminUsersPage> { return this.mucAdmin.adminUsersList(opts); }

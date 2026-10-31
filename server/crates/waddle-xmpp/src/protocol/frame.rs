@@ -16,6 +16,11 @@ use thiserror::Error;
 use xmpp_parsers::message::Lang;
 use xmpp_parsers::minidom::Element;
 
+mod address_audit;
+pub use address_audit::{
+    inspect_stanza_addresses, AddressPreparation, DecodedAddress, StanzaAddressAudit,
+};
+
 pub const CLIENT_STANZA_NS: &str = "jabber:client";
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
@@ -240,9 +245,15 @@ fn require_text_only_element(element: &Element, name: &'static str) -> Result<()
 }
 
 fn parse_stanza(frame: &str, kind: &str) -> Result<ParsedFrame, ParseError> {
+    parse_stanza_element(decode_stanza(frame)?, kind)
+}
+
+fn decode_stanza(frame: &str) -> Result<Element, ParseError> {
     let patched = inject_client_ns_if_missing(frame);
-    let element =
-        Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
+    Element::from_str(&patched).map_err(|err| ParseError::InvalidXml(err.to_string()))
+}
+
+fn parse_stanza_element(element: Element, kind: &str) -> Result<ParsedFrame, ParseError> {
     let message_stanza_lang = message_stanza_lang(&element);
 
     let stanza = match kind {

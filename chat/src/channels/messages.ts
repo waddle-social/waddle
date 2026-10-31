@@ -102,7 +102,7 @@ export function useChannelMessages(
   // eviction. Bounds memory across long sessions; the cap only needs to
   // outlast the window in which a live copy and its MAM catch-up
   // re-emission can both arrive.
-  const recordedMentionStanzaIds = new Set<string>();
+  const recordedMentionKeys = new Set<string>();
   const RECORDED_MENTION_STANZA_IDS_CAP = 512;
   const pendingNotificationActivities = ref<RoomActivityEvent[]>([]);
   const roomAvatarHashes = ref<Record<string, string>>({});
@@ -164,6 +164,7 @@ export function useChannelMessages(
   } = useRoomAccessRequirements(xmppClient, currentRoomJid);
 
   function roomJidForChannel(channelId: string): string | null {
+    if (xmppClient.value?.isRoomIdAmbiguous?.(channelId)) return null;
     const currentSession = session.value;
     if (!currentSession) return null;
     const channel = currentChannel.value?.id === channelId ? currentChannel.value : null;
@@ -266,7 +267,7 @@ export function useChannelMessages(
           // message the user already read. Thread replies are excluded —
           // the feed hides them (mirroring the `isFeedVisible` read-marker
           // policy), so on-screen never meant seen for those.
-          accountMentionStanzaId(msg.stanzaId);
+          accountMentionStanzaId(msg.roomJid, msg.stanzaId);
         }
       });
       client.setChatStateHandler((event) => {
@@ -696,6 +697,22 @@ export function useChannelMessages(
     return true;
   }
 
+  watch(xmppClient, (client, previous, onCleanup) => {
+    if (previous && previous !== client) {
+      roomJidOverrides.value = {};
+      clearMessages();
+    }
+    const unsubscribe = client?.onRoomIdAmbiguous?.((channelId) => {
+      const { [channelId]: _discard, ...remaining } = roomJidOverrides.value;
+      roomJidOverrides.value = remaining;
+      if (!activeChannelId.value || activeChannelId.value === channelId) {
+        activeChannelId.value = null;
+        clearMessages();
+      }
+    });
+    if (unsubscribe) onCleanup(unsubscribe);
+  }, { immediate: true, flush: "sync" });
+
   function clearChannelActivity(roomJid: string) {
     const bareRoomJid = barePeerJid(roomJid);
     const next = new Set(activeChannels.value);
@@ -713,7 +730,7 @@ export function useChannelMessages(
     mentionedChannelCounts.value = {};
     lastMentionActivity.value = null;
     pendingNotificationActivities.value = [];
-    recordedMentionStanzaIds.clear();
+    recordedMentionKeys.clear();
   }
 
   function isOwnMentionActivity(event: RoomActivityEvent): boolean {
@@ -761,16 +778,17 @@ export function useChannelMessages(
   }
 
   /**
-   * Marks a mention's stanza-id as accounted (badge recorded OR read on
+   * Marks a room-issued stanza-id as accounted (badge recorded OR read on
    * screen). Returns false when it was already accounted, so a MAM
    * catch-up re-emission of the same message can never badge twice.
    */
-  function accountMentionStanzaId(stanzaId: string): boolean {
-    if (recordedMentionStanzaIds.has(stanzaId)) return false;
-    recordedMentionStanzaIds.add(stanzaId);
-    if (recordedMentionStanzaIds.size > RECORDED_MENTION_STANZA_IDS_CAP) {
-      const oldest = recordedMentionStanzaIds.values().next().value;
-      if (oldest !== undefined) recordedMentionStanzaIds.delete(oldest);
+  function accountMentionStanzaId(roomJid: string, stanzaId: string): boolean {
+    const key = JSON.stringify([bareJidKey(roomJid), stanzaId]);
+    if (recordedMentionKeys.has(key)) return false;
+    recordedMentionKeys.add(key);
+    if (recordedMentionKeys.size > RECORDED_MENTION_STANZA_IDS_CAP) {
+      const oldest = recordedMentionKeys.values().next().value;
+      if (oldest !== undefined) recordedMentionKeys.delete(oldest);
     }
     return true;
   }
@@ -785,7 +803,7 @@ export function useChannelMessages(
    */
   function shouldRecordMentionOnce(event: RoomActivityEvent): boolean {
     if (!event.stanzaId) return !event.fromArchive;
-    return accountMentionStanzaId(event.stanzaId);
+    return accountMentionStanzaId(event.roomJid, event.stanzaId);
   }
 
   function isTabHidden(): boolean {

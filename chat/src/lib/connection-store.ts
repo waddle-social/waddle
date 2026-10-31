@@ -9,11 +9,13 @@ interface ConnectionStore {
   appState: AppState;
   session: WaddleSession | null;
   appError: string;
+  defaultServerUrl: string;
   activeServerUrl: string;
   providers: AuthProvider[];
   login: (serverUrl?: string, providerId?: string) => Promise<void>;
   logout: () => Promise<void>;
   fetchProviders: (serverUrl: string) => Promise<void>;
+  invalidateProviders: () => void;
   bootstrap: () => Promise<void>;
 }
 
@@ -23,10 +25,12 @@ export const connectionStore: ConnectionStore = shallowReactive({
   appState: "loading" as AppState,
   session: null as WaddleSession | null,
   appError: "",
+  defaultServerUrl: "",
   activeServerUrl: "",
   providers: [] as AuthProvider[],
   login: async () => {},
   logout: async () => {},
   fetchProviders: async () => {},
+  invalidateProviders: () => {},
   bootstrap: async () => {},
 });

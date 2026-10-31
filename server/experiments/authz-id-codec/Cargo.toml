@@ -1,0 +1,20 @@
+[package]
+name = "waddle-authz-id-codec-experiment"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+# Deliberately excluded from the production workspace and dependency graph.
+[workspace]
+
+[dependencies]
+base64 = "0.22"
+jid = "0.12"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1.5"
+
+[lints.clippy]
+wildcard_imports = "warn"

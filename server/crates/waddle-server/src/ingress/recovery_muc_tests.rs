@@ -758,6 +758,8 @@ mod pin;
 
 #[path = "recovery_departed_tests.rs"]
 mod departed;
+#[path = "recovery_room_child_contract_tests.rs"]
+mod room_child_contract;
 
 #[path = "recovery_ghosts_tests.rs"]
 mod ghosts;
