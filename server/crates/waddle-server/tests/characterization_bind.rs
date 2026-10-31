@@ -24,6 +24,8 @@
 //!   the same entry point production uses to swap in the clustered store.
 //! - `GateMailbox` (`waddle-xmpp` `test-utils`) parks a `UserActor` mailbox,
 //!   so a `RegisterConnection` queues behind it.
+//! - The `ConnectionRegistry` `test-utils` pending-bind observer signals only
+//!   after a competing per-JID lock future actually polls to `Pending`.
 //!
 //! These suites need neither Postgres nor `clustering`; they need the
 //! `test-support` feature, so they run in the all-features publish lane and
@@ -136,8 +138,41 @@ impl Harness {
             .is_connected(jid)
     }
 
-    async fn wait_until_routed(&self, jid: &FullJid) {
-        wait_for(|| self.is_routed(jid), "connection registry route").await;
+    fn registry_mailbox_capacity(&self) -> usize {
+        self.state
+            .deps
+            .protocol
+            .user_registry
+            .mailbox_sender()
+            .capacity()
+            .expect("user registry has a bounded mailbox")
+    }
+
+    async fn wait_for_queued_registrations(
+        &self,
+        capacity_before: usize,
+        expected_queued: usize,
+        seam: &ClaimSeam,
+    ) {
+        let expected_capacity = capacity_before
+            .checked_sub(expected_queued)
+            .expect("registry has room for the expected registrations");
+        tokio::time::timeout(CONDITION_BOUND, async {
+            while self.registry_mailbox_capacity() != expected_capacity {
+                tokio::time::sleep(CONDITION_POLL).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "registrations not admitted within {CONDITION_BOUND:?}: \
+                 capacity_before={capacity_before}, expected_queued={expected_queued}, \
+                 capacity_now={}, registry_alive={}, claim_events={:?}",
+                self.registry_mailbox_capacity(),
+                self.state.deps.protocol.user_registry.is_alive(),
+                seam.events(),
+            )
+        });
     }
 
     /// The resources the account's `UserActor` holds, sorted.
@@ -172,16 +207,6 @@ impl Harness {
             .await
             .expect("wire the gated claim store into the user registry");
     }
-}
-
-async fn wait_for(mut condition: impl FnMut() -> bool, what: &str) {
-    tokio::time::timeout(CONDITION_BOUND, async {
-        while !condition() {
-            tokio::time::sleep(CONDITION_POLL).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{what} not observed within {CONDITION_BOUND:?}"));
 }
 
 async fn within<T>(what: &str, future: impl Future<Output = T>) -> T {
@@ -291,12 +316,19 @@ async fn expect_bind_result(client: &mut WsXmppClient, id: &str) -> FullJid {
 /// Read until the WebSocket closes and return every XMPP frame on the way.
 async fn frames_until_closed(client: &mut WsXmppClient) -> Vec<Element> {
     let mut frames = Vec::new();
-    loop {
-        match within("stream close", next_event(client)).await {
-            ServerEvent::Frame(frame) => frames.push(frame),
-            ServerEvent::Closed => return frames,
+    tokio::time::timeout(FRAME_BOUND, async {
+        loop {
+            match next_event(client).await {
+                ServerEvent::Frame(frame) => frames.push(frame),
+                ServerEvent::Closed => return,
+            }
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("stream close not observed within {FRAME_BOUND:?}; frames: {frames:?}")
+    });
+    frames
 }
 
 /// The two frames RFC 7395 §3.5/§3.6 put on the wire for a stream error:
@@ -440,16 +472,16 @@ impl GatedClaimStore {
         let record = CallRecord::enter(&self.log, op, entity.id.clone());
         if entity.entity_type == EntityType::UserActor && entity.id == self.gated {
             let gate = match op {
-                ClaimOp::EnsureClaimed => {
-                    self.acquire_entered.notify_one();
-                    Some(self.acquire_gate.clone())
-                }
+                ClaimOp::EnsureClaimed => Some(self.acquire_gate.clone()),
                 ClaimOp::Fence => Some(self.fence_gate.clone()),
                 _ => None,
             };
             if let Some(gate) = gate {
                 if !*gate.borrow() {
                     self.push(ClaimEvent::Held(op, entity.id.clone()));
+                    if op == ClaimOp::EnsureClaimed {
+                        self.acquire_entered.notify_one();
+                    }
                     wait_open(gate).await;
                     self.push(ClaimEvent::Released(op, entity.id.clone()));
                 }
@@ -718,7 +750,7 @@ async fn second_bind_on_bound_stream_is_refused_not_authorized_and_keeps_first_b
     );
 }
 
-/// RFC 6120 §7.7.2.2 option (2): a new stream binding a full JID that a live
+/// RFC 6120 §7.7.2.2 option (3): a new stream binding a full JID that a live
 /// stream holds terminates the incumbent. The incumbent gets
 /// `<stream:error><conflict/>` (§4.9.3.3) and the framing `<close/>`
 /// (RFC 7395 §3.6) and its WebSocket closes; the newcomer's bind succeeds and
@@ -755,8 +787,8 @@ async fn rebind_of_live_full_jid_closes_incumbent_with_conflict_and_routes_to_ne
     expect_chat(&mut newcomer, &desk, "after rebind").await;
 }
 
-/// Once the previous stream for a full JID has closed and its route is gone,
-/// binding the same resource again is an ordinary fresh bind.
+/// Once the previous stream for a full JID has closed and both its route and
+/// its `UserActor` resource are gone, binding it again is an ordinary fresh bind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_after_clean_close_binds_without_conflict() {
     let harness = start().await;
@@ -766,9 +798,56 @@ async fn rebind_after_clean_close_binds_without_conflict() {
     let mut first = harness.authenticated("alice").await;
     send_bind(&mut first, "bind-first", Some("phone")).await;
     assert_eq!(expect_bind_result(&mut first, "bind-first").await, phone);
+    let actor = within("original UserActor lookup", async {
+        harness
+            .state
+            .deps
+            .protocol
+            .user_registry
+            .ask(GetUser {
+                bare_jid: phone.to_bare(),
+            })
+            .await
+    })
+    .await
+    .expect("registry GetUser")
+    .expect("original UserActor exists after binding");
+    assert_eq!(
+        within("original UserActor resources", async {
+            actor.ask(GetResources).await
+        })
+        .await
+        .expect("UserActor resources"),
+        vec![phone.clone()]
+    );
     first.close().await.expect("RFC 7395 close handshake");
-    wait_for(|| !harness.is_routed(&phone), "route removal after close").await;
-    assert!(harness.actor_resources(&phone.to_bare()).await.is_empty());
+    // Route removal precedes the asynchronous mirror unregister. Query the
+    // original actor directly: a missing/replaced registry entry must not
+    // masquerade as successful cleanup of that actor's resource.
+    let mut last_resources = None;
+    tokio::time::timeout(CONDITION_BOUND, async {
+        loop {
+            let resources = actor
+                .ask(GetResources)
+                .await
+                .expect("original UserActor remains queryable during clean close");
+            let cleaned = resources.is_empty() && !harness.is_routed(&phone);
+            last_resources = Some(resources);
+            if cleaned {
+                return;
+            }
+            tokio::time::sleep(CONDITION_POLL).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "clean-close cleanup not observed within {CONDITION_BOUND:?}: \
+             jid={phone}, routed={}, original_actor_alive={}, last_resources={last_resources:?}",
+            harness.is_routed(&phone),
+            actor.is_alive(),
+        )
+    });
 
     let mut second = harness.authenticated("alice").await;
     send_bind(&mut second, "bind-second", Some("phone")).await;
@@ -800,11 +879,11 @@ impl Transcript {
     }
 }
 
-/// Two streams of one account bind the same full JID at the same time. The
-/// per-full-JID bind gate serializes them; the second to take it retires the
-/// first exactly as a sequential rebind does. Which stream wins is not
-/// determined. Pinned outcome: exactly one stream stays live holding the
-/// route; the other ends with `<conflict/>` and `<close/>` (RFC 6120
+/// Two streams of one account overlap while binding the same full JID. The
+/// first is parked in claim acquisition while holding the per-full-JID gate;
+/// the second must poll that gate's lock future to `Pending` before the first
+/// is released. The second then retires the first and stays live holding the
+/// route; the first ends with `<conflict/>` and `<close/>` (RFC 6120
 /// §4.9.3.3, RFC 7395 §3.6), possibly after its own bind result, because the
 /// retirement's write interruption can land before or after that result is
 /// written.
@@ -815,6 +894,10 @@ async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_clos
     harness.add_account("bob").await;
     let phone = full("alice@example.com/phone");
     let desk = full("bob@example.com/desk");
+    let mut seam = claim_seam(&phone.to_bare(), true);
+    harness
+        .wire_claim_store(seam.store.take().expect("store"))
+        .await;
 
     let mut bob = harness.authenticated("bob").await;
     send_bind(&mut bob, "bind-desk", Some("desk")).await;
@@ -822,10 +905,23 @@ async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_clos
 
     let mut first = harness.authenticated("alice").await;
     let mut second = harness.authenticated("alice").await;
-    tokio::join!(
-        send_bind(&mut first, "bind-first", Some("phone")),
-        send_bind(&mut second, "bind-second", Some("phone")),
-    );
+    send_bind(&mut first, "bind-first", Some("phone")).await;
+    within(
+        "first bind's claim acquisition to park",
+        seam.acquire_entered.notified(),
+    )
+    .await;
+    let pending = harness
+        .state
+        .deps
+        .protocol
+        .connection_registry
+        .observe_next_pending_bind(&phone);
+    send_bind(&mut second, "bind-second", Some("phone")).await;
+    within("second bind to wait on the held per-JID gate", pending)
+        .await
+        .expect("bind contention observer remains installed until Pending");
+    seam.acquire.open();
 
     let mut first_transcript = Transcript::default();
     let mut second_transcript = Transcript::default();
@@ -848,24 +944,21 @@ async fn concurrent_same_full_jid_binds_leave_one_live_session_and_conflict_clos
     })
     .await;
 
-    let (mut survivor, survivor_transcript, survivor_id, loser_transcript, loser_id) =
-        if first_transcript.closed {
-            (
-                second,
-                second_transcript,
-                "bind-second",
-                first_transcript,
-                "bind-first",
-            )
-        } else {
-            (
-                first,
-                first_transcript,
-                "bind-first",
-                second_transcript,
-                "bind-second",
-            )
-        };
+    assert!(
+        first_transcript.closed,
+        "the parked first binder is retired: {first_transcript:?}"
+    );
+    assert!(
+        !second_transcript.closed,
+        "the waiting second binder survives: {second_transcript:?}"
+    );
+    let (mut survivor, survivor_transcript, survivor_id, loser_transcript, loser_id) = (
+        second,
+        second_transcript,
+        "bind-second",
+        first_transcript,
+        "bind-first",
+    );
 
     assert_eq!(
         survivor_transcript.frames.len(),
@@ -934,13 +1027,14 @@ async fn concurrent_first_binds_serialize_node_wide_behind_parked_user_claim_acq
         seam.acquire_entered.notified(),
     )
     .await;
+    let capacity_before = harness.registry_mailbox_capacity();
     send_bind(&mut laptop_client, "bind-laptop", Some("laptop")).await;
     send_bind(&mut bob_client, "bind-desk", Some("desk")).await;
-    // Both later binds have published their routes, which happens directly
-    // before their registry ask; their registrations are now queued behind
-    // the parked turn.
-    harness.wait_until_routed(&laptop).await;
-    harness.wait_until_routed(&desk).await;
+    // The parked registry turn cannot consume either request. The mailbox
+    // capacity delta proves both registration asks were admitted before release.
+    harness
+        .wait_for_queued_registrations(capacity_before, 2, &seam)
+        .await;
     seam.acquire.open();
 
     assert_eq!(
@@ -1032,8 +1126,11 @@ async fn slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_co
         seam.acquire_entered.notified(),
     )
     .await;
+    let capacity_before = harness.registry_mailbox_capacity();
     send_bind(&mut laptop_client, "bind-laptop", Some("laptop")).await;
-    harness.wait_until_routed(&laptop).await;
+    harness
+        .wait_for_queued_registrations(capacity_before, 1, &seam)
+        .await;
     seam.acquire.open();
 
     assert_eq!(
@@ -1116,6 +1213,7 @@ async fn slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_co
 
 /// Characterizes current behaviour; changes with E0 (#2046).
 ///
+/// This router-only harness omits the production critical-registry watch.
 /// E0's row names this W1.6 case: it moves the `RegisterConnection` ask
 /// (`user_registry.rs:1090-1097`) out of the registry turn and orders
 /// register/unregister completions per resource, so this path changes there.
@@ -1134,9 +1232,13 @@ async fn slow_claim_fence_fails_concurrent_second_resource_bind_with_resource_co
 /// failure and the default `on_panic` stops the node-wide
 /// `UserRegistryActor` (vendor/kameo/src/message.rs:410-418,
 /// actor/kind.rs:168-170). Messages queued behind it fail with
-/// `ActorStopped`, and every later bind on the node fails registration with
+/// `ActorStopped`. This harness does not start the production critical-registry
+/// lifetime watch (`spawn_user_registry_lifetime_watch`), which marks the node
+/// failed and requests process stop when the registry terminates. Subsequent
+/// binds here therefore characterize the surviving router only, not production
+/// behaviour after that watch fires: they fail registration with
 /// `<internal-server-error/>` (RFC 6120 §4.9.3.8) and `<close/>`. The
-/// `UserActor` itself is not linked to the registry and survives: when its
+/// `UserActor` in this harness is not linked to the registry and survives: when its
 /// mailbox resumes it runs the late `RegisterConnection` and then the queued
 /// owner-gated unregister, so it ends with exactly desk (no phantom phone).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
