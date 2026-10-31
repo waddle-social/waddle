@@ -925,8 +925,9 @@ enum TerminalCause {
     /// retire CAS finds no row; the detached registration task marks the
     /// late row draining, it holds no claims and ages out, as before).
     Shutdown,
-    /// A fatal fence, or lease loss detected during shutdown: the reaper,
-    /// not this node, decides when the identities' claims become stealable.
+    /// A fatal fence or lease loss skips early graceful retirement. A fully
+    /// drained process may still commit terminal departure after disabling
+    /// and demoting its identities.
     Fatal,
 }
 

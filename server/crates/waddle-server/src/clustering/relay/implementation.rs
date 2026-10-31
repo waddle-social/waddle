@@ -651,10 +651,12 @@ impl Message<RelayUpdateRemoteUserResource> for RelayActor {
     ) -> Self::Reply {
         let span = relay_dispatch_span(RelayDispatchKind::RemoteResourceUpdate, &msg.trace);
         span.record("jid", tracing::field::display(&msg.jid));
-        let bridge = Arc::clone(&self.ordered_delivery_bridge);
-        spawn_in_dispatch_span(ctx, span, async move {
-            bridge.update_remote_user_resource_on_owner(msg).await
-        })
+        // Admitted here, in the relay actor's turn, so same-registration
+        // handlers run in mailbox arrival order (#1685 interim).
+        let update = self
+            .ordered_delivery_bridge
+            .admit_remote_user_resource_update(msg);
+        spawn_in_dispatch_span(ctx, span, update)
     }
 }
 

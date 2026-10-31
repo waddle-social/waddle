@@ -124,7 +124,7 @@ impl NodeLeaseStore for RecordingLease {
         _me: &NodeIdentity,
         _limit: usize,
     ) -> Result<Vec<NodeIdentity>, ClaimError> {
-        Ok(Vec::new())
+        panic!("shutdown must not query the unexpired-node list")
     }
     async fn reconcile(
         &self,
@@ -138,7 +138,7 @@ impl NodeLeaseStore for RecordingLease {
         _entity: &Entity,
         _reporter: &NodeIdentity,
     ) -> Result<(), ClaimError> {
-        Ok(())
+        panic!("shutdown must not report a steal intent")
     }
     async fn owner_steal_intents(
         &self,
@@ -152,7 +152,7 @@ impl NodeLeaseStore for RecordingLease {
         _me: &NodeIdentity,
         _mine: ClaimEpoch,
     ) -> Result<u64, ClaimError> {
-        Ok(1)
+        panic!("an empty intent inventory must not clear an intent")
     }
     async fn list_orphaned_sm_session_claims(
         &self,
