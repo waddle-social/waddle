@@ -51,7 +51,7 @@ const serverBaseUrl = env.SERVER_BASE_URL;
       // `waddle:server-base-url` meta tag.
       import { consumeRedirectSession } from "@/auth/redirect-session";
       import { initTelemetry } from "@/lib/telemetry";
-      consumeRedirectSession();
+      void consumeRedirectSession().catch(() => {});
       const serverBaseUrl = document
         .querySelector('meta[name="waddle:server-base-url"]')
         ?.getAttribute("content") ?? "";
