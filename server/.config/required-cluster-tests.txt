@@ -28,11 +28,11 @@
 #
 # TO ADD TESTS: append a block at the end of the file headed by a comment
 # naming the slice/issue and why the tests must run before an image ships.
-# Do not list a known-flaky test; record it under the exclusions instead.
+# List tests whose omission would invalidate the publish evidence. Listing a
+# test checks that it ran and passed; it does not alter which tests run or
+# suppress failures. Track and fix flakes separately.
 #
-# Known-flaky exclusions (re-add once the issue is fixed):
-# - waddle-server::clustering_cluster_e2e cluster_exit_criteria_end_to_end
-#     #1720: swarm-registry relay error under load, passes on rerun.
+# Exclusions:
 # - waddle-server::clustering_cluster_e2e dead_publisher_record_visibility_window
 #     #[ignore]d manual measurement; never runs in CI.
 # The other tracked flakes are outside this list's scope and stay excluded:
@@ -46,6 +46,10 @@
 
 # Two-process cluster harness: two spawned waddle-server processes plus the
 # test process as a third swarm node over a shared Postgres control plane.
+# This scenario previously had a swarm-registry failure (#1720); #1984
+# changed its peer identity lookup. Requiring its execution does not claim
+# that all flakes are fixed.
+waddle-server::clustering_cluster_e2e cluster_exit_criteria_end_to_end
 waddle-server::clustering_cluster_e2e cold_mesh_admits_registered_peers_before_default_isolation_window
 waddle-server::clustering_cluster_e2e surge_node_joins_default_mesh_without_rotating_startup_identity
 waddle-server::clustering_cluster_e2e lone_survivor_and_isolation_fencing

@@ -124,6 +124,8 @@ on:
     - server/scripts/test_check_required_tests.py/**
     - server/scripts/test_check_test_postgres_env.py
     - server/scripts/test_check_test_postgres_env.py/**
+    - server/scripts/test_default_publish_graph.py
+    - server/scripts/test_default_publish_graph.py/**
     - server/scripts/test_nextest_archive_transfer.py
     - server/scripts/test_nextest_archive_transfer.py/**
     - server/scripts/test_observer_release.py
@@ -150,7 +152,7 @@ jobs:
       contents: read
       id-token: write
     name: checkCiDrift
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -203,7 +205,7 @@ jobs:
       contents: read
       id-token: write
     name: checkSwitchableAlternativeProgram
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -256,7 +258,7 @@ jobs:
       contents: read
       id-token: write
     name: checkXmppClientFfiBindings
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -309,7 +311,7 @@ jobs:
       contents: read
       id-token: write
     name: ciHelperContracts
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -362,7 +364,7 @@ jobs:
       contents: read
       id-token: write
     name: clippy
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -415,7 +417,7 @@ jobs:
       contents: read
       id-token: write
     name: doctest
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -468,7 +470,7 @@ jobs:
       contents: read
       id-token: write
     name: fmt
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -521,7 +523,7 @@ jobs:
       contents: read
       id-token: write
     name: nixBuildExtensionModules
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -554,7 +556,7 @@ jobs:
       contents: read
       id-token: write
     name: nixBuildImageStream
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -588,7 +590,9 @@ jobs:
       packages: write
       id-token: write
     name: nixTestLocal
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
+    needs:
+    - ciHelperContracts
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -649,7 +653,7 @@ jobs:
       packages: write
       id-token: write
     name: publishContainerImage
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     needs:
     - checkCiDrift
     - checkSwitchableAlternativeProgram
@@ -727,7 +731,7 @@ jobs:
       contents: read
       id-token: write
     name: renderDeployment
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -780,7 +784,7 @@ jobs:
       contents: read
       id-token: write
     name: test
-    runs-on: ${{ fromJSON('["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]') }}
+    runs-on: ${{ fromJSON(fromJSON(toJSON(needs)).ciHelperContracts.result == 'success' && fromJSON(toJSON(needs)).nixTestLocal.result == '' && '["nscloud-ubuntu-24.04-amd64-32x64-with-features","namespace-features:container.privileged=true;job.priority=1"]' || '["namespace-profile-linux-x86"]') }}
     steps:
     - name: Checkout
       uses: actions/checkout@v4

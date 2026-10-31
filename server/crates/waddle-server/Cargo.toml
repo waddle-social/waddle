@@ -71,6 +71,9 @@ async-trait = "0.1"
 # HTTP Client
 reqwest = { workspace = true }
 
+# Operational audit reports use private temporary files and atomic no-clobber publication.
+tempfile = "3.27"
+
 # CLI Arguments
 clap = { workspace = true }
 config = { workspace = true }
@@ -171,6 +174,10 @@ test-support = []
 [[bin]]
 name = "waddle-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "waddle-identity-audit"
+path = "src/bin/identity_audit/main.rs"
 
 [[bin]]
 name = "waddle-cluster-keypool"

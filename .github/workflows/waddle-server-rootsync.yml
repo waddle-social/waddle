@@ -37,6 +37,8 @@ on:
     - server/deployment.cue/**
     - server/env.cue
     - server/schema/**
+    - server/scripts/test_default_publish_graph.py
+    - server/scripts/test_default_publish_graph.py/**
   pull_request:
     branches:
     - main
@@ -71,6 +73,8 @@ on:
     - server/deployment.cue/**
     - server/env.cue
     - server/schema/**
+    - server/scripts/test_default_publish_graph.py
+    - server/scripts/test_default_publish_graph.py/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
