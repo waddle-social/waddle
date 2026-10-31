@@ -97,8 +97,8 @@ struct PendingStaleUserRetirement {
     bare_jid: BareJid,
 }
 
-/// A resource removal that could not enter the child actor before its owner
-/// disconnected.  The registry retries this exact owner-gated removal from
+/// A resource removal that was not confirmed by the child actor before its
+/// owner disconnected. The registry retries this exact owner-gated removal from
 /// the janitor rather than leaving the full-JID slot occupied forever.
 #[derive(Clone)]
 struct PendingUserUnregister {
@@ -622,6 +622,32 @@ impl UserRegistryActor {
         self.poisoned_users.insert(bare_jid.clone());
         metrics::record_actor_restart("user_actor", "detected_dead_actor_fail_fast");
         UserRegistryError::UserActorStateLost(bare_jid.clone())
+    }
+
+    async fn unregister_resource_and_remember_retry(
+        &mut self,
+        jid: FullJid,
+        owner: Option<Arc<AtomicBool>>,
+    ) -> Result<(), UserRegistryError> {
+        let bare_jid = jid.to_bare();
+        let retry_jid = jid.clone();
+        let retry_owner = owner.clone();
+        match self.unregister_and_release_if_empty(jid, owner).await {
+            UnregisterAndReleaseOutcome::Released
+            | UnregisterAndReleaseOutcome::RetainedLiveResources
+            | UnregisterAndReleaseOutcome::AlreadyAbsent => Ok(()),
+            UnregisterAndReleaseOutcome::RetryableFailure(reason) => {
+                self.remember_pending_unregister(retry_jid, retry_owner);
+                Err(match reason {
+                    UnregisterAndReleaseRetryableFailure::UserActorBusy => {
+                        UserRegistryError::UserActorBusy(bare_jid)
+                    }
+                    UnregisterAndReleaseRetryableFailure::UserActorStateLost => {
+                        UserRegistryError::UserActorStateLost(bare_jid)
+                    }
+                })
+            }
+        }
     }
 
     /// Remove one resource and retire an empty user actor.  The whole
@@ -1185,6 +1211,9 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
 /// `owner` is the ownership token forwarded to the `UserActor` so the removal
 /// is ownership-gated (`UnregisterConnection` semantics); `None` removes
 /// unconditionally, matching a plain DashMap `unregister`.
+/// Callers that only need mailbox admission must use
+/// [`EnqueueUserResourceUnregister`]: a failed `Result` reply to a Kameo tell
+/// terminates the registry actor.
 pub struct UnregisterUserResource {
     pub jid: FullJid,
     pub owner: Option<Arc<AtomicBool>>,
@@ -1198,27 +1227,34 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
         msg: UnregisterUserResource,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let bare_jid = msg.jid.to_bare();
-        let retry_jid = msg.jid.clone();
-        let retry_owner = msg.owner.clone();
-        match self
-            .unregister_and_release_if_empty(msg.jid, msg.owner)
+        self.unregister_resource_and_remember_retry(msg.jid, msg.owner)
+            .await
+    }
+}
+
+/// Enqueue-only teardown mirror with the same owner gating as
+/// [`UnregisterUserResource`]. Admission confirms custody, not child completion:
+/// unsuccessful attempts retain the exact removal for convergence retries.
+/// The unit reply keeps retryable child failures from becoming Kameo tell
+/// failures that would terminate this critical registry.
+pub struct EnqueueUserResourceUnregister {
+    pub jid: FullJid,
+    pub owner: Option<Arc<AtomicBool>>,
+}
+
+impl kameo::message::Message<EnqueueUserResourceUnregister> for UserRegistryActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: EnqueueUserResourceUnregister,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if let Err(error) = self
+            .unregister_resource_and_remember_retry(msg.jid, msg.owner)
             .await
         {
-            UnregisterAndReleaseOutcome::Released
-            | UnregisterAndReleaseOutcome::RetainedLiveResources
-            | UnregisterAndReleaseOutcome::AlreadyAbsent => Ok(()),
-            UnregisterAndReleaseOutcome::RetryableFailure(reason) => {
-                self.remember_pending_unregister(retry_jid, retry_owner);
-                Err(match reason {
-                    UnregisterAndReleaseRetryableFailure::UserActorBusy => {
-                        UserRegistryError::UserActorBusy(bare_jid)
-                    }
-                    UnregisterAndReleaseRetryableFailure::UserActorStateLost => {
-                        UserRegistryError::UserActorStateLost(bare_jid)
-                    }
-                })
-            }
+            warn!(%error, "unregister mirror retained for convergence retry");
         }
     }
 }
