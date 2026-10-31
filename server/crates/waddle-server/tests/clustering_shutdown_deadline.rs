@@ -9,12 +9,14 @@
 //!   ends inside the enclosing deadline;
 //! - if the publication barrier cannot close inside the deadline, the
 //!   identity is not retired;
+//! - if either exact-owner demotion cannot complete, neither retirement
+//!   API runs, even after Q6 and the socket drain have completed;
 //! - SIGTERM while the node is re-registering after a self-fence (#1985
 //!   follow-up) is an ordinary shutdown: both identities are retired after
 //!   the publication barrier, instead of waiting for the orphan reaper.
 #![cfg(feature = "clustering")]
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,7 +29,7 @@ use waddle_server::clustering::claims::{
 use waddle_server::clustering::self_fence::{
     run_node_lease, ConnectedPeerCount, LocallyClaimedEntities, NodeLeaseRunConfig,
 };
-use waddle_server::clustering::{NodeLifecycle, ShutdownSmDrain};
+use waddle_server::clustering::{CriticalNodeFailure, NodeLifecycle, ShutdownSmDrain};
 use waddle_server::config::{ClusteringNodeLeaseConfig, ClusteringSelfFenceConfig};
 use waddle_server::shutdown_deadline::{
     ShutdownBudget, ShutdownDeadline, SHUTDOWN_TERMINAL_SWEEP_BUDGET,
@@ -38,13 +40,14 @@ use waddle_xmpp::ownership::{
 
 type RetirementProbe = Box<dyn Fn(&NodeIdentity) -> bool + Send + Sync>;
 
-/// In-memory node-lease store: records `retire_after_shutdown` calls and
-/// what `probe` observed at each one.
+/// In-memory node-lease store: records both retirement APIs and what
+/// `probe` observed at each call.
 struct RecordingLease {
     heartbeat_ok: bool,
     registration_entered: Option<Arc<Notify>>,
     registration_release: Option<Arc<Notify>>,
     retirements: Arc<Mutex<Vec<(NodeIdentity, bool)>>>,
+    departures: Arc<Mutex<Vec<(NodeIdentity, bool)>>>,
     probe: RetirementProbe,
 }
 
@@ -55,6 +58,7 @@ impl RecordingLease {
             registration_entered: None,
             registration_release: None,
             retirements: Arc::new(Mutex::new(Vec::new())),
+            departures: Arc::new(Mutex::new(Vec::new())),
             probe,
         }
     }
@@ -100,7 +104,12 @@ impl NodeLeaseStore for RecordingLease {
     async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
         Ok(())
     }
-    async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+        let observed = (self.probe)(me);
+        self.departures
+            .lock()
+            .expect("lock")
+            .push((me.clone(), observed));
         Ok(())
     }
     async fn count_other_live_nodes(
@@ -625,4 +634,240 @@ async fn process_sigterm_during_reregistration_with_a_held_guard_does_not_retire
         "an identity whose barrier did not close is never retired"
     );
     drop(publication);
+}
+
+/// Exact demotion can stall even when the broad terminal sweep is empty.
+/// Only demotions after disable() are relevant: the normal self-fence also
+/// demotes the prior owner before entering re-registration.
+struct TerminalDemotionClaims {
+    prior: NodeIdentity,
+    stall_prior: Option<bool>,
+    live_identity: SharedNodeIdentity,
+    attempted: Arc<Mutex<Vec<NodeIdentity>>>,
+    completed: Arc<Mutex<Vec<NodeIdentity>>>,
+    swept: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl LocallyClaimedEntities for TerminalDemotionClaims {
+    async fn owned(&self) -> Vec<Entity> {
+        Vec::new()
+    }
+
+    async fn terminal_sweep(&self) -> Vec<Entity> {
+        if !self.live_identity.current().is_active() {
+            self.swept.store(true, Ordering::SeqCst);
+        }
+        Vec::new()
+    }
+
+    async fn demote(&self, _entity: &Entity) {}
+
+    async fn demote_owned_by(&self, owner: &NodeIdentity) {
+        if self.live_identity.current().is_active() {
+            return;
+        }
+        self.attempted.lock().expect("lock").push(owner.clone());
+        if self.stall_prior == Some(owner == &self.prior) {
+            std::future::pending::<()>().await;
+        }
+        self.completed.lock().expect("lock").push(owner.clone());
+    }
+
+    async fn health_check(&self, _entity: &Entity) -> bool {
+        true
+    }
+}
+
+/// A stop during re-registration reaches the production finish() path
+/// with two distinct identities. Completed Q6 and socket drains are not
+/// sufficient retirement proof if either exact demotion times out.
+#[tokio::test(start_paused = true)]
+async fn terminal_departure_requires_both_exact_demotions() {
+    for stall_prior in [Some(true), Some(false), None] {
+        let prior = identity();
+        let live_identity = SharedNodeIdentity::new(prior.clone());
+        let deadline = ten_second_deadline();
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let swept = Arc::new(AtomicBool::new(false));
+        let probe_identity = live_identity.clone();
+        let probe_completed = Arc::clone(&completed);
+        let mut lease = RecordingLease::new(
+            false,
+            Box::new(move |_| {
+                !probe_identity.current().is_active()
+                    && probe_completed.lock().expect("lock").len() == 2
+            }),
+        );
+        let registration_entered = Arc::new(Notify::new());
+        let registration_release = Arc::new(Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = Arc::clone(&lease.retirements);
+        let departures = Arc::clone(&lease.departures);
+        let process_stop = CancellationToken::new();
+        let q6_complete = CancellationToken::new();
+        q6_complete.cancel();
+        let interval = Duration::from_millis(50);
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            prior.clone(),
+            process_stop.child_token(),
+            run_config(
+                interval,
+                Arc::new(TerminalDemotionClaims {
+                    prior: prior.clone(),
+                    stall_prior,
+                    live_identity: live_identity.clone(),
+                    attempted: Arc::clone(&attempted),
+                    completed: Arc::clone(&completed),
+                    swept: Arc::clone(&swept),
+                }),
+                NodeLifecycle::new(),
+                live_identity.clone(),
+                Some(ShutdownSmDrain {
+                    process_stop: process_stop.clone(),
+                    complete: q6_complete,
+                    connections_drained: Arc::new(AtomicBool::new(true)),
+                    deadline: deadline.clone(),
+                }),
+            ),
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        process_stop.cancel();
+        let shutdown = deadline.start();
+        registration_release.notify_one();
+        tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+            .await
+            .expect("terminal fencing must end inside the shared deadline")
+            .expect("node-lease task");
+
+        assert!(tokio::time::Instant::now() <= shutdown.deadline());
+        assert!(!live_identity.current().is_active());
+        assert!(swept.load(Ordering::SeqCst), "the broad sweep completes");
+        let attempted = attempted.lock().expect("lock");
+        assert_eq!(attempted.len(), 2, "both exact demotions are attempted");
+        assert_eq!(attempted[0], prior);
+        assert_ne!(attempted[0], attempted[1]);
+        let completed = completed.lock().expect("lock");
+        let departures = departures.lock().expect("lock");
+        let retirements = retirements.lock().expect("lock");
+        if let Some(stall_prior) = stall_prior {
+            let stalled = &attempted[usize::from(!stall_prior)];
+            assert!(!completed.contains(stalled));
+            assert!(
+                departures.is_empty(),
+                "neither identity may retire when exact demotion of {stalled:?} is unproven"
+            );
+            assert!(
+                retirements.is_empty(),
+                "retire_after_shutdown also requires every exact demotion to complete"
+            );
+        } else {
+            assert_eq!(completed.as_slice(), attempted.as_slice());
+            assert!(
+                retirements.iter().all(|(_, after_barrier)| *after_barrier),
+                "any graceful retirement follows disable and both exact demotions"
+            );
+            assert_eq!(
+                departures.as_slice(),
+                &[(attempted[0].clone(), true), (attempted[1].clone(), true)],
+                "both identities depart once, only after disable, exact demotions and sweep"
+            );
+        }
+    }
+}
+
+/// A fatal fence never invokes early graceful retirement. It can still
+/// commit terminal departure after process, Q6, and socket drains, once the
+/// identity barrier and both exact demotions have completed.
+#[tokio::test(start_paused = true)]
+async fn fatal_fence_terminal_departure_requires_a_completed_socket_drain() {
+    for sockets_drained in [false, true] {
+        let prior = identity();
+        let live_identity = SharedNodeIdentity::new(prior.clone());
+        let readiness = NodeLifecycle::new();
+        let deadline = ten_second_deadline();
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let swept = Arc::new(AtomicBool::new(false));
+        let probe_identity = live_identity.clone();
+        let probe_completed = Arc::clone(&completed);
+        let mut lease = RecordingLease::new(
+            false,
+            Box::new(move |_| {
+                !probe_identity.current().is_active()
+                    && probe_completed.lock().expect("lock").len() == 2
+            }),
+        );
+        let registration_entered = Arc::new(Notify::new());
+        let registration_release = Arc::new(Notify::new());
+        lease.registration_entered = Some(Arc::clone(&registration_entered));
+        lease.registration_release = Some(Arc::clone(&registration_release));
+        let retirements = Arc::clone(&lease.retirements);
+        let departures = Arc::clone(&lease.departures);
+        let process_stop = CancellationToken::new();
+        let q6_complete = CancellationToken::new();
+        q6_complete.cancel();
+        let interval = Duration::from_millis(50);
+        let task = tokio::spawn(run_node_lease(
+            lease,
+            prior.clone(),
+            process_stop.child_token(),
+            run_config(
+                interval,
+                Arc::new(TerminalDemotionClaims {
+                    prior: prior.clone(),
+                    stall_prior: None,
+                    live_identity: live_identity.clone(),
+                    attempted: Arc::clone(&attempted),
+                    completed: Arc::clone(&completed),
+                    swept: Arc::clone(&swept),
+                }),
+                readiness.clone(),
+                live_identity.clone(),
+                Some(ShutdownSmDrain {
+                    process_stop: process_stop.clone(),
+                    complete: q6_complete,
+                    connections_drained: Arc::new(AtomicBool::new(sockets_drained)),
+                    deadline: deadline.clone(),
+                }),
+            ),
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval + Duration::from_millis(20)).await;
+        registration_entered.notified().await;
+        readiness.fail(CriticalNodeFailure::UserRegistryTerminated);
+        process_stop.cancel();
+        let shutdown = deadline.start();
+        registration_release.notify_one();
+        tokio::time::timeout_at(shutdown.deadline() + Duration::from_millis(1), task)
+            .await
+            .expect("fatal fencing must end inside the shared deadline")
+            .expect("node-lease task");
+
+        let attempted = attempted.lock().expect("lock");
+        assert_eq!(attempted.len(), 2, "both identities are demoted");
+        assert!(
+            retirements.lock().expect("lock").is_empty(),
+            "fatal fences skip early graceful retirement"
+        );
+        let departures = departures.lock().expect("lock");
+        if sockets_drained {
+            assert_eq!(
+                departures.as_slice(),
+                &[(attempted[0].clone(), true), (attempted[1].clone(), true)]
+            );
+        } else {
+            assert!(
+                departures.is_empty(),
+                "a live socket prevents terminal departure"
+            );
+        }
+    }
 }

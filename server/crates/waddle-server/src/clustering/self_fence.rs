@@ -1240,7 +1240,9 @@ where
         // actors are demoted, before the local sweep, exactly like
         // `shutdown`. A fresh row registered after this point is marked
         // draining by its registration task, holds no claims and ages out.
-        // A fatal fence never self-retires.
+        // A fatal fence never takes this early graceful-retirement path.
+        // A later terminal departure is still possible if the process,
+        // Q6, and socket drains have completed.
         let retire = cause == TerminalCause::Shutdown
             && disabled
             && demoted
@@ -1272,7 +1274,9 @@ where
                 .await;
             }
         }
-        if disabled {
+        // An empty broad sweep does not prove exact-owner demotion. Keep
+        // both identities on lease expiry if either demotion was cut off.
+        if disabled && demoted {
             for identity in identities {
                 self.retire_if_drained(identity).await;
             }
@@ -3774,7 +3778,7 @@ mod tests {
         );
         assert!(
             retirements.lock().expect("lock").is_empty(),
-            "a fatal fence never self-retires either identity"
+            "a fatal fence never uses graceful retirement for either identity"
         );
     }
 
