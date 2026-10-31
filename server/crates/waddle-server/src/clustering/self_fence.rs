@@ -1192,6 +1192,7 @@ where
                 tracing::warn!("clustering: Q6 did not settle after the terminal fence; demoting local claims with incomplete drain accounting");
             }
         }
+        let mut demoted = true;
         for identity in identities {
             if self
                 .within_deadline(
@@ -1201,6 +1202,7 @@ where
                 .await
                 .is_none()
             {
+                demoted = false;
                 tracing::warn!(
                     node_id = %identity.node_id,
                     "clustering: exact-owner demotion did not finish before the shutdown deadline"
@@ -1216,7 +1218,9 @@ where
             )
             .await;
         }
-        if disabled {
+        // An empty broad sweep does not prove exact-owner demotion. Keep
+        // both identities on lease expiry if either demotion was cut off.
+        if disabled && demoted {
             for identity in identities {
                 self.retire_if_drained(identity).await;
             }
