@@ -23,4 +23,7 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.3.20" apply false
 }
 
+// Gradle 9 requires writable project directories, including SDK plugins.
+apply(from = "sdk-plugins.settings.gradle.kts")
+
 include(":app")

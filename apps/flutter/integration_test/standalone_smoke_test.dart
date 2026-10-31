@@ -92,91 +92,88 @@ Future<void> _exerciseBundledRust() async {
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'standalone Android bootstrap, ownership, secure storage and Rust',
-    (tester) async {
-      expect(
-        Platform.isAndroid,
-        isTrue,
-        reason: 'Run on the dedicated Android emulator.',
-      );
-      const storage = SecureRuntimeStorage();
-      final hasSavedAccount =
-          (await storage.read('session'))?.isNotEmpty == true;
-      expect(
-        hasSavedAccount,
-        isFalse,
-        reason:
-            'Use a clean emulator; this smoke test never restores a real account.',
-      );
-      final scratch = 'device-smoke.${DateTime.now().microsecondsSinceEpoch}';
-      try {
-        await storage.write(scratch, 'standalone-keystore-round-trip');
-        expect(await storage.read(scratch), 'standalone-keystore-round-trip');
-      } finally {
-        await storage.write(scratch, null);
-      }
-      expect(await storage.read(scratch), isNull);
+  testWidgets('standalone Android bootstrap, ownership, secure storage and Rust', (
+    tester,
+  ) async {
+    expect(
+      Platform.isAndroid,
+      isTrue,
+      reason: 'Run on the dedicated Android emulator.',
+    );
+    const storage = SecureRuntimeStorage();
+    final hasSavedAccount = (await storage.read('session'))?.isNotEmpty == true;
+    expect(
+      hasSavedAccount,
+      isFalse,
+      reason:
+          'Use a clean emulator; this smoke test never restores a real account.',
+    );
+    final scratch = 'device-smoke.${DateTime.now().microsecondsSinceEpoch}';
+    try {
+      await storage.write(scratch, 'standalone-keystore-round-trip');
+      expect(await storage.read(scratch), 'standalone-keystore-round-trip');
+    } finally {
+      await storage.write(scratch, null);
+    }
+    expect(await storage.read(scratch), isNull);
 
-      await _exerciseBundledRust();
-      await application.main(const []);
-      await _pumpUntil(
-        tester,
-        () => find.byType(application.WaddleApp).evaluate().isNotEmpty,
-        'The production Flutter application did not mount.',
-      );
-      expect(find.byType(MaterialApp), findsOneWidget);
-      expect(find.byType(Scaffold), findsAtLeastNWidgets(1));
-      final widget = tester.widget<application.WaddleApp>(
-        find.byType(application.WaddleApp),
-      );
-      final bridge = widget.bridge;
-      await tester.pump(const Duration(milliseconds: 200));
-      expect(
-        bridge.session['state'] ?? 'loading',
-        isIn(['loading', 'signedOut', 'error']),
-        reason: 'No credentials or production sign-in are part of this test.',
-      );
-      expect(IsolateNameServer.lookupPortByName(_ownerPort), isNotNull);
+    await _exerciseBundledRust();
+    await application.main(const []);
+    await _pumpUntil(
+      tester,
+      () => find.byType(application.WaddleApp).evaluate().isNotEmpty,
+      'The production Flutter application did not mount.',
+    );
+    expect(find.byType(MaterialApp), findsOneWidget);
+    expect(find.byType(Scaffold), findsAtLeastNWidgets(1));
+    final widget = tester.widget<application.WaddleApp>(
+      find.byType(application.WaddleApp),
+    );
+    final bridge = widget.bridge;
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(
+      bridge.session['state'] ?? 'loading',
+      isIn(['loading', 'signedOut', 'error']),
+      reason: 'No credentials or production sign-in are part of this test.',
+    );
+    expect(IsolateNameServer.lookupPortByName(_ownerPort), isNotNull);
 
-      // Exercise the real headless entry point while the UI already owns runtime.
-      // The harmless event cannot cause an account restore or protocol mutation.
-      await notificationBootstrap({'type': 'standalone_smoke'});
-      expect(
-        identical(
-          tester
-              .widget<application.WaddleApp>(find.byType(application.WaddleApp))
-              .bridge,
-          bridge,
-        ),
-        isTrue,
-      );
-      final acquiredSecondOwner = await NotificationOwner.acquire(
-        headless: true,
-        onEvent: (_) async {},
-        onRetire: () async =>
-            fail('A headless wake must not retire the UI owner.'),
-      );
-      expect(acquiredSecondOwner, isFalse);
-      expect(tester.takeException(), isNull);
+    // Exercise the real headless entry point while the UI already owns runtime.
+    // The harmless event cannot cause an account restore or protocol mutation.
+    await notificationBootstrap({'type': 'standalone_smoke'});
+    expect(
+      identical(
+        tester
+            .widget<application.WaddleApp>(find.byType(application.WaddleApp))
+            .bridge,
+        bridge,
+      ),
+      isTrue,
+    );
+    final acquiredSecondOwner = await NotificationOwner.acquire(
+      headless: true,
+      onEvent: (_) async {},
+      onRetire: () async =>
+          fail('A headless wake must not retire the UI owner.'),
+    );
+    expect(acquiredSecondOwner, isFalse);
+    expect(tester.takeException(), isNull);
 
-      await binding.convertFlutterSurfaceToImage();
-      await tester.pump(const Duration(milliseconds: 100));
-      final screenshot = await binding.takeScreenshot(
-        'standalone-production-boot',
-      );
-      final cache = await getTemporaryDirectory();
-      await File(
-        '${cache.path}/standalone-smoke.png',
-      ).writeAsBytes(screenshot, flush: true);
+    await binding.convertFlutterSurfaceToImage();
+    await tester.pump(const Duration(milliseconds: 100));
+    final screenshot = await binding.takeScreenshot(
+      'standalone-production-boot',
+    );
+    final cache = await getTemporaryDirectory();
+    await File(
+      '${cache.path}/standalone-smoke.png',
+    ).writeAsBytes(screenshot, flush: true);
 
-      await tester.pumpWidget(const SizedBox.shrink());
-      await _pumpUntil(
-        tester,
-        () => IsolateNameServer.lookupPortByName(_ownerPort) == null,
-        'Disposing the production app did not release its runtime owner.',
-      );
-    },
-    timeout: const Timeout(Duration(minutes: 3)),
-  );
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpUntil(
+      tester,
+      () => IsolateNameServer.lookupPortByName(_ownerPort) == null,
+      'Disposing the production app did not release its runtime owner.',
+    );
+  }, timeout: const Timeout(Duration(minutes: 3)));
 }

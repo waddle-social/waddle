@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createContext, runInContext } from "node:vm";
 
 const root = resolve(import.meta.dir, "..");
 const temporary: string[] = [];
+// Opt in with the reviewed Gradle 9 binary; runner-installed Gradle may differ.
+const gradleBinary = process.env.WADDLE_GRADLE_BIN;
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -54,12 +56,16 @@ esac
   const buildTools = join(directory, "sdk/build-tools/36.0.0");
   mkdirSync(buildTools, { recursive: true });
   writeFileSync(join(buildTools, "aapt"), `#!/usr/bin/python3
-import os
+import os, sys
+if sys.argv[-1].startswith("-"):
+    raise SystemExit("Unexpected aapt option in place of APK")
 package = "wrong.app" if os.environ.get("FLUTTER_TEST_BAD_PACKAGE") else "social.waddle.flutter"
 print("package: name='%s' versionCode='30000000' versionName='pr-abcdef123456'" % package)
 `, { mode: 0o755 });
   writeFileSync(join(buildTools, "apksigner"), `#!/usr/bin/python3
-import hashlib, os
+import hashlib, os, sys
+if sys.argv[-1].startswith("-"):
+    raise SystemExit("Unexpected apksigner option in place of APK")
 digest = "0" * 64 if os.environ.get("FLUTTER_TEST_BAD_CERT") else hashlib.sha256(b"fixture-cert").hexdigest()
 print("Signer #1 certificate SHA-256 digest: " + digest)
 `, { mode: 0o755 });
@@ -68,6 +74,10 @@ print("Signer #1 certificate SHA-256 digest: " + digest)
     directory,
     run: (mode: string, extra: Record<string, string> = {}) =>
       Bun.spawnSync(["bash", script, mode], { env: { ...env, ...extra } }),
+    verify: (apk: string) => Bun.spawnSync(
+      ["/usr/bin/python3", join(directory, "scripts/flutter-verify-apk.py"), apk, "30000000", "pr-abcdef123456"],
+      { cwd: directory, env },
+    ),
     calls: () => readFileSync(record, "utf8").trim().split("\n").map(line => JSON.parse(line)),
   };
 }
@@ -103,6 +113,37 @@ describe("standalone Rust build contracts", () => {
 });
 
 describe("standalone verification contracts", () => {
+  test.skipIf(!gradleBinary)("SDK integration_test builds from a writable copy with Gradle 9", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "waddle-sdk-plugin-"));
+    temporary.push(directory);
+    const android = join(directory, "android");
+    const sdkPlugin = join(directory, "immutable-sdk/integration_test/android");
+    mkdirSync(android, { recursive: true });
+    mkdirSync(sdkPlugin, { recursive: true });
+    writeFileSync(join(sdkPlugin, "build.gradle.kts"), 'tasks.register("writeProbe") { doLast { projectDir.resolve("probe").writeText("ok") } }\n');
+    chmodSync(sdkPlugin, 0o555);
+    const settings = join(android, "settings.gradle.kts");
+    const initial = `rootProject.name = "sdk-plugin-fixture"\ninclude(":integration_test")\nproject(":integration_test").projectDir = file(${JSON.stringify(sdkPlugin)})\n`;
+    writeFileSync(settings, initial);
+    const run = async () => {
+      const process = Bun.spawn([gradleBinary!, "--offline", "--no-daemon", "-Dorg.gradle.vfs.watch=false", "-p", android, ":integration_test:writeProbe"], { stdout: "pipe", stderr: "pipe" });
+      const [code, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
+      return { code, output: stdout + stderr };
+    };
+    try {
+      const rejected = await run();
+      expect(rejected.code).not.toBe(0);
+      expect(rejected.output).toContain("can't be written to");
+      copyFileSync(join(root, "apps/flutter/android/sdk-plugins.settings.gradle.kts"), join(android, "sdk-plugins.settings.gradle.kts"));
+      writeFileSync(settings, initial + '\napply(from = "sdk-plugins.settings.gradle.kts")\n');
+      const relocated = await run();
+      expect(relocated.code).toBe(0);
+      expect(readFileSync(join(directory, ".dart_tool/android-sdk-plugins/integration_test/probe"), "utf8")).toBe("ok");
+      expect(Bun.file(join(sdkPlugin, "probe")).size).toBe(0);
+    } finally {
+      chmodSync(sdkPlugin, 0o755);
+    }
+  }, 60_000);
   test("APK command labels the alternative debug app and permits upgrades", () => {
     const h = harness("flutter-ci.sh");
     expect(h.run("apk").exitCode).toBe(0);
@@ -118,6 +159,14 @@ describe("standalone verification contracts", () => {
       expect(h.run("apk", { [failure]: "1" }).exitCode).not.toBe(0);
       expect(Bun.file(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk")).size).toBe(0);
     }
+  });
+  test("an APK filename beginning with a dash is verified as a file, not an SDK option", () => {
+    const h = harness("flutter-ci.sh");
+    expect(h.run("apk").exitCode).toBe(0);
+    renameSync(join(h.directory, "apps/flutter/build/artifacts/waddle-flutter.apk"), join(h.directory, "-preview.apk"));
+    const verified = h.verify("-preview.apk");
+    expect(verified.exitCode).toBe(0);
+    expect(verified.stdout.toString()).toContain("Verified alternative Flutter package");
   });
   test("tests export real native-library and rendered-preview inputs and propagate failure", () => {
     const h = harness("flutter-ci.sh");

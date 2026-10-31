@@ -84,7 +84,8 @@ scripts/build-flutter-rust.sh --android
 scripts/flutter-ci.sh apk
 ```
 
-The APK is `apps/flutter/build/app/outputs/flutter-apk/app-debug.apk`. Debug builds
+The verified APK is `apps/flutter/build/artifacts/waddle-flutter.apk`. This copy
+is preserved when the emulator smoke test rebuilds its test application. Debug builds
 use the committed public preview keystore for consistent upgrades across CI runs;
 it is not a production signing key. Release signing must be configured separately.
 For web:

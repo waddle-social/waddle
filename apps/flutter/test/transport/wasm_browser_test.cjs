@@ -130,7 +130,7 @@ function delayedWebSocketFixture({authenticationFailure=false,protocolError=fals
     const end=state.buffer.indexOf('\r\n\r\n');if(end<0)return;
     const request=state.buffer.subarray(0,end).toString(),key=request.match(/sec-websocket-key:\s*([^\r\n]+)/i)?.[1];
     assert.ok(key);if(active.size)overlap=true;active.add(socket);connections++;
-    const accept=createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+    const accept=createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64'); // NOSONAR: RFC 6455 requires SHA-1 for Sec-WebSocket-Accept; this localhost handshake does not hash passwords or sensitive data.
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: xmpp\r\n\r\n`);
     state.upgraded=true;state.buffer=state.buffer.subarray(end+4);
    }

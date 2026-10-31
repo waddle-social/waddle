@@ -13,13 +13,16 @@ import zipfile
 def main():
     if len(sys.argv) != 4:
         raise SystemExit("Usage: flutter-verify-apk.py APK VERSION_CODE VERSION_NAME")
-    apk = Path(sys.argv[1])
+    # An absolute existing path cannot become an option to either SDK tool.
+    apk = Path(sys.argv[1]).resolve(strict=True)
     expected_version, expected_name = sys.argv[2:]
     root = Path(__file__).resolve().parents[1]
     sdk = Path(os.environ.get("ANDROID_HOME", str(Path.home() / ".android-sdk")))
-    tools = sdk / "build-tools" / "36.0.0"
+    tools = (sdk / "build-tools" / "36.0.0").resolve(strict=True)
+    aapt = (tools / "aapt").resolve(strict=True)
+    apksigner = (tools / "apksigner").resolve(strict=True)
     badging = subprocess.run(
-        [str(tools / "aapt"), "dump", "badging", str(apk)],
+        [str(aapt), "dump", "badging", str(apk)],
         check=True, capture_output=True, text=True,
     ).stdout
     package = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging, re.M)
@@ -39,7 +42,7 @@ def main():
     ).stdout
     expected_digest = hashlib.sha256(certificate).hexdigest()
     verified = subprocess.run(
-        [str(tools / "apksigner"), "verify", "--print-certs", str(apk)],
+        [str(apksigner), "verify", "--print-certs", str(apk)],
         check=True, capture_output=True, text=True,
     ).stdout
     signers = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)$", verified, re.M)

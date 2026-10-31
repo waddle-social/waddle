@@ -33,6 +33,13 @@ android {
         }
     }
 
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+        }
+    }
+
 }
 
 dependencies {
