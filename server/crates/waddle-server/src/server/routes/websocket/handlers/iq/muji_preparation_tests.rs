@@ -39,6 +39,8 @@ use crate::server::routes::websocket::WebSocketState;
 
 const SIGNING_SECRET: &str = "preparation-test-secret-at-least-32-bytes";
 
+mod real_pipeline;
+
 struct EmptyProviderAdmin;
 
 impl LiveKitAdmin for EmptyProviderAdmin {
@@ -83,6 +85,7 @@ struct PausedPreparationSfu {
     entered: Notify,
     released: Notify,
     preparation_calls: AtomicUsize,
+    preparation_failure: Mutex<Option<waddle_sfu::ParticipantPreparationError>>,
     pending_observed: Notify,
     published: Mutex<Vec<JoinToken>>,
 }
@@ -109,6 +112,7 @@ impl PausedPreparationSfu {
             entered: Notify::new(),
             released: Notify::new(),
             preparation_calls: AtomicUsize::new(0),
+            preparation_failure: Mutex::new(None),
             pending_observed: Notify::new(),
             published: Mutex::new(Vec::new()),
         }
@@ -158,7 +162,14 @@ impl SfuService for PausedPreparationSfu {
         Box::pin(async move {
             self.entered.notify_one();
             self.released.notified().await;
-            expected
+            if let Some(error) = *self
+                .preparation_failure
+                .lock()
+                .expect("preparation failure")
+            {
+                return Err(error);
+            }
+            expected.ok_or(waddle_sfu::ParticipantPreparationError::ContextUnavailable)
         })
     }
     fn issue_join_token_with_session(
@@ -873,4 +884,84 @@ async fn relayed_muji_retirement_sql_failure_rolls_back_and_suppresses_credentia
 async fn relayed_muji_voice_revoked_during_retirement_sql_wait_invalidates_held_credentials() {
     assert_retirement_is_durable_before_reply(Adapter::Relayed, PublicationOutcome::VoiceRevoked)
         .await;
+}
+
+async fn assert_preparation_failure_is_recorded_before_dispatch(adapter: Adapter) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = PublicationFixture::new().await;
+    *fixture
+        .sfu
+        .preparation_failure
+        .lock()
+        .expect("preparation failure") =
+        Some(waddle_sfu::ParticipantPreparationError::ProviderUnavailable);
+    fixture.sfu.released.notify_one();
+    let frames = execute_adapter(
+        adapter,
+        fixture.state.clone(),
+        initiate_iq(&fixture.room, &fixture.sender),
+        fixture.sender.clone(),
+        fixture.generation,
+    )
+    .await
+    .expect("IQ handled");
+    assert!(
+        frames.iter().any(|frame| {
+            let element: Element = frame.parse().expect("IQ XML");
+            element.attr("type") == Some("error")
+                && element.children().any(|child| {
+                    child.name() == "error"
+                        && child
+                            .children()
+                            .any(|condition| condition.name() == "internal-server-error")
+                })
+        }),
+        "exhausted provider preparation returns an explicit retryable IQ error: {frames:?}"
+    );
+    assert!(
+        fixture
+            .sfu
+            .published
+            .lock()
+            .expect("published tokens")
+            .is_empty(),
+        "failed preparation never reaches the dispatcher token mint"
+    );
+    assert_eq!(fixture.sfu.preparation_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        metrics.counter_sum(
+            "waddle.call.setup.failed",
+            &[("reason", "media_preparation_failed")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "membership_check_failed")]
+            )
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "waddle.call.setup.failed",
+                &[("reason", "token_mint_failed")]
+            )
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[tokio::test]
+async fn local_muji_exhausted_preparation_records_one_dedicated_failure_before_dispatch() {
+    assert_preparation_failure_is_recorded_before_dispatch(Adapter::Local).await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn relayed_muji_exhausted_preparation_records_one_dedicated_failure_before_dispatch() {
+    assert_preparation_failure_is_recorded_before_dispatch(Adapter::Relayed).await;
 }

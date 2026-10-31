@@ -35,7 +35,8 @@ mod turn;
 mod webhook;
 
 pub use admin::{
-    AdminCallObserver, AdminOp, ListedRoom, LiveKitAdmin, LiveParticipant, RoomOccupancy,
+    AdminCallObserver, AdminOp, ListedRoom, ListedRoomName, LiveKitAdmin, LiveParticipant,
+    RoomOccupancy,
 };
 pub use call::{
     CallGeneration, CallId, CallState, CallTeardownIntentLite, Identity, MediaCapabilities,
@@ -59,6 +60,7 @@ pub use webhook::{
 
 mod service;
 pub use service::LiveParticipantsFuture;
+pub use service::ParticipantPreparationError;
 pub use service::ParticipantPreparationFuture;
 pub use service::ParticipantRegistrationExpectation;
 pub use service::PendingMediaRetirement;

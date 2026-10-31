@@ -1,5 +1,21 @@
 # Displaced occupancy media retirement (#1732)
 
+## Review correction plan (0d1a200f8)
+
+1. Reproduce an old, generationless queued departure through the real drain
+   before changing the shared unknown-SID leave guard. Cover the matching
+   Jingle-to-outbox-to-drain path and explicit hangup/ghost convergence.
+2. Retry preparation once before fresh authorization, use room-filtered provider
+   lookup, and report preparation failure separately from membership denial.
+3. Log retirement outcomes, correct provisional-publication documentation and
+   document exact destructive rollback disposal without touching unrelated jobs.
+4. Refresh onto main, run relevant native/HTTP/SQL checks, independently review
+   the integrated result and verify final-head CI. Do not merge/deploy.
+
+Keep this pass inside these seams; do not add another generation state or
+expand into a general actor refactor. Retain actor-only cleanup checks around
+awaits; delete the duplicate check in the same synchronous post-snapshot span.
+
 ## Contract
 
 Preserve cached-token tab reload until an authorized fresh Jingle publication
@@ -32,8 +48,8 @@ occupancy generation.
    await confirmed outbox inserts; acknowledge only matching receipt IDs after
    commit. Revalidate the minted role/capabilities and generation after this
    database await; failures suppress the token and roll back only that publication.
-   Persist retirement only after that authorized publication succeeds. Attribute
-   remote retirement to observed media and local JTI revocation to logical
+   A successful provisional CAS may dispatch retirement before finalization.
+   Attribute remote retirement to observed media and local JTI revocation to logical
    occupancy; those generations can differ after cached-token recovery.
 5. Drain explicit retirement on any node, even after the room owner disappears.
    Resolve generation-only jobs from LiveKit, match captured SIDs/incarnations,
@@ -57,10 +73,19 @@ was split into independent PR #2058 and has merged.
 
 - JWT attributes carry the server-signed `waddle.occupancy_generation` and deny
   client metadata changes. The attribute identifies media, never MUC authority.
-- Preparation also runs against an empty cache after restart. A concurrent token
-  publication or a newer provider observation invalidates preparation. The
-  later publication CAS prevents authorization snapshots overwriting a newer
-  registration. No retirement is persisted by a failed publication.
+- Preparation also runs against an empty cache after restart. Room lookups are
+  filtered to the requested name. One retry covers provider failure, room
+  rotation or benign observation changes; the original signaling/occupancy
+  anchor must remain unchanged across both attempts. A newer signaling binding
+  supersedes the operation. Exhausted preparation emits `media_preparation_failed`
+  before dispatch, separately from membership denial. The later publication CAS
+  prevents authorization snapshots overwriting a newer
+  registration. A failed CAS stages no retirement. A later failed finalization
+  can still leave retirement durably queued: the provisional CAS already
+  displaced the old registration, and the reporter may have committed it before
+  final role/connection validation failed. The held replacement credential is
+  suppressed and its exact publication rolled back; unacknowledged setup is
+  indeterminate, not an all-or-nothing rollback of earlier retirement.
 - Exact takeover responsibility is durable before SID discovery. It is never
   an instruction to remove whichever generation differs from a future occupant.
   A later matching provider listing resolves a generation-only obligation.
@@ -73,7 +98,12 @@ was split into independent PR #2058 and has merged.
   credentials explicitly displaced by a newer Jingle setup are no longer valid
   recovery credentials; cache replacement follows successful call setup.
 - Ordinary departure and room-finished cleanup retain their existing lifecycle
-  and caller-held occupancy/session fences. Provider tags do not stand in for
+  and caller-held occupancy/session fences. An unscoped leave cannot supply the
+  first SID for a bound, still-unobserved registration, even if it carries a SID
+  or a matching tag. This also rejects queued departures whose tags were lost.
+  A genuine leave before its join observation waits for the existing grace and
+  two-absence-pass ghost sweep; the caller's own scoped hangup remains immediate.
+  Provider tags do not stand in for
   the current XMPP occupancy: cached media can legitimately carry an older tag.
   Ghost registration revisions are captured before provider probes internally.
   Their remaining actor cleanup never removes SFU state a second time; its
@@ -94,6 +124,8 @@ change does not atomically coordinate provider, actor and inbox state.
 LiveKit RemoveParticipant takes room and identity, not an atomic expected SID.
 A successor connecting between the final probe and that request can still be
 removed. Source: https://github.com/livekit/protocol/blob/main/protobufs/livekit_room.proto
+Follow-up for generation-specific provider identities and explicit old-token
+admission policy: https://github.com/waddle-social/waddle/issues/2095
 
 Local JTI revocation is bookkeeping: self-hosted LiveKit does not consult it at
 admission. A completed retirement is not permanent provider token revocation or

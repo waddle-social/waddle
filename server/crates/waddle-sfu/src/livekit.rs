@@ -7,6 +7,7 @@
 use crate::config::ApiSecret;
 use crate::LiveParticipant;
 use crate::LiveParticipantsFuture;
+use crate::ParticipantPreparationError;
 use crate::ParticipantRegistrationExpectation;
 use crate::PendingMediaRetirement;
 use crate::ReconcileFuture;
@@ -136,6 +137,27 @@ struct ParticipantState {
     /// registration (#1703). `None` for non-MUC registrations and
     /// webhook/probe-restored entries.
     occupant_session: Option<OccupancySessionGeneration>,
+}
+
+/// Provider observations may change during preparation; the signaling request
+/// must remain anchored to the same logical registration across both attempts.
+#[derive(Clone, PartialEq, Eq)]
+struct PreparationAnchor {
+    session: Option<SessionBinding>,
+    occupant: Option<OccupancySessionGeneration>,
+}
+
+impl PreparationAnchor {
+    fn from_participant(participant: Option<&ParticipantState>) -> Option<Self> {
+        participant.and_then(|participant| {
+            (participant.session.is_some() || participant.occupant_session.is_some()).then(|| {
+                Self {
+                    session: participant.session.clone(),
+                    occupant: participant.occupant_session,
+                }
+            })
+        })
+    }
 }
 
 impl ParticipantState {
@@ -769,13 +791,24 @@ impl LiveKitTeardownExecutor {
         identity: &Identity,
         participant_sid: Option<&ParticipantSid>,
     ) -> Result<TeardownExecution, SfuError> {
+        let finish = |execution, reason: &'static str| {
+            tracing::info!(
+                action = "retire_displaced_participant", call_id = %intent.call_id,
+                identity = %identity.as_livekit_identity(),
+                expected_generation = ?intent.occupant_session, expected_sid = ?participant_sid,
+                outcome = ?execution, reason, "displaced media retirement decision"
+            );
+            Ok(execution)
+        };
         if participant_sid.is_none() && intent.occupant_session.is_none() {
-            return Ok(TeardownExecution::Occupied);
+            return finish(TeardownExecution::Occupied, "missing_target_evidence");
         }
         if let Some(expected) = intent.room_sid.as_ref() {
             match self.live_room_sid(&intent.call_id).await? {
-                None => return Ok(TeardownExecution::Executed),
-                Some(live) if &live != expected => return Ok(TeardownExecution::StaleGeneration),
+                None => return finish(TeardownExecution::Executed, "room_absent"),
+                Some(live) if &live != expected => {
+                    return finish(TeardownExecution::StaleGeneration, "room_changed")
+                }
                 Some(_) => {}
             }
         }
@@ -786,15 +819,23 @@ impl LiveKitTeardownExecutor {
             .iter()
             .find(|live| &live.identity == identity)
         else {
-            return Ok(TeardownExecution::Executed);
+            return finish(TeardownExecution::Executed, "participant_absent");
         };
         if intent.occupant_session.is_some() && live.media_generation != intent.occupant_session {
             // Unknown legacy media is deliberately outside the attributed
             // takeover contract. A missing tag never proves old authority.
-            return Ok(TeardownExecution::StaleGeneration);
+            if live.media_generation.is_none() {
+                tracing::warn!(action = "retire_displaced_participant", call_id = %intent.call_id,
+                    identity = %identity.as_livekit_identity(), expected_generation = ?intent.occupant_session,
+                    "provider did not echo generation attribute; leaving unattributed media unchanged");
+            }
+            return finish(
+                TeardownExecution::StaleGeneration,
+                "generation_unattributed_or_changed",
+            );
         }
         let Some(live_sid) = live.participant_sid.as_ref() else {
-            return Ok(TeardownExecution::Occupied);
+            return finish(TeardownExecution::Occupied, "participant_sid_unavailable");
         };
         if participant_sid.is_some_and(|expected| expected != live_sid)
             || self.calls.get(&intent.call_id).is_some_and(|entry| {
@@ -809,24 +850,25 @@ impl LiveKitTeardownExecutor {
                 })
             })
         {
-            return Ok(TeardownExecution::StaleGeneration);
+            return finish(
+                TeardownExecution::StaleGeneration,
+                "participant_sid_changed",
+            );
         }
         // LiveKit cannot atomically compare this SID with identity-keyed removal.
         // A successor connecting during this last request remains a provider race.
         self.admin
             .remove_participant(&intent.call_id, identity)
             .await?;
-        Ok(TeardownExecution::Executed)
+        finish(TeardownExecution::Executed, "removed")
     }
 
     /// LiveKit's current sid for this room name, if the room exists.
     async fn live_room_sid(&self, call_id: &CallId) -> Result<Option<RoomSid>, SfuError> {
         Ok(self
             .admin
-            .list_rooms()
+            .lookup_room(call_id)
             .await?
-            .into_iter()
-            .find(|room| room.name.as_waddle() == Some(call_id))
             .and_then(|room| room.sid))
     }
 
@@ -1575,15 +1617,14 @@ impl LiveKitSfu {
 
         if matches!(direction, SidObservationDirection::Leave)
             && matches!(session_gate, SessionGate::Any)
-            && observed_sids.participant_sid.is_none()
             && entry.participants.get(identity).is_some_and(|state| {
                 state.occupant_session.is_some() && state.participant_sid.is_none()
             })
         {
-            // Removing displaced media may finish the old provider room before
-            // its successor connects. That room-only event says nothing about
-            // a bound registration whose media has never been observed.
-            // Explicit caller-scoped departures still apply normally.
+            // A leave's carried SID cannot establish a bound registration's
+            // first media observation: it may name the displaced participant.
+            // Even a genuine first leave waits for join/poll evidence or a
+            // confirmed ghost sweep; explicit caller-scoped departures apply.
             return SidGuardDisposition::StaleSid;
         }
 
@@ -1780,35 +1821,88 @@ impl LiveKitSfu {
         }
     }
 
-    /// Seed only provider evidence, before room authorization, under the exact
-    /// registration and observation fence captured before the remote requests.
+    fn preparation_context(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+    ) -> (
+        ParticipantRegistrationExpectation,
+        Option<PreparationAnchor>,
+    ) {
+        let entry = self.calls.get(call_id);
+        let participant = entry
+            .as_ref()
+            .and_then(|entry| entry.participants.get(identity));
+        (
+            ParticipantRegistrationExpectation {
+                revision: participant.map(|participant| participant.registration_revision),
+                publication_revision: uuid::Uuid::new_v4(),
+            },
+            PreparationAnchor::from_participant(participant),
+        )
+    }
+
+    /// Retry one transient probe/observation failure without adopting a newer
+    /// signaling request's registration as this request's publication authority.
     async fn prepare_registration(
         &self,
         call_id: &CallId,
         identity: &Identity,
-    ) -> Option<ParticipantRegistrationExpectation> {
-        let expected = self.participant_registration_expectation(call_id, identity)?;
+    ) -> Result<ParticipantRegistrationExpectation, ParticipantPreparationError> {
+        let (_, anchor) = self.preparation_context(call_id, identity);
+        for attempt in 0..2 {
+            let _permit = self
+                .admin_permits
+                .acquire()
+                .await
+                .map_err(|_| ParticipantPreparationError::ContextUnavailable)?;
+            let (expected, current_anchor) = self.preparation_context(call_id, identity);
+            if current_anchor != anchor {
+                return Err(ParticipantPreparationError::Superseded);
+            }
+            let result = self
+                .prepare_registration_attempt(call_id, identity, expected, anchor.as_ref())
+                .await;
+            match result {
+                Err(
+                    ParticipantPreparationError::ProviderUnavailable
+                    | ParticipantPreparationError::ObservationChanged,
+                ) if attempt == 0 => {}
+                outcome => return outcome,
+            }
+        }
+        Err(ParticipantPreparationError::ObservationChanged)
+    }
+
+    /// Seed only provider evidence under this attempt's registration and
+    /// observation fence; the original signaling anchor remains immutable.
+    async fn prepare_registration_attempt(
+        &self,
+        call_id: &CallId,
+        identity: &Identity,
+        expected: ParticipantRegistrationExpectation,
+        anchor: Option<&PreparationAnchor>,
+    ) -> Result<ParticipantRegistrationExpectation, ParticipantPreparationError> {
         let started = Utc::now();
-        let _permit = self.admin_permits.acquire().await.ok()?;
         let room_sid = self
             .admin
-            .list_rooms()
+            .lookup_room(call_id)
             .await
-            .ok()?
-            .into_iter()
-            .find(|room| room.name.as_waddle() == Some(call_id))
+            .map_err(|_| ParticipantPreparationError::ProviderUnavailable)?
             .and_then(|room| room.sid);
-        let occupancy = self.admin.room_occupancy(call_id).await.ok()?;
+        let occupancy = self
+            .admin
+            .room_occupancy(call_id)
+            .await
+            .map_err(|_| ParticipantPreparationError::ProviderUnavailable)?;
         let confirmed_room_sid = self
             .admin
-            .list_rooms()
+            .lookup_room(call_id)
             .await
-            .ok()?
-            .into_iter()
-            .find(|room| room.name.as_waddle() == Some(call_id))
+            .map_err(|_| ParticipantPreparationError::ProviderUnavailable)?
             .and_then(|room| room.sid);
         if confirmed_room_sid != room_sid {
-            return None;
+            return Err(ParticipantPreparationError::ObservationChanged);
         }
         let live = occupancy
             .waddle
@@ -1816,9 +1910,15 @@ impl LiveKitSfu {
             .find(|live| &live.identity == identity);
         let mut entry = match self.calls.entry(call_id.clone()) {
             dashmap::Entry::Occupied(entry) => entry.into_ref(),
-            dashmap::Entry::Vacant(entry) if expected.revision.is_none() => {
+            dashmap::Entry::Vacant(entry) => {
+                if anchor.is_some() {
+                    return Err(ParticipantPreparationError::Superseded);
+                }
+                if expected.revision.is_some() {
+                    return Err(ParticipantPreparationError::ObservationChanged);
+                }
                 let Some(live) = live.as_ref() else {
-                    return Some(expected);
+                    return Ok(expected);
                 };
                 let now = Utc::now();
                 let generation = self.next_call_generation(call_id, 0);
@@ -1840,7 +1940,7 @@ impl LiveKitSfu {
                     room_sid_observed_at: Some(started),
                     participants,
                 });
-                return Some(ParticipantRegistrationExpectation {
+                return Ok(ParticipantRegistrationExpectation {
                     revision: entry
                         .participants
                         .get(identity)
@@ -1848,9 +1948,11 @@ impl LiveKitSfu {
                     ..expected
                 });
             }
-            dashmap::Entry::Vacant(_) => return None,
         };
         let current = entry.participants.get(identity);
+        if PreparationAnchor::from_participant(current).as_ref() != anchor {
+            return Err(ParticipantPreparationError::Superseded);
+        }
         if current.map(|state| state.registration_revision) != expected.revision
             || entry.room_sid_observed_at.is_some_and(|at| at > started)
             || current.is_some_and(|state| {
@@ -1859,7 +1961,7 @@ impl LiveKitSfu {
                     .is_some_and(|at| at > started)
             })
         {
-            return None;
+            return Err(ParticipantPreparationError::ObservationChanged);
         }
         if let Some(live) = live {
             let now = Utc::now();
@@ -1880,7 +1982,7 @@ impl LiveKitSfu {
             entry.room_sid = room_sid;
             entry.room_sid_observed_at = Some(started);
         }
-        Some(ParticipantRegistrationExpectation {
+        Ok(ParticipantRegistrationExpectation {
             revision: entry
                 .participants
                 .get(identity)

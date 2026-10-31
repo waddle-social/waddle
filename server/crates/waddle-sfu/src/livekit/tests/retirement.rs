@@ -9,6 +9,8 @@ use super::{
 use crate::JoinToken;
 use crate::SfuReconciler;
 
+mod leave_guard;
+
 #[tokio::test]
 async fn older_poll_cannot_pair_a_newer_sid_with_a_displaced_generation() {
     let admin = Arc::new(RecordingAdmin::default());

@@ -84,6 +84,19 @@ pub struct PendingMediaRetirement {
     pub(crate) receipt_id: uuid::Uuid,
 }
 
+/// Why a bounded provider preparation could not establish a publishable fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ParticipantPreparationError {
+    #[error("media provider unavailable")]
+    ProviderUnavailable,
+    #[error("media observation changed during preparation")]
+    ObservationChanged,
+    #[error("signaling registration was superseded")]
+    Superseded,
+    #[error("media preparation context unavailable")]
+    ContextUnavailable,
+}
+
 pub trait SfuService: Send + Sync + 'static {
     /// Snapshot unpersisted takeover obligations, including work currently
     /// being persisted by a background sink. Reading never consumes them.
@@ -123,14 +136,15 @@ pub trait SfuService: Send + Sync + 'static {
 
     /// Recover provider media before asynchronous Muji authorization. The
     /// returned expectation fences both that observation and token publication.
-    /// A failed probe or concurrent registration returns `None`; retry the setup.
+    /// Retry one transient failure without adopting a newer signaling request.
+    /// Exhaustion or supersession returns a typed error before publication.
     fn prepare_participant_registration<'a>(
         &'a self,
         call_id: &'a CallId,
         identity: &'a Identity,
     ) -> ParticipantPreparationFuture<'a> {
         let expected = self.participant_registration_expectation(call_id, identity);
-        Box::pin(async move { expected })
+        Box::pin(async move { expected.ok_or(ParticipantPreparationError::ContextUnavailable) })
     }
 
     /// Publish a join token and signaling registration only if the exact
@@ -542,8 +556,13 @@ pub trait SfuService: Send + Sync + 'static {
 
 /// Preparation is the asynchronous adapter seam; authorization and publication
 /// remain separate, and the existing synchronous publication uses its CAS fence.
-pub type ParticipantPreparationFuture<'a> =
-    Pin<Box<dyn Future<Output = Option<ParticipantRegistrationExpectation>> + Send + 'a>>;
+pub type ParticipantPreparationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ParticipantRegistrationExpectation, ParticipantPreparationError>>
+            + Send
+            + 'a,
+    >,
+>;
 
 /// Future returned by [`SfuReconciler::reconcile_active_calls`]. Named
 /// so the boxed-future shape stays readable at the trait + impl sites.

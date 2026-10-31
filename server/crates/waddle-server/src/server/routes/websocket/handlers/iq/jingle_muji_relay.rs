@@ -146,7 +146,19 @@ pub(crate) async fn handle_relayed_muji_initiate(
     let prepare_room = jingle_muji_gate::muji_session_initiate_room(iq);
     let participant_registration = if let Some(room) = prepare_room {
         let registration =
-            jingle_muji_gate::participant_registration_expectation(state, &room, &sender).await;
+            match jingle_muji_gate::participant_registration_expectation(state, &room, &sender)
+                .await
+            {
+                Ok(registration) => registration,
+                Err(error) => {
+                    return Some(vec![build_iq_error_xml_typed(
+                        id,
+                        response_from.as_deref(),
+                        Some(response_to.as_str()),
+                        *error,
+                    )])
+                }
+            };
         match jingle_muji_gate::verify_muji_jingle_request(
             state,
             &sender,
@@ -194,7 +206,7 @@ pub(crate) async fn handle_relayed_muji_initiate(
                 error,
             )]);
         }
-        registration
+        Some(registration)
     } else {
         None
     };

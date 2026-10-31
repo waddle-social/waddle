@@ -645,6 +645,37 @@ struct IssuedMujiMedia {
     participant_sid: waddle_sfu::ParticipantSid,
 }
 
+async fn post_participant_joined_webhook(
+    server: &TestServer,
+    room: &str,
+    identity: &str,
+    media: &IssuedMujiMedia,
+) {
+    let body = serde_json::to_vec(&json!({
+        "id": format!("EV_{}", uuid::Uuid::new_v4()),
+        "event": "participant_joined",
+        "room": { "name": room },
+        "participant": {
+            "identity": identity,
+            "sid": media.participant_sid.as_str(),
+            "attributes": &media.attributes
+        },
+    }))
+    .expect("joined webhook body");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/livekit/webhook", server.http_base_url()))
+        .header("Authorization", livekit_webhook_auth(&body))
+        .body(body)
+        .send()
+        .await
+        .expect("post participant joined webhook");
+    assert!(
+        response.status().is_success(),
+        "LiveKit join failed: {}",
+        response.status()
+    );
+}
+
 async fn post_participant_left_webhook(
     server: &TestServer,
     room: &str,
@@ -1141,6 +1172,7 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
     let admin_media = send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
 
     let admin_web_full_jid = admin_web.full_jid.clone().expect("admin/web has full jid");
+    post_participant_joined_webhook(&server, &room, &admin_web_full_jid, &admin_media).await;
     post_participant_left_webhook(&server, &room, &admin_web_full_jid, &admin_media).await;
     admin_mobile
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
@@ -1242,6 +1274,9 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
     let bob_media = send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
 
     let admin_full_jid = admin_web.full_jid.clone().expect("admin full jid");
+    let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
+    post_participant_joined_webhook(&server, &room, &admin_full_jid, &admin_media).await;
+    post_participant_joined_webhook(&server, &room, &bob_full_jid, &bob_media).await;
     post_participant_left_webhook(&server, &room, &admin_full_jid, &admin_media).await;
     recv_muji_leave_reflection(&mut bob, &room, "admin").await;
     assert_no_call_thread_ended(
@@ -1252,8 +1287,8 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
 
     let rejoined_admin_media =
         send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
+    post_participant_joined_webhook(&server, &room, &admin_full_jid, &rejoined_admin_media).await;
 
-    let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
     post_participant_left_webhook(&server, &room, &bob_full_jid, &bob_media).await;
     recv_muji_leave_reflection(&mut admin_web, &room, "bob").await;
     assert_no_call_thread_ended(
@@ -1356,6 +1391,9 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     let mobile_media = send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
 
     let web_full_jid = web.full_jid.clone().expect("web has full jid");
+    let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
+    post_participant_joined_webhook(&server, &room, &web_full_jid, &web_media).await;
+    post_participant_joined_webhook(&server, &room, &mobile_full_jid, &mobile_media).await;
     post_participant_left_webhook(&server, &room, &web_full_jid, &web_media).await;
     let no_early_ended = tokio::time::timeout(std::time::Duration::from_millis(750), async {
         mobile
@@ -1370,7 +1408,6 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
         "first participant leaving must not emit call-thread-ended while another SFU participant remains"
     );
 
-    let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
     post_participant_left_webhook(&server, &room, &mobile_full_jid, &mobile_media).await;
 
     let ended_frame = web

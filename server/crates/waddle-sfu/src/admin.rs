@@ -166,6 +166,21 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>>;
 
+    /// Look up one exact room. Test adapters may reuse their inventory;
+    /// production sends LiveKit's names filter instead of a global listing.
+    fn lookup_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ListedRoom>, SfuError>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(self
+                .list_rooms()
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.name.as_waddle() == Some(room)))
+        })
+    }
+
     fn remove_participant<'a>(
         &'a self,
         room: &'a CallId,
@@ -389,43 +404,57 @@ impl ReqwestLiveKitAdmin {
             body: truncate(body, 256),
         })
     }
+    async fn list_rooms_with_names(&self, names: Vec<String>) -> Result<Vec<ListedRoom>, SfuError> {
+        let result = async {
+            let token = self.mint_list_rooms_token()?;
+            let url = self
+                .base_url
+                .join("twirp/livekit.RoomService/ListRooms")
+                .map_err(SfuError::AdminUrl)?;
+            let response = self
+                .http
+                .post(url)
+                .bearer_auth(token)
+                .json(&ListRoomsRequest { names })
+                .send()
+                .await
+                .map_err(SfuError::AdminRequest)?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response
+                    .json::<ListRoomsResponse>()
+                    .await
+                    .map_err(SfuError::AdminRequest)?
+                    .rooms);
+            }
+            let body = response.text().await.unwrap_or_default();
+            Err(SfuError::AdminCallFailed {
+                status: status.as_u16(),
+                body: truncate(body, 256),
+            })
+        }
+        .await;
+        self.observe(AdminOp::ListRooms, result)
+    }
 }
 
 impl LiveKitAdmin for ReqwestLiveKitAdmin {
     fn list_rooms(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>> {
+        Box::pin(self.list_rooms_with_names(Vec::new()))
+    }
+
+    fn lookup_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ListedRoom>, SfuError>> + Send + 'a>> {
         Box::pin(async move {
-            let result = async {
-                let token = self.mint_list_rooms_token()?;
-                let url = self
-                    .base_url
-                    .join("twirp/livekit.RoomService/ListRooms")
-                    .map_err(SfuError::AdminUrl)?;
-                let response = self
-                    .http
-                    .post(url)
-                    .bearer_auth(token)
-                    .json(&ListRoomsRequest::default())
-                    .send()
-                    .await
-                    .map_err(SfuError::AdminRequest)?;
-                let status = response.status();
-                if status.is_success() {
-                    let response = response
-                        .json::<ListRoomsResponse>()
-                        .await
-                        .map_err(SfuError::AdminRequest)?;
-                    return Ok(response.rooms);
-                }
-                let body = response.text().await.unwrap_or_default();
-                Err(SfuError::AdminCallFailed {
-                    status: status.as_u16(),
-                    body: truncate(body, 256),
-                })
-            }
-            .await;
-            self.observe(AdminOp::ListRooms, result)
+            Ok(self
+                .list_rooms_with_names(vec![room.as_str().to_owned()])
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.name.as_waddle() == Some(room)))
         })
     }
 
@@ -1064,6 +1093,68 @@ mod tests {
             })
             .expect("grant serializes"),
             serde_json::json!({ "roomList": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_room_sends_a_names_filter_and_selects_the_exact_returned_room() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("test address");
+        let request = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("admin connection");
+            let mut bytes = Vec::new();
+            let (body_start, body_length) = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("request bytes");
+                assert!(read > 0, "request must include headers and JSON body");
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&bytes[..end]).expect("headers");
+                    assert!(headers.starts_with("POST /twirp/livekit.RoomService/ListRooms "));
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("body length"))
+                        })
+                        .expect("content length");
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < body_start + body_length {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("request body");
+                assert!(read > 0, "complete request body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[body_start..body_start + body_length])
+                    .expect("request JSON");
+            let response = r#"{"rooms":[{"name":"other@muc.example.com","sid":"RM_other"},{"name":"wanted@muc.example.com","sid":"RM_wanted"}]}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response,
+            ).as_bytes()).await.expect("response");
+            body
+        });
+        let mut admin = test_admin();
+        admin.base_url = Url::parse(&format!("http://{address}/")).expect("test URL");
+        let room = CallId::try_new("wanted@muc.example.com").expect("call");
+        let found = admin
+            .lookup_room(&room)
+            .await
+            .expect("lookup")
+            .expect("wanted room");
+        assert_eq!(found.name.as_waddle(), Some(&room));
+        assert_eq!(found.sid, Some(RoomSid::try_new("RM_wanted").expect("SID")));
+        assert_eq!(
+            request.await.expect("request task"),
+            serde_json::json!({ "names": ["wanted@muc.example.com"] })
         );
     }
 
