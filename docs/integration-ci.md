@@ -7,8 +7,12 @@ gate.** A candidate can edit the workflow, generator, adapter, tests or task
 definitions and manufacture success. Action SHA pins, read-only permissions,
 report validation and green checks do not establish an independent trust boundary.
 This draft prepares verification machinery; the trusted external/organization
-boundary and protected task contract remain open design blockers. No repository
-rules or runner settings are changed by this addition.
+boundary and protected task contract remain open design blockers for production
+activation, not for the pre-production merge stack. Under the
+[2026-10-31 restart-order decision](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6537418568),
+this CI-changing PR may merge only after exact-head review, successful hosted CI,
+explicit human review, and the existing merge queue. No repository rules or
+runner settings are changed by this addition.
 
 ## Coverage and candidate identity
 
@@ -118,7 +122,8 @@ trigger is intentionally preserved alongside manual dispatch; publication itself
 is not run as local verification. No trigger suppression or implicit version
 fallback is used. Checksums provide release-integrity hardening, not the missing
 independent trusted-verifier boundary. Keep this PR draft until hosted exact-head
-execution and the remaining architecture/authority work are resolved.
+execution and explicit human review of its CI changes are complete. The remaining
+architecture/authority work must be resolved before production activation.
 
 Each runner rechecks exact HEAD, base commit availability, ancestry and complete
 NUL-safe diff success. Deleted, empty, malformed, stale or empty-pipeline
@@ -229,16 +234,21 @@ GitHub documents the separate merge-group trigger and skipped-job behavior in
 [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group)
 and [troubleshooting required checks](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 
-## Bootstrap evidence and remaining work
+## Bootstrap evidence and remaining production gate
 
-There is no executable main-activation sequence approved for this draft. Keep
-federation merges blocked while the trusted boundary and protected task contract
-are unresolved. A same-repository context requirement must not be substituted
-for that work. A future bootstrap must establish and read back the independently
-trusted rule before admitting candidates, retain an effective exclusive freeze
-through the transition, and prove candidate failure/missing evidence cannot
-advance main. The previously proposed no-bypass update freeze still needs queue
-behavior proof; administrators' ability to edit rules also needs coordination.
+There is no production-activation sequence approved for this draft. The
+[restart-order decision](https://github.com/waddle-social/waddle/issues/2047#issuecomment-6537418568)
+allows the pre-production federation stack to merge through exact-head review,
+hosted CI, and the existing merge queue; CI-changing PRs additionally require
+explicit human review. Production activation remains blocked until the trusted
+boundary and protected task contract are implemented and verified. A
+same-repository context requirement must not be substituted for that work.
+
+Before production activation, the bootstrap must establish and read back the
+independently trusted rule, retain an effective exclusive freeze through the
+transition, and prove candidate failure or missing evidence cannot advance main.
+The previously proposed no-bypass update freeze still needs queue behavior proof;
+administrators' ability to edit rules also needs coordination.
 
 Controlled canary evidence on 2026-10-30:
 [#2072](https://github.com/waddle-social/waddle/pull/2072) used ruleset 26220154,
