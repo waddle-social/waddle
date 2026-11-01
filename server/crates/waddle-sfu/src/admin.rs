@@ -30,8 +30,11 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use waddle_xmpp_core::OccupancySessionGeneration;
 
-use crate::call::{CallId, Identity, MediaCapabilities, ParticipantSid, RoomSid};
+use crate::call::{
+    CallId, Identity, MediaCapabilities, ParticipantAttributes, ParticipantSid, RoomSid,
+};
 use crate::config::{ApiKey, ApiSecret, WebsocketUrl};
 use crate::error::SfuError;
 use crate::token::JWT_CLOCK_SKEW;
@@ -84,9 +87,18 @@ pub struct RoomOccupancy {
     /// LiveKit participant SID when the listing supplied one. Reconciliation
     /// carries that SID into restored registry entries so SID-fenced teardown
     /// remains decidable after a process restart.
-    pub waddle: Vec<(Identity, Option<ParticipantSid>)>,
+    pub waddle: Vec<LiveParticipant>,
     /// Connected participants whose identity is not one of ours.
     pub foreign: usize,
+}
+
+/// One authenticated provider observation. Generation is media evidence only;
+/// it does not establish logical MUC occupancy after restoration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveParticipant {
+    pub identity: Identity,
+    pub participant_sid: Option<ParticipantSid>,
+    pub media_generation: Option<OccupancySessionGeneration>,
 }
 
 /// A LiveKit room name classified once at the admin boundary (#1612
@@ -138,7 +150,7 @@ impl RoomOccupancy {
             && self
                 .waddle
                 .iter()
-                .all(|(identity, _participant_sid)| identity == departing)
+                .all(|participant| &participant.identity == departing)
     }
 }
 
@@ -153,6 +165,21 @@ pub trait LiveKitAdmin: Send + Sync + 'static {
     fn list_rooms(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>>;
+
+    /// Look up one exact room. Test adapters may reuse their inventory;
+    /// production sends LiveKit's names filter instead of a global listing.
+    fn lookup_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ListedRoom>, SfuError>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(self
+                .list_rooms()
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.name.as_waddle() == Some(room)))
+        })
+    }
 
     fn remove_participant<'a>(
         &'a self,
@@ -377,43 +404,57 @@ impl ReqwestLiveKitAdmin {
             body: truncate(body, 256),
         })
     }
+    async fn list_rooms_with_names(&self, names: Vec<String>) -> Result<Vec<ListedRoom>, SfuError> {
+        let result = async {
+            let token = self.mint_list_rooms_token()?;
+            let url = self
+                .base_url
+                .join("twirp/livekit.RoomService/ListRooms")
+                .map_err(SfuError::AdminUrl)?;
+            let response = self
+                .http
+                .post(url)
+                .bearer_auth(token)
+                .json(&ListRoomsRequest { names })
+                .send()
+                .await
+                .map_err(SfuError::AdminRequest)?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response
+                    .json::<ListRoomsResponse>()
+                    .await
+                    .map_err(SfuError::AdminRequest)?
+                    .rooms);
+            }
+            let body = response.text().await.unwrap_or_default();
+            Err(SfuError::AdminCallFailed {
+                status: status.as_u16(),
+                body: truncate(body, 256),
+            })
+        }
+        .await;
+        self.observe(AdminOp::ListRooms, result)
+    }
 }
 
 impl LiveKitAdmin for ReqwestLiveKitAdmin {
     fn list_rooms(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ListedRoom>, SfuError>> + Send + '_>> {
+        Box::pin(self.list_rooms_with_names(Vec::new()))
+    }
+
+    fn lookup_room<'a>(
+        &'a self,
+        room: &'a CallId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ListedRoom>, SfuError>> + Send + 'a>> {
         Box::pin(async move {
-            let result = async {
-                let token = self.mint_list_rooms_token()?;
-                let url = self
-                    .base_url
-                    .join("twirp/livekit.RoomService/ListRooms")
-                    .map_err(SfuError::AdminUrl)?;
-                let response = self
-                    .http
-                    .post(url)
-                    .bearer_auth(token)
-                    .json(&ListRoomsRequest::default())
-                    .send()
-                    .await
-                    .map_err(SfuError::AdminRequest)?;
-                let status = response.status();
-                if status.is_success() {
-                    let response = response
-                        .json::<ListRoomsResponse>()
-                        .await
-                        .map_err(SfuError::AdminRequest)?;
-                    return Ok(response.rooms);
-                }
-                let body = response.text().await.unwrap_or_default();
-                Err(SfuError::AdminCallFailed {
-                    status: status.as_u16(),
-                    body: truncate(body, 256),
-                })
-            }
-            .await;
-            self.observe(AdminOp::ListRooms, result)
+            Ok(self
+                .list_rooms_with_names(vec![room.as_str().to_owned()])
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.name.as_waddle() == Some(room)))
         })
     }
 
@@ -493,9 +534,11 @@ impl LiveKitAdmin for ReqwestLiveKitAdmin {
                 let mut occupancy = RoomOccupancy::default();
                 for participant in resp.participants {
                     match participant.identity.parse::<jid::FullJid>() {
-                        Ok(jid) => occupancy
-                            .waddle
-                            .push((Identity::from_jid(jid), participant.sid)),
+                        Ok(jid) => occupancy.waddle.push(LiveParticipant {
+                            identity: Identity::from_jid(jid),
+                            participant_sid: participant.sid,
+                            media_generation: participant.attributes.media_generation,
+                        }),
                         Err(_) => occupancy.foreign += 1,
                     }
                 }
@@ -660,6 +703,8 @@ struct ParticipantPermission {
     can_publish: bool,
     #[serde(rename = "canPublishData")]
     can_publish_data: bool,
+    #[serde(rename = "canUpdateMetadata")]
+    can_update_metadata: bool,
 }
 
 impl ParticipantPermission {
@@ -668,6 +713,7 @@ impl ParticipantPermission {
             can_subscribe: capabilities.can_subscribe,
             can_publish: capabilities.can_publish,
             can_publish_data: capabilities.can_publish_data,
+            can_update_metadata: false,
         }
     }
 }
@@ -680,7 +726,8 @@ struct ListParticipantsRequest {
 
 /// Twirp response for `livekit.RoomService/ListParticipants`. LiveKit
 /// returns a `participants` array of `ParticipantInfo`; only the
-/// `identity` and `sid` are load-bearing for ghost reconciliation. Other
+/// `identity`, `sid` and generation attributes are load-bearing for media
+/// reconciliation. Other
 /// fields (`state`, `tracks`, …) are ignored via serde's default unknown-field
 /// handling.
 #[derive(Deserialize)]
@@ -695,6 +742,8 @@ struct ListedParticipant {
     identity: String,
     #[serde(default)]
     sid: Option<ParticipantSid>,
+    #[serde(default)]
+    attributes: ParticipantAttributes,
 }
 
 /// Twirp error envelope: a JSON object with `code` and `msg` fields
@@ -940,6 +989,38 @@ mod tests {
     }
 
     #[test]
+    fn participant_listing_parses_generation_attributes_without_inventing_absent_authority() {
+        let generation: waddle_xmpp_core::OccupancySessionGeneration =
+            "2ad5f39a-638e-4ba3-87ab-d0a9be491f5b"
+                .parse()
+                .expect("generation");
+        let parsed: ListParticipantsResponse = serde_json::from_value(serde_json::json!({
+            "participants": [
+                {"identity": "alice@waddle.social/desktop", "sid": "PA_tagged", "attributes": {
+                    "waddle.occupancy_generation": generation.to_string(), "display": "ignored"
+                }},
+                {"identity": "bob@waddle.social/mobile", "sid": "PA_untagged"}
+            ]
+        }))
+        .expect("listing");
+        assert_eq!(
+            parsed.participants[0].attributes.media_generation,
+            Some(generation)
+        );
+        assert_eq!(parsed.participants[1].attributes.media_generation, None);
+        let malformed = serde_json::from_value::<ListParticipantsResponse>(serde_json::json!({
+            "participants": [{"identity": "alice@waddle.social/desktop", "attributes": {
+                "waddle.occupancy_generation": "not-a-generation"
+            }}]
+        }))
+        .expect("malformed optional evidence does not invalidate the listing");
+        assert_eq!(
+            malformed.participants[0].attributes.media_generation, None,
+            "malformed attributes provide no generation evidence"
+        );
+    }
+
+    #[test]
     fn list_participants_response_parses_livekit_wire_shape() {
         // Lock the LiveKit `ListParticipantsResponse` wire shape: a
         // `participants` array whose elements carry typed `identity` and
@@ -1015,6 +1096,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lookup_room_sends_a_names_filter_and_selects_the_exact_returned_room() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("test address");
+        let request = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("admin connection");
+            let mut bytes = Vec::new();
+            let (body_start, body_length) = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("request bytes");
+                assert!(read > 0, "request must include headers and JSON body");
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&bytes[..end]).expect("headers");
+                    assert!(headers.starts_with("POST /twirp/livekit.RoomService/ListRooms "));
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("body length"))
+                        })
+                        .expect("content length");
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < body_start + body_length {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.expect("request body");
+                assert!(read > 0, "complete request body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[body_start..body_start + body_length])
+                    .expect("request JSON");
+            let response = r#"{"rooms":[{"name":"other@muc.example.com","sid":"RM_other"},{"name":"wanted@muc.example.com","sid":"RM_wanted"}]}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response,
+            ).as_bytes()).await.expect("response");
+            body
+        });
+        let mut admin = test_admin();
+        admin.base_url = Url::parse(&format!("http://{address}/")).expect("test URL");
+        let room = CallId::try_new("wanted@muc.example.com").expect("call");
+        let found = admin
+            .lookup_room(&room)
+            .await
+            .expect("lookup")
+            .expect("wanted room");
+        assert_eq!(found.name.as_waddle(), Some(&room));
+        assert_eq!(found.sid, Some(RoomSid::try_new("RM_wanted").expect("SID")));
+        assert_eq!(
+            request.await.expect("request task"),
+            serde_json::json!({ "names": ["wanted@muc.example.com"] })
+        );
+    }
+
     #[test]
     fn update_participant_request_serializes_livekit_wire_shape() {
         // Pin the Twirp `UpdateParticipant` body: addressing pair plus
@@ -1037,6 +1180,7 @@ mod tests {
                     "canSubscribe": true,
                     "canPublish": false,
                     "canPublishData": false,
+                    "canUpdateMetadata": false,
                 }
             })
         );

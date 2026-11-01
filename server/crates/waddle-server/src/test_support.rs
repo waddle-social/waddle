@@ -13,6 +13,21 @@ use crate::notification_settings_projection::NotificationSettingsProjectionStore
 use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use std::sync::Arc;
 
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::AttestedPgPool;
+#[cfg(feature = "test-support")]
+use crate::db::Database;
+#[cfg(feature = "test-support")]
+use crate::ingress_substrate::PostgresIngressSubstrate;
+#[cfg(feature = "test-support")]
+use crate::ingress_uow::{
+    begin_raw_ingress_writer_with_capability, IngressUnitOfWork, IngressUowError,
+};
+#[cfg(feature = "test-support")]
+use crate::{config::LineageConfig, db::physical_attestation::AttestedPostgresWriterCapability};
+#[cfg(feature = "test-support")]
+use sqlx::postgres::PgPool;
+
 pub use crate::server::routes::websocket::muc_invites::{
     claim_invite, list_invites, record_invite_at, InviteStorageError, OutstandingInvite,
     RecordOutcome,
@@ -40,6 +55,164 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
         || std::future::ready(None),
     )
     .await
+}
+
+/// Consume a physically attested SQLx pool into the crate's database wrapper.
+/// The pool and its opaque writer capability stay paired by construction.
+#[cfg(feature = "test-support")]
+pub fn database_from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Database {
+    Database::from_attested_postgres_pool(name, pool)
+}
+
+/// Wrap an ordinary PostgreSQL pool without attaching any physical writer
+/// authority. This supports wrong-pool identity checks in dark tests.
+#[cfg(feature = "test-support")]
+pub fn database_from_unattested_postgres_pool(name: &str, pool: PgPool) -> Database {
+    Database::from_postgres_pool(name, pool)
+}
+
+/// Run the dark raw ingress writer against the attested pool carried by
+/// `authority`. Supplying a different `database` must fail before DML.
+#[cfg(feature = "test-support")]
+pub async fn attested_raw_ingress_candidate_write(
+    database: &Database,
+    authority: &Database,
+    key: uuid::Uuid,
+) -> Result<(), IngressUowError> {
+    let capability = writer_capability(authority)?;
+    let mut transaction = begin_raw_ingress_writer_with_capability(database, &capability).await?;
+    transaction
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![31_u8; 32]],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Run the pre-capability raw writer against a disposable relation-guard
+/// candidate. The candidate must reject it for lacking the schema prelock.
+#[cfg(feature = "test-support")]
+pub async fn legacy_ingress_candidate_write(
+    database: &Database,
+    key: uuid::Uuid,
+) -> Result<(), IngressUowError> {
+    let mut transaction = crate::ingress_uow::begin_raw_ingress_writer(database).await?;
+    transaction
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![34_u8; 32]],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Run an attested candidate write with an intentionally stale transaction
+/// epoch proof. The candidate must reject the guarded DML.
+#[cfg(feature = "test-support")]
+pub async fn attested_raw_candidate_write_with_epoch(
+    database: &Database,
+    authority: &Database,
+    key: uuid::Uuid,
+    epoch: &str,
+) -> Result<(), IngressUowError> {
+    let capability = writer_capability(authority)?;
+    let mut transaction = begin_raw_ingress_writer_with_capability(database, &capability).await?;
+    transaction
+        .execute(
+            "SELECT set_config('waddle.protocol_epoch', ?, true)",
+            crate::db_params![epoch.to_owned()],
+        )
+        .await?;
+    transaction
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![35_u8; 32]],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Exercise the dark UoW entrypoint with the database's own physical writer
+/// capability, without returning its raw transaction to the integration test.
+#[cfg(feature = "test-support")]
+pub async fn attested_uow_candidate_write(
+    database: &Database,
+    lineage: LineageConfig,
+    key: uuid::Uuid,
+) -> Result<(), IngressUowError> {
+    let unit_of_work =
+        IngressUnitOfWork::open(database.clone(), lineage)?.with_attested_pg_writer()?;
+    let mut transaction = unit_of_work.begin().await?;
+    transaction
+        .transaction_mut()
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![32_u8; 32]],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Hold an attested UoW's epoch row lock until the caller releases it. Only
+/// the backend PID crosses the test-support boundary; the raw transaction
+/// remains private to this helper.
+#[cfg(feature = "test-support")]
+pub async fn hold_attested_uow_epoch_lock(
+    database: Database,
+    lineage: LineageConfig,
+    ready: tokio::sync::oneshot::Sender<i32>,
+    release: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), IngressUowError> {
+    let unit_of_work = IngressUnitOfWork::open(database, lineage)?.with_attested_pg_writer()?;
+    let mut transaction = unit_of_work.begin().await?;
+    let mut rows = transaction
+        .transaction_mut()
+        .query("SELECT pg_backend_pid()", ())
+        .await?;
+    let pid = rows
+        .next()
+        .await?
+        .ok_or(IngressUowError::EpochProofMissing)?
+        .get::<i32>(0)?;
+    drop(rows);
+    let _ = ready.send(pid);
+    let _ = release.await;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Exercise the dark substrate writer entrypoint without exposing the raw
+/// transaction to the integration test.
+#[cfg(feature = "test-support")]
+pub async fn attested_substrate_candidate_write(
+    database: &Database,
+    key: uuid::Uuid,
+) -> Result<(), IngressUowError> {
+    let capability = writer_capability(database)?;
+    let substrate = PostgresIngressSubstrate::open(database.clone())?;
+    let mut transaction = substrate.begin_with_attested_pg_writer(&capability).await?;
+    transaction
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![33_u8; 32]],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+fn writer_capability(
+    database: &Database,
+) -> Result<AttestedPostgresWriterCapability, IngressUowError> {
+    database
+        .attested_pg_writer_capability()
+        .ok_or(IngressUowError::AttestedPoolRequired)
 }
 
 /// Build a minimal WebSocket state over a caller-owned database pool and ingress authority.
