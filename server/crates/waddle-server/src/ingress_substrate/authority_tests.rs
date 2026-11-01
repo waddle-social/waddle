@@ -459,15 +459,22 @@ async fn postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation() 
     insert_intent(&mut setup, key, [1; 32]).await;
     setup.commit().await.expect("commit setup");
 
+    let application_name = format!("waddle-receipt-rc-{}", Uuid::new_v4().simple());
+    let writer_application_name = application_name.clone();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .after_connect(|connection, _| {
+        .after_connect(move |connection, _| {
+            let application_name = writer_application_name.clone();
             Box::pin(async move {
                 sqlx::query(
                     "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
                 )
-                .execute(connection)
+                .execute(&mut *connection)
                 .await?;
+                sqlx::query("SELECT pg_catalog.set_config('application_name', $1, false)")
+                    .bind(application_name)
+                    .execute(&mut *connection)
+                    .await?;
                 Ok(())
             })
         })
@@ -502,9 +509,10 @@ async fn postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation() 
     let mut blocked = false;
     for _ in 0..400 {
         let waiting: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1",
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query = $1 AND application_name = $2",
         )
-        .bind("%SELECT epoch FROM ingress_protocol_epoch%")
+        .bind(super::substrate::READ_EPOCH_POSTGRES)
+        .bind(&application_name)
         .fetch_one(admin)
         .await
         .expect("inspect epoch waiter");
