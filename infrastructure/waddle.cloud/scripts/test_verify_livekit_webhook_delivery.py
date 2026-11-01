@@ -11,7 +11,7 @@ import unittest
 
 
 VERIFIER = Path(__file__).with_name("verify-livekit-webhook-delivery.py")
-SECRET_MARKER = "synthetic-secret-that-must-never-appear-in-output"
+SECRET_MARKER = "sensitive-fixture-secret"
 
 
 class WebhookCredentialRedactionTests(unittest.TestCase):
