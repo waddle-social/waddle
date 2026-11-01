@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use jid::{BareJid, FullJid};
 use waddle_sfu::{
-    CallGeneration, CallId, Identity, ListedRoom, LiveKitAdmin, MediaCapabilities,
+    CallGeneration, CallId, Identity, ListedRoom, LiveKitAdmin, LiveParticipant, MediaCapabilities,
     ObservedCallSids, ParticipantSid, RoomOccupancy, RoomSid, SfuError, SfuService,
 };
 use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
@@ -209,8 +209,11 @@ async fn state_with_executor(
     state
 }
 
+mod displaced;
 mod drain_basics;
+mod ghost_clear;
 mod muji;
+mod queued_takeover_leave;
 mod retention_fences;
 mod session_fence;
 mod store_queue;
