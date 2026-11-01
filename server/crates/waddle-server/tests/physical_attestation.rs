@@ -419,6 +419,87 @@ async fn poisoned_idle_session_is_discarded_before_checkout() {
     fixture.cleanup().await;
 }
 
+#[tokio::test]
+async fn raw_repeatable_read_snapshot_cannot_attest_stale_lineage() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let config = install(&fixture.admin_options, fixture.config())
+        .await
+        .expect("install attestation");
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_millis(500),
+    )
+    .expect("attested pool");
+    let mut member = pool.acquire().await.expect("initial attested checkout");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *member)
+        .await
+        .expect("backend PID");
+    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *member)
+        .await
+        .expect("start raw repeatable-read transaction");
+    let stored: String = sqlx::query_scalar(&format!(
+        "SELECT lineage_uuid FROM {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .fetch_one(&mut *member)
+    .await
+    .expect("pin old lineage snapshot");
+    assert_eq!(stored, fixture.lineage.lineage_uuid.to_string());
+
+    let replacement = uuid::Uuid::new_v4().to_string();
+    let updated = sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(&replacement)
+    .execute(&fixture.admin)
+    .await
+    .expect("commit changed lineage outside pinned snapshot");
+    assert_eq!(updated.rows_affected(), 1);
+    drop(member);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM pg_catalog.pg_stat_activity WHERE pid = $1")
+                .bind(pid)
+                .fetch_optional(&fixture.admin)
+                .await
+                .expect("inspect returned backend");
+        if pool.num_idle() == 1 && state.as_deref() == Some("idle in transaction") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "raw transaction was not returned to the idle pool"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        pool.acquire().await.is_err(),
+        "old snapshot must not attest after committed lineage change"
+    );
+
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(fixture.lineage.lineage_uuid.to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("restore fixture lineage");
+    let replacement_member = pool.acquire().await.expect("restored lineage attests");
+    drop(replacement_member);
+    pool.close().await;
+    fixture.cleanup().await;
+}
+
 fn url_with_schema(base: &str, schema: &str) -> String {
     let mut url = url::Url::parse(base).expect("PostgreSQL test URL");
     let retained: Vec<_> = url
@@ -493,7 +574,6 @@ async fn committed_function_attests_every_physical_connection_and_replacement() 
         "pool expansion needs a physical connection"
     );
     drop(first);
-    drop(second);
 
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(first_pid)
@@ -510,7 +590,12 @@ async fn committed_function_attests_every_physical_connection_and_replacement() 
         .await
         .expect("replacement backend PID");
     assert_ne!(replacement_pid, first_pid);
+    assert_ne!(
+        replacement_pid, second_pid,
+        "surviving backend remains checked out during replacement"
+    );
     drop(replacement);
+    drop(second);
     pool.close().await;
 
     // The same check rejects a privileged login even if its DSN can reach
@@ -562,10 +647,32 @@ async fn wrong_identity_revoked_grant_and_spoofed_schema_never_lend_a_connection
     .execute(&fixture.admin)
     .await
     .expect("spoof schema usage");
-    let spoof_url = url_with_schema(&fixture.base_url, &spoof);
+    sqlx::query(&format!(
+        "CREATE FUNCTION {spoof}.current_schema() RETURNS text \
+         LANGUAGE sql AS $$ SELECT '{}'::text $$",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("shadow catalog current_schema");
+    let spoof_url = url_with_schema(&fixture.base_url, &format!("{spoof},pg_catalog"));
     let spoof_options = PgConnectOptions::from_str(&spoof_url)
         .expect("spoof options")
         .username(&fixture.runtime);
+    let mut spoof_connection = PgConnection::connect_with(&spoof_options)
+        .await
+        .expect("spoof connection");
+    let shadowed_schema: String = sqlx::query_scalar("SELECT current_schema()::text")
+        .fetch_one(&mut spoof_connection)
+        .await
+        .expect("unqualified function is shadowed");
+    let actual_schema: String = sqlx::query_scalar("SELECT pg_catalog.current_schema()::text")
+        .fetch_one(&mut spoof_connection)
+        .await
+        .expect("qualified catalog function");
+    assert_eq!(shadowed_schema, fixture.target);
+    assert_eq!(actual_schema, spoof);
+    drop(spoof_connection);
     let spoofed = attested_pool(spoof_options, config.clone(), 1, Duration::from_millis(350))
         .expect("spoof pool is constructible");
     assert!(
@@ -672,5 +779,48 @@ async fn inherited_outsider_function_grant_aborts_before_commit() {
     .execute(&fixture.admin)
     .await
     .expect("remove administrator default function grant");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inherited_runtime_grant_option_aborts_before_commit() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    sqlx::query(&format!(
+        "ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO {} WITH GRANT OPTION",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("seed runtime default grant option");
+
+    let error = install(&fixture.admin_options, fixture.config())
+        .await
+        .expect_err("runtime grant option must abort installer");
+    assert!(
+        matches!(
+            &error,
+            PhysicalAttestationError::Mismatch {
+                field: "function ACL grantees"
+            }
+        ),
+        "runtime grant option must be detected before COMMIT: {error:?}"
+    );
+    let role_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pg_catalog.pg_roles WHERE rolname = $1")
+            .bind(&fixture.definer)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("read rolled-back definer role");
+    assert_eq!(role_count, 0, "definer role must roll back");
+
+    sqlx::query(&format!(
+        "ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove runtime default grant option");
     fixture.cleanup().await;
 }

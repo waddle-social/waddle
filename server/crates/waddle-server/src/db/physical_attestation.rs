@@ -267,11 +267,13 @@ async fn verify_installed_roles(
          pg_catalog.has_function_privilege($1, 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE'), \
          NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
                          COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a \
-                     WHERE a.grantee NOT IN (p.proowner, runtime.oid)), \
+                     WHERE a.grantee NOT IN (p.proowner, runtime.oid) \
+                        OR (a.grantee = runtime.oid AND a.is_grantable)), \
          NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
                          COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a \
                      WHERE a.grantee NOT IN (n.nspowner, runtime.oid) \
-                        OR (a.grantee = runtime.oid AND a.privilege_type <> 'USAGE')), \
+                        OR (a.grantee = runtime.oid AND \
+                            (a.privilege_type <> 'USAGE' OR a.is_grantable))), \
          NOT pg_catalog.has_schema_privilege($4, n.oid, 'CREATE') \
          FROM pg_catalog.pg_roles r \
          JOIN pg_catalog.pg_roles runtime ON runtime.rolname = $4 \
@@ -442,9 +444,11 @@ pub async fn attest_connection(
     connection: &mut PgConnection,
     config: &PhysicalAttestationConfig,
 ) -> Result<(), PhysicalAttestationError> {
-    let row = sqlx::query("SELECT session_user::text, current_user::text, current_schema()::text")
-        .fetch_one(&mut *connection)
-        .await?;
+    let row = sqlx::query(
+        "SELECT session_user::text, current_user::text, pg_catalog.current_schema()::text",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
     let session_user: String = row.try_get(0)?;
     let current_user: String = row.try_get(1)?;
     let current_schema: Option<String> = row.try_get(2)?;
@@ -492,6 +496,12 @@ pub fn attested_pool(
         .before_acquire(move |connection, _| {
             let config = config.clone();
             Box::pin(async move {
+                // SQLx tracks ReadyForQuery transaction state internally but
+                // does not expose it to pool hooks. A borrower can issue raw
+                // BEGIN and return a pinned REPEATABLE READ snapshot. End any
+                // such transaction before reading the current lineage. A
+                // failed ROLLBACK hard-closes the connection.
+                sqlx::query("ROLLBACK").execute(&mut *connection).await?;
                 attest_connection(connection, &config)
                     .await
                     .map(|()| true)
