@@ -2,7 +2,6 @@ use crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL;
 use crate::call_teardown_outbox::CallTeardownIntent;
 use crate::call_teardown_outbox::CallTeardownOutboxStore;
 use crate::call_teardown_outbox::CallTeardownPersistenceSupervisor;
-use crate::call_teardown_outbox::TeardownTarget;
 #[cfg(feature = "clustering")]
 use crate::clustering::allowlist::PostgresAllowlistStore;
 #[cfg(feature = "clustering")]
@@ -859,25 +858,7 @@ async fn create_websocket_state(
                 Ok(sfu_impl) => {
                     let sink_store = Arc::clone(&call_teardown_outbox);
                     let failure_sink: waddle_sfu::TeardownFailureSink = Arc::new(move |lite| {
-                        let target = match lite.target {
-                            waddle_sfu::TeardownTargetLite::Participant {
-                                identity,
-                                participant_sid,
-                            } => TeardownTarget::Participant {
-                                identity: identity.as_jid().clone(),
-                                participant_sid,
-                            },
-                            waddle_sfu::TeardownTargetLite::Room => TeardownTarget::Room,
-                        };
-                        let intent = CallTeardownIntent {
-                            call_id: lite.call_id,
-                            target,
-                            generation: lite.generation,
-                            room_sid: lite.room_sid,
-                            occupant: lite.occupant_session,
-                            unbound_occupant: lite.unbound_occupant,
-                            session: None,
-                        };
+                        let intent = CallTeardownIntent::from(lite);
                         let sink_store = Arc::clone(&sink_store);
                         Box::pin(async move {
                             let mut retry_delay = std::time::Duration::from_secs(5);

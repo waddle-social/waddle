@@ -676,6 +676,33 @@ async fn identity_variants_missing_function_and_login_mismatch_fail_closed() {
         "schema mismatch"
     );
 
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 2",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("change only the lineage format");
+    let function_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .fetch_one(&mut runtime)
+    .await
+    .expect("call installed function after format change");
+    assert_eq!(function_rows, 0, "installed function must reject format 2");
+    assert!(matches!(
+        attest_connection(&mut runtime, &config).await,
+        Err(PhysicalAttestationError::MissingLineage)
+    ));
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 1",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore lineage format");
+
     let wrong_login_options = fixture.admin_options.clone();
     assert!(
         attested_pool(
@@ -729,6 +756,35 @@ async fn misplaced_admin_identity_is_rejected_before_ddl() {
             .await
             .expect("read function catalog after preflight denial");
     assert_eq!(remaining, 0, "preflight must precede function creation");
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 2",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("change only the lineage format");
+    assert!(matches!(
+        install(
+            &fixture.installer_options,
+            fixture.config(),
+            fixture.operation_id
+        )
+        .await,
+        Err(PhysicalAttestationError::Mismatch {
+            field: "lineage format"
+        })
+    ));
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'read_physical_identity'",
+    )
+            .bind(&fixture.trusted)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("read function catalog after format denial");
+    assert_eq!(
+        remaining, 0,
+        "format preflight must precede function creation"
+    );
     fixture.cleanup().await;
 }
 
@@ -1004,6 +1060,10 @@ fn url_with_database(base: &str, database: &str) -> String {
 }
 
 fn url_with_schema(base: &str, schema: &str) -> String {
+    url_with_search_path(base, schema)
+}
+
+fn url_with_search_path(base: &str, search_path: &str) -> String {
     let mut url = url::Url::parse(base).expect("PostgreSQL test URL");
     let retained: Vec<_> = url
         .query_pairs()
@@ -1013,12 +1073,91 @@ fn url_with_schema(base: &str, schema: &str) -> String {
     url.query_pairs_mut()
         .clear()
         .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
-        .append_pair("options", &format!("-c search_path={schema}"));
+        .append_pair("options", &format!("-c search_path={search_path}"));
     url.to_string()
 }
 
 fn test_url() -> Option<String> {
     waddle_ws_test_support::require_test_postgres_url()
+}
+
+#[cfg(feature = "test-support")]
+async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, PhysicalAttestationConfig) {
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let database = Database::from_config(
+        "attested-writer-migrations",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url.clone()),
+    )
+    .await
+    .expect("migration database");
+    MigrationRunner::single()
+        .run(&database)
+        .await
+        .expect("install ingress migrations including V1009");
+    drop(database);
+
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install physical attestor after lineage and schema migrations");
+    for statement in [
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA {} TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT ON {}._lineage TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT TEMPORARY ON DATABASE {} TO {}",
+            fixture.database_name, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("grant disposable writer fixture privileges");
+    }
+    (boundary_url, config)
+}
+
+#[cfg(feature = "test-support")]
+async fn ingress_message_count(pool: &PgPool, target: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"{target}\".ingress_messages"
+    ))
+    .fetch_one(pool)
+    .await
+    .expect("count guarded ingress messages")
+}
+
+#[cfg(feature = "test-support")]
+async fn wait_for_blocking_pid(observer: &PgPool, waiter: i32, blocker: i32) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let blocked: bool =
+                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
+                    .bind(blocker)
+                    .bind(waiter)
+                    .fetch_one(observer)
+                    .await
+                    .expect("observe blocked epoch transition");
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("identify row-share lock wait");
 }
 
 #[tokio::test]
@@ -2095,5 +2234,523 @@ async fn installer_lock_timeout_reports_indeterminate_without_mutation() {
         InstallationStatus::Indeterminate
     );
     drop(blocker);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contracts() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (_boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("attested runtime pool");
+    let mut connection = pool.acquire().await.expect("attested runtime connection");
+    let system_identifier_privilege: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_control_system()', 'EXECUTE')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .expect("inspect runtime system-identifier privilege");
+    assert!(
+        !system_identifier_privilege,
+        "runtime attestation must use the trusted definer, not pg_control_system privilege"
+    );
+    let current_schema: String = sqlx::query_scalar("SELECT pg_catalog.current_schema()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("active runtime schema");
+    assert_eq!(current_schema, fixture.target);
+    sqlx::query(
+        "CREATE TEMP TABLE ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL)",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("create temporary epoch shadow");
+    sqlx::query("INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (1, 1)")
+        .execute(&mut *connection)
+        .await
+        .expect("seed hostile temporary epoch shadow");
+    let shadow_schema: String = sqlx::query_scalar(
+        "SELECT n.nspname FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = pg_catalog.to_regclass('ingress_protocol_epoch')",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .expect("resolve temporary relation shadow");
+    assert!(shadow_schema.starts_with("pg_temp_"));
+    drop(connection);
+
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "full-identity-writer",
+        pool,
+    );
+    let writer_admin = PgPool::connect_with(fixture.admin_options.clone())
+        .await
+        .expect("schema-qualified writer observer");
+
+    // The dark UoW still holds V1009's row-share lock until commit. An epoch
+    // transition cannot pass the writer while it owns that lock.
+    let lineage = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held_database = database.clone();
+    let held_lineage = lineage.clone();
+    let held_writer = tokio::spawn(async move {
+        waddle_server::test_support::hold_attested_uow_epoch_lock(
+            held_database,
+            held_lineage,
+            ready_tx,
+            release_rx,
+        )
+        .await
+    });
+    let readiness = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .expect("attested writer acquired epoch");
+    let writer_pid = match readiness {
+        Ok(pid) => pid,
+        Err(_) => {
+            let result = held_writer.await;
+            panic!("attested UoW failed before readiness: {result:?}");
+        }
+    };
+    let epoch_relation = format!("\"{}\".ingress_protocol_epoch", fixture.target);
+    let row_share_held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks \
+         WHERE pid = $1 AND relation = pg_catalog.to_regclass($2) \
+           AND mode = 'RowShareLock' AND granted)",
+    )
+    .bind(writer_pid)
+    .bind(&epoch_relation)
+    .fetch_one(&writer_admin)
+    .await
+    .expect("inspect V1009 row-share lock");
+    assert!(row_share_held, "dark writer retains V1009's epoch row lock");
+
+    let mut transition = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("epoch transition connection");
+    sqlx::query("BEGIN")
+        .execute(&mut transition)
+        .await
+        .expect("begin epoch transition");
+    let transition_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut transition)
+        .await
+        .expect("transition backend PID");
+    let transition_target = fixture.target.clone();
+    let transition_task = tokio::spawn(async move {
+        sqlx::query(&format!(
+            "UPDATE \"{transition_target}\".ingress_protocol_epoch \
+             SET epoch = 1, activated_at = now(), lineage_uuid = $1::uuid WHERE id = 1"
+        ))
+        .bind(uuid::Uuid::new_v4())
+        .execute(&mut transition)
+        .await
+        .expect("transition waits for the attested writer");
+        sqlx::query("ROLLBACK")
+            .execute(&mut transition)
+            .await
+            .expect("roll back epoch transition");
+    });
+    wait_for_blocking_pid(&writer_admin, transition_pid, writer_pid).await;
+    release_tx.send(()).expect("release epoch-lock writer");
+    held_writer
+        .await
+        .expect("join held writer")
+        .expect("commit held attested UoW");
+    transition_task.await.expect("join transition waiter");
+    let live_epoch: i64 = sqlx::query_scalar(&format!(
+        "SELECT epoch FROM \"{}\".ingress_protocol_epoch WHERE id = 1",
+        fixture.target
+    ))
+    .fetch_one(&writer_admin)
+    .await
+    .expect("read rolled-back transition");
+    assert_eq!(live_epoch, 0);
+
+    sqlx::raw_sql(include_str!(
+        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("install unregistered candidate relation guard");
+    let count_before = ingress_message_count(&writer_admin, &fixture.target).await;
+    assert!(
+        waddle_server::test_support::legacy_ingress_candidate_write(
+            &database,
+            uuid::Uuid::new_v4()
+        )
+        .await
+        .is_err(),
+        "legacy writer without the schema prelock is rejected"
+    );
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before,
+        "legacy writer failure happens before application DML"
+    );
+
+    waddle_server::test_support::attested_raw_ingress_candidate_write(
+        &database,
+        &database,
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("full-identity raw writer passes V1009 and candidate guard");
+    waddle_server::test_support::attested_uow_candidate_write(
+        &database,
+        lineage,
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("full-identity UoW passes V1009 and candidate guard");
+    waddle_server::test_support::attested_substrate_candidate_write(
+        &database,
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("full-identity substrate writer passes candidate guard");
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before + 3,
+        "TEMP shadow cannot redirect schema-qualified epoch guarding"
+    );
+
+    assert!(
+        waddle_server::test_support::attested_raw_candidate_write_with_epoch(
+            &database,
+            &database,
+            uuid::Uuid::new_v4(),
+            "1",
+        )
+        .await
+        .is_err(),
+        "candidate rejects a stale transaction-local epoch proof"
+    );
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before + 3,
+        "wrong proof is rejected before application DML"
+    );
+
+    drop(database);
+    writer_admin.close().await;
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor_drift() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url.clone()).await;
+    let (boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let writer_admin = PgPool::connect_with(fixture.admin_options.clone())
+        .await
+        .expect("schema-qualified writer observer");
+    sqlx::raw_sql(include_str!(
+        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("install candidate relation guard");
+    let count_before = ingress_message_count(&writer_admin, &fixture.target).await;
+
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("attested runtime pool");
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "full-identity-writer-fail-closed",
+        pool,
+    );
+
+    let ordinary_pool = PgPool::connect_with(fixture.runtime_options.clone())
+        .await
+        .expect("ordinary runtime pool to the same database");
+    let ordinary_database = waddle_server::test_support::database_from_unattested_postgres_pool(
+        "same-database-wrong-pool",
+        ordinary_pool,
+    );
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &ordinary_database,
+            &database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "capability from another pool cannot authorize a writer"
+    );
+
+    let mut wrong_schema_lineage = fixture.lineage.clone();
+    wrong_schema_lineage
+        .postgres_identity
+        .as_mut()
+        .expect("PostgreSQL lineage")
+        .schema
+        .oid ^= 1;
+    let wrong_schema_config = fixture.with_lineage(wrong_schema_lineage);
+    let wrong_schema_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        wrong_schema_config,
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("schema-mismatched attested pool constructor");
+    let wrong_schema_database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "wrong-schema-identity",
+        wrong_schema_pool,
+    );
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &wrong_schema_database,
+            &wrong_schema_database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "schema OID drift fails physical attestation before DML"
+    );
+
+    let hostile_schema = format!("waddle_attest_hostile_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {hostile_schema}"))
+        .execute(&writer_admin)
+        .await
+        .expect("create hostile search-path schema");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {hostile_schema} TO {}",
+        fixture.runtime
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("runtime can see hostile search-path schema");
+    let hostile_url = url_with_search_path(
+        &boundary_url,
+        &format!("{hostile_schema},{}", fixture.target),
+    );
+    let hostile_options = PgConnectOptions::from_str(&hostile_url)
+        .expect("hostile search-path options")
+        .username(&fixture.runtime);
+    let hostile_pool = attested_pool(hostile_options, config.clone(), 1, Duration::from_secs(2))
+        .expect("hostile-path pool is refused only when physically checked");
+    let hostile_database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "hostile-search-path",
+        hostile_pool,
+    );
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &hostile_database,
+            &hostile_database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "poisoned current_schema fails closed before DML"
+    );
+
+    // Provision a second, fully valid identity so the attestation reaches the
+    // trusted function and rejects the connected database by its live name,
+    // rather than failing early because its schema or function is absent.
+    let wrong_database_fixture = Fixture::new(url.clone()).await;
+    let _ = prepare_attested_writer_fixture(&wrong_database_fixture).await;
+    sqlx::raw_sql(include_str!(
+        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&wrong_database_fixture.admin)
+    .await
+    .expect("install candidate guard in wrong-database fixture");
+    let wrong_database_count = ingress_message_count(
+        &wrong_database_fixture.admin,
+        &wrong_database_fixture.target,
+    )
+    .await;
+    let mut expected_original_database = wrong_database_fixture.lineage.clone();
+    expected_original_database
+        .postgres_identity
+        .as_mut()
+        .expect("wrong fixture PostgreSQL identity")
+        .database
+        .name = PgDatabaseName(fixture.database_name.clone());
+    let wrong_database_identity_config =
+        wrong_database_fixture.with_lineage(expected_original_database);
+    let wrong_database_options = wrong_database_fixture.runtime_options.clone();
+    let wrong_database_pool = attested_pool(
+        wrong_database_options,
+        wrong_database_identity_config,
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("wrong-database pool constructor");
+    let wrong_database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "wrong-database-identity",
+        wrong_database_pool,
+    );
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &wrong_database,
+            &wrong_database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "wrong current database fails before application DML"
+    );
+    drop(wrong_database);
+    assert_eq!(
+        ingress_message_count(
+            &wrong_database_fixture.admin,
+            &wrong_database_fixture.target
+        )
+        .await,
+        wrong_database_count,
+        "wrong-database identity mismatch precedes application DML"
+    );
+    wrong_database_fixture.cleanup().await;
+
+    sqlx::query(&format!(
+        "UPDATE \"{}\"._lineage SET format = 2 WHERE id = 1",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("poison lineage format");
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &database,
+            &database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "unsupported lineage format fails before application DML"
+    );
+    sqlx::query(&format!(
+        "UPDATE \"{}\"._lineage SET format = 1 WHERE id = 1",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("restore supported lineage format");
+
+    let wrong_deployment = LineageConfig {
+        deployment_uuid: Some(DeploymentUuid(uuid::Uuid::new_v4())),
+        action: None,
+    };
+    assert!(
+        waddle_server::test_support::attested_uow_candidate_write(
+            &database,
+            wrong_deployment,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "attested UoW refuses a caller deployment mismatch before DML"
+    );
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before,
+        "deployment mismatch does not reach application DML"
+    );
+
+    sqlx::query(&format!(
+        "GRANT {} TO {}",
+        fixture.outsider, fixture.runtime
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("allow deliberate SET ROLE poisoning");
+    let role_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_secs(2),
+    )
+    .expect("role-poisoning pool");
+    let mut role_connection = role_pool.acquire().await.expect("runtime session");
+    sqlx::query(&format!("SET ROLE {}", fixture.outsider))
+        .execute(&mut *role_connection)
+        .await
+        .expect("poison effective role");
+    assert!(
+        attest_connection(&mut role_connection, &config)
+            .await
+            .is_err(),
+        "physical attestor refuses the role-poisoned connection"
+    );
+    drop(role_connection);
+    let role_database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "wrong-effective-role",
+        role_pool,
+    );
+    waddle_server::test_support::attested_raw_ingress_candidate_write(
+        &role_database,
+        &role_database,
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("pool discards the role-poisoned session before its verified replacement writes");
+    sqlx::query(&format!(
+        "REVOKE {} FROM {}",
+        fixture.outsider, fixture.runtime
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("remove deliberate SET ROLE membership");
+
+    sqlx::query(&format!(
+        "DROP FUNCTION {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("remove physical attestor function");
+    assert!(
+        waddle_server::test_support::attested_raw_ingress_candidate_write(
+            &database,
+            &database,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .is_err(),
+        "missing trusted function fails before application DML"
+    );
+
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before + 1,
+        "only the writer on the replacement session that passed attestation reaches application DML"
+    );
+    assert!(matches!(
+        attested_pool(
+            fixture.admin_options.clone(),
+            config,
+            1,
+            Duration::from_secs(2)
+        ),
+        Err(PhysicalAttestationError::WrongConfiguredLogin)
+    ));
+
+    drop(database);
+    drop(ordinary_database);
+    drop(wrong_schema_database);
+    drop(hostile_database);
+    drop(role_database);
+    writer_admin.close().await;
     fixture.cleanup().await;
 }

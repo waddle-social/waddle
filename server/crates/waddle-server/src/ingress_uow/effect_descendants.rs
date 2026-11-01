@@ -9,7 +9,11 @@ use uuid::Uuid;
 use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 use super::{IngressUowError, IngressUowTransaction};
+#[cfg(any(test, feature = "test-support"))]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, Transaction};
+#[cfg(any(test, feature = "test-support"))]
+use crate::ingress_substrate::acquire_epoch_lock_first_with_capability;
 use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -30,6 +34,38 @@ pub enum EffectDeliveryBinding {
 pub(crate) async fn begin_raw_ingress_writer(
     db: &Database,
 ) -> Result<Transaction<'_>, IngressUowError> {
+    begin_raw_ingress_writer_inner(db).await
+}
+
+/// Begin a dark raw writer using the full identity capability retained by an
+/// independently attested PostgreSQL pool. This path is not wired into normal
+/// startup and verifies the same physical transaction connection before any
+/// application lock or DML.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
+    db: &'a Database,
+    capability: &AttestedPostgresWriterCapability,
+) -> Result<Transaction<'a>, IngressUowError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(IngressUowError::PostgresRequired);
+    }
+    db.verify_attested_pg_writer_capability(capability)
+        .map_err(DatabaseError::from)?;
+    let mut tx = db.begin_immediate().await?;
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await?;
+    bound_raw_transaction(&mut tx).await?;
+    let live = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+    let supported = supported_protocol_epoch();
+    if live > supported {
+        return Err(IngressUowError::EpochUnsupported { live, supported });
+    }
+    Ok(tx)
+}
+
+async fn begin_raw_ingress_writer_inner<'a>(
+    db: &'a Database,
+) -> Result<Transaction<'a>, IngressUowError> {
     let mut tx = db.begin_immediate().await?;
     if tx.driver() == DatabaseDriver::Postgres {
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
