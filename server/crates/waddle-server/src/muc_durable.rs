@@ -75,9 +75,10 @@ use crate::clustering::NodeId;
 use crate::db::{Database, DatabaseError, Transaction};
 
 mod admin_receipts;
+pub mod pin_durability;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
     use crate::db::{DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
@@ -100,7 +101,7 @@ mod tests {
     use waddle_xmpp::ownership::{ClaimStore, NodeIdentity, StalePredicate};
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
-    fn node_identity() -> NodeIdentity {
+    pub(super) fn node_identity() -> NodeIdentity {
         NodeIdentity::new(
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -119,15 +120,15 @@ mod tests {
         waddle_xmpp_core::OccupancySessionGeneration::from_uuid(uuid::Uuid::from_u128(1733))
     }
 
-    struct ProjectionTestRoom {
-        store: PostgresMucRoomStore,
-        db: Database,
-        room_jid: BareJid,
-        fence: RoomClaimFenceContext,
-        create: RoomCommitOutcome,
+    pub(super) struct ProjectionTestRoom {
+        pub(super) store: PostgresMucRoomStore,
+        pub(super) db: Database,
+        pub(super) room_jid: BareJid,
+        pub(super) fence: RoomClaimFenceContext,
+        pub(super) create: RoomCommitOutcome,
     }
 
-    async fn projection_test_room(prefix: &str) -> Option<ProjectionTestRoom> {
+    pub(super) async fn projection_test_room(prefix: &str) -> Option<ProjectionTestRoom> {
         let (store, claim_store, db, me) = clean_store().await?;
         let room_jid = unique_room_jid(prefix);
         let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
