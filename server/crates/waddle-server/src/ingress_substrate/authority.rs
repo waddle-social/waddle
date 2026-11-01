@@ -774,6 +774,11 @@ pub async fn record_receipt_pooled(
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
     let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(discard_database_error)?;
+    }
     let epoch = acquire_epoch_lock_first(&mut tx).await?;
     if epoch > supported_protocol_epoch() {
         return Err(IngressSubstrateError::UnsupportedLiveEpoch);
