@@ -1,6 +1,53 @@
-use super::{info, DatabaseDriver, DatabaseInboxStorage, InboxStorageError};
+use super::{info, DatabaseDriver, InboxStorageError};
+use crate::db::{Database, IntoParams, Rows};
 
-pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), InboxStorageError> {
+/// Owner-side schema access retains the inbox store's per-call pool acquisition
+/// and error mapping without constructing a live inbox storage object.
+struct OwnerSchemaDb<'a> {
+    db: &'a Database,
+}
+
+impl OwnerSchemaDb<'_> {
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, InboxStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))
+    }
+
+    async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, InboxStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<(), InboxStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        conn.execute_batch(sql)
+            .await
+            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
+        Ok(())
+    }
+}
+
+pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), InboxStorageError> {
+    initialize(&OwnerSchemaDb { db }).await
+}
+
+async fn initialize(storage: &OwnerSchemaDb<'_>) -> Result<(), InboxStorageError> {
     let i64_type = crate::db::i64_sql_type(storage.db.driver());
 
     // Check if the table already exists with the old schema (missing thread_id column).
@@ -67,7 +114,7 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
             .await?;
     }
 
-    crate::db::widen_postgres_i64_column_to_bigint(&storage.db, "inbox_entries", "last_updated")
+    crate::db::widen_postgres_i64_column_to_bigint(storage.db, "inbox_entries", "last_updated")
         .await
         .map_err(|error| InboxStorageError::Other(error.to_string()))?;
 
@@ -151,7 +198,7 @@ pub(super) async fn initialize(storage: &DatabaseInboxStorage) -> Result<(), Inb
 /// their canonical ingress obligations, so retaining rows that cannot point to
 /// a canonical message would create an unreceiptable retry path.
 async fn migrate_recovery_message_key_column(
-    storage: &DatabaseInboxStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), InboxStorageError> {
     const COLUMN: &str = "message_key";
     let mut tx = storage
@@ -222,7 +269,7 @@ async fn migrate_recovery_message_key_column(
 /// retroactively. The recovery path then downgrades the class to
 /// `NotifyAll`, which composes with the existing XEP-0492 policy.
 async fn migrate_recovery_channel_broadcast_column(
-    storage: &DatabaseInboxStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), InboxStorageError> {
     const COLUMN: &str = "sender_can_broadcast_channel_mention";
     match storage.db.driver() {
@@ -264,7 +311,7 @@ async fn migrate_recovery_channel_broadcast_column(
 /// `groupchat_notification_recovery`. Mirrors `needs_thread_migration`
 /// but for a specific column rather than table-existence.
 async fn recovery_column_present_sqlite(
-    storage: &DatabaseInboxStorage,
+    storage: &OwnerSchemaDb<'_>,
     column: &str,
 ) -> Result<bool, InboxStorageError> {
     column_present_sqlite(storage, "groupchat_notification_recovery", column).await
@@ -277,7 +324,7 @@ async fn recovery_column_present_sqlite(
 /// no anchor metadata, and a row whose call has not ended has no ended
 /// summary.
 async fn migrate_inbox_call_thread_columns(
-    storage: &DatabaseInboxStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), InboxStorageError> {
     let i64_type = crate::db::i64_sql_type(storage.db.driver());
     // (column, SQL type) for the four call-thread columns.
@@ -324,7 +371,7 @@ async fn migrate_inbox_call_thread_columns(
 /// exist, returns `true` so callers treat the missing-column ALTER as
 /// moot (the CREATE TABLE IF NOT EXISTS path owns that case).
 async fn column_present_sqlite(
-    storage: &DatabaseInboxStorage,
+    storage: &OwnerSchemaDb<'_>,
     table: &str,
     column: &str,
 ) -> Result<bool, InboxStorageError> {
@@ -373,7 +420,7 @@ async fn column_present_sqlite(
 }
 
 /// Returns true if inbox_entries exists but lacks the thread_id column.
-async fn needs_thread_migration(storage: &DatabaseInboxStorage) -> Result<bool, InboxStorageError> {
+async fn needs_thread_migration(storage: &OwnerSchemaDb<'_>) -> Result<bool, InboxStorageError> {
     if storage.db.driver() != DatabaseDriver::Sqlite {
         return Ok(false);
     }

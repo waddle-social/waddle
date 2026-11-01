@@ -1,16 +1,13 @@
 //! Monotone physical insertion metadata for bounded notification recovery laps.
 
-use super::{DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId, PendingStorageError};
-use crate::db::DatabaseError;
-use crate::db::Transaction;
+use super::{DatabaseDriver, PendingRowId, PendingStorageError};
+use crate::db::{Database, DatabaseError, Transaction};
 
 const INITIALIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const BACKFILL_BATCH: i64 = 128;
 
-pub(super) async fn initialize(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<(), PendingStorageError> {
-    tokio::time::timeout(INITIALIZATION_BUDGET, initialize_inner(storage))
+pub(super) async fn initialize(db: &Database) -> Result<(), PendingStorageError> {
+    tokio::time::timeout(INITIALIZATION_BUDGET, initialize_inner(db))
         .await
         .map_err(|_| {
             PendingStorageError::Other(
@@ -19,10 +16,8 @@ pub(super) async fn initialize(
         })?
 }
 
-async fn begin(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<Transaction<'_>, PendingStorageError> {
-    let mut tx = storage.db.begin_immediate().await.map_err(other)?;
+async fn begin(db: &Database) -> Result<Transaction<'_>, PendingStorageError> {
+    let mut tx = db.begin_immediate().await.map_err(other)?;
     if tx.driver() == DatabaseDriver::Postgres {
         // Fresh catalog reads are required after waiting for another initializer.
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -43,10 +38,8 @@ fn other(error: DatabaseError) -> PendingStorageError {
     PendingStorageError::Other(error.to_string())
 }
 
-async fn initialize_inner(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<(), PendingStorageError> {
-    let mut tx = begin(storage).await?;
+async fn initialize_inner(db: &Database) -> Result<(), PendingStorageError> {
+    let mut tx = begin(db).await?;
     if tx.driver() == DatabaseDriver::Postgres {
         initialize_postgres(&mut tx).await?;
     } else {

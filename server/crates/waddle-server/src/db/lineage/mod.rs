@@ -9,12 +9,14 @@ mod record;
 mod registry;
 mod sql;
 
-pub(crate) use engine::verify_in_transaction;
+pub(crate) use sql::LINEAGE_FORMAT;
+
 pub use engine::{
     adopt_if_matched, enroll, ensure_table, live_postgres_identity,
     live_postgres_identity_via_pg_pool, sqlite_pool_is_in_memory, verify, verify_via_control_plane,
     verify_via_pg_pool, verify_via_sqlite_pool, AdoptOutcome, AttestedLineage,
 };
+pub(crate) use engine::{verify_in_transaction, verify_qualified_in_transaction};
 pub use error::LineageError;
 pub use record::{
     DeploymentUuid, LineageAction, LineageRecord, LineageUuid, PgDatabaseIdentity, PgDatabaseName,

@@ -1,7 +1,37 @@
-use super::{debug, DatabaseDriver, DatabaseSmPersistence, SmPersistenceError};
+use super::{debug, Database, DatabaseDriver, IntoParams, Rows, SmPersistenceError};
+
+/// Owner-side schema access retains the portable store's per-statement pool
+/// acquisition without constructing a live SM persistence object.
+struct OwnerSchemaDb<'a> {
+    db: &'a Database,
+}
+
+impl OwnerSchemaDb<'_> {
+    async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, SmPersistenceError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, SmPersistenceError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+}
 
 async fn add_column_if_missing(
-    storage: &DatabaseSmPersistence,
+    storage: &OwnerSchemaDb<'_>,
     table: &str,
     column_def: &str,
 ) -> Result<(), SmPersistenceError> {
@@ -22,7 +52,8 @@ async fn add_column_if_missing(
     Ok(())
 }
 
-pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {
+pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), SmPersistenceError> {
+    let storage = OwnerSchemaDb { db };
     // Driver-aware bigint type: Postgres INTEGER is i32 (overflows
     // for `timestamp_millis()` after Jan 2038); BIGINT is i64.
     // SQLite INTEGER is dynamically sized so the same DDL works.
@@ -125,26 +156,26 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         .await?;
     storage.execute("CREATE INDEX IF NOT EXISTS idx_sm_ingress_appends_pending ON sm_ingress_appends (disposition, appended_at_ms)", ()).await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_unacked",
         &format!("ingress_receipts {receipts_type}"),
     )
     .await?;
-    add_column_if_missing(storage, "sm_sessions", "occupancy_session TEXT").await?;
-    drop_shadow_ordinal(storage).await?;
+    add_column_if_missing(&storage, "sm_sessions", "occupancy_session TEXT").await?;
+    drop_shadow_ordinal(&storage).await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_sessions",
         &format!("replay_gap_through {bigint}"),
     )
     .await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_sessions",
         "blocklist_interested INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
-    widen_existing_postgres_i64_columns(storage).await?;
+    widen_existing_postgres_i64_columns(&storage).await?;
     // Index on detached_at_ms + max_resume_duration_ms for the
     // janitor's expired-session sweep. We can't compute the
     // expiry timestamp directly in SQL portably, so the janitor
@@ -157,7 +188,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
         )
         .await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_sessions",
         "promotion_attempts INTEGER NOT NULL DEFAULT 0",
     )
@@ -165,17 +196,17 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // #1206: durable storage of the resource's own presence extension
     // payloads (XEP-0115 caps, XEP-0319 idle, ...) so a rehydrated session
     // relays them verbatim on probe instead of coming back caps-less.
-    add_column_if_missing(storage, "sm_sessions", "presence_payloads TEXT").await?;
-    add_column_if_missing(storage, "sm_sessions", "bare_jid TEXT").await?;
-    add_column_if_missing(storage, "sm_sessions", "auth_context_id TEXT").await?;
+    add_column_if_missing(&storage, "sm_sessions", "presence_payloads TEXT").await?;
+    add_column_if_missing(&storage, "sm_sessions", "bare_jid TEXT").await?;
+    add_column_if_missing(&storage, "sm_sessions", "auth_context_id TEXT").await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_sessions",
         &format!("auth_context_version {bigint}"),
     )
     .await?;
     add_column_if_missing(
-        storage,
+        &storage,
         "sm_sessions",
         &format!("principal_auth_epoch {bigint}"),
     )
@@ -189,9 +220,9 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     // stream itself (`sm_unacked.stream_id`, already part of the primary
     // key), so the dedup key collapses to `(stream_id, origin_stream_id,
     // inbound_seq)`.
-    add_column_if_missing(storage, "sm_unacked", "origin_stream_id TEXT").await?;
-    add_column_if_missing(storage, "sm_unacked", &format!("inbound_seq {bigint}")).await?;
-    add_column_if_missing(storage, "sm_unacked", &format!("pair_sequence {bigint}")).await?;
+    add_column_if_missing(&storage, "sm_unacked", "origin_stream_id TEXT").await?;
+    add_column_if_missing(&storage, "sm_unacked", &format!("inbound_seq {bigint}")).await?;
+    add_column_if_missing(&storage, "sm_unacked", &format!("pair_sequence {bigint}")).await?;
     storage
         .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unacked_dedup \
@@ -204,7 +235,7 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
 }
 
 async fn widen_existing_postgres_i64_columns(
-    storage: &DatabaseSmPersistence,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), SmPersistenceError> {
     for (table, column) in [
         ("sm_sessions", "inbound_count"),
@@ -219,7 +250,7 @@ async fn widen_existing_postgres_i64_columns(
         ("sm_unacked", "sequence"),
         ("sm_unacked", "original_receipt_at_ms"),
     ] {
-        crate::db::widen_postgres_i64_column_to_bigint(&storage.db, table, column)
+        crate::db::widen_postgres_i64_column_to_bigint(storage.db, table, column)
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
     }
@@ -227,7 +258,7 @@ async fn widen_existing_postgres_i64_columns(
     Ok(())
 }
 
-async fn drop_shadow_ordinal(storage: &DatabaseSmPersistence) -> Result<(), SmPersistenceError> {
+async fn drop_shadow_ordinal(storage: &OwnerSchemaDb<'_>) -> Result<(), SmPersistenceError> {
     if storage.db.driver() == DatabaseDriver::Postgres {
         storage
             .execute(

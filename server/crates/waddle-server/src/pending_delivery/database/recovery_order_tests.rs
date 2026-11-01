@@ -1,7 +1,8 @@
-use super::{begin, DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId};
+use super::{begin, DatabaseDriver, PendingRowId};
 use crate::db::Database;
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_uow::PendingReceiptRepository;
+use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use jid::BareJid;
 use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
 use waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal;
@@ -293,7 +294,8 @@ async fn postgres_pending_recovery_initializer_pins_read_committed() {
     let store = DatabasePendingDeliveryStorage::from_database(db.clone(), QuotaPolicy::Unlimited)
         .await
         .expect("RR initialization");
-    let mut tx = begin(&store).await.expect("metadata transaction");
+    let store_db = store.database();
+    let mut tx = begin(&store_db).await.expect("metadata transaction");
     let mut rows = tx
         .query("SHOW transaction_isolation", ())
         .await

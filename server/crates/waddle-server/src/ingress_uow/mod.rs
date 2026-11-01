@@ -145,7 +145,7 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(None, false).await
+        self.begin_inner(None).await
     }
 
     /// Bound even the initial epoch lock wait before taking any row locks.
@@ -157,7 +157,7 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), false).await
+        self.begin_inner(Some((lock, statement))).await
     }
 
     /// Fresh source rediscovery must see parents committed after an earlier
@@ -167,13 +167,12 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement)), true).await
+        self.begin_inner(Some((lock, statement))).await
     }
 
     async fn begin_inner(
         &self,
         bounds: Option<(Duration, Duration)>,
-        read_committed: bool,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         let acquisition = async {
             match self.db.driver() {
@@ -185,7 +184,7 @@ impl IngressUnitOfWork {
             Some((lock, _)) => acquire_transaction_with_timeout(lock, acquisition).await?,
             None => acquisition.await?,
         };
-        if read_committed && self.db.driver() == DatabaseDriver::Postgres {
+        if self.db.driver() == DatabaseDriver::Postgres {
             // Set isolation before the timeout/epoch/lineage SELECTs can pin
             // the transaction's first snapshot.
             transaction

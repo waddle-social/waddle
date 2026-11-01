@@ -85,7 +85,7 @@ impl DatabaseInboxStorage {
     /// Share the ingress database for transactional projections and their reads.
     pub async fn from_database(db: Database) -> Result<Self, InboxStorageError> {
         let storage = Self { db };
-        schema::initialize(&storage).await?;
+        schema::bootstrap_schema_owner(&storage.db).await?;
         Ok(storage)
     }
 
@@ -133,18 +133,6 @@ impl DatabaseInboxStorage {
         conn.execute(sql, params)
             .await
             .map_err(|error| InboxStorageError::Other(error.to_string()))
-    }
-
-    pub(in crate::inbox) async fn execute_batch(&self, sql: &str) -> Result<(), InboxStorageError> {
-        let conn = self
-            .db
-            .guard()
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-        conn.execute_batch(sql)
-            .await
-            .map_err(|error| InboxStorageError::Other(error.to_string()))?;
-        Ok(())
     }
 }
 

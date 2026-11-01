@@ -1385,10 +1385,10 @@ async fn sqlite_schema_drops_shadow_ordinal_and_preserves_session() {
         .await
         .expect("install former shadow column");
 
-    schema::initialize(&storage)
+    schema::bootstrap_schema_owner(&storage.db)
         .await
         .expect("remove shadow column");
-    schema::initialize(&storage)
+    schema::bootstrap_schema_owner(&storage.db)
         .await
         .expect("repeat schema initialization");
 
@@ -1412,6 +1412,57 @@ async fn sqlite_schema_drops_shadow_ordinal_and_preserves_session() {
 }
 
 #[tokio::test]
+async fn file_sqlite_sm_owner_schema_bootstraps_before_live_storage() {
+    let directory = tempfile::tempdir().expect("SM owner fixture directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("sm-owner.db").display()
+    );
+    let mut config = crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Sqlite, url);
+    config.pool_size = 1;
+    let db = crate::db::Database::from_config("sm-owner", &config)
+        .await
+        .expect("opened SQLite database");
+    super::bootstrap_portable_sm_owner_schema(&db)
+        .await
+        .expect("owner bootstrap without a live SM object");
+    let guard = db.guard().await.expect("owner connection");
+    guard
+        .execute("DROP TABLE sm_acknowledged_windows", ())
+        .await
+        .expect("simulate interruption after earlier tables committed");
+    drop(guard);
+    super::bootstrap_portable_sm_owner_schema(&db)
+        .await
+        .expect("owner retry completes partial schema");
+    drop(db);
+
+    let reopened = crate::db::Database::from_config("sm-owner-reopened", &config)
+        .await
+        .expect("reopen file SQLite database");
+    super::bootstrap_portable_sm_owner_schema(&reopened)
+        .await
+        .expect("repeated owner bootstrap after restart");
+    let guard = reopened.guard().await.expect("reopened connection");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
+             ('sm_sessions', 'sm_unacked', 'sm_acknowledged_windows', 'sm_ingress_appends')",
+            (),
+        )
+        .await
+        .expect("inspect completed schema");
+    let row = rows.next().await.expect("schema query").expect("count row");
+    let count: i64 = row.get(0).expect("table count");
+    assert_eq!(count, 4);
+    drop(rows);
+    drop(guard);
+    DatabaseSmPersistence::from_database(reopened)
+        .await
+        .expect("live storage attaches with current owner path");
+}
+
+#[tokio::test]
 async fn postgres_schema_has_no_shadow_ordinal() {
     let Some(database_url) = waddle_ws_test_support::require_test_postgres_url() else {
         eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (Postgres shadow column removal)");
@@ -1420,7 +1471,7 @@ async fn postgres_schema_has_no_shadow_ordinal() {
     let storage = DatabaseSmPersistence::open(Some(&database_url))
         .await
         .expect("open Postgres SM store");
-    schema::initialize(&storage)
+    schema::bootstrap_schema_owner(&storage.db)
         .await
         .expect("repeat schema initialization");
     let mut rows = storage.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'sm_sessions' AND column_name = 'shadow_ordinal'", ()).await.expect("inspect schema");
