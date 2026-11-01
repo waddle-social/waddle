@@ -238,10 +238,10 @@ pub(crate) use route_to_connection::deliver_ordered_local_copy;
 pub(crate) use route_to_connection::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
 pub(crate) use route_to_connection::{
     bounce_undeliverable_iq, deliver_direct_to_full_locally,
-    deliver_direct_to_full_with_registered_remote, deliver_full_jid_via_ordered_relay,
-    deliver_peer_to_full_with_registered_remote, deliver_registered_remote_resource,
-    queue_processed_for_detached, route_to_connection, undeliverable_iq_reply,
-    DetachedQueueOutcome,
+    deliver_direct_to_full_with_registered_remote, deliver_frozen_invitation_resource,
+    deliver_full_jid_via_ordered_relay, deliver_peer_to_full_with_registered_remote,
+    deliver_registered_remote_resource, queue_processed_for_detached, route_to_connection,
+    undeliverable_iq_reply, DetachedQueueOutcome,
 };
 #[cfg(feature = "clustering")]
 pub(crate) use routing::deliver_peer_to_full_at;

@@ -95,15 +95,37 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
     let mut deps = Deps::new(&registry, "example.com");
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
-    let report = execute_effects(
+    let attempt = execute_effects(
         &fixture.uow,
         &fixture.db,
         &decision,
         &ImmediateSink,
         &deps,
         Duration::from_secs(5),
-    )
-    .await;
+    );
+    #[cfg(feature = "clustering")]
+    let (report, remote_calls) = if live {
+        use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+            .scope(
+                (FullJidDeliveryOutcome::MaybeCommitted, calls.clone()),
+                attempt,
+            )
+            .await;
+        (report, Some(calls))
+    } else {
+        (attempt.await, None)
+    };
+    #[cfg(not(feature = "clustering"))]
+    let report = attempt.await;
+    #[cfg(feature = "clustering")]
+    if let Some(calls) = remote_calls {
+        assert!(
+            calls.lock().expect("remote calls").is_empty(),
+            "local acceptance must not attempt the registered remote gateway"
+        );
+    }
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(rx.try_recv().is_ok(), live, "live invitation delivery");
     assert_eq!(
@@ -929,7 +951,7 @@ async fn postgres_invite_quota_recovers_generated_notification_after_restart() {
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn sqlite_invite_remote_hosted_resource_uses_gateway_without_pending_fallback() {
+async fn sqlite_invite_remote_hosted_resource_uncertain_without_pending_fallback() {
     use crate::server::routes::interpret::CONTROLLED_REGISTERED_REMOTE_DELIVERY;
     use std::sync::{Arc, Mutex};
     let fixture = IngressFixture::sqlite().await;
@@ -980,6 +1002,49 @@ async fn sqlite_invite_remote_hosted_resource_uses_gateway_without_pending_fallb
         "an uncertain remote send cannot fall back to pending delivery"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn frozen_invitation_facade_returns_registered_remote_delivery() {
+    use crate::server::routes::interpret::{
+        deliver_frozen_invitation_resource, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    };
+    use std::sync::{Arc, Mutex};
+    let fixture = IngressFixture::sqlite().await;
+    let registry = ConnectionRegistry::new();
+    let target: jid::FullJid = "juliet@example.com/remote".parse().expect("remote target");
+    let (tx, mut mirror) = tokio::sync::mpsc::channel(4);
+    registry.register_entry(
+        target.clone(),
+        waddle_xmpp::registry::ConnectionEntry::remote_hosted(tx),
+    );
+    let stanza = waddle_xmpp::Stanza::Message(
+        fixture
+            .submission(Some("remote-invite-route"), "invitation")
+            .plan
+            .sanitized_message,
+    );
+    let deps = Deps::new(&registry, "example.com");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let outcome = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, calls.clone()),
+            deliver_frozen_invitation_resource(&deps, &target, &stanza),
+        )
+        .await;
+    assert_eq!(outcome, FullJidDeliveryOutcome::Delivered);
+    {
+        let recorded = calls.lock().expect("remote calls");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, target);
+        assert!(matches!(recorded[0].1, waddle_xmpp::Stanza::Message(_)));
+    }
+    assert!(
+        mirror.try_recv().is_err(),
+        "remote mirror is not a local socket"
+    );
     fixture.close().await;
 }
 
