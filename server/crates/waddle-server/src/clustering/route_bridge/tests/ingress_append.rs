@@ -1,15 +1,16 @@
 //! A supplied ingress key is mandatory authority: rejected claims never deliver.
 use super::{
-    envelope_for_services, mpsc, origin_identity, payload_for_recipient, receiver_identity,
-    sender_full, services_with_claims, sign_envelope, target_bare, target_entity, target_full,
-    user_entity, Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, Entity,
-    EntityType, Keypair, Message, NodeId, NodeIdentity, OrderedRelayClaim,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNackReason,
-    OrderedRelayPayload, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
-    RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
-    RemoteDeliverySeed, RemoteOwnerRegistration, RemoteResourceOutboundFrame,
-    RemoteResourceRegistrationId, RemoteResourceRouteOutcome, RemoteResourceRouteTarget,
-    RemoteResourceSocketGeneration, RemoteStanza, Stanza, TEST_CANCELLED_ENVELOPES,
+    connection_entry_for_current_node, envelope_for_services, mpsc, origin_identity,
+    payload_for_recipient, receiver_identity, sender_full, services_with_claims, sign_envelope,
+    target_bare, target_entity, target_full, user_entity, Arc, CancellationToken,
+    ClusteringMessagingConfig, Entity, EntityType, Keypair, Message, NodeId, NodeIdentity,
+    OrderedRelayClaim, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    OrderedRelayNackReason, OrderedRelayPayload, RelayDeliverRemoteResourceFrame,
+    RelayRemoteResourceFrameStatus, RelayRouteRemoteResourceStanza,
+    RelayRouteRemoteResourceStanzaReply, RelayTraceContext, RemoteDeliverySeed,
+    RemoteOwnerRegistration, RemoteResourceOutboundFrame, RemoteResourceRegistrationId,
+    RemoteResourceRouteOutcome, RemoteResourceRouteTarget, RemoteResourceSocketGeneration,
+    RemoteStanza, Stanza, TEST_CANCELLED_ENVELOPES,
 };
 use crate::ingress::append_authority::canonical_reads;
 use crate::ingress::commit::commit_submission;
@@ -106,7 +107,7 @@ async fn ingress_append_authority(
     );
     bridge.wire(services.clone());
     let (tx, _rx) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = connection_entry_for_current_node(tx, &services);
     let owner = entry.binding_id();
     services
         .connection_registry
@@ -126,6 +127,12 @@ async fn ingress_append_authority(
         RemoteOwnerRegistration {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                    "source-socket-node",
+                    "fixture-epoch",
+                )),
+            ),
             unregister_pending: false,
             registration_id,
             socket_generation,
@@ -195,7 +202,7 @@ async fn ingress_append_authority(
             .expect("recipient");
         let live_rx = if matches!(case, AuthorityCase::LiveRecipient) {
             let (tx, rx) = mpsc::channel(1);
-            let entry = ConnectionEntry::new(tx);
+            let entry = connection_entry_for_current_node(tx, &services);
             services
                 .connection_registry
                 .register_entry(recipient.clone(), entry.clone());
@@ -334,7 +341,7 @@ async fn ingress_append_authority(
             let source_jid = if alternate_sender {
                 let alternate = sender_full();
                 let (tx, _alternate_rx) = mpsc::channel(1);
-                let entry = ConnectionEntry::new(tx);
+                let entry = connection_entry_for_current_node(tx, &services);
                 let owner = entry.binding_id();
                 services
                     .connection_registry
@@ -352,6 +359,11 @@ async fn ingress_append_authority(
                     RemoteOwnerRegistration {
                         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+                        connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                                &NodeIdentity::new("source-socket-node", "fixture-epoch"),
+                            ),
+                        ),
                         unregister_pending: false,
                         registration_id,
                         socket_generation,
@@ -572,7 +584,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
     message.to = Some(recipient.clone().into());
     let stanza = Stanza::Message(message.clone());
     let (tx, _rx) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let entry = connection_entry_for_current_node(tx, &services);
     let owner = entry.binding_id();
     services
         .connection_registry
@@ -597,6 +609,12 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         RemoteOwnerRegistration {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                    "source-socket-node",
+                    "fixture-epoch",
+                )),
+            ),
             unregister_pending: false,
             registration_id,
             socket_generation,
@@ -914,7 +932,7 @@ impl RegisteredRemoteOwner {
         let mut message = submission.plan.sanitized_message.clone();
         message.to = Some(recipient.clone().into());
         let (tx, _rx) = mpsc::channel(1);
-        let entry = ConnectionEntry::new(tx);
+        let entry = connection_entry_for_current_node(tx, &services);
         let owner = entry.binding_id();
         services
             .connection_registry
@@ -942,6 +960,11 @@ impl RegisteredRemoteOwner {
             RemoteOwnerRegistration {
                 occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new("source-socket-node", "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id: source_registration.0,
                 socket_generation: source_registration.1,

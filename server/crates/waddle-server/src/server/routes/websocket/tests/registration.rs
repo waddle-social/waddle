@@ -1036,6 +1036,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             .expect("model pre-V0013 persisted session");
     }
     let mut conn = WsConnState::new();
+    let physical_connection_ref = conn.connection_ref.clone();
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session);
     let (tx, _rx) = mpsc::channel(4);
@@ -1124,6 +1125,10 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
             .is_some());
         assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
+        assert_eq!(
+            conn.connection_ref, physical_connection_ref,
+            "failed resume keeps the same physical WebSocket identity"
+        );
         assert!(!conn.carbons_enabled);
         assert!(!conn.roster_interested);
         assert!(!conn.blocklist_interested);
@@ -1164,6 +1169,16 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         fresh,
         RegistrationAfterFrame::Registered(SmRegistrationFinalization::KeepExistingResponses)
     ));
+    assert_eq!(
+        conn.connection_ref, physical_connection_ref,
+        "fresh bind on the still-open socket keeps its physical identity"
+    );
+    let replacement_socket =
+        WsConnState::new_for_node_lease(physical_connection_ref.node_lease().clone());
+    assert_ne!(
+        replacement_socket.connection_ref, physical_connection_ref,
+        "a newly accepted socket gets a new physical transport generation"
+    );
     assert_ne!(conn.occupancy_session, generation);
     let entry = state
         .deps

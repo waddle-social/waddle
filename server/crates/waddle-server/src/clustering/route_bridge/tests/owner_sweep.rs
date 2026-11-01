@@ -1168,6 +1168,11 @@ async fn add_six_live_socket_mirrors(bridge: &OrderedRelayDeliveryBridge) {
         registration.socket_node = NodeId::new(format!("socket-{index}"));
         registration.socket_identity =
             NodeIdentity::new(registration.socket_node.as_str(), "old-epoch");
+        registration.connection_ref = waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                &registration.socket_identity,
+            ),
+        );
         let jid = format!("a{index}@example.test/resource")
             .parse()
             .expect("earlier mirror JID");

@@ -66,7 +66,7 @@ async fn fresh_remote_retirement_fixture() -> (
     services
         .connection_registry
         .register_entry(jid.clone(), entry.clone());
-    let registration_id = track_remote_socket_for_test(&bridge, &jid, entry.binding_id()).await;
+    let registration_id = track_remote_socket_for_test(&bridge, &jid, &entry).await;
     let request = RelayForceDetachRemoteUserResource {
         jid: jid.clone(),
         registration_id,

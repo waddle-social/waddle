@@ -2,11 +2,11 @@
 //! registered remote-resource route without appending to a stale local stream.
 
 use super::{
-    origin_identity, receiver_identity, services_with_claims, test_peer_id, Arc, CancellationToken,
-    ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, NodeId, OrderedRelayDeliveryBridge,
-    OutboundStanza, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
-    RelayTraceContext, RemoteOwnerRegistration, RemoteResourceOutboundFrame,
-    RemoteResourceSocketGeneration, Stanza, WebSocketState,
+    connection_entry_for_current_node, origin_identity, receiver_identity, services_with_claims,
+    test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind,
+    NodeId, OrderedRelayDeliveryBridge, OutboundStanza, RelayDeliverRemoteResourceFrame,
+    RelayRemoteResourceFrameStatus, RelayTraceContext, RemoteOwnerRegistration,
+    RemoteResourceOutboundFrame, RemoteResourceSocketGeneration, Stanza, WebSocketState,
 };
 use crate::clustering::route_bridge::{
     TestRemoteFrameTransport, TEST_CANCELLED_REMOTE_FRAMES, TEST_REMOTE_FRAME_TRANSPORT,
@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use waddle_xmpp::ownership::{Entity, EntityType};
+use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{
@@ -117,7 +117,7 @@ impl RemoteRosterFixture {
         );
         socket_bridge.wire(socket_services.clone());
         let (socket_sender, socket_receiver) = mpsc::channel(4);
-        let socket_entry = ConnectionEntry::new(socket_sender);
+        let socket_entry = connection_entry_for_current_node(socket_sender, &socket_services);
         let socket_owner = socket_entry.binding_id();
         socket_services
             .connection_registry
@@ -134,6 +134,11 @@ impl RemoteRosterFixture {
             RemoteOwnerRegistration {
                 occupancy_session: OccupancySessionGeneration::mint(),
                 socket_identity: origin_identity(),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -511,6 +516,11 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
             RemoteOwnerRegistration {
                 occupancy_session: OccupancySessionGeneration::mint(),
                 socket_identity: origin_identity(),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),

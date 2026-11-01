@@ -3,6 +3,7 @@ use super::{
     FullJid, Instant, LocalConnectionBindingId, Ordering, OutboundStanza, OutboundWriteAcceptance,
     PendingFlushReserveError, SendResult, Stanza,
 };
+use crate::ownership::{ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
 use std::time::Duration;
 use xmpp_parsers::message::{Message, MessageType};
@@ -286,6 +287,39 @@ fn binding_id_survives_clone_and_republication_but_is_independent_of_carbons_sta
         binding_id
     );
     assert!(!registry.is_owned_by(&jid, &binding_id));
+}
+
+#[test]
+fn physical_reference_survives_binding_replacement_and_remote_owner_movement() {
+    let source_incarnation =
+        NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("source-node", "source-epoch"));
+    let connection_ref = ConnectionRef::fresh(source_incarnation.clone());
+    let (first_sender, _first_receiver) = mpsc::channel(1);
+    let first = ConnectionEntry::new_for_connection(first_sender, connection_ref.clone());
+    let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
+    let replacement =
+        ConnectionEntry::new_for_connection(replacement_sender, connection_ref.clone());
+    let (new_socket_sender, _new_socket_receiver) = mpsc::channel(1);
+    let new_socket = ConnectionEntry::new_for_connection(
+        new_socket_sender,
+        ConnectionRef::fresh(source_incarnation),
+    );
+    let (owner_a_sender, _owner_a_receiver) = mpsc::channel(1);
+    let owner_a_mirror =
+        ConnectionEntry::remote_hosted_for_connection(owner_a_sender, connection_ref.clone());
+    let (owner_b_sender, _owner_b_receiver) = mpsc::channel(1);
+    let owner_b_mirror =
+        ConnectionEntry::remote_hosted_for_connection(owner_b_sender, connection_ref.clone());
+
+    assert_eq!(first.connection_ref(), replacement.connection_ref());
+    assert_ne!(first.binding_id(), replacement.binding_id());
+    assert_ne!(first.connection_ref(), new_socket.connection_ref());
+    assert_ne!(first.binding_id(), new_socket.binding_id());
+    assert_eq!(
+        owner_a_mirror.connection_ref(),
+        owner_b_mirror.connection_ref()
+    );
+    assert_ne!(owner_a_mirror.binding_id(), owner_b_mirror.binding_id());
 }
 
 #[test]

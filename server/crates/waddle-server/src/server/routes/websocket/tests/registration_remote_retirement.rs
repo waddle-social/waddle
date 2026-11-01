@@ -95,7 +95,7 @@ where
         SharedNodeIdentity::new(NodeIdentity::new("socket-node", "socket-epoch")),
     )
     .await;
-    let registration_id = track_remote_socket_for_test(&bridge, &jid, old_owner).await;
+    let registration_id = track_remote_socket_for_test(&bridge, &jid, &lifecycle.entry).await;
     let request = RelayForceDetachRemoteUserResource {
         jid: jid.clone(),
         registration_id,

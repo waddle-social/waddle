@@ -238,6 +238,12 @@ impl OrderedRelayDeliveryBridge {
         if target_snapshot.owner == me {
             return RemoteResourceRegisterOutcome::NotRemote;
         }
+        if !me.is_active()
+            || entry.connection_ref().node_lease()
+                != &waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&me)
+        {
+            return RemoteResourceRegisterOutcome::Failed;
+        }
 
         let registration_id = RemoteResourceRegistrationId::fresh();
         let socket_generation = {
@@ -317,19 +323,26 @@ impl OrderedRelayDeliveryBridge {
                 // left with a ghost mirror.
                 let committed = {
                     let mut registrations = self.remote_socket_resources.lock().await;
+                    let current_identity = services.node_identity.current();
+                    let source_incarnation_is_current = current_identity.is_active()
+                        && entry.connection_ref().node_lease()
+                            == &waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                                &current_identity,
+                            );
                     let socket_still_ours = services
                         .connection_registry
                         .entry_if_owner(jid, &owner)
-                        .is_some();
+                        .is_some_and(|current| current.connection_ref() == entry.connection_ref());
                     let slot_available = registrations
                         .get(jid)
                         .is_none_or(|current| current.owner == owner);
-                    if socket_still_ours && slot_available {
+                    if source_incarnation_is_current && socket_still_ours && slot_available {
                         registrations.insert(
                             jid.clone(),
                             RemoteSocketRegistration {
                                 registration_id,
                                 socket_generation,
+                                connection_ref: entry.connection_ref().clone(),
                                 owner,
                                 user_owner: user_owner.clone(),
                             },
@@ -785,7 +798,7 @@ impl OrderedRelayDeliveryBridge {
         }
     }
 
-    pub(super) async fn remote_socket_registration_if_current(
+    pub(in crate::clustering::route_bridge) async fn remote_socket_registration_if_current(
         &self,
         jid: &jid::FullJid,
     ) -> Option<RemoteSocketRegistration> {
@@ -796,9 +809,17 @@ impl OrderedRelayDeliveryBridge {
             .get(jid)
             .cloned()?;
         let services = self.services.get()?;
+        let identity = services.node_identity.current();
+        if !identity.is_active()
+            || registration.connection_ref.node_lease()
+                != &waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&identity)
+        {
+            return None;
+        }
         services
             .connection_registry
             .entry_if_owner(jid, &registration.owner)
+            .filter(|entry| entry.connection_ref() == &registration.connection_ref)
             .map(|_| registration)
     }
 
@@ -1652,6 +1673,7 @@ mod tests {
             RemoteSocketRegistration {
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
+                connection_ref: entry.connection_ref().clone(),
                 owner,
                 user_owner: NodeId::new("owner-node".to_string()),
             },
@@ -1957,6 +1979,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
         *entry.occupancy_session.lock().unwrap() = Some(generation);
+        let connection_ref = entry.connection_ref().clone();
         let owner = entry.binding_id();
         let mut cleanup_rx = entry.take_force_detach_rx().unwrap();
         let mut bind = state
@@ -1991,6 +2014,7 @@ mod tests {
                 RemoteSocketRegistration {
                     registration_id,
                     socket_generation: RemoteResourceSocketGeneration::next(None),
+                    connection_ref,
                     owner,
                     user_owner: NodeId::new("owner-node".to_owned()),
                 },
@@ -2183,6 +2207,7 @@ mod tests {
             RemoteSocketRegistration {
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
+                connection_ref: entry.connection_ref().clone(),
                 owner,
                 user_owner: NodeId::new("owner-node".to_string()),
             },

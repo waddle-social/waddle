@@ -554,7 +554,7 @@ pub struct RelayRemoteResourceRegistrationReply {
     pub status: RelayRemoteResourceRegistrationStatus,
 }
 
-#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v3")]
+#[kameo::remote_message("waddle.clustering.relay.remote_resource_register.v4")]
 impl Message<RelayRegisterRemoteUserResource> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RelayRemoteResourceRegistrationReply>;
 

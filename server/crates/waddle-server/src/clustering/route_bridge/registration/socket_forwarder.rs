@@ -292,6 +292,11 @@ mod tests {
             RemoteOwnerRegistration {
                 occupancy_session: generation,
                 socket_identity: NodeIdentity::new("socket", "epoch"),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_node: socket_node.clone(),

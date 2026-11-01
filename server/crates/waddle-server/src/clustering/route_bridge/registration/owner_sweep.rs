@@ -115,7 +115,12 @@ impl OrderedRelayDeliveryBridge {
                     lease
                 };
                 match lease {
-                    Ok(Some(identity)) if identity == registration.socket_identity => {
+                    Ok(Some(identity))
+                        if identity == registration.socket_identity
+                            && waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                                &identity,
+                            ) == *registration.connection_ref.node_lease() =>
+                    {
                         self.reconcile_healthy_remote_owner_mirror(
                             services,
                             &jid,

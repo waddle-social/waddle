@@ -4,11 +4,11 @@ use super::Message;
 mod invitation;
 
 use super::{
-    mpsc, origin_identity, receiver_identity, services_with_claims, test_peer_id, Arc,
-    CancellationToken, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, Duration, Lang,
-    NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OutboundStanza,
-    RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus, RelayTraceContext,
-    RemoteResourceOutboundFrame, RemoteStanza, Stanza,
+    connection_entry_for_current_node, mpsc, origin_identity, receiver_identity,
+    services_with_claims, test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig,
+    DeliveryKind, Duration, Lang, NodeId, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    OutboundStanza, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
+    RelayTraceContext, RemoteResourceOutboundFrame, RemoteStanza, Stanza,
 };
 use crate::ingress::commit::commit_submission;
 use crate::ingress::identity::IngressAppendObligationRef;
@@ -54,7 +54,7 @@ impl SocketFixture {
         bridge.wire(Arc::clone(&services));
         let target: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
         let (sender, receiver) = mpsc::channel(4);
-        let entry = ConnectionEntry::new(sender);
+        let entry = connection_entry_for_current_node(sender, &services);
         let owner = entry.binding_id();
         services
             .connection_registry
@@ -199,7 +199,7 @@ async fn forged_obligation_cannot_send(fixture: IngressFixture) {
         .parse()
         .expect("other resource");
     let (sender, mut receiver) = mpsc::channel(1);
-    let entry = ConnectionEntry::new(sender);
+    let entry = connection_entry_for_current_node(sender, &socket.services);
     let owner = entry.binding_id();
     socket
         .services
@@ -330,7 +330,7 @@ async fn remote_socket_owner_replaced_during_send_lease_cannot_receive_old_frame
         socket.frame.frame.jid.clone(),
     );
     let (sender, mut replacement_receiver) = mpsc::channel(1);
-    let replacement = ConnectionEntry::new(sender);
+    let replacement = connection_entry_for_current_node(sender, &socket.services);
     let replace_owner = async {
         tokio::time::timeout(Duration::from_secs(1), gate.wait_until_reached())
             .await

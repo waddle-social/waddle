@@ -34,16 +34,31 @@ pub(crate) enum RegisteredRemoteWriteAcceptedDelivery {
     RefreshNeeded,
 }
 
+fn remote_socket_connection_ref_is_current(
+    services: &super::super::OrderedRelayDeliveryServices,
+    jid: &jid::FullJid,
+    registration: &super::super::RemoteSocketRegistration,
+) -> bool {
+    let identity = services.node_identity.current();
+    identity.is_active()
+        && registration.connection_ref.node_lease()
+            == &waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&identity)
+        && services
+            .connection_registry
+            .entry_if_owner(jid, &registration.owner)
+            .is_some_and(|entry| entry.connection_ref() == &registration.connection_ref)
+}
+
 impl OrderedRelayDeliveryBridge {
     pub(crate) async fn remote_resource_origin_if_owner(
         &self,
         jid: &jid::FullJid,
         owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     ) -> Option<RemoteResourceOriginSnapshot> {
-        let registrations = self.remote_socket_resources.lock().await;
-        let registration = registrations
-            .get(jid)
-            .filter(|registration| registration.owner == *owner)?;
+        let registration = self.remote_socket_registration_if_current(jid).await?;
+        if registration.owner != *owner {
+            return None;
+        }
         Some(RemoteResourceOriginSnapshot {
             jid: jid.clone(),
             registration_id: registration.registration_id,
@@ -429,6 +444,13 @@ impl OrderedRelayDeliveryBridge {
                 .filter(|registration| registration.registration_id == msg.frame.registration_id)
                 .cloned()
         };
+        if registration.as_ref().is_none_or(|registration| {
+            !remote_socket_connection_ref_is_current(&services, &msg.frame.jid, registration)
+        }) {
+            return RelayRemoteResourceFrameReply {
+                status: RelayRemoteResourceFrameStatus::Unavailable,
+            };
+        }
         if let Some(obligation) = msg.frame.ingress_append.as_ref() {
             let Some(state) = services.web_socket_state.upgrade() else {
                 return RelayRemoteResourceFrameReply {
@@ -604,6 +626,11 @@ impl OrderedRelayDeliveryBridge {
                 Some(registration) => registration.clone(),
             }
         };
+        if !remote_socket_connection_ref_is_current(&services, &msg.frame.jid, &registration) {
+            return RelayRemoteResourceWriteAcceptedReply {
+                status: RelayRemoteResourceWriteAcceptedStatus::StaleRegistration,
+            };
+        }
         let (acceptance, receiver) = OutboundWriteAcceptance::new();
         let outbound = OutboundStanza::with_write_acceptance(msg.frame.stanza.0, acceptance);
         let outcome = services.connection_registry.try_send_outbound_if_owner(

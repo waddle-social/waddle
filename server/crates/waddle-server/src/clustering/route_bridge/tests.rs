@@ -47,8 +47,21 @@ use std::sync::atomic::AtomicBool;
 use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
 
+pub(crate) fn connection_entry_for_current_node(
+    sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+    services: &OrderedRelayDeliveryServices,
+) -> ConnectionEntry {
+    let identity = services.node_identity.current();
+    ConnectionEntry::new_for_connection(
+        sender,
+        waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&identity),
+        ),
+    )
+}
+
 #[derive(Clone)]
-enum SocketLeaseRead {
+pub(crate) enum SocketLeaseRead {
     Present(NodeIdentity),
     Gone,
     Failed,
@@ -62,10 +75,10 @@ enum SocketLeaseRead {
     },
 }
 
-struct StaticNodeLease {
-    socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
-    origin: NodeIdentity,
-    peer_id: String,
+pub(crate) struct StaticNodeLease {
+    pub(crate) socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
+    pub(crate) origin: NodeIdentity,
+    pub(crate) peer_id: String,
 }
 
 #[async_trait::async_trait]

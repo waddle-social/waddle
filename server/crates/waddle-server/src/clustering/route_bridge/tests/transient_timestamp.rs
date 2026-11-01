@@ -176,6 +176,12 @@ pub(crate) async fn remote_owner_fixture() -> RemoteOwnerFixture {
         RemoteOwnerRegistration {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                    "source-socket-node",
+                    "fixture-epoch",
+                )),
+            ),
             unregister_pending: false,
             registration_id,
             socket_generation,

@@ -1,4 +1,5 @@
 use super::{mpsc, Arc, Ordering, Stanza};
+use crate::ownership::{ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
@@ -274,6 +275,7 @@ impl LocalConnectionBindingId {
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
     binding_id: LocalConnectionBindingId,
+    connection_ref: ConnectionRef,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
@@ -366,9 +368,22 @@ const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        Self::new_for_connection(
+            sender,
+            ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        )
+    }
+
+    /// Create a new local registry entry for an already-identified physical
+    /// connection. Each call still mints a new JID-binding token.
+    pub fn new_for_connection(
+        sender: mpsc::Sender<OutboundStanza>,
+        connection_ref: ConnectionRef,
+    ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             binding_id: LocalConnectionBindingId::fresh(),
+            connection_ref,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
@@ -410,9 +425,26 @@ impl ConnectionEntry {
     }
 
     pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {
-        let mut entry = Self::new(sender);
+        Self::remote_hosted_for_connection(
+            sender,
+            ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        )
+    }
+
+    /// Create a remote-hosted account mirror which retains the originating
+    /// physical connection reference while minting a mirror-local binding.
+    pub fn remote_hosted_for_connection(
+        sender: mpsc::Sender<OutboundStanza>,
+        connection_ref: ConnectionRef,
+    ) -> Self {
+        let mut entry = Self::new_for_connection(sender, connection_ref);
         entry.hosting = ConnectionHosting::Remote;
         entry
+    }
+
+    /// Immutable physical transport identity carried by this registry entry.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
     }
 
     pub fn is_locally_hosted(&self) -> bool {

@@ -9,7 +9,9 @@ use super::super::{
     MAX_REMOTE_OWNER_REGISTRATION_LOCKS, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
     REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT, REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE,
 };
-use super::owner_update::remote_owner_registration_is_current;
+use super::owner_update::{
+    remote_owner_registration_is_current, remote_source_connection_lease_is_current,
+};
 
 pub(in super::super) use super::owner_update::owner_remote_entry_if_current;
 
@@ -247,6 +249,19 @@ impl OrderedRelayDeliveryBridge {
             };
         }
 
+        // Verify the exact source incarnation before touching displaced mirror
+        // state. Node ID alone cannot distinguish a restarted socket node.
+        let socket_identity = match remote_source_connection_lease_is_current(
+            &services,
+            &msg.socket_node,
+            &msg.state.connection_ref,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(status) => return RelayRemoteResourceRegistrationReply { status },
+        };
+
         let incumbent = bind_guard.incumbent();
         if let Some(incumbent) = &incumbent {
             if incumbent.generation != generation
@@ -287,6 +302,7 @@ impl OrderedRelayDeliveryBridge {
             if displaced.registration_id == msg.registration_id
                 && displaced.socket_node == msg.socket_node
                 && displaced.socket_generation == msg.socket_generation
+                && displaced.connection_ref == msg.state.connection_ref
             {
                 match remote_owner_registration_is_current(&services, &msg.jid, &displaced).await {
                     Ok(()) => {
@@ -348,21 +364,9 @@ impl OrderedRelayDeliveryBridge {
             }
         }
 
-        let socket_identity = match services
-            .node_lease
-            .unexpired_node_identity(&msg.socket_node)
-            .await
-        {
-            Ok(Some(identity)) => identity,
-            Ok(None) | Err(_) => {
-                return RelayRemoteResourceRegistrationReply {
-                    status: RelayRemoteResourceRegistrationStatus::Unavailable,
-                }
-            }
-        };
-
         let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
-        let entry = ConnectionEntry::remote_hosted(tx);
+        let entry =
+            ConnectionEntry::remote_hosted_for_connection(tx, msg.state.connection_ref.clone());
         apply_remote_resource_state(&entry, &msg.state);
         let owner = entry.binding_id();
         let force_detach_rx = entry.take_force_detach_rx();
@@ -382,6 +386,23 @@ impl OrderedRelayDeliveryBridge {
                 if let Ok((entered, release)) = REGISTERED_ACTOR_GATE.try_with(Clone::clone) {
                     entered.notify_one();
                     release.notified().await;
+                }
+                if let Err(status) = remote_source_connection_lease_is_current(
+                    &services,
+                    &msg.socket_node,
+                    &msg.state.connection_ref,
+                )
+                .await
+                {
+                    if matches!(
+                        unregister_remote_owner_actor_entry(&services, &msg.jid, &owner).await,
+                        RemoteOwnerActorUnregisterOutcome::Failed
+                    ) {
+                        return RelayRemoteResourceRegistrationReply {
+                            status: RelayRemoteResourceRegistrationStatus::Unavailable,
+                        };
+                    }
+                    return RelayRemoteResourceRegistrationReply { status };
                 }
                 let authority = crate::occupancy_authority::acquire_current(
                     &services.occupancy_database,
@@ -414,6 +435,7 @@ impl OrderedRelayDeliveryBridge {
                 let registration = RemoteOwnerRegistration {
                     occupancy_session: generation,
                     socket_identity,
+                    connection_ref: msg.state.connection_ref.clone(),
                     unregister_pending: false,
                     registration_id: msg.registration_id,
                     socket_node: msg.socket_node.clone(),
@@ -761,6 +783,7 @@ pub(super) fn remote_owner_registration_matches(
     left.registration_id == right.registration_id
         && left.socket_node == right.socket_node
         && left.socket_generation == right.socket_generation
+        && left.connection_ref == right.connection_ref
         && left.owner == right.owner
 }
 
@@ -768,7 +791,8 @@ pub(super) fn remote_owner_registration_matches(
 mod tests {
     use super::*;
     use crate::clustering::route_bridge::tests::{
-        origin_identity, receiver_identity, services_with_claims, test_peer_id,
+        origin_identity, receiver_identity, services_with_claims, test_peer_id, SocketLeaseRead,
+        StaticNodeLease,
     };
     use crate::clustering::route_bridge::{
         remote_registration_request, RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
@@ -782,9 +806,34 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
     use waddle_xmpp::ownership::{
-        ClaimEpoch, ClaimError, InProcessClaimStore, ResumeIdentityProof, StalePredicate,
+        ClaimEpoch, ClaimError, ConnectionRef, InProcessClaimStore, NodeLeaseIdentity,
+        ResumeIdentityProof, StalePredicate,
     };
     use waddle_xmpp::ownership::{ClaimSnapshot, ClaimStore, Entity, NodeIdentity};
+
+    async fn services_with_socket_lease(
+        socket_identity: NodeIdentity,
+    ) -> (
+        Arc<OrderedRelayDeliveryServices>,
+        Arc<std::sync::Mutex<SocketLeaseRead>>,
+    ) {
+        let socket_read = Arc::new(std::sync::Mutex::new(SocketLeaseRead::Present(
+            socket_identity,
+        )));
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            test_peer_id(),
+        )
+        .await;
+        services.node_lease = Arc::new(StaticNodeLease {
+            socket_read: Some(Arc::clone(&socket_read)),
+            origin: origin_identity(),
+            peer_id: test_peer_id(),
+        });
+        (Arc::new(services), socket_read)
+    }
 
     struct PausedFirstAcquire {
         inner: InProcessClaimStore,
@@ -996,6 +1045,12 @@ mod tests {
         let registration = RemoteOwnerRegistration {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                    socket_node.as_str(),
+                    "fixture-epoch",
+                )),
+            ),
             unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
             socket_node,
@@ -1421,6 +1476,158 @@ mod tests {
             RelayRemoteResourceRegistrationStatus::Registered,
             "stale actor entry must not block a successor"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_registration_rejects_replayed_generation_with_a_different_transport_ref() {
+        let socket_identity = NodeIdentity::new("socket-node", "socket-epoch-1");
+        let (services, _socket_read) = services_with_socket_lease(socket_identity.clone()).await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(services.clone());
+        let request = remote_registration_request(
+            &bridge,
+            "juliet@example.test/phone".parse().expect("JID"),
+            NodeId::new("socket-node".to_owned()),
+        )
+        .await;
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(request.clone())
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::Registered
+        );
+        let published = bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&request.jid)
+            .cloned()
+            .expect("published remote mirror");
+        assert_eq!(
+            published.connection_ref, request.state.connection_ref,
+            "the owner mirror retains the source transport reference"
+        );
+        let mirror_entry = services
+            .connection_registry
+            .entry(&request.jid)
+            .expect("owner mirror entry");
+        assert_eq!(published.owner, mirror_entry.binding_id());
+        assert_eq!(mirror_entry.connection_ref(), &request.state.connection_ref);
+        let (source_tx, _source_rx) = mpsc::channel(1);
+        let source_entry =
+            ConnectionEntry::new_for_connection(source_tx, request.state.connection_ref.clone());
+        assert_ne!(
+            mirror_entry.binding_id(),
+            source_entry.binding_id(),
+            "the moved mirror receives a local binding distinct from its source socket"
+        );
+
+        let mut replay = request.clone();
+        replay.state.connection_ref =
+            ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(&socket_identity));
+        assert_ne!(replay.state.connection_ref, request.state.connection_ref);
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(replay)
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::StaleRegistration
+        );
+        let still_published = bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&request.jid)
+            .cloned()
+            .expect("replay must preserve the valid mirror");
+        assert_eq!(still_published.connection_ref, request.state.connection_ref);
+    }
+
+    #[tokio::test]
+    async fn source_lease_rotation_after_actor_admission_preserves_the_successor() {
+        let socket_identity = NodeIdentity::new("socket-node", "socket-epoch-1");
+        let (services, socket_read) = services_with_socket_lease(socket_identity).await;
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(services.clone());
+        let request = remote_registration_request(
+            &bridge,
+            "juliet@example.test/phone".parse().expect("JID"),
+            NodeId::new("socket-node".to_owned()),
+        )
+        .await;
+        let jid = request.jid.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let registering = tokio::spawn({
+            let bridge = Arc::clone(&bridge);
+            let gate = (Arc::clone(&entered), Arc::clone(&release));
+            async move {
+                REGISTERED_ACTOR_GATE
+                    .scope(gate, bridge.register_remote_user_resource_on_owner(request))
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("source lease precheck passed and actor admission completed");
+        *socket_read
+            .lock()
+            .expect("socket lease fixture lock must not be poisoned") =
+            SocketLeaseRead::Present(NodeIdentity::new("socket-node", "socket-epoch-2"));
+
+        let successor_node = services.node_identity.current();
+        let successor_connection_ref =
+            ConnectionRef::fresh(NodeLeaseIdentity::from_node_identity(&successor_node));
+        let (successor_tx, _successor_rx) = mpsc::channel(1);
+        let successor =
+            ConnectionEntry::new_for_connection(successor_tx, successor_connection_ref.clone());
+        let successor_owner = successor.binding_id();
+        services
+            .user_registry
+            .ask(waddle_xmpp::registry::RegisterUserResource {
+                jid: jid.clone(),
+                entry: successor.clone(),
+            })
+            .await
+            .expect("publish successor actor entry");
+        services
+            .connection_registry
+            .register_entry(jid.clone(), successor);
+        release.notify_one();
+
+        assert_eq!(
+            registering.await.expect("registration task").status,
+            RelayRemoteResourceRegistrationStatus::StaleRegistration
+        );
+        assert!(bridge.remote_owner_resources.lock().await.is_empty());
+        let registry_entry = services
+            .connection_registry
+            .entry(&jid)
+            .expect("rotated source cleanup must preserve the successor registry entry");
+        assert_eq!(registry_entry.binding_id(), successor_owner);
+        assert_eq!(registry_entry.connection_ref(), &successor_connection_ref);
+        let actor = services
+            .user_registry
+            .ask(waddle_xmpp::registry::GetUser {
+                bare_jid: jid.to_bare(),
+            })
+            .await
+            .expect("lookup owner actor");
+        let actor = actor.expect("successor user actor remains available");
+        let actor_entry = actor
+            .ask(waddle_xmpp::registry::GetConnectionEntry { jid })
+            .await
+            .expect("actor entry lookup")
+            .expect("stale cleanup must preserve the successor actor entry");
+        assert_eq!(actor_entry.binding_id(), successor_owner);
+        assert_eq!(actor_entry.connection_ref(), &successor_connection_ref);
     }
 
     #[tokio::test]

@@ -4,7 +4,8 @@ use super::{
     relay_dispatch_span, relay_name, Demote, DemoteReply, Deserialize, Mutex,
     OrderedRelayNackReason, OrderedRelayReceiverState, OrderedRelayReply, OrderedRelayReservation,
     PendingReplyReceipts, RelayDispatchKind, RelayReassertMediaGrants,
-    RelayReassertMediaGrantsReply, RelayResumeSteal, RelayResumeStealReply, Serialize,
+    RelayReassertMediaGrantsReply, RelayRegisterRemoteUserResource, RelayResumeSteal,
+    RelayResumeStealReply, Serialize,
 };
 use super::{
     refresh_relay_registration, remote_resource_compat, send_error, Arc, CancellationToken,
@@ -149,6 +150,14 @@ fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
     assert_eq!(
         <RelayActor as kameo::remote::RemoteMessage<remote_resource_compat::BaselineRoute>>::REMOTE_ID,
         "waddle.clustering.relay.remote_resource_route.v8"
+    );
+}
+
+#[test]
+fn remote_resource_register_connection_ref_uses_a_new_message_id() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayRegisterRemoteUserResource>>::REMOTE_ID,
+        "waddle.clustering.relay.remote_resource_register.v4"
     );
 }
 
