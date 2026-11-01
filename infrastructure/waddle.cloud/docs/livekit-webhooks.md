@@ -15,12 +15,14 @@ signature/replay checks.
 ## Reproduce delivery safely
 
 The verifier needs Python with the existing PyYAML tooling, an explicit
-Kubernetes context, read access to the two existing webhook secrets, and exec
+Kubernetes context from the local kubectl inventory, read access to the two existing webhook secrets, and exec
 access to a ready SFU pod containing BusyBox wget. It resolves the configured
 webhook-key inside the **SFU** keys.yaml and checks that the server's
 verifier secret matches, without printing either. Malformed credential YAML or
 value shapes produce a generic error without parser input or traceback. The
-JWT travels to kubectl through stdin and only HTTP statuses are printed.
+JWT travels to kubectl through stdin and only HTTP statuses are printed. It
+rejects option-like, non-printable and unknown contexts before cluster access,
+and never creates or deletes policies.
 
 After the GitOps policy is applied:
 
@@ -36,19 +38,47 @@ tear down a call or create a persistent delivery row. It does increment
 time, because that synthetic increment can suppress the silence alert for its
 six-hour lookback. A probe is not evidence that genuine lifecycle events flowed.
 
-For a pre-rollout comparison, an operator can explicitly add
-`--compare-public --temporary-egress`. The latter creates one uniquely named,
-additive CiliumNetworkPolicy selecting only SFU pods and server TCP/3000, then
-deletes it in a finally block. It does not restart workloads or modify the
-managed policy. Verify cleanup with:
+For a pre-rollout comparison, an operator can add `--compare-public`. If the
+internal path is still denied, the temporary diagnostic allowance used for the
+investigation was exactly this additive policy:
 
-```sh
-kubectl --context <explicit-context> get ciliumnetworkpolicy -n livekit
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  generateName: webhook-delivery-probe-
+  namespace: livekit
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit-sfu
+      app.kubernetes.io/instance: livekit-sfu
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: waddle
+            k8s:app.kubernetes.io/name: waddle-server
+            k8s:app.kubernetes.io/instance: waddle-server
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
 ```
 
-If the process is killed before cleanup, delete only its printed
-`webhook-delivery-probe-...` policy. Do not run this optional diagnostic mutation
-from CI.
+Save it as `/tmp/webhook-probe-policy.yaml`. An operator can create it, record
+the generated name, run the verifier, and delete that exact policy afterward:
+
+```sh
+kubectl --context=<explicit-context> create -f /tmp/webhook-probe-policy.yaml
+python3 infrastructure/waddle.cloud/scripts/verify-livekit-webhook-delivery.py \
+  --context=<explicit-context> --compare-public
+kubectl --context=<explicit-context> delete ciliumnetworkpolicy -n livekit <generated-name> --wait=true
+kubectl --context=<explicit-context> get ciliumnetworkpolicy -n livekit
+```
+
+Do not modify the managed policy or restart workloads for this comparison. The
+temporary allowance and its cleanup are explicit operator actions, separate
+from the retained verifier. Do not run them from CI.
 
 Use Hubble to inspect the SFU source and server TCP/3000 path around the probe
 time. Export only timestamp, verdict, source/destination, port, TCP flags and
@@ -70,9 +100,11 @@ be checked in or pasted into a PR.
 - The server recorded the accepted `other` event at
   `2026-11-01T22:36:00.019731Z` and the invalid-token rejection at
   `2026-11-01T22:36:12.121349Z`. The temporary policy was removed afterward.
-- The retained verifier itself was subsequently executed with an explicit
-  context, public comparison and temporary egress: it reported 403/200/401 and
-  confirmed policy cleanup.
+- Before its optional policy mutation was removed, the verifier itself was
+  executed with an explicit context, public comparison and temporary egress:
+  it reported 403/200/401 and confirmed policy cleanup. The retained helper now
+  only reads credentials and sends probes; temporary policy management remains
+  the explicit operator procedure above.
 
 These observations prove the diagnosed routing boundary and signed handler
 reachability. They do not claim the committed GitOps change has deployed or
@@ -130,4 +162,3 @@ the known public-hairpin delivery failure. Prefer retaining the scoped internal
 allow while repairing any newly discovered problem. Reverting the parser also
 restores rejection of canonical string timestamps. Record real event/alert
 acceptance on #1616 before closing it.
-

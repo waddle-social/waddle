@@ -63,3 +63,29 @@ call lifecycle and post-rollout alert acceptance remain issue closure gates.
 The synthetic probe produces operational acceptance telemetry and can suppress
 the six-hour silence lookback; it is not a real-call acceptance result.
 
+## Focused diagnostic and manifest cleanup plan
+
+Sonar identified raw CLI context flow into optional create/delete commands,
+excess complexity in the verifier and manifest test, and nested anonymous test
+fixtures. Preserve the proven delivery/parser behavior and existing EOF fixes.
+
+1. Lock the existing credential-redaction and manifest assertions; add CLI tests
+   rejecting option-like/control-bearing or unknown contexts before secret reads
+   or probes.
+2. Delete optional policy mutation from the retained diagnostic helper. Its
+   normal purpose is to inspect delivery after GitOps permits the path; the
+   temporary live diagnosis is already complete and documented separately.
+3. Resolve explicit contexts from local kubectl inventory and pass the selected
+   inventory value as one --context=value argument. Isolate credential parsing
+   so errors remain redacted and the main orchestration stays readable.
+4. Give manifest fixture shapes names and flatten endpoint-rule assertions,
+   keeping the same URL/selector/port acceptance contract.
+5. Re-run CLI tests, focused Go tests/vet, Python compilation and whitespace
+   checks; request independent review and fresh Sonar analysis.
+
+The three CLI test methods pass, including four context rejection cases that
+failed before validation was added. Credential tests also require the accepted
+context to be passed atomically. Focused manifest tests and file-level Go vet
+pass with named fixtures and shallow assertion helpers. No Rust production
+behavior changed in this cleanup; fresh hosted Sonar and independent review
+remain integration-owner gates.

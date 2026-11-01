@@ -10,7 +10,6 @@ import re
 import shlex
 import subprocess
 import time
-import uuid
 
 import yaml
 
@@ -18,21 +17,19 @@ INTERNAL_URL = "http://waddle-server.waddle.svc.cluster.local:3000/api/v1/liveki
 PUBLIC_URL = "https://xmpp.waddle.social/api/v1/livekit/webhook"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--context", required=True, help="Explicit kubectl context to inspect")
-    parser.add_argument(
-        "--temporary-egress",
-        action="store_true",
-        help="Create a narrow additive diagnostic policy, then delete it in finally",
-    )
-    parser.add_argument("--compare-public", action="store_true", help="Also probe the public gateway")
-    args = parser.parse_args()
-    kubectl = ["kubectl", "--context", args.context, "--request-timeout=15s"]
+def kubectl_for_context(requested):
+    if not requested.isprintable() or requested.startswith("-"):
+        raise SystemExit("invalid Kubernetes context")
+    contexts = subprocess.check_output(
+        ["kubectl", "config", "get-contexts", "-o", "name"], text=True,
+    ).splitlines()
+    for context in contexts:
+        if context == requested:
+            return ["kubectl", "--context=" + context, "--request-timeout=15s"]
+    raise SystemExit("Kubernetes context is not in the local inventory")
 
-    def kube_json(*arguments):
-        return json.loads(subprocess.check_output([*kubectl, *arguments, "-o", "json"]))
 
+def load_webhook_credentials(kube_json):
     try:
         sfu = kube_json("get", "secret", "-n", "livekit", "livekit-sfu-api-keys")["data"]
         server = kube_json("get", "secret", "-n", "waddle", "waddle-livekit-config")["data"]
@@ -50,6 +47,20 @@ def main():
         raise SystemExit("webhook credentials are malformed or incomplete") from None
     if not hmac.compare_digest(secret, verifier_secret):
         raise RuntimeError("SFU signer and server verifier secrets differ")
+    return issuer, secret
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--context", required=True, help="Explicit kubectl context to inspect")
+    parser.add_argument("--compare-public", action="store_true", help="Also probe the public gateway")
+    args = parser.parse_args()
+    kubectl = kubectl_for_context(args.context)
+
+    def kube_json(*arguments):
+        return json.loads(subprocess.check_output([*kubectl, *arguments, "-o", "json"]))
+
+    issuer, secret = load_webhook_credentials(kube_json)
     pods = kube_json(
         "get", "pods", "-n", "livekit", "-l",
         "app.kubernetes.io/name=livekit-sfu,app.kubernetes.io/instance=livekit-sfu",
@@ -103,48 +114,13 @@ def main():
         print(json.dumps({"probe": label, "http_status": status, "exec_exit": result.returncode}), flush=True)
         return status
 
-    name = "webhook-delivery-probe-" + uuid.uuid4().hex[:8]
-    policy = {
-        "apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
-        "metadata": {"name": name, "namespace": "livekit"},
-        "spec": {
-            "endpointSelector": {"matchLabels": {
-                "app.kubernetes.io/name": "livekit-sfu",
-                "app.kubernetes.io/instance": "livekit-sfu",
-            }},
-            "egress": [{
-                "toEndpoints": [{"matchLabels": {
-                    "k8s:io.kubernetes.pod.namespace": "waddle",
-                    "k8s:app.kubernetes.io/name": "waddle-server",
-                    "k8s:app.kubernetes.io/instance": "waddle-server",
-                }}],
-                "toPorts": [{"ports": [{"port": "3000", "protocol": "TCP"}]}],
-            }],
-        },
-    }
-    created = False
-    try:
-        if args.compare_public:
-            probe("signed-public", PUBLIC_URL, token)
-        if args.temporary_egress:
-            subprocess.run([*kubectl, "create", "-f", "-"], input=json.dumps(policy), text=True, check=True)
-            created = True
-        for _ in range(3):
-            status = probe("signed-internal", INTERNAL_URL, token)
-            if status == 200:
-                break
-        if status != 200:
-            raise RuntimeError("signed internal delivery did not reach the handler")
-        if probe("invalid-signature-internal", INTERNAL_URL, "invalid-signature") != 401:
-            raise RuntimeError("invalid signature was not rejected")
-    finally:
-        if created:
-            subprocess.run(
-                [*kubectl, "delete", "ciliumnetworkpolicy", "-n", "livekit", name, "--wait=true"],
-                check=True,
-            )
+    if args.compare_public:
+        probe("signed-public", PUBLIC_URL, token)
+    if probe("signed-internal", INTERNAL_URL, token) != 200:
+        raise RuntimeError("signed internal delivery did not reach the handler")
+    if probe("invalid-signature-internal", INTERNAL_URL, "invalid-signature") != 401:
+        raise RuntimeError("invalid signature was not rejected")
 
 
 if __name__ == "__main__":
     main()
-

@@ -75,4 +75,3 @@ tests:
       - expr: 'ALERTS{alertname="LiveKitWebhookSilent"}'
         eval_time: 70m
         exp_samples: []
-
