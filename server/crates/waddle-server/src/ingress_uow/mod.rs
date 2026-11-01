@@ -65,9 +65,11 @@ pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 use std::time::Duration;
 
 use crate::config::LineageConfig;
+use crate::db::lineage::PgSchemaIdentity;
 use crate::db::{lineage, Database, DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
-    acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
+    acquire_epoch_lock_first, acquire_epoch_lock_first_with_schema, set_local_transaction_timeouts,
+    supported_protocol_epoch,
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -89,6 +91,10 @@ pub struct IngressUnitOfWork {
     observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
     db: Database,
     lineage: LineageConfig,
+    /// Optional dark writer capability supplied by an independent attestor.
+    /// Normal startup does not populate this until its identity handoff is
+    /// wired and reviewed.
+    expected_pg_schema: Option<PgSchemaIdentity>,
     /// The server's canonical node identity source. Bound once at
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
@@ -114,8 +120,24 @@ impl IngressUnitOfWork {
             observations: Default::default(),
             db,
             lineage,
+            expected_pg_schema: None,
             fencing: IngressFencing::SingleNode,
         })
+    }
+
+    /// Attach an independently attested schema identity for dark writer-path
+    /// qualification. This must not be built from the current pooled
+    /// connection's search path or DSN.
+    #[cfg(test)]
+    pub(crate) fn with_expected_pg_schema(
+        mut self,
+        expected: PgSchemaIdentity,
+    ) -> Result<Self, IngressUowError> {
+        if self.db.driver() != DatabaseDriver::Postgres {
+            return Err(IngressUowError::PostgresRequired);
+        }
+        self.expected_pg_schema = Some(expected);
+        Ok(self)
     }
 
     /// Ownership fencing configured for transactions opened by this factory.
@@ -197,7 +219,12 @@ impl IngressUnitOfWork {
                 return Err(IngressUowError::TransactionBoundsUnproven);
             }
         }
-        let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
+        let protocol_epoch = match &self.expected_pg_schema {
+            Some(expected) => {
+                acquire_epoch_lock_first_with_schema(&mut transaction, expected).await?
+            }
+            None => acquire_epoch_lock_first(&mut transaction).await?,
+        };
         let supported = supported_protocol_epoch();
         if protocol_epoch > supported {
             return Err(IngressUowError::EpochUnsupported {
@@ -206,7 +233,7 @@ impl IngressUnitOfWork {
             });
         }
 
-        if self.db.driver() == DatabaseDriver::Postgres {
+        if self.db.driver() == DatabaseDriver::Postgres && self.expected_pg_schema.is_none() {
             let mut proof = transaction
                 .query(
                     r#"

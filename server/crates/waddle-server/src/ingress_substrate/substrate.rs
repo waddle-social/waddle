@@ -23,6 +23,7 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
+use crate::db::lineage::PgSchemaIdentity;
 
 /// The time an origin-id alias remains available after its message becomes
 /// terminal.  The garbage collector receives `now` and binds the derived
@@ -94,6 +95,12 @@ pub enum IngressSubstrateError {
     DeliveryKeyConflict,
     #[error("live ingress protocol epoch exceeds what this binary supports")]
     UnsupportedLiveEpoch,
+    #[error("ingress schema identity changed before the epoch prelock")]
+    SchemaIdentityMismatch,
+    #[error("ingress epoch changed while preparing the V1009 compatibility lock")]
+    EpochChangedDuringPreparation,
+    #[error("the ingress relation prelock requires READ COMMITTED isolation")]
+    ReadCommittedRequired,
 }
 
 /// Outcome of adding a child identity that requires a live message row.
@@ -251,6 +258,23 @@ impl PostgresIngressSubstrate {
     /// callers supplying another transaction must establish these preconditions
     /// before acquiring application locks. This API does not prove that order.
     pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.begin_inner(None).await
+    }
+
+    /// Start a disposable dark writer with an independently attested schema
+    /// capability. This test-only path is not wired into runtime startup.
+    #[cfg(test)]
+    pub(crate) async fn begin_with_expected_pg_schema(
+        &self,
+        expected: &PgSchemaIdentity,
+    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.begin_inner(Some(expected)).await
+    }
+
+    async fn begin_inner(
+        &self,
+        expected: Option<&PgSchemaIdentity>,
+    ) -> Result<Transaction<'_>, IngressSubstrateError> {
         let mut tx = self
             .db
             .begin_immediate()
@@ -268,13 +292,24 @@ impl PostgresIngressSubstrate {
                     retry_class: DbRetryClass::NotRetryable,
                 });
             }
-            let epoch = acquire_supported_epoch_lock_first(&mut tx).await?;
-            tx.execute(
-                "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
-                crate::db_params![epoch.to_storage().to_string()],
-            )
-            .await
-            .map_err(discard_database_error)?;
+            let epoch = match expected {
+                Some(expected) => {
+                    let epoch = acquire_epoch_lock_first_with_schema(&mut tx, expected).await?;
+                    if epoch > supported_protocol_epoch() {
+                        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+                    }
+                    epoch
+                }
+                None => acquire_supported_epoch_lock_first(&mut tx).await?,
+            };
+            if expected.is_none() {
+                tx.execute(
+                    "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+                    crate::db_params![epoch.to_storage().to_string()],
+                )
+                .await
+                .map_err(discard_database_error)?;
+            }
         }
         Ok(tx)
     }
@@ -1177,6 +1212,124 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
         skipped_locked,
         deadline_reached: false,
     })
+}
+
+/// Prepare a dark writer with an independently attested schema identity.
+///
+/// This path deliberately takes the schema-qualified relation lock before
+/// reading the epoch, then installs a fresh transaction proof and retains the
+/// V1009 row lock. The expected identity must come from outside the current
+/// pooled session; it must never be reconstructed from `current_schema()`,
+/// the DSN, or the connection's search path.
+pub(crate) async fn acquire_epoch_lock_first_with_schema(
+    tx: &mut Transaction<'_>,
+    expected: &PgSchemaIdentity,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    if tx.driver() != DatabaseDriver::Postgres {
+        return acquire_epoch_lock_first(tx).await;
+    }
+
+    let mut isolation_rows = tx
+        .query("SELECT current_setting('transaction_isolation')", ())
+        .await
+        .map_err(discard_database_error)?;
+    let isolation = isolation_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
+        .get::<String>(0)
+        .map_err(discard_database_error)?;
+    if isolation != "read committed" {
+        return Err(IngressSubstrateError::ReadCommittedRequired);
+    }
+    drop(isolation_rows);
+
+    let relation = format!(
+        "{}.ingress_protocol_epoch",
+        quote_postgres_identifier(&expected.name.0)
+    );
+    tx.execute(
+        &format!("LOCK TABLE ONLY {relation} IN ACCESS SHARE MODE"),
+        (),
+    )
+    .await
+    .map_err(discard_database_error)?;
+
+    let mut schema_rows = tx
+        .query(
+            "SELECT oid::text FROM pg_catalog.pg_namespace WHERE nspname = ?",
+            crate::db_params![expected.name.0.clone()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let actual_schema_oid = schema_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::SchemaIdentityMismatch)?
+        .get::<String>(0)
+        .map_err(discard_database_error)?
+        .parse::<u32>()
+        .map_err(|_| IngressSubstrateError::SchemaIdentityMismatch)?;
+    drop(schema_rows);
+    if actual_schema_oid != expected.oid {
+        return Err(IngressSubstrateError::SchemaIdentityMismatch);
+    }
+
+    let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
+    let mut proof = tx
+        .query(
+            "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+            crate::db_params![fresh_epoch.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    proof
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?;
+    drop(proof);
+
+    let locked_epoch = read_epoch_in_relation(tx, &relation, true).await?;
+    if locked_epoch != fresh_epoch {
+        return Err(IngressSubstrateError::EpochChangedDuringPreparation);
+    }
+    Ok(locked_epoch)
+}
+
+async fn read_epoch_in_relation(
+    tx: &mut Transaction<'_>,
+    relation: &str,
+    for_share: bool,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    let lock_clause = if for_share { " FOR SHARE" } else { "" };
+    let mut rows = tx
+        .query(
+            &format!("SELECT epoch FROM {relation} WHERE id = 1{lock_clause}"),
+            (),
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let epoch = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?
+        .get::<i64>(0)
+        .map_err(discard_database_error)?;
+    u32::try_from(epoch)
+        .map(ProtocolEpoch::from_storage)
+        .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
+}
+
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 pub(in crate::ingress_substrate) async fn install_gc_timeouts(

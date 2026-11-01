@@ -1,5 +1,6 @@
 //! Foundation references for scheduled descendants, never completion receipts.
 
+use crate::db::lineage::PgSchemaIdentity;
 use crate::db::DatabaseError;
 use crate::ingress_substrate::IngressSubstrateError;
 use crate::ingress_substrate::MessageWriteOutcome;
@@ -10,7 +11,9 @@ use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::db::{Database, DatabaseDriver, Transaction};
-use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
+use crate::ingress_substrate::{
+    acquire_epoch_lock_first, acquire_epoch_lock_first_with_schema, supported_protocol_epoch,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EffectDescendantRepository;
@@ -30,6 +33,27 @@ pub enum EffectDeliveryBinding {
 pub(crate) async fn begin_raw_ingress_writer(
     db: &Database,
 ) -> Result<Transaction<'_>, IngressUowError> {
+    begin_raw_ingress_writer_inner(db, None).await
+}
+
+/// Begin a dark schema-bound raw writer using an identity supplied by an
+/// independent attestation boundary. This capability is not wired into normal
+/// startup and must not be derived from the current connection's search path.
+#[cfg(test)]
+pub(crate) async fn begin_raw_ingress_writer_with_expected_pg_schema<'a>(
+    db: &'a Database,
+    expected: &PgSchemaIdentity,
+) -> Result<Transaction<'a>, IngressUowError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(IngressUowError::PostgresRequired);
+    }
+    begin_raw_ingress_writer_inner(db, Some(expected)).await
+}
+
+async fn begin_raw_ingress_writer_inner<'a>(
+    db: &'a Database,
+    expected: Option<&PgSchemaIdentity>,
+) -> Result<Transaction<'a>, IngressUowError> {
     let mut tx = db.begin_immediate().await?;
     if tx.driver() == DatabaseDriver::Postgres {
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -50,7 +74,13 @@ pub(crate) async fn begin_raw_ingress_writer(
         let statement_timeout: String = row.get(1)?;
         drop(rows);
         bound_raw_transaction(&mut tx).await?;
-        if descendant_foundation_exists(&mut tx).await? {
+        if let Some(expected) = expected {
+            let live = acquire_epoch_lock_first_with_schema(&mut tx, expected).await?;
+            let supported = supported_protocol_epoch();
+            if live > supported {
+                return Err(IngressUowError::EpochUnsupported { live, supported });
+            }
+        } else if descendant_foundation_exists(&mut tx).await? {
             install_epoch_proof(&mut tx).await?;
         } else {
             tx.execute(

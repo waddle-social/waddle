@@ -1,10 +1,57 @@
-use super::begin_raw_ingress_writer;
+use super::effect_descendants::begin_raw_ingress_writer_with_expected_pg_schema;
+use super::{begin_raw_ingress_writer, CanonicalMessageRepository, IngressLineage};
+use crate::db::lineage::PgSchemaIdentity;
 use crate::db::{Database, DatabaseConfig, DatabaseDriver};
 use crate::ingress::test_support::IngressFixture;
 use crate::ingress_substrate::{
     self, EffectReceiptKind, IngressSubstrateError, PostgresIngressSubstrate,
 };
 use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
+
+async fn attested_pg_schema(fixture: &IngressFixture) -> PgSchemaIdentity {
+    let transaction = fixture.uow.begin().await.expect("attest fixture schema");
+    let schema = match transaction.lineage() {
+        IngressLineage::Attested(lineage) => lineage
+            .postgres_identity
+            .as_ref()
+            .expect("Postgres lineage identity")
+            .schema
+            .clone(),
+        IngressLineage::Ephemeral => panic!("Postgres fixture must be durable"),
+    };
+    transaction
+        .commit()
+        .await
+        .expect("close schema attestation transaction");
+    schema
+}
+
+fn qualified_epoch_relation(schema: &PgSchemaIdentity) -> String {
+    format!(
+        "\"{}\".ingress_protocol_epoch",
+        schema.name.0.replace('"', "\"\"")
+    )
+}
+
+async fn wait_for_blocking_pid(observer: &sqlx::PgPool, waiter: i32, blocker: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let blocked: bool =
+                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
+                    .bind(blocker)
+                    .bind(waiter)
+                    .fetch_one(observer)
+                    .await
+                    .expect("observe transaction blocker");
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("identify expected row-lock wait");
+}
 
 #[tokio::test]
 async fn postgres_raw_writer_waits_for_current_epoch_before_application_locks() {
@@ -501,5 +548,381 @@ async fn postgres_substrate_begin_bounds_epoch_wait() {
     transition.rollback().await.expect("release transition");
     observer.close().await;
     pool.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_schema_bound_uow_retains_v1009_row_share_at_epoch_zero() {
+    let Some(fixture) = IngressFixture::postgres("schema_bound_v1009_epoch_zero").await else {
+        return;
+    };
+    let expected = attested_pg_schema(&fixture).await;
+    let uow = fixture
+        .uow
+        .clone()
+        .with_expected_pg_schema(expected.clone())
+        .expect("Postgres schema capability");
+    let mut writer = uow.begin().await.expect("schema-bound epoch-zero UoW");
+    let relation = qualified_epoch_relation(&expected);
+    let mut locks = writer
+        .transaction_mut()
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_backend_pid() AND relation = pg_catalog.to_regclass(?) AND mode = 'AccessShareLock' AND granted), EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_backend_pid() AND relation = pg_catalog.to_regclass(?) AND mode = 'RowShareLock' AND granted)",
+            crate::db_params![relation.clone(), relation],
+        )
+        .await
+        .expect("inspect epoch locks");
+    let row = locks.next().await.expect("lock row").expect("lock result");
+    assert!(row.get::<bool>(0).expect("relation prelock"));
+    assert!(row.get::<bool>(1).expect("V1009 row-lock compatibility"));
+    drop(locks);
+
+    CanonicalMessageRepository::record_message(
+        &mut writer,
+        MessageKey::new(),
+        &SemanticDigest::from_storage(1, [7; 32]).expect("digest"),
+        None,
+    )
+    .await
+    .expect("actual canonical writer passes V1009 at epoch zero");
+
+    let mut writer_pid_rows = writer
+        .transaction_mut()
+        .query("SELECT pg_backend_pid()", ())
+        .await
+        .expect("writer PID");
+    let writer_pid: i32 = writer_pid_rows
+        .next()
+        .await
+        .expect("writer PID row")
+        .expect("writer PID result")
+        .get(0)
+        .expect("writer backend PID");
+    drop(writer_pid_rows);
+
+    let observer = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("lock observer");
+    let owner_db = fixture.db.clone();
+    let (owner_pid_tx, owner_pid_rx) = tokio::sync::oneshot::channel();
+    let owner = tokio::spawn(async move {
+        let mut transaction = owner_db.begin().await.expect("owner transaction");
+        transaction
+            .execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .expect("owner isolation");
+        let mut pid_rows = transaction
+            .query("SELECT pg_backend_pid()", ())
+            .await
+            .expect("owner PID");
+        let owner_pid: i32 = pid_rows
+            .next()
+            .await
+            .expect("owner PID row")
+            .expect("owner PID result")
+            .get(0)
+            .expect("owner backend PID");
+        drop(pid_rows);
+        owner_pid_tx.send(owner_pid).expect("return owner PID");
+        transaction
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = ?::uuid WHERE id = 1",
+                crate::db_params![uuid::Uuid::new_v4().to_string()],
+            )
+            .await
+            .expect("epoch update waits on retained V1009 row lock");
+        transaction
+            .rollback()
+            .await
+            .expect("roll back test transition");
+    });
+    let owner_pid = owner_pid_rx.await.expect("owner backend PID");
+    wait_for_blocking_pid(&observer, owner_pid, writer_pid).await;
+
+    writer.commit().await.expect("commit epoch-zero writer");
+    owner.await.expect("join owner transition");
+    let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM ingress_protocol_epoch WHERE id = 1")
+        .fetch_one(&observer)
+        .await
+        .expect("read epoch after rolled-back transition");
+    assert_eq!(
+        epoch, 0,
+        "the disposable compatibility probe did not flip the epoch"
+    );
+    observer.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_schema_bound_uow_writes_through_relation_guard_candidate() {
+    let Some(fixture) = IngressFixture::postgres("schema_bound_candidate_uow").await else {
+        return;
+    };
+    let expected = attested_pg_schema(&fixture).await;
+    let admin = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("candidate installer connection");
+    sqlx::raw_sql(include_str!(
+        "../../tests/fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install unregistered candidate in disposable schema");
+
+    let uow = fixture
+        .uow
+        .clone()
+        .with_expected_pg_schema(expected.clone())
+        .expect("Postgres schema capability");
+    let mut writer = uow.begin().await.expect("candidate-bound UoW");
+    CanonicalMessageRepository::record_message(
+        &mut writer,
+        MessageKey::new(),
+        &SemanticDigest::from_storage(1, [8; 32]).expect("digest"),
+        None,
+    )
+    .await
+    .expect("actual Waddle UoW satisfies candidate prelock and proof");
+
+    let relation = qualified_epoch_relation(&expected);
+    let mut locks = writer
+        .transaction_mut()
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_backend_pid() AND relation = pg_catalog.to_regclass(?) AND mode = 'AccessShareLock' AND granted), EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid = pg_backend_pid() AND relation = pg_catalog.to_regclass(?) AND mode = 'RowShareLock' AND granted)",
+            crate::db_params![relation.clone(), relation],
+        )
+        .await
+        .expect("inspect candidate-path locks");
+    let row = locks.next().await.expect("lock row").expect("lock result");
+    assert!(row.get::<bool>(0).expect("candidate relation prelock"));
+    assert!(row.get::<bool>(1).expect("retained V1009 row lock"));
+    drop(locks);
+    writer
+        .commit()
+        .await
+        .expect("commit candidate-bound writer");
+    admin.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_schema_bound_substrate_begin_writes_through_relation_guard_candidate() {
+    let Some(fixture) = IngressFixture::postgres("schema_bound_substrate_candidate").await else {
+        return;
+    };
+    let expected = attested_pg_schema(&fixture).await;
+    let admin = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("candidate installer connection");
+    sqlx::raw_sql(include_str!(
+        "../../tests/fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install unregistered candidate in disposable schema");
+
+    let substrate = PostgresIngressSubstrate::open(fixture.db.clone()).expect("open substrate");
+    let mut writer = substrate
+        .begin_with_expected_pg_schema(&expected)
+        .await
+        .expect("begin schema-bound substrate transaction");
+    let key = uuid::Uuid::new_v4();
+    writer
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![10_u8; 32]],
+        )
+        .await
+        .expect("substrate candidate write uses the bound relation and XID proof");
+    writer
+        .commit()
+        .await
+        .expect("commit substrate candidate write");
+
+    let actual_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingress_messages WHERE message_key = $1")
+            .bind(key)
+            .fetch_one(&admin)
+            .await
+            .expect("read substrate candidate write");
+    assert_eq!(actual_count, 1);
+    admin.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_schema_bound_candidate_rejects_old_writer_and_wrong_proof() {
+    let Some(fixture) = IngressFixture::postgres("schema_bound_candidate_negative").await else {
+        return;
+    };
+    let expected = attested_pg_schema(&fixture).await;
+    let admin = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("candidate installer connection");
+    sqlx::raw_sql(include_str!(
+        "../../tests/fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install unregistered candidate in disposable schema");
+
+    // The existing writer seam takes only V1009's row lock. The candidate
+    // refuses the actual guarded write because no schema relation prelock was
+    // acquired before the caller reached application DML.
+    let mut old_writer = begin_raw_ingress_writer(&fixture.db)
+        .await
+        .expect("begin V1009-compatible legacy writer");
+    let old_writer_error = old_writer
+        .execute(
+            "DELETE FROM ingress_messages WHERE message_key = ?::uuid",
+            crate::db_params![uuid::Uuid::new_v4().to_string()],
+        )
+        .await
+        .expect_err("candidate must reject a legacy writer without ACCESS SHARE");
+    assert!(
+        old_writer_error
+            .to_string()
+            .contains("require an epoch ACCESS SHARE prelock"),
+        "{old_writer_error}"
+    );
+    old_writer
+        .rollback()
+        .await
+        .expect("release rejected writer");
+
+    // The capability-backed writer acquires the schema relation first, but a
+    // stale epoch proof still fails closed at the candidate guard.
+    let mut writer = begin_raw_ingress_writer_with_expected_pg_schema(&fixture.db, &expected)
+        .await
+        .expect("begin schema-bound writer");
+    writer
+        .execute("SELECT set_config('waddle.protocol_epoch', '1', true)", ())
+        .await
+        .expect("replace proof with wrong epoch");
+    let proof_error = writer
+        .execute(
+            "DELETE FROM ingress_messages WHERE message_key = ?::uuid",
+            crate::db_params![uuid::Uuid::new_v4().to_string()],
+        )
+        .await
+        .expect_err("candidate must reject a wrong epoch proof");
+    assert!(
+        proof_error
+            .to_string()
+            .contains("transaction-local epoch proof"),
+        "{proof_error}"
+    );
+    writer.rollback().await.expect("release rejected proof");
+
+    admin.close().await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_schema_bound_raw_writer_ignores_hostile_path_and_rejects_schema_oid_drift() {
+    let Some(fixture) = IngressFixture::postgres("schema_bound_hostile_path").await else {
+        return;
+    };
+    let expected = attested_pg_schema(&fixture).await;
+    let hostile = format!("waddle_test_hostile_{}", uuid::Uuid::new_v4().simple());
+    fixture
+        .execute(&format!("CREATE SCHEMA {hostile}"), ())
+        .await;
+    fixture
+        .execute(
+            &format!(
+                "CREATE TABLE {hostile}.ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL)"
+            ),
+            (),
+        )
+        .await;
+    fixture
+        .execute(
+            &format!("INSERT INTO {hostile}.ingress_protocol_epoch (id, epoch) VALUES (1, 1)"),
+            (),
+        )
+        .await;
+
+    let admin = sqlx::PgPool::connect(fixture.db.database_url())
+        .await
+        .expect("candidate installer connection");
+    sqlx::raw_sql(include_str!(
+        "../../tests/fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&admin)
+    .await
+    .expect("install unregistered candidate in disposable schema");
+
+    let mut url = url::Url::parse(fixture.db.database_url()).expect("Postgres URL");
+    let retained: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained)
+        .append_pair(
+            "options",
+            &format!("-c search_path={hostile},{}", expected.name.0),
+        );
+    let db = Database::from_config(
+        "schema-bound-hostile-path",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string()),
+    )
+    .await
+    .expect("hostile-search-path database");
+    let key = uuid::Uuid::new_v4();
+    let mut writer = begin_raw_ingress_writer_with_expected_pg_schema(&db, &expected)
+        .await
+        .expect("prelock the independently attested schema");
+    let mut proof = writer
+        .query(
+            "SELECT current_setting('waddle.protocol_epoch'), current_setting('waddle.protocol_epoch_xid') = pg_current_xact_id()::text",
+            (),
+        )
+        .await
+        .expect("inspect bound proof");
+    let proof_row = proof
+        .next()
+        .await
+        .expect("proof row")
+        .expect("proof result");
+    assert_eq!(proof_row.get::<String>(0).expect("epoch proof"), "0");
+    assert!(proof_row.get::<bool>(1).expect("XID proof"));
+    drop(proof);
+    writer
+        .execute(
+            "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?::uuid, 1, ?)",
+            crate::db_params![key.to_string(), vec![9_u8; 32]],
+        )
+        .await
+        .expect("candidate guard uses the protected table schema, not the hostile epoch shadow");
+    writer.commit().await.expect("commit hostile-path writer");
+
+    let actual_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingress_messages WHERE message_key = $1")
+            .bind(key)
+            .fetch_one(&admin)
+            .await
+            .expect("read actual protected schema");
+    assert_eq!(actual_count, 1);
+
+    let mut wrong_identity = expected.clone();
+    wrong_identity.oid = wrong_identity.oid.saturating_add(1);
+    let mismatch = begin_raw_ingress_writer_with_expected_pg_schema(&db, &wrong_identity).await;
+    assert!(matches!(
+        mismatch,
+        Err(crate::ingress_uow::IngressUowError::Substrate(
+            IngressSubstrateError::SchemaIdentityMismatch
+        ))
+    ));
+    drop(mismatch);
+
+    drop(db);
+    admin.close().await;
+    fixture
+        .execute(&format!("DROP SCHEMA {hostile} CASCADE"), ())
+        .await;
     fixture.close().await;
 }
