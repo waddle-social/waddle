@@ -204,6 +204,7 @@ waddle-server::physical_attestation typed_sqlite_authority_uses_shared_foundatio
 
 # P2.1 (#2116/#2046): pooled receipt and ordinary unit-of-work transactions
 # must read the committed epoch after waiting on an activation transition.
+waddle-server ingress_substrate::authority_tests::postgres_alias_identity_mismatch_fails_closed
 waddle-server ingress_substrate::authority_tests::postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation
 waddle-server ingress_uow::recovery_receipts::tests::postgres_ordinary_begin_reads_committed_epoch_after_waiting_on_transition
 
