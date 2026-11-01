@@ -7,13 +7,16 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{PgConnection, Row};
 use thiserror::Error;
 
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
 };
+
+mod installer;
+pub use installer::{inspect_installation, install, InstallationStatus};
 
 const FUNCTION_NAME: &str = "read_physical_identity";
 
@@ -25,16 +28,28 @@ pub enum PhysicalAttestationError {
     MissingPostgresIdentity,
     #[error("configured pool login differs from attested runtime login")]
     WrongConfiguredLogin,
+    #[error("configured installer login differs from the provisioned installer login")]
+    WrongInstallerLogin,
     #[error("physical connection identity differs at {field}")]
     Mismatch { field: &'static str },
     #[error("physical connection returned invalid {field}")]
     InvalidValue { field: &'static str },
     #[error("physical attestation returned no lineage row")]
     MissingLineage,
-    #[error("physical attestation installation commit has unknown outcome")]
-    CommitUnknown(#[source] sqlx::Error),
-    #[error("physical attestation installation committed but fresh-session verification failed")]
-    PostCommitUnverified(#[source] Box<PhysicalAttestationError>),
+    #[error("physical attestation installation {operation_id} has an unknown commit outcome")]
+    CommitUnknown { operation_id: uuid::Uuid },
+    #[error("physical attestation installation {operation_id} committed but fresh-session verification failed")]
+    PostCommitUnverified {
+        operation_id: uuid::Uuid,
+        #[source]
+        source: Box<PhysicalAttestationError>,
+    },
+    #[error("physical attestation installation conflicts with an existing object or operation")]
+    InstallationConflict,
+    #[error("physical attestation installation is not visible and remains indeterminate")]
+    InstallationIndeterminate,
+    #[error("physical attestation requires a writable primary")]
+    NotPrimary,
     #[error("PostgreSQL attestation query failed")]
     Database(#[from] sqlx::Error),
 }
@@ -60,6 +75,7 @@ impl PgRoleName {
 pub struct PhysicalAttestationConfig {
     lineage: AttestedLineage,
     postgres: PgIdentity,
+    installer_login: PgRoleName,
     runtime_login: PgRoleName,
     definer_role: PgRoleName,
     trusted_schema: PgSchemaName,
@@ -68,6 +84,7 @@ pub struct PhysicalAttestationConfig {
 impl PhysicalAttestationConfig {
     pub fn new(
         lineage: AttestedLineage,
+        installer_login: PgRoleName,
         runtime_login: PgRoleName,
         definer_role: PgRoleName,
         trusted_schema: PgSchemaName,
@@ -84,14 +101,18 @@ impl PhysicalAttestationConfig {
                 field: "trusted schema must differ from lineage schema",
             });
         }
-        if runtime_login == definer_role {
+        if runtime_login == definer_role
+            || installer_login == definer_role
+            || installer_login == runtime_login
+        {
             return Err(PhysicalAttestationError::InvalidIdentifier {
-                field: "definer role must differ from runtime login",
+                field: "installer, definer and runtime roles must differ",
             });
         }
         Ok(Self {
             lineage,
             postgres,
+            installer_login,
             runtime_login,
             definer_role,
             trusted_schema,
@@ -130,99 +151,6 @@ fn quote_identifier(value: &str) -> String {
     format!("\"{value}\"")
 }
 
-/// Install the restricted function through an owned fresh connection. A
-/// failed COMMIT is reported as unknown and never yields an installed handle.
-/// A second physical connection proves the committed function and lineage are
-/// visible before this method returns.
-pub async fn install(
-    admin_options: &PgConnectOptions,
-    config: PhysicalAttestationConfig,
-) -> Result<PhysicalAttestationConfig, PhysicalAttestationError> {
-    let mut admin = PgConnection::connect_with(admin_options).await?;
-    // Reject a misplaced admin DSN before creating a role or schema there.
-    // The post-COMMIT check below is still required: this only checks the
-    // owned installer session's starting boundary.
-    verify_active_schema(&mut admin, &config).await?;
-    let preflight = read_preflight_snapshot(&mut admin, &config).await?;
-    verify_identity(&preflight, &config)?;
-    let mut transaction = admin.begin().await?;
-    let definer = quote_identifier(config.definer_role.as_str());
-    let runtime = quote_identifier(config.runtime_login.as_str());
-    let trusted = quote_identifier(&config.trusted_schema.0);
-    let target = quote_identifier(&config.postgres().schema.name.0);
-    let function = config.function_path();
-
-    let statements = [
-        format!(
-            "CREATE ROLE {definer} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
-        ),
-        format!("CREATE SCHEMA {trusted} AUTHORIZATION {definer}"),
-        format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {definer}"),
-        format!("GRANT USAGE ON SCHEMA {target} TO {definer}"),
-        format!("GRANT SELECT ON {target}._lineage TO {definer}"),
-    ];
-    for statement in statements {
-        sqlx::query(&statement).execute(&mut *transaction).await?;
-    }
-
-    // The target schema name is validated before interpolation. Every table
-    // and catalog reference is qualified; pg_temp is last in the definer's
-    // search path so temp objects cannot shadow authority objects.
-    let identity_sql = identity_select(&config);
-    let function_sql = format!(
-        r#"CREATE FUNCTION {function}()
-RETURNS TABLE (
-    lineage_uuid text, deployment_uuid text,
-    stored_system_identifier text, stored_database_oid text, stored_database_name text,
-    stored_schema_oid text, stored_schema_name text,
-    live_system_identifier text, live_database_oid text, live_database_name text,
-    live_schema_oid text, live_schema_name text
-)
-LANGUAGE sql SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $waddle_attestation$
-    {identity_sql}
-$waddle_attestation$"#,
-    );
-    sqlx::query(&function_sql)
-        .execute(&mut *transaction)
-        .await?;
-    for statement in [
-        format!("REVOKE ALL ON FUNCTION {function}() FROM PUBLIC"),
-        format!("ALTER FUNCTION {function}() OWNER TO {definer}"),
-        format!("GRANT USAGE ON SCHEMA {trusted} TO {runtime}"),
-        format!("GRANT EXECUTE ON FUNCTION {function}() TO {runtime}"),
-    ] {
-        sqlx::query(&statement).execute(&mut *transaction).await?;
-    }
-    // Inherited default grants can add unexpected principals to a new
-    // function. Check effective ACLs while all installer DDL can still roll
-    // back, then repeat the same checks on the committed object below.
-    verify_installed_roles(&mut transaction, &config).await?;
-    transaction
-        .commit()
-        .await
-        .map_err(PhysicalAttestationError::CommitUnknown)?;
-    drop(admin);
-
-    verify_post_commit(admin_options, &config)
-        .await
-        .map_err(|source| PhysicalAttestationError::PostCommitUnverified(Box::new(source)))?;
-    Ok(config)
-}
-
-async fn verify_post_commit(
-    admin_options: &PgConnectOptions,
-    config: &PhysicalAttestationConfig,
-) -> Result<(), PhysicalAttestationError> {
-    let mut readback = PgConnection::connect_with(admin_options).await?;
-    verify_active_schema(&mut readback, config).await?;
-    let snapshot = read_snapshot(&mut readback, config).await?;
-    verify_identity(&snapshot, config)?;
-    verify_installed_roles(&mut readback, config).await?;
-    Ok(())
-}
-
 fn identity_select(config: &PhysicalAttestationConfig) -> String {
     let target = quote_identifier(&config.postgres().schema.name.0);
     let schema = &config.postgres().schema.name.0;
@@ -248,85 +176,6 @@ async fn read_preflight_snapshot(
         .await?
         .ok_or(PhysicalAttestationError::MissingLineage)?;
     parse_snapshot(&row)
-}
-
-async fn verify_installed_roles(
-    connection: &mut PgConnection,
-    config: &PhysicalAttestationConfig,
-) -> Result<(), PhysicalAttestationError> {
-    let row = sqlx::query(
-        "SELECT r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole, \
-         r.rolreplication, r.rolbypassrls, pg_catalog.pg_get_userbyid(p.proowner), \
-         pg_catalog.pg_get_userbyid(n.nspowner), p.prosecdef, \
-         p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[], \
-         NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
-                         COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a \
-                     WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'), \
-         pg_catalog.has_function_privilege($4, p.oid, 'EXECUTE'), \
-         pg_catalog.has_schema_privilege($4, n.oid, 'USAGE'), \
-         pg_catalog.has_function_privilege($1, 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE'), \
-         NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
-                         COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a \
-                     WHERE a.grantee NOT IN (p.proowner, runtime.oid) \
-                        OR (a.grantee = runtime.oid AND a.is_grantable)), \
-         NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
-                         COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a \
-                     WHERE a.grantee NOT IN (n.nspowner, runtime.oid) \
-                        OR (a.grantee = runtime.oid AND \
-                            (a.privilege_type <> 'USAGE' OR a.is_grantable))), \
-         NOT pg_catalog.has_schema_privilege($4, n.oid, 'CREATE') \
-         FROM pg_catalog.pg_roles r \
-         JOIN pg_catalog.pg_roles runtime ON runtime.rolname = $4 \
-         JOIN pg_catalog.pg_namespace n ON n.nspname = $2 \
-         JOIN pg_catalog.pg_proc p ON p.pronamespace = n.oid AND p.proname = $3 \
-         WHERE r.rolname = $1 AND p.pronargs = 0",
-    )
-    .bind(config.definer_role.as_str())
-    .bind(&config.trusted_schema.0)
-    .bind(FUNCTION_NAME)
-    .bind(config.runtime_login.as_str())
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(PhysicalAttestationError::Mismatch {
-        field: "installed definer/function",
-    })?;
-    for index in 0..6 {
-        let enabled: bool = row.try_get(index)?;
-        if enabled {
-            return Err(PhysicalAttestationError::Mismatch {
-                field: "definer privileges",
-            });
-        }
-    }
-    let owner: String = row.try_get(6)?;
-    if owner != config.definer_role.as_str() {
-        return Err(PhysicalAttestationError::Mismatch {
-            field: "function owner",
-        });
-    }
-    let schema_owner: String = row.try_get(7)?;
-    if schema_owner != config.definer_role.as_str() {
-        return Err(PhysicalAttestationError::Mismatch {
-            field: "trusted schema owner",
-        });
-    }
-    for (index, field) in [
-        (8, "SECURITY DEFINER"),
-        (9, "function search_path"),
-        (10, "PUBLIC EXECUTE revoke"),
-        (11, "runtime EXECUTE grant"),
-        (12, "runtime schema USAGE grant"),
-        (13, "definer pg_control_system EXECUTE grant"),
-        (14, "function ACL grantees"),
-        (15, "trusted schema ACL grantees"),
-        (16, "runtime trusted schema CREATE denied"),
-    ] {
-        let valid: bool = row.try_get(index)?;
-        if !valid {
-            return Err(PhysicalAttestationError::Mismatch { field });
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -392,21 +241,6 @@ fn parse_snapshot(row: &sqlx::postgres::PgRow) -> Result<Snapshot, PhysicalAttes
         },
     };
     Ok(Snapshot { stored, live })
-}
-
-async fn verify_active_schema(
-    connection: &mut PgConnection,
-    config: &PhysicalAttestationConfig,
-) -> Result<(), PhysicalAttestationError> {
-    let active: Option<String> = sqlx::query_scalar("SELECT pg_catalog.current_schema()::text")
-        .fetch_one(connection)
-        .await?;
-    if active.as_deref() != Some(&config.postgres().schema.name.0) {
-        return Err(PhysicalAttestationError::Mismatch {
-            field: "active schema",
-        });
-    }
-    Ok(())
 }
 
 fn parse<T: FromStr>(value: &str, field: &'static str) -> Result<T, PhysicalAttestationError> {
