@@ -1,10 +1,11 @@
 #![cfg(feature = "test-support")]
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -201,15 +202,53 @@ async fn forward_postgres_server(
     }
 }
 
+fn begin_proxy_target(value: &str) -> Result<(url::Url, String, u16), &'static str> {
+    let url = url::Url::parse(value).map_err(|_| "invalid PostgreSQL test URL")?;
+    if url
+        .query_pairs()
+        .any(|(key, _)| matches!(key.as_ref(), "host" | "hostaddr" | "port"))
+    {
+        return Err("BEGIN wire gate does not support host, hostaddr, or port query overrides");
+    }
+    let options: PgConnectOptions = value.parse().map_err(|_| "invalid PostgreSQL test URL")?;
+    if options.get_socket().is_some() {
+        return Err("BEGIN wire gate requires a TCP loopback PostgreSQL fixture");
+    }
+    let host = match url.host() {
+        Some(url::Host::Domain(host)) if host.eq_ignore_ascii_case("localhost") => host.to_owned(),
+        Some(url::Host::Domain(host)) => match host.parse::<IpAddr>() {
+            Ok(address) if address.is_loopback() => address.to_string(),
+            _ => return Err("BEGIN wire gate requires localhost or a loopback IP literal"),
+        },
+        Some(url::Host::Ipv4(host)) if host.is_loopback() => host.to_string(),
+        Some(url::Host::Ipv6(host)) if host.is_loopback() => host.to_string(),
+        _ => return Err("BEGIN wire gate requires localhost or a loopback IP literal"),
+    };
+    Ok((url, host, options.get_port()))
+}
+
+fn require_loopback_addresses(addresses: &[SocketAddr]) -> Result<(), &'static str> {
+    if addresses.is_empty() || addresses.iter().any(|address| !address.ip().is_loopback()) {
+        return Err("BEGIN wire gate requires exclusively loopback PostgreSQL addresses");
+    }
+    Ok(())
+}
+
 async fn postgres_begin_proxy(
-    url: &str,
+    database_url: &str,
     begin_request_gate: Arc<Gate>,
     begin_reply_gate: Arc<Gate>,
     omit_rollback: bool,
 ) -> (String, tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
-    let mut url = url::Url::parse(url).expect("parse PostgreSQL URL");
-    let host = url.host_str().expect("PostgreSQL TCP host").to_owned();
-    let port = url.port().unwrap_or(5432);
+    // The proxy reads plaintext PostgreSQL protocol. Fail the required test
+    // rather than downgrade a remote server's configured TLS connection.
+    let (mut url, host, port) = begin_proxy_target(database_url)
+        .expect("BEGIN wire gate requires a supported local PostgreSQL test fixture");
+    let target: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .expect("resolve loopback PostgreSQL test fixture")
+        .collect();
+    require_loopback_addresses(&target).expect("PostgreSQL fixture resolved outside loopback");
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind PostgreSQL proxy");
@@ -225,14 +264,22 @@ async fn postgres_begin_proxy(
             let Ok((client, _)) = listener.accept().await else {
                 return;
             };
-            let target = (host.clone(), port);
+            let target = target.clone();
             let begin_request_gate = Arc::clone(&begin_request_gate);
             let begin_reply_gate = Arc::clone(&begin_reply_gate);
             let rollback_rewritten = Arc::clone(&rewrites);
             tokio::spawn(async move {
-                let Ok(server) = TcpStream::connect(target).await else {
+                let Ok(server) = TcpStream::connect(target.as_slice()).await else {
                     return;
                 };
+                let Ok(peer) = server.peer_addr() else {
+                    eprintln!("BEGIN wire gate could not inspect the PostgreSQL peer");
+                    return;
+                };
+                if require_loopback_addresses(&[peer]).is_err() {
+                    eprintln!("BEGIN wire gate refused a non-loopback PostgreSQL peer");
+                    return;
+                }
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
                 tokio::select! {
@@ -243,6 +290,39 @@ async fn postgres_begin_proxy(
         }
     });
     (url.to_string(), task, rollback_rewritten)
+}
+
+#[test]
+fn postgres_wire_proxy_rejects_remote_and_host_overrides() {
+    for url in [
+        "postgresql://203.0.113.1/postgres?sslmode=require",
+        "postgresql://[2001:db8::1]/postgres",
+        "postgresql://db.example/postgres",
+        "postgresql://127.0.0.1/postgres?hostaddr=203.0.113.1",
+        "postgresql://127.0.0.1/postgres?host=db.example",
+        "postgresql://127.0.0.1/postgres?port=5432",
+    ] {
+        assert!(
+            begin_proxy_target(url).is_err(),
+            "unsafe target was accepted: {url}"
+        );
+    }
+    for url in [
+        "postgresql://127.0.0.1/postgres?sslmode=require",
+        "postgresql://[::1]/postgres",
+        "postgresql://localhost/postgres",
+    ] {
+        assert!(
+            begin_proxy_target(url).is_ok(),
+            "loopback target was rejected: {url}"
+        );
+    }
+    let loopback: SocketAddr = "127.0.0.1:5432".parse().expect("loopback address");
+    let remote: SocketAddr = "203.0.113.1:5432".parse().expect("remote address");
+    assert!(require_loopback_addresses(&[loopback]).is_ok());
+    assert!(require_loopback_addresses(&[]).is_err());
+    assert!(require_loopback_addresses(&[loopback, remote]).is_err());
+    assert!(require_loopback_addresses(&[remote]).is_err());
 }
 
 #[tokio::test]
