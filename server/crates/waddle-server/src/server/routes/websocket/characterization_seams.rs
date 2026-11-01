@@ -15,8 +15,7 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use jid::{BareJid, FullJid};
