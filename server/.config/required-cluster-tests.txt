@@ -219,6 +219,11 @@ waddle-server ingress_uow::raw_writer_tests::postgres_substrate_begin_bounds_epo
 waddle-server::physical_attestation full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contracts
 waddle-server::physical_attestation full_identity_writer_fails_closed_for_database_schema_pool_and_attestor_drift
 
+# P2.1 (#2116/#2046): characterize archive/room claim ordering with queued
+# and already-held takeover locks.
+waddle-server ingress_uow::archive_lock_order_tests::postgres_archive_replay_with_queued_takeover
+waddle-server ingress_uow::archive_lock_order_tests::postgres_archive_claim_times_out_when_takeover_holds_claim
+
 # Dark P2.1 candidate: execute every role and relation-lock laboratory case.
 waddle-server::ingress_relation_guard_lab candidate_guards_all_tables_with_select_only_epoch_login
 waddle-server::ingress_relation_guard_lab candidate_requires_ax_first_and_rejects_duplicate_advance

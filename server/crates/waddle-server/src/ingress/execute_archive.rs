@@ -4,11 +4,9 @@ use crate::ingress::decision::IngressDecision;
 use crate::ingress_uow::ClaimRepository;
 use crate::ingress_uow::{
     settle_recorded, CanonicalMessageRepository, EffectIntentRepository, IngressUnitOfWork,
-    IngressUowError, MamArchiveRepository,
+    IngressUowError, IngressUowTransaction, MamArchiveRepository,
 };
-use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
-#[cfg(feature = "clustering")]
-use crate::server::routes::interpret::effects::room::RoomFenceRequirement;
+use crate::server::routes::interpret::effects::room::{ExternalRoomEffect, RoomFenceRequirement};
 use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
 use waddle_xmpp::mam::MamTxStoreOutcome;
 
@@ -48,13 +46,44 @@ async fn store(
             std::time::Duration::from_millis(250),
         )
         .await?;
+    let Some(persisted) =
+        store_in_transaction(&mut tx, decision, index, room, message, fence).await?
+    else {
+        // Dropping this transaction preserves the unresolved archive obligation.
+        return Ok(SettledOutcome {
+            refusal: None,
+            persisted: Vec::new(),
+            completion: SettledCompletion::Incomplete,
+            detached: None,
+        });
+    };
+    tx.commit().await?;
+    Ok(SettledOutcome {
+        refusal: None,
+        persisted,
+        completion: SettledCompletion::Complete,
+        detached: None,
+    })
+}
+
+/// Apply archive-after-pin and receipt settlement inside the caller's existing
+/// transaction. `None` leaves that transaction uncommitted for tombstones and
+/// expired archives.
+async fn store_in_transaction(
+    tx: &mut IngressUowTransaction<'_>,
+    decision: &IngressDecision,
+    index: usize,
+    room: &jid::BareJid,
+    message: &waddle_xmpp::mam::ArchivedMessage,
+    fence: &RoomFenceRequirement,
+) -> Result<Option<Vec<waddle_xmpp::ingress::IngressEffectIntent>>, IngressUowError> {
     let key = decision
         .message_key
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+    if !CanonicalMessageRepository::lock(tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
-    let recorded = EffectIntentRepository::load(&mut tx, key).await?;
+    let recorded = EffectIntentRepository::load(tx, key).await?;
     let archive_expectation =
         crate::ingress::archive_authority::expectation(key, &recorded, room, message);
     // Pin replanning can produce different human-readable text (for example
@@ -88,7 +117,7 @@ async fn store(
     } else {
         None
     };
-    let message = restored.as_ref().unwrap_or(message.as_ref());
+    let message = restored.as_ref().unwrap_or(message);
     #[cfg(feature = "clustering")]
     let outcome = match fence {
         crate::server::routes::interpret::effects::room::RoomFenceRequirement::Guarded(context) => {
@@ -101,10 +130,9 @@ async fn store(
                 return Err(IngressUowError::RoomGenerationStale);
             }
             let proof =
-                ClaimRepository::assert_room_claim(&mut tx, room, &context.owner, context.epoch)
-                    .await?;
+                ClaimRepository::assert_room_claim(tx, room, &context.owner, context.epoch).await?;
             MamArchiveRepository::store_fenced(
-                &mut tx,
+                tx,
                 &proof,
                 room,
                 message,
@@ -119,40 +147,27 @@ async fn store(
             ) {
                 return Err(IngressUowError::ClaimFenceMissing);
             }
-            MamArchiveRepository::store(&mut tx, room, message, archive_expectation.clone()).await?
+            MamArchiveRepository::store(tx, room, message, archive_expectation.clone()).await?
         }
     };
     #[cfg(not(feature = "clustering"))]
     let outcome = {
         let _ = fence;
-        MamArchiveRepository::store(&mut tx, room, message, archive_expectation.clone()).await?
+        MamArchiveRepository::store(tx, room, message, archive_expectation.clone()).await?
     };
     if matches!(
         outcome,
         MamTxStoreOutcome::TombstoneHit(_) | MamTxStoreOutcome::Expired(_)
     ) {
-        // Dropping this transaction preserves the unresolved archive obligation.
-        return Ok(SettledOutcome {
-            refusal: None,
-            persisted: Vec::new(),
-            completion: SettledCompletion::Incomplete,
-            detached: None,
-        });
+        return Ok(None);
     }
-    crate::ingress::archive_authority::finalize(&mut tx, key, &recorded, room, message, &outcome)
+    crate::ingress::archive_authority::finalize(tx, key, &recorded, room, message, &outcome)
         .await?;
     let mut evidence = Vec::new();
-    for intent in EffectIntentRepository::load(&mut tx, key).await? {
+    for intent in EffectIntentRepository::load(tx, key).await? {
         if decision.external_receipts[index].contains(&crate::ingress::receipt_key(&intent)?) {
             evidence.push(intent);
         }
     }
-    let persisted = settle_recorded(&mut tx, key, &evidence).await?;
-    tx.commit().await?;
-    Ok(SettledOutcome {
-        refusal: None,
-        persisted,
-        completion: SettledCompletion::Complete,
-        detached: None,
-    })
+    Ok(Some(settle_recorded(tx, key, &evidence).await?))
 }
