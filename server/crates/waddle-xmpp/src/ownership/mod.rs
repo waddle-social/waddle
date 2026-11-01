@@ -38,6 +38,8 @@
 //!   the type down into `resume` closes.
 
 mod connection_identity;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod endpoint_transition;
 pub mod in_process;
 mod observe;
 pub mod resume;
