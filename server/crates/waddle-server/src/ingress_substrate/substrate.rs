@@ -86,6 +86,8 @@ pub enum IngressSubstrateError {
     InvalidStoredTimestamp,
     #[error("ingress substrate returned a malformed semantic digest")]
     InvalidStoredDigest,
+    #[error("persisted ingress alias identity is malformed or inconsistent with its hash")]
+    AliasIdentityConflict,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
     #[error("ingress sm ordinal is already bound to a different message")]
@@ -1300,9 +1302,43 @@ pub(in crate::ingress_substrate) async fn locked_alias(
         .await
         .map_err(discard_database_error)?;
     match rows.next().await.map_err(discard_database_error)? {
-        Some(row) => decode_stored_alias(&row).map(Some),
+        Some(row) => {
+            validate_stored_alias_identity(&row, key)?;
+            decode_stored_alias(&row).map(Some)
+        }
         None => Ok(None),
     }
+}
+
+fn validate_stored_alias_identity(
+    row: &Row,
+    key: &AliasStorageKey<'_>,
+) -> Result<(), IngressSubstrateError> {
+    let sender_text: String = row.get(3).map_err(discard_database_error)?;
+    let target_kind: i64 = row.get(4).map_err(discard_database_error)?;
+    let target_jid: String = row.get(5).map_err(discard_database_error)?;
+    let origin_text: String = row.get(6).map_err(discard_database_error)?;
+
+    let sender = sender_text
+        .parse::<BareJid>()
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target_kind =
+        i32::try_from(target_kind).map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target = NormalizedTarget::from_storage(target_kind, &target_jid)
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let origin = OriginId::new(origin_text.clone());
+
+    if sender != *key.sender
+        || sender_text != key.sender.to_string()
+        || target.to_storage() != key.target
+        || target_kind != key.target.kind()
+        || target_jid != key.target.jid()
+        || origin != *key.origin_id
+        || origin_text != key.origin_id.as_str()
+    {
+        return Err(IngressSubstrateError::AliasIdentityConflict);
+    }
+    Ok(())
 }
 
 pub(in crate::ingress_substrate) fn decode_stored_alias(
@@ -1762,14 +1798,16 @@ pub(in crate::ingress_substrate) const GC_DELETE_MESSAGE_SQLITE: &str = r#"
                   )
                 "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_POSTGRES: &str = r#"
-            SELECT m.message_key::text, m.digest_version, m.digest
+            SELECT m.message_key::text, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
             FOR UPDATE OF m
             "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_SQLITE: &str = r#"
-            SELECT m.message_key, m.digest_version, m.digest
+            SELECT m.message_key, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
