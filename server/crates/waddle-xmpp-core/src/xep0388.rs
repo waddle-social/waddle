@@ -276,7 +276,7 @@ impl Sasl2InlineFeatures {
 }
 
 /// SASL2 authentication request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Sasl2Authenticate {
     /// Mechanism selected for this exchange.
     pub mechanism: Sasl2Mechanism,
@@ -286,6 +286,16 @@ pub struct Sasl2Authenticate {
     // container. Keep even unrecognized children so the receiving server can
     // decide whether it supports each requested extension.
     additional_children: Vec<Element>,
+}
+
+impl fmt::Debug for Sasl2Authenticate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sasl2Authenticate")
+            .field("mechanism", &self.mechanism)
+            .field("has_initial_response", &self.initial_response.is_some())
+            .field("additional_child_count", &self.additional_children.len())
+            .finish()
+    }
 }
 
 impl Sasl2Authenticate {

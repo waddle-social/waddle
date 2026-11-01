@@ -4,6 +4,7 @@ use minidom::Element;
 use waddle_xmpp_core::xep0388::{
     Sasl2Authenticate, Sasl2Data, Sasl2Mechanism, Sasl2Response, NS_SASL2,
 };
+use waddle_xmpp_core::xep0388_server::Sasl2ServerInput;
 
 #[test]
 fn xep0388_authenticate_preserves_direct_inline_requests_and_user_agent() {
@@ -76,6 +77,48 @@ fn xep0388_authenticate_distinguishes_absent_from_empty_initial_response() {
         Sasl2Authenticate::from_element(&empty.to_element()).unwrap(),
         empty
     );
+}
+
+#[test]
+fn xep0388_authenticate_debug_redacts_credentials_and_direct_children() {
+    let mut request = Sasl2Authenticate::new(
+        Sasl2Mechanism::OAuthBearer,
+        Some(Sasl2Data::new(b"initial-credential-sentinel")),
+    );
+    request
+        .push_additional_child(
+            Element::builder("resume", "urn:xmpp:sm:3")
+                .attr(
+                    minidom::rxml::xml_ncname!("previd").to_owned(),
+                    "resume-identifier-sentinel",
+                )
+                .build(),
+        )
+        .unwrap();
+    request
+        .push_additional_child(
+            Element::builder("future", "urn:example:feature")
+                .append("extension-secret-sentinel")
+                .build(),
+        )
+        .unwrap();
+
+    let debug_values = [
+        format!("{request:?}"),
+        format!("{:?}", Sasl2ServerInput::Authenticate(request)),
+    ];
+    for debug in debug_values {
+        assert!(debug.contains("OAuthBearer"));
+        assert!(debug.contains("has_initial_response: true"));
+        assert!(debug.contains("additional_child_count: 2"));
+        for secret in [
+            "initial-credential-sentinel",
+            "resume-identifier-sentinel",
+            "extension-secret-sentinel",
+        ] {
+            assert!(!debug.contains(secret), "debug exposed {secret}: {debug}");
+        }
+    }
 }
 
 #[test]
