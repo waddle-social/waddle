@@ -29,12 +29,15 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-      # Registry libp2p crates need the patched swarm's real API even
+      # Registry crates need the patched dependencies' real APIs even
       # when Crane replaces application sources with dependency stubs.
-      swarmDummyScript = ''
+      patchedDependenciesDummyScript = ''
         rm -rf "$out/vendor/libp2p-swarm"
         cp -R ${./server/vendor/libp2p-swarm} "$out/vendor/libp2p-swarm"
         chmod -R u+w "$out/vendor/libp2p-swarm"
+        rm -rf "$out/vendor/sqlx-postgres"
+        cp -R ${./server/vendor/sqlx-postgres} "$out/vendor/sqlx-postgres"
+        chmod -R u+w "$out/vendor/sqlx-postgres"
       '';
       # cuengine (a waddle-server dev-dependency) links a cgo archive of its
       # Go bridge. Its build.rs otherwise `go build`s it from source, which
@@ -384,7 +387,7 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverPackageSrc;
-            extraDummyScript = swarmDummyScript;
+            extraDummyScript = patchedDependenciesDummyScript;
             strictDeps = true;
             cargoExtraArgs = "--locked --package waddle-server --bin waddle-server --features clustering";
             nativeBuildInputs = [
@@ -578,7 +581,7 @@
             pname = "waddle-server";
             version = "0.1.0";
             src = serverCheckSrc;
-            extraDummyScript = swarmDummyScript;
+            extraDummyScript = patchedDependenciesDummyScript;
             strictDeps = true;
             CUE_BRIDGE_PATH = mkCueBridge pkgs;
             nativeBuildInputs = [
