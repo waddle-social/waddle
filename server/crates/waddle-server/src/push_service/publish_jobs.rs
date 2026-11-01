@@ -1590,9 +1590,7 @@ impl DatabasePushServiceStore {
         if repaired > 0 {
             return Ok(());
         }
-        let mut tx = self
-            .db
-            .begin_immediate()
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {

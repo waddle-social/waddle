@@ -61,7 +61,9 @@ impl DatabasePushServiceStore {
     }
 
     async fn settle_known_failure(&self, id: &str, now_ms: i64) -> Result<bool, XmppError> {
-        let mut tx = self.db.begin_immediate().await.map_err(internal)?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db)
+            .await
+            .map_err(internal)?;
         let Some(job) = get_publish_job_tx(&mut tx, id).await? else {
             return Ok(false);
         };

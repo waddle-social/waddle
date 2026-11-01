@@ -1,3 +1,4 @@
+use super::substrate::acquire_supported_epoch_lock_first;
 use super::{
     acquire_epoch_lock_first, decode_stored_alias, dialect_sql, discard_database_error,
     lock_message_for_child, supported_protocol_epoch, Database, DatabaseDriver, IngressOrdinal,
@@ -268,6 +269,7 @@ pub async fn record_room_canonical_envelope(
     key: MessageKey,
     envelope: &MessageEnvelope,
 ) -> Result<(), IngressSubstrateError> {
+    acquire_supported_epoch_lock_first(tx).await?;
     if !lock_message_for_child(tx, key).await? {
         return Err(IngressSubstrateError::MessageContentConflict);
     }
@@ -606,7 +608,7 @@ pub async fn advance_frontier(
     const READ_POSTGRES: &str = "SELECT handled_ordinal::text FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid FOR UPDATE";
     const READ_SQLITE: &str =
         "SELECT handled_ordinal FROM ingress_sm_streams WHERE sm_ingress_id = ?";
-    acquire_epoch_lock_first(tx).await?;
+    acquire_supported_epoch_lock_first(tx).await?;
     let mut rows = tx
         .query(
             dialect_sql(tx.driver(), READ_POSTGRES, READ_SQLITE),
@@ -661,7 +663,7 @@ pub async fn flush_checkpoint(
     const READ_POSTGRES: &str =
         "SELECT checkpoint_h FROM ingress_sm_streams WHERE sm_ingress_id = ?::uuid FOR UPDATE";
     const READ_SQLITE: &str = "SELECT checkpoint_h FROM ingress_sm_streams WHERE sm_ingress_id = ?";
-    acquire_epoch_lock_first(tx).await?;
+    acquire_supported_epoch_lock_first(tx).await?;
     let mut rows = tx
         .query(
             dialect_sql(tx.driver(), READ_POSTGRES, READ_SQLITE),
@@ -729,6 +731,7 @@ pub async fn record_receipt(
     kind: EffectReceiptKind,
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
+    acquire_supported_epoch_lock_first(tx).await?;
     const POSTGRES: &str = "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?::uuid, ?, ?) ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING";
     const SQLITE: &str = "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, ?, ?) ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING";
     tx.execute(

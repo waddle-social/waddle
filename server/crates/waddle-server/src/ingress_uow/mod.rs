@@ -17,6 +17,7 @@ pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod effect_descendants;
 pub(crate) use effect_descendants::canonical_nowait_error;
+pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transaction};
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
@@ -378,3 +379,6 @@ mod tests;
 
 #[cfg(test)]
 mod lock_timeout_tests;
+
+#[cfg(test)]
+mod raw_writer_tests;

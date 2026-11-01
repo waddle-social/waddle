@@ -4,7 +4,7 @@ Status: implementation plan for the dark, epoch-zero preparation stacked on #214
 
 ## Boundary
 
-Prepare first-party raw PostgreSQL transactions which can write any guarded ingress table to use READ COMMITTED from the start and obtain the live epoch before application or row locks. Cover effect descendant ancestry, notification outbox drain, publication, legacy adoption and pruning, and push publication, settlement and retirement callers. Preserve SQLite and stores without the ingress foundation. Reject epochs this binary does not support even if a caller supplies valid transaction-local guard settings.
+Prepare first-party raw PostgreSQL transactions which can write any guarded ingress table to use READ COMMITTED from the start and obtain the live epoch before application or row locks. Cover effect descendant ancestry, notification outbox drain, publication, legacy adoption and pruning, and push publication, settlement and retirement callers. Preserve SQLite behavior and standalone stores without the ingress foundation. Reject epochs this binary does not support even if a caller supplies valid transaction-local guard settings.
 
 This work does not register V1028, change V1009 or its checksum, activate an epoch or custody, provision roles, alter startup pools, or change protocol wire behavior. It does not assert physical attestation or claim the later relation-lock migration has been installed.
 
@@ -18,3 +18,7 @@ This work does not register V1028, change V1009 or its checksum, activate an epo
 ## Verification and remaining gates
 
 Run `cargo fmt`, strict Clippy (`-D warnings`), required PostgreSQL inventory checks, and focused tests against real PostgreSQL. An independent final diff review must check entry-point coverage, lock ordering, error handling, and preservation of standalone behavior. Installation lock ordering, schema qualification and catalog binding for any future relation-lock migration, role ownership, old binary drain, and activation remain separate work and require their own evidence.
+
+The public substrate methods still accept caller-owned raw transactions. Their supported-epoch check cannot prove that an arbitrary caller acquired no earlier locks; the first-party entry points covered here establish the required order. Physical schema binding and resistance to temporary-relation shadowing remain separate blockers, so this preparation does not complete P2.1.
+
+PostgreSQL standalone scheduler transactions use READ COMMITTED even when their session default is REPEATABLE READ; their existing timeout settings are restored after the foundation-free probe. This intentional isolation change avoids a snapshot being fixed before the foundation check.

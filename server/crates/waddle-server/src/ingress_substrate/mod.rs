@@ -69,6 +69,7 @@ pub use substrate::resolve_and_record_alias;
 pub(crate) use substrate::set_local_transaction_timeouts;
 pub use substrate::supported_protocol_epoch;
 pub use substrate::terminalize_message;
+pub(crate) use substrate::tighten_local_transaction_timeouts;
 pub use substrate::AliasGcBudget;
 pub use substrate::AliasGcError;
 pub use substrate::AliasGcFailure;

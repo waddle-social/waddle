@@ -194,3 +194,12 @@ waddle-server::physical_attestation raw_repeatable_read_snapshot_cannot_attest_s
 # must read the committed epoch after waiting on an activation transition.
 waddle-server ingress_substrate::authority_tests::postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation
 waddle-server ingress_uow::recovery_receipts::tests::postgres_ordinary_begin_reads_committed_epoch_after_waiting_on_transition
+
+# P2.1 (#2116/#2046): raw scheduler writers lock the current epoch before
+# application locks and reject unsupported epochs while keeping standalone stores.
+waddle-server ingress_uow::raw_writer_tests::postgres_raw_writer_waits_for_current_epoch_before_application_locks
+waddle-server ingress_uow::raw_writer_tests::postgres_raw_substrate_rejects_unsupported_epoch_even_with_valid_gucs
+waddle-server ingress_uow::raw_writer_tests::postgres_raw_writer_preserves_standalone_store_without_foundation
+waddle-server ingress_uow::raw_writer_tests::postgres_legacy_prune_and_push_entries_wait_before_scheduler_locks
+waddle-server ingress_uow::raw_writer_tests::postgres_raw_writer_completes_with_queued_epoch_transition
+waddle-server ingress_uow::raw_writer_tests::postgres_substrate_begin_bounds_epoch_wait
