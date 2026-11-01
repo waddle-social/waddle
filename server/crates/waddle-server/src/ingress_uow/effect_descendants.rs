@@ -13,7 +13,7 @@ use super::{IngressUowError, IngressUowTransaction};
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, Transaction};
 #[cfg(feature = "test-support")]
-use crate::ingress_substrate::acquire_epoch_lock_first_with_capability;
+use crate::ingress_substrate::prepare_attested_receipt_transaction;
 use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -55,7 +55,9 @@ pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
     tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
         .await?;
     bound_raw_transaction(&mut tx).await?;
-    let live = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+    let live = prepare_attested_receipt_transaction(&mut tx, capability)
+        .await?
+        .protocol_epoch();
     let supported = supported_protocol_epoch();
     if live > supported {
         return Err(IngressUowError::EpochUnsupported { live, supported });

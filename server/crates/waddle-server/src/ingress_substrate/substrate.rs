@@ -104,6 +104,9 @@ pub enum IngressSubstrateError {
     EpochChangedDuringPreparation,
     #[error("the ingress relation prelock requires READ COMMITTED isolation")]
     ReadCommittedRequired,
+    #[cfg(feature = "test-support")]
+    #[error("the pooled receipt COMMIT outcome is indeterminate")]
+    ReceiptCommitIndeterminate,
 }
 
 /// Outcome of adding a child identity that requires a live message row.
@@ -293,7 +296,9 @@ impl PostgresIngressSubstrate {
                 retry_class: DbRetryClass::NotRetryable,
             });
         }
-        let epoch = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+        let epoch = prepare_attested_receipt_transaction(&mut tx, capability)
+            .await?
+            .protocol_epoch();
         if epoch > supported_protocol_epoch() {
             return Err(IngressSubstrateError::UnsupportedLiveEpoch);
         }
@@ -1237,10 +1242,10 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
 /// reading the epoch or taking application locks. This path never derives
 /// identity from the active search path or DSN.
 #[cfg(feature = "test-support")]
-pub(crate) async fn acquire_epoch_lock_first_with_capability(
+pub(crate) async fn prepare_attested_receipt_transaction(
     tx: &mut Transaction<'_>,
     capability: &AttestedPostgresWriterCapability,
-) -> Result<ProtocolEpoch, IngressSubstrateError> {
+) -> Result<PreparedAttestedReceiptWriter, IngressSubstrateError> {
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(IngressSubstrateError::Database {
             retry_class: DbRetryClass::NotRetryable,
@@ -1301,6 +1306,27 @@ pub(crate) async fn acquire_epoch_lock_first_with_capability(
     }
     drop(isolation_rows);
 
+    // PostgreSQL searches the temporary schema before ordinary schemas unless
+    // it is explicitly ordered. Keep the attested schema first and pg_temp
+    // last for the remainder of this transaction; receipt SQL is also
+    // explicitly schema-qualified at its repository boundary.
+    let search_path = format!("{}, pg_temp", quote_postgres_identifier(&expected.name.0));
+    let mut search_path_rows = tx
+        .query(
+            "SELECT pg_catalog.set_config('search_path', ?, true)",
+            crate::db_params![search_path],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    search_path_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?;
+    drop(search_path_rows);
+
     let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
     let mut proof = tx
         .query(
@@ -1322,7 +1348,30 @@ pub(crate) async fn acquire_epoch_lock_first_with_capability(
     if locked_epoch != fresh_epoch {
         return Err(IngressSubstrateError::EpochChangedDuringPreparation);
     }
-    Ok(locked_epoch)
+    Ok(PreparedAttestedReceiptWriter {
+        protocol_epoch: locked_epoch,
+        schema: expected.name.0.clone(),
+    })
+}
+
+/// Receipt-only evidence that the transaction was prepared on the attested
+/// PostgreSQL connection before application locks or writes. The type stays
+/// private to the crate and is stored inside the owning UoW transaction.
+#[cfg(feature = "test-support")]
+pub(crate) struct PreparedAttestedReceiptWriter {
+    protocol_epoch: ProtocolEpoch,
+    schema: String,
+}
+
+#[cfg(feature = "test-support")]
+impl PreparedAttestedReceiptWriter {
+    pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
+        self.protocol_epoch
+    }
+
+    pub(crate) fn schema(&self) -> &str {
+        &self.schema
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -1353,8 +1402,7 @@ async fn read_epoch_in_relation(
         .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
 }
 
-#[cfg(feature = "test-support")]
-fn quote_postgres_identifier(identifier: &str) -> String {
+pub(crate) fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 

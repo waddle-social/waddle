@@ -19,6 +19,8 @@ use waddle_server::db::MigrationRunner;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress::EffectReceiptKey;
 use waddle_server::ingress_substrate::EffectReceiptKind;
+#[cfg(feature = "test-support")]
+use waddle_server::ingress_substrate::IngressSubstrateError;
 use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 
 // Every installer edits pg_control_system's catalog ACL. Cargo test runs
@@ -2753,6 +2755,251 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
     drop(wrong_schema_database);
     drop(hostile_database);
     drop(role_database);
+    writer_admin.close().await;
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_outcomes() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, key) = typed_authority_fixture(&fixture).await;
+    for statement in [
+        format!(
+            "GRANT INSERT ON {}.ingress_messages TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT UPDATE ON {}.ingress_protocol_epoch TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT ON {}.ingress_effect_intents TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("grant dark UoW writer fixture privileges");
+    }
+    sqlx::query(&format!(
+        "GRANT TEMPORARY ON DATABASE {} TO {}",
+        fixture.database_name, fixture.runtime
+    ))
+    .execute(&fixture.cluster_admin)
+    .await
+    .expect("grant temp only for persistent shadow fixture");
+
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("one-slot attested receipt pool");
+    let observer_pool = pool.clone();
+    let mut connection = pool.acquire().await.expect("attested runtime checkout");
+    sqlx::query(
+        "CREATE TEMP TABLE ingress_effect_receipts \
+         (message_key UUID, kind INTEGER, semantic_identity_hash BYTEA)",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("create persistent temporary receipt shadow");
+    sqlx::query(
+        "CREATE TEMP TABLE ingress_messages \
+         (message_key UUID, digest_version INTEGER, digest BYTEA)",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("create persistent temporary message shadow");
+    drop(connection);
+
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "attested-receipt-writer",
+        pool,
+    );
+    let writer_admin = PgPool::connect_with(fixture.admin_options.clone())
+        .await
+        .expect("schema-qualified receipt observer");
+
+    // Existing unqualified message SQL must resolve to the target schema in
+    // the attested transaction, despite a persistent TEMP relation shadow.
+    let count_before = ingress_message_count(&writer_admin, &fixture.target).await;
+    waddle_server::test_support::attested_uow_candidate_write(
+        &database,
+        LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("prepared UoW message write");
+    assert_eq!(
+        ingress_message_count(&writer_admin, &fixture.target).await,
+        count_before + 1,
+        "message write lands in the attested schema"
+    );
+
+    // A lost successful pooled COMMIT acknowledgement is resolved only by a
+    // fresh attested read of the exact receipt key. Pool size one proves the
+    // write transaction is committed before that readback checks out again.
+    waddle_server::test_support::attested_pooled_receipt_write_after_lost_ack(
+        &database,
+        key,
+        EffectReceiptKind::from_storage(1),
+        &[1_u8; 32],
+    )
+    .await
+    .expect("exact-key readback confirms committed pooled receipt");
+
+    let (present, complete, key_count) = waddle_server::test_support::attested_uow_receipt_write(
+        &database,
+        LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+        key,
+        EffectReceiptKind::from_storage(1),
+        &[1_u8; 32],
+    )
+    .await
+    .expect("caller-owned UoW receipt write and read");
+    assert!(present);
+    assert!(complete);
+    assert_eq!(key_count, 1);
+
+    let target_receipt_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"{}\".ingress_effect_receipts WHERE message_key = $1",
+        fixture.target
+    ))
+    .bind(key.to_storage())
+    .fetch_one(&writer_admin)
+    .await
+    .expect("read target receipt");
+    assert_eq!(target_receipt_count, 1, "same key is idempotent");
+    let mut shadow_observer = observer_pool
+        .acquire()
+        .await
+        .expect("reacquire one-slot attested observer");
+    let (shadow_receipts, shadow_messages): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM pg_temp.ingress_effect_receipts), \
+                (SELECT count(*) FROM pg_temp.ingress_messages)",
+    )
+    .fetch_one(&mut *shadow_observer)
+    .await
+    .expect("inspect persistent temporary shadows");
+    assert_eq!(shadow_receipts, 0, "receipt SQL bypasses TEMP shadow");
+    assert_eq!(shadow_messages, 0, "message SQL bypasses TEMP shadow");
+    drop(shadow_observer);
+
+    let failed_key = MessageKey::from_storage(uuid::Uuid::new_v4());
+    let failed_hash = [9_u8; 32];
+    let mut seed = fixture
+        .admin
+        .begin()
+        .await
+        .expect("seed failed-commit intent");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY \"{}\".ingress_protocol_epoch IN ACCESS SHARE MODE",
+        fixture.target
+    ))
+    .execute(&mut *seed)
+    .await
+    .expect("seed epoch relation prelock");
+    sqlx::query(
+        "SELECT set_config('waddle.protocol_epoch', '0', true), \
+                 set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+    )
+    .execute(&mut *seed)
+    .await
+    .expect("seed V1009 proof");
+    sqlx::query(&format!(
+        "INSERT INTO \"{}\".ingress_messages \
+         (message_key, digest_version, digest) VALUES ($1, 1, $2)",
+        fixture.target
+    ))
+    .bind(failed_key.to_storage())
+    .bind([7_u8; 32].as_slice())
+    .execute(&mut *seed)
+    .await
+    .expect("seed failed-commit message");
+    sqlx::query(&format!(
+        "INSERT INTO \"{}\".ingress_effect_intents \
+         (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) \
+         VALUES ($1, 1, 2, $2, 1, $3)",
+        fixture.target
+    ))
+    .bind(failed_key.to_storage())
+    .bind(failed_hash.as_slice())
+    .bind(Vec::<u8>::new())
+    .execute(&mut *seed)
+    .await
+    .expect("seed failed-commit intent");
+    seed.commit()
+        .await
+        .expect("commit failed-commit fixture rows");
+
+    let function = format!("\"{}\".fail_receipt_commit", fixture.target);
+    let trigger = "fail_receipt_commit";
+    sqlx::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'forced deferred receipt commit failure'; END $$"
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("create deferred commit failure function");
+    sqlx::query(&format!(
+        "CREATE CONSTRAINT TRIGGER {trigger} AFTER INSERT ON \"{}\".ingress_effect_receipts \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {function}()",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("create deferred receipt commit failure");
+    let failed = waddle_server::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+        &database,
+        failed_key,
+        EffectReceiptKind::from_storage(2),
+        &failed_hash,
+    )
+    .await;
+    assert!(
+        matches!(
+            &failed,
+            Err(waddle_server::ingress_uow::IngressUowError::Substrate(
+                IngressSubstrateError::ReceiptCommitIndeterminate
+            ))
+        ),
+        "expected absent failed receipt to remain indeterminate, got {failed:?}"
+    );
+    let failed_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"{}\".ingress_effect_receipts WHERE message_key = $1",
+        fixture.target
+    ))
+    .bind(failed_key.to_storage())
+    .fetch_one(&writer_admin)
+    .await
+    .expect("confirm failed transaction has no committed receipt");
+    assert_eq!(failed_count, 0, "absence remains indeterminate");
+    sqlx::query(&format!(
+        "DROP TRIGGER {trigger} ON \"{}\".ingress_effect_receipts",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("drop deferred receipt trigger");
+    sqlx::query(&format!("DROP FUNCTION {function}()"))
+        .execute(&writer_admin)
+        .await
+        .expect("drop deferred receipt function");
+
+    drop(database);
+    drop(observer_pool);
     writer_admin.close().await;
     fixture.cleanup().await;
 }

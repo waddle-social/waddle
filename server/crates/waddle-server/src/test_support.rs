@@ -18,10 +18,13 @@ use crate::db::physical_attestation::AttestedPgPool;
 #[cfg(feature = "test-support")]
 use crate::db::Database;
 #[cfg(feature = "test-support")]
+use crate::ingress_substrate::with_pooled_receipt_commit_ack_lost;
+#[cfg(feature = "test-support")]
 use crate::ingress_substrate::PostgresIngressSubstrate;
 #[cfg(feature = "test-support")]
 use crate::ingress_uow::{
-    begin_raw_ingress_writer_with_capability, IngressUnitOfWork, IngressUowError,
+    begin_raw_ingress_writer_with_capability, EffectReceiptRepository, IngressUnitOfWork,
+    IngressUowError,
 };
 #[cfg(feature = "test-support")]
 use crate::{config::LineageConfig, db::physical_attestation::AttestedPostgresWriterCapability};
@@ -156,6 +159,43 @@ pub async fn attested_uow_candidate_write(
         .await?;
     transaction.commit().await?;
     Ok(())
+}
+
+/// Record and read back a receipt through one attested UoW transaction. The
+/// tuple reports exact-key presence, completion status, and receipt-key count
+/// before that same caller-owned transaction commits.
+#[cfg(feature = "test-support")]
+pub async fn attested_uow_receipt_write(
+    database: &Database,
+    lineage: LineageConfig,
+    key: waddle_xmpp::ingress::MessageKey,
+    kind: crate::ingress_substrate::EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<(bool, bool, usize), IngressUowError> {
+    let unit_of_work =
+        IngressUnitOfWork::open(database.clone(), lineage)?.with_attested_pg_writer()?;
+    let mut transaction = unit_of_work.begin().await?;
+    EffectReceiptRepository::record_receipt(&mut transaction, key, kind, hash).await?;
+    let present = EffectReceiptRepository::contains(&mut transaction, key, kind, hash).await?;
+    let complete = EffectReceiptRepository::receipts_complete(&mut transaction, key).await?;
+    let keys = EffectReceiptRepository::keys(&mut transaction, key).await?;
+    transaction.commit().await?;
+    Ok((present, complete, keys.len()))
+}
+
+/// Simulate a lost successful COMMIT acknowledgement while retaining the
+/// actual commit, then exercise the pooled receipt path's exact-key readback.
+#[cfg(feature = "test-support")]
+pub async fn attested_pooled_receipt_write_after_lost_ack(
+    database: &Database,
+    key: waddle_xmpp::ingress::MessageKey,
+    kind: crate::ingress_substrate::EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<(), IngressUowError> {
+    with_pooled_receipt_commit_ack_lost(async {
+        EffectReceiptRepository::record_receipt_pooled(database, key, kind, hash).await
+    })
+    .await
 }
 
 /// Hold an attested UoW's epoch row lock until the caller releases it. Only
