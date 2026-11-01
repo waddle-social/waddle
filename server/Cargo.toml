@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/kameo", "vendor/libp2p-swarm", "experiments/native-fixture"]
+exclude = ["vendor/kameo", "vendor/libp2p-swarm", "vendor/sqlx-postgres", "experiments/native-fixture"]
 members = [
     "crates/waddle-ecdysis",
     "crates/waddle-server",
@@ -173,3 +173,4 @@ debug = "line-tables-only"
 [patch.crates-io]
 kameo = { path = "vendor/kameo" }
 libp2p-swarm = { path = "vendor/libp2p-swarm" }
+sqlx-postgres = { path = "vendor/sqlx-postgres" }

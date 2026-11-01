@@ -163,3 +163,9 @@ waddle-server::clustering_shutdown_deadline process_sigterm_during_reregistratio
 waddle-server::clustering_shutdown_deadline fatal_fence_terminal_departure_requires_a_completed_socket_drain
 waddle-server::clustering_shutdown_deadline fatal_fence_during_terminal_marking_prevents_graceful_retirement
 waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_prevents_second_admission
+
+# P2.1 (#2116/#2046): the SQLx 0.8.6 backport must discard or roll back a
+# cancelled ordinary BEGIN before its physical connection is reused. These
+# controls require the disposable PostgreSQL service in the publish lane.
+waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
+waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
