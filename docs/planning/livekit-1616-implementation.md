@@ -54,9 +54,9 @@ Use this isolated issue branch and PR. Preserve unrelated workspace changes. Kee
 - Both credential-redaction CLI tests pass after reproducing the original
   traceback failure. The exact retained live verifier also reported
   public/internal/invalid-signature HTTP 403/200/401 with temporary-policy cleanup.
-- Full server workspace, signed HTTP integrations and doctests are being run by
-  the integration owner after the focused checks; do not infer their result from
-  the SFU tests above.
+- Full server workspace, signed HTTP integration and doctest results are recorded
+  separately in PR #2168. The focused SFU results above do not establish those
+  outcomes.
 
 The committed configuration/parser have not been deployed. Genuine production
 call lifecycle and post-rollout alert acceptance remain issue closure gates.
@@ -87,5 +87,15 @@ The three CLI test methods pass, including four context rejection cases that
 failed before validation was added. Credential tests also require the accepted
 context to be passed atomically. Focused manifest tests and file-level Go vet
 pass with named fixtures and shallow assertion helpers. No Rust production
-behavior changed in this cleanup; fresh hosted Sonar and independent review
-remain integration-owner gates.
+behavior changed in this cleanup. Independent follow-up review is CLEAN and
+Sonar passes on code head 5ca1c863b; the PR records checks on subsequent heads.
+
+## Live alert evidence
+
+Grafana Cloud history independently confirms LiveKitWebhookSilent firing at
+2026-10-31T01:29:57.489Z (Prometheus timestamp 1793410197.489). At that timestamp,
+the prior-six-hour setup increase was positive (about 2.037 after Prometheus
+extrapolation) and the accepted-webhook increase was 0. The deployed rule is
+healthy, warning severity, with a six-hour lookback and one-hour hold.
+The current accepted-event counter is 2, matching the two synthetic diagnostic
+deliveries; this does not establish genuine production-call acceptance.

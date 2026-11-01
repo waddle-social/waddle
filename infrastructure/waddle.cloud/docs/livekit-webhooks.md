@@ -162,3 +162,23 @@ the known public-hairpin delivery failure. Prefer retaining the scoped internal
 allow while repairing any newly discovered problem. Reverting the parser also
 restores rejection of canonical string timestamps. Record real event/alert
 acceptance on #1616 before closing it.
+
+## Deployed alert verification
+
+Read-only Grafana Cloud queries confirmed a firing LiveKitWebhookSilent sample
+at 2026-10-31T01:29:57.489Z. The six-hour setup increase at that sample was
+positive (about 2.037, including Prometheus extrapolation), while the six-hour
+accepted-webhook increase was 0. This proves that the deployed rule detects
+active-call silence, independently of the promtool scenarios.
+
+To reproduce against datasource grafanacloud-prom, use these instant queries:
+
+```promql
+ALERTS{alertname="LiveKitWebhookSilent",alertstate="firing"} @ 1793410197.489
+sum(increase(waddle_call_setup_ok_total[6h] @ 1793410197.489))
+sum(increase(waddle_call_webhook_events_total{outcome="received"}[6h] @ 1793410197.489)) or vector(0)
+```
+
+At the end of this diagnostic pass, the accepted-event counter was 2, matching
+the two synthetic probes. The rule currently evaluates healthy/normal; this
+is not evidence that the unmerged delivery configuration has been deployed.
