@@ -203,6 +203,33 @@ async fn identity_variants_missing_function_and_login_mismatch_fail_closed() {
         "schema mismatch"
     );
 
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 2",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("change only the lineage format");
+    let function_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.read_physical_identity()",
+        fixture.trusted
+    ))
+    .fetch_one(&mut runtime)
+    .await
+    .expect("call installed function after format change");
+    assert_eq!(function_rows, 0, "installed function must reject format 2");
+    assert!(matches!(
+        attest_connection(&mut runtime, &config).await,
+        Err(PhysicalAttestationError::MissingLineage)
+    ));
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 1",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore lineage format");
+
     let wrong_login_options = fixture.admin_options.clone();
     assert!(
         attested_pool(
@@ -252,6 +279,26 @@ async fn misplaced_admin_identity_is_rejected_before_ddl() {
             .await
             .expect("read role catalog after preflight denial");
     assert_eq!(remaining, 0, "preflight must precede CREATE ROLE");
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET format = 2",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("change only the lineage format");
+    assert!(matches!(
+        install(&fixture.admin_options, fixture.config()).await,
+        Err(PhysicalAttestationError::Mismatch {
+            field: "lineage format"
+        })
+    ));
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pg_catalog.pg_roles WHERE rolname = $1")
+            .bind(&fixture.definer)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("read role catalog after format denial");
+    assert_eq!(remaining, 0, "format preflight must precede CREATE ROLE");
     fixture.cleanup().await;
 }
 

@@ -1,6 +1,6 @@
 use crate::db::DatabaseDriver;
 
-pub(super) const LINEAGE_FORMAT: i64 = 1;
+pub(crate) const LINEAGE_FORMAT: i64 = 1;
 
 pub(super) const LINEAGE_COLUMNS: [&str; 10] = [
     "id",

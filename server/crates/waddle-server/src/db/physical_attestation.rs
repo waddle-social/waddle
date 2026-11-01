@@ -10,6 +10,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{Connection, PgConnection, Row};
 use thiserror::Error;
 
+use super::lineage::LINEAGE_FORMAT;
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
@@ -168,7 +169,12 @@ pub async fn install(
     // The target schema name is validated before interpolation. Every table
     // and catalog reference is qualified; pg_temp is last in the definer's
     // search path so temp objects cannot shadow authority objects.
-    let identity_sql = identity_select(&config);
+    // The installed function independently refuses unsupported lineage
+    // formats, even when called outside the pool hook.
+    let identity_sql = format!(
+        "{} AND l.format = {LINEAGE_FORMAT}",
+        identity_select(&config)
+    );
     let function_sql = format!(
         r#"CREATE FUNCTION {function}()
 RETURNS TABLE (
@@ -176,7 +182,8 @@ RETURNS TABLE (
     stored_system_identifier text, stored_database_oid text, stored_database_name text,
     stored_schema_oid text, stored_schema_name text,
     live_system_identifier text, live_database_oid text, live_database_name text,
-    live_schema_oid text, live_schema_name text
+    live_schema_oid text, live_schema_name text,
+    stored_lineage_format bigint
 )
 LANGUAGE sql SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -234,7 +241,7 @@ fn identity_select(config: &PhysicalAttestationConfig) -> String {
          (SELECT oid::text FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()), \
          pg_catalog.current_database()::text, \
          (SELECT oid::text FROM pg_catalog.pg_namespace WHERE nspname = '{schema}'), \
-         '{schema}'::text \
+         '{schema}'::text, l.format::bigint \
          FROM {target}._lineage AS l WHERE l.id = 1"
     )
 }
@@ -333,6 +340,7 @@ async fn verify_installed_roles(
 struct Snapshot {
     stored: PhysicalIdentity,
     live: PgIdentity,
+    lineage_format: i64,
 }
 
 #[derive(Debug)]
@@ -391,7 +399,12 @@ fn parse_snapshot(row: &sqlx::postgres::PgRow) -> Result<Snapshot, PhysicalAttes
             name: PgSchemaName(field(11, "live schema name")?),
         },
     };
-    Ok(Snapshot { stored, live })
+    let lineage_format: i64 = row.try_get(12)?;
+    Ok(Snapshot {
+        stored,
+        live,
+        lineage_format,
+    })
 }
 
 async fn verify_active_schema(
@@ -419,6 +432,11 @@ fn verify_identity(
     snapshot: &Snapshot,
     config: &PhysicalAttestationConfig,
 ) -> Result<(), PhysicalAttestationError> {
+    if snapshot.lineage_format != LINEAGE_FORMAT {
+        return Err(PhysicalAttestationError::Mismatch {
+            field: "lineage format",
+        });
+    }
     let expected = config.postgres();
     let stored = &snapshot.stored;
     if stored.deployment_uuid != config.lineage.deployment_uuid {

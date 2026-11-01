@@ -9,6 +9,8 @@ mod record;
 mod registry;
 mod sql;
 
+pub(crate) use sql::LINEAGE_FORMAT;
+
 pub use engine::{
     adopt_if_matched, enroll, ensure_table, live_postgres_identity,
     live_postgres_identity_via_pg_pool, sqlite_pool_is_in_memory, verify, verify_via_control_plane,
