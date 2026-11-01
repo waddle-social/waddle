@@ -197,7 +197,7 @@ pub struct Database {
     pub(in crate::db) control_plane_admission: Option<PoolAdmission>,
     pub(in crate::db) name: String,
     pub(in crate::db) driver: DatabaseDriver,
-    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
+    /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
     /// FIX 4): lets a caller compare "does this other resolved URL point
     /// at the same database as this handle" — e.g.
     /// `sm_persistence::open_for_cluster_mode`'s co-location check, which
@@ -209,7 +209,9 @@ pub struct Database {
     /// caller must go out of its way to read it, rather than have it leak
     /// into an incidental log/format call. Callers that log or embed this
     /// value in an error message MUST redact credentials first (DSNs
-    /// commonly carry a password in their userinfo component).
+    /// commonly carry a password in their userinfo component). Externally
+    /// supplied and physically attested pools use non-connectable sentinel
+    /// values here; callers must not use this accessor to reopen those pools.
     pub(in crate::db) database_url: String,
     /// Present only when the exact hook-bearing pool and its unforgeable
     /// writer capability were consumed together.
@@ -333,7 +335,7 @@ impl Database {
                 .ok_or(DatabaseError::PoolSizeOverflow)?,
             None => main_budget,
         };
-        let (pool, attested_pg_writer, database_url) = pool.into_parts()?;
+        let (pool, attested_pg_writer) = pool.into_parts()?;
         let actual = pool.options().get_max_connections();
         if actual != expected {
             return Err(DatabaseError::AttestedPoolLaneCapacityMismatch { expected, actual });
@@ -348,9 +350,19 @@ impl Database {
             control_plane_admission: None,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
-            database_url,
+            // PgConnectOptions can carry startup parameters that SQLx's URL
+            // rendering drops. This sentinel prevents downstream consumers
+            // from silently creating a raw, un-attested child pool.
+            database_url: "postgres:attested-pool".to_owned(),
             attested_pg_writer: Some(attested_pg_writer),
         })
+    }
+
+    /// Whether this handle owns the exact hook-bearing pool created by the
+    /// physical attestor. Child stores must share this handle or fail closed;
+    /// its `database_url()` value is deliberately not reconnectable.
+    pub(crate) fn uses_attested_postgres_pool(&self) -> bool {
+        self.attested_pg_writer.is_some()
     }
 
     pub(crate) fn attested_pg_writer_capability(&self) -> Option<AttestedPostgresWriterCapability> {
@@ -548,10 +560,12 @@ impl Database {
         self.control_plane_backend.is_some()
     }
 
-    /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
-    /// FIX 4). See the field's own doc comment for the redaction caveat —
-    /// this MAY carry credentials in its userinfo component; callers that
-    /// log or embed it in a user-facing error MUST redact first.
+    /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
+    /// FIX 4). Externally supplied and physically attested pools return a
+    /// non-connectable sentinel instead. See the field's own doc comment for
+    /// the redaction caveat — this MAY carry credentials in its userinfo
+    /// component; callers that log or embed it in a user-facing error MUST
+    /// redact first.
     pub fn database_url(&self) -> &str {
         &self.database_url
     }

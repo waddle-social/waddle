@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, PgConnection, Row};
+use sqlx::{PgConnection, Row};
 use thiserror::Error;
 
 use super::lineage::LineageError;
@@ -101,10 +101,12 @@ pub struct PhysicalAttestationConfig {
 /// server session across checkout and transaction start; transaction- and
 /// statement-pooling proxies are unsupported unless session pinning is
 /// independently guaranteed.
+/// It deliberately exposes no reconnect URL: [`PgConnectOptions`] can carry
+/// startup parameters such as `search_path` that SQLx's lossy URL rendering
+/// does not preserve.
 pub struct AttestedPgPool {
     pool: PgPool,
     writer_capability: AttestedPostgresWriterCapability,
-    database_url: String,
 }
 
 /// Opaque authority for PostgreSQL ingress writers. It is created only
@@ -184,11 +186,11 @@ impl AttestedPgPool {
 
     pub(crate) fn into_parts(
         self,
-    ) -> Result<(PgPool, AttestedPostgresWriterCapability, String), PhysicalAttestationError> {
+    ) -> Result<(PgPool, AttestedPostgresWriterCapability), PhysicalAttestationError> {
         if self.pool.size() as usize != self.pool.num_idle() {
             return Err(PhysicalAttestationError::ActivePoolLease);
         }
-        Ok((self.pool, self.writer_capability, self.database_url))
+        Ok((self.pool, self.writer_capability))
     }
 }
 
@@ -443,7 +445,6 @@ pub fn attested_pool(
     }
     let on_connect = config.clone();
     let before_acquire = config.clone();
-    let database_url = options.to_url_lossy().to_string();
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(max_connections)
@@ -478,6 +479,5 @@ pub fn attested_pool(
             binding: std::sync::Arc::new(()),
             config,
         },
-        database_url,
     })
 }

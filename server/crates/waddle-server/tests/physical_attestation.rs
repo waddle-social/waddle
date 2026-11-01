@@ -2977,6 +2977,114 @@ async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_backend() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (_boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        2,
+        Duration::from_secs(2),
+    )
+    .expect("attested runtime pool");
+    let database_pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "attested-auth-session",
+        pool,
+        1,
+        1,
+    )
+    .await
+    .expect("attested main and ingress lanes");
+
+    assert_eq!(
+        database_pool.global().database_url(),
+        "postgres:attested-pool",
+        "the non-round-trippable PgConnectOptions must not become a child-pool DSN"
+    );
+    let connection = database_pool
+        .global()
+        .guard()
+        .await
+        .expect("attested main guard");
+    let mut schema_rows = connection
+        .query("SELECT pg_catalog.current_schema()", ())
+        .await
+        .expect("read active schema on exact attested pool");
+    let active_schema: String = schema_rows
+        .next()
+        .await
+        .expect("read current schema row")
+        .expect("current schema row")
+        .get(0)
+        .expect("decode active schema");
+    assert_eq!(active_schema, fixture.target);
+    drop(schema_rows);
+    drop(connection);
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let user_jid = format!("{}@auth.attested.test", uuid::Uuid::new_v4().simple());
+    let username = format!("attested_{}", uuid::Uuid::new_v4().simple());
+    let xmpp_localpart = username.clone();
+    let localpart_key: jid::NodePart = jid::NodePart::new(&xmpp_localpart)
+        .expect("valid localpart")
+        .into();
+    let localpart_key_text = localpart_key.as_str().to_owned();
+    let token_hash = format!("token_{}", uuid::Uuid::new_v4().simple());
+    let auth_context_id = uuid::Uuid::new_v4();
+    let created_at = "2026-11-01T00:00:00Z".to_owned();
+
+    database_pool
+        .global_actor()
+        .ask(waddle_server::db::actor::CreateAuthSession {
+            session_id: session_id.clone(),
+            user_jid: user_jid.clone(),
+            username: username.clone(),
+            xmpp_localpart,
+            localpart_key: Some(localpart_key),
+            token_hash: token_hash.clone(),
+            auth_context_id,
+            auth_context_version: 7,
+            principal_auth_epoch: 3,
+            expires_at: None,
+            created_at: created_at.clone(),
+            last_used_at: created_at,
+        })
+        .await
+        .expect("Database::begin writes through attested main lane");
+
+    let row = database_pool
+        .global_actor()
+        .ask(waddle_server::db::actor::DbQueryOne {
+            sql: "SELECT users.username, users.localpart_key, sessions.token_hash, \
+                  sessions.auth_context_id, sessions.auth_context_version, \
+                  sessions.principal_auth_epoch \
+                  FROM users JOIN sessions ON sessions.user_jid = users.jid \
+                  WHERE sessions.id = ?"
+                .to_owned(),
+            params: waddle_server::db_params![session_id],
+        })
+        .await
+        .expect("actor accepts auth-session read")
+        .expect("created session row");
+
+    assert_eq!(row[0], waddle_server::db::Value::Text(username.clone()));
+    assert_eq!(row[1], waddle_server::db::Value::Text(localpart_key_text));
+    assert_eq!(row[2], waddle_server::db::Value::Text(token_hash));
+    assert_eq!(
+        row[3],
+        waddle_server::db::Value::Text(auth_context_id.to_string())
+    );
+    assert_eq!(row[4], waddle_server::db::Value::Integer(7));
+    assert_eq!(row[5], waddle_server::db::Value::Integer(3));
+
+    drop(database_pool);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_outcomes() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
