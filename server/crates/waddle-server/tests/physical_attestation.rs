@@ -14,7 +14,9 @@ use waddle_server::db::physical_attestation::{
     DarkIngressAuthorityError, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
     PhysicalAttestationError, TransactionBounds,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+#[cfg(feature = "test-support")]
+use waddle_server::db::MigrationRunner;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::ingress::EffectReceiptKey;
 use waddle_server::ingress_substrate::EffectReceiptKind;
 use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};

@@ -56,7 +56,7 @@ mod tests;
 
 mod substrate;
 pub(crate) use substrate::acquire_epoch_lock_first;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) use substrate::acquire_epoch_lock_first_with_capability;
 use substrate::decode_stored_alias;
 use substrate::dialect_sql;

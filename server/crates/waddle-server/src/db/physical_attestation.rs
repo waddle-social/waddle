@@ -11,14 +11,14 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Row};
 use thiserror::Error;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use super::lineage::LineageError;
 use super::lineage::LINEAGE_FORMAT;
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use super::DatabaseError;
 
 mod installer;
@@ -103,33 +103,33 @@ pub struct PhysicalAttestationConfig {
 #[derive(Clone)]
 pub struct AttestedPgPool {
     pool: PgPool,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     writer_capability: AttestedPostgresWriterCapability,
 }
 
 /// Opaque authority for dark PostgreSQL ingress writers. It is created only
 /// together with the hook-bearing pool and carries the full physical identity
 /// and lineage expected by the trusted SECURITY DEFINER attestor.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub(crate) struct AttestedPostgresWriterCapability {
     binding: std::sync::Arc<()>,
     config: PhysicalAttestationConfig,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 impl AttestedPostgresWriterCapability {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn identity(&self) -> &PgIdentity {
         self.config.postgres()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.binding, &other.binding)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) async fn attest_transaction(
         &self,
         transaction: &mut super::Transaction<'_>,
@@ -142,7 +142,7 @@ impl AttestedPostgresWriterCapability {
             .map_err(DatabaseError::from)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn attested_lineage_for_deployment(
         &self,
         configured: Option<DeploymentUuid>,
@@ -175,7 +175,7 @@ impl AttestedPgPool {
         self.pool.num_idle()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn into_parts(self) -> (PgPool, AttestedPostgresWriterCapability) {
         (self.pool, self.writer_capability)
     }
@@ -462,7 +462,7 @@ pub fn attested_pool(
         .connect_lazy_with(options);
     Ok(AttestedPgPool {
         pool,
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         writer_capability: AttestedPostgresWriterCapability {
             binding: std::sync::Arc::new(()),
             config,

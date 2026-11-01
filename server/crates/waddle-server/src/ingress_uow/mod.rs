@@ -16,7 +16,7 @@ mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod effect_descendants;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) use effect_descendants::begin_raw_ingress_writer_with_capability;
 pub(crate) use effect_descendants::canonical_nowait_error;
 pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transaction};
@@ -67,13 +67,13 @@ pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 use std::time::Duration;
 
 use crate::config::LineageConfig;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{lineage, Database, DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
     acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use crate::ingress_substrate::{
     acquire_epoch_lock_first_with_capability, tighten_local_transaction_timeouts,
 };
@@ -99,7 +99,7 @@ pub struct IngressUnitOfWork {
     lineage: LineageConfig,
     /// Optional full-identity dark writer capability retained by the exact
     /// physically attested pool. Normal startup does not populate this.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     attested_pg_writer: Option<AttestedPostgresWriterCapability>,
     /// The server's canonical node identity source. Bound once at
     /// construction so claim fences can only be minted against the real
@@ -126,7 +126,7 @@ impl IngressUnitOfWork {
             observations: Default::default(),
             db,
             lineage,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
             fencing: IngressFencing::SingleNode,
         })
@@ -134,7 +134,7 @@ impl IngressUnitOfWork {
 
     /// Enable the dark full-identity writer path using the capability retained
     /// by this unit of work's exact physically attested PostgreSQL pool.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn with_attested_pg_writer(mut self) -> Result<Self, IngressUowError> {
         if self.db.driver() != DatabaseDriver::Postgres {
             return Err(IngressUowError::PostgresRequired);
@@ -204,7 +204,7 @@ impl IngressUnitOfWork {
         &self,
         bounds: Option<(Duration, Duration)>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         if let Some(capability) = &self.attested_pg_writer {
             self.db
                 .verify_attested_pg_writer_capability(capability)
@@ -232,20 +232,20 @@ impl IngressUnitOfWork {
                 return Err(IngressUowError::TransactionBoundsUnproven);
             }
         }
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         if self.attested_pg_writer.is_some()
             && !tighten_local_transaction_timeouts(&mut transaction).await?
         {
             return Err(IngressUowError::TransactionBoundsUnproven);
         }
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         let protocol_epoch = match &self.attested_pg_writer {
             Some(capability) => {
                 acquire_epoch_lock_first_with_capability(&mut transaction, capability).await?
             }
             None => acquire_epoch_lock_first(&mut transaction).await?,
         };
-        #[cfg(not(any(test, feature = "test-support")))]
+        #[cfg(not(feature = "test-support"))]
         let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
         let supported = supported_protocol_epoch();
         if protocol_epoch > supported {
@@ -255,9 +255,9 @@ impl IngressUnitOfWork {
             });
         }
 
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "test-support")]
         let has_attested_writer = self.attested_pg_writer.is_some();
-        #[cfg(not(any(test, feature = "test-support")))]
+        #[cfg(not(feature = "test-support"))]
         let has_attested_writer = false;
         if self.db.driver() == DatabaseDriver::Postgres && !has_attested_writer {
             let mut proof = transaction
@@ -283,7 +283,7 @@ impl IngressUnitOfWork {
         let lineage = if self.db.is_in_memory_sqlite() {
             IngressLineage::Ephemeral
         } else {
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             let verified = match &self.attested_pg_writer {
                 Some(capability) => capability
                     .attested_lineage_for_deployment(self.lineage.deployment_uuid)
@@ -296,7 +296,7 @@ impl IngressUnitOfWork {
                 .await
                 .map_err(IngressUowError::Lineage)?,
             };
-            #[cfg(not(any(test, feature = "test-support")))]
+            #[cfg(not(feature = "test-support"))]
             let verified =
                 lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
                     .await
