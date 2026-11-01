@@ -15,6 +15,7 @@ use waddle_server::db::lineage::{
 use waddle_server::db::{
     Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationLedgerError,
 };
+use waddle_server::inbox::bootstrap_inbox_owner_schema;
 use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
 use waddle_server::sm_persistence::bootstrap_portable_sm_owner_schema;
 
@@ -1174,4 +1175,164 @@ async fn pending_delivery_owner_retries_partial_sqlite_schema_and_preserves_clai
         .get(0)
         .expect("count");
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn inbox_schema_owner_requires_a_schema_writer() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {} TO {}",
+        fixture.schema, fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("runtime schema usage");
+    assert!(
+        bootstrap_inbox_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot create inbox schema"
+    );
+    bootstrap_inbox_owner_schema(&fixture.owner)
+        .await
+        .expect("owner provisions inbox schema");
+    bootstrap_inbox_owner_schema(&fixture.owner)
+        .await
+        .expect("owner bootstrap is repeatable");
+    assert!(
+        bootstrap_inbox_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot repair inbox schema"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inbox_owner_bootstraps_fresh_sqlite_and_reopens() {
+    let directory = tempfile::tempdir().expect("SQLite fixture directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("fresh-inbox.db").display()
+    );
+    let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, url);
+    config.pool_size = 1;
+    let db = Database::from_config("fresh inbox", &config)
+        .await
+        .expect("SQLite database");
+    bootstrap_inbox_owner_schema(&db)
+        .await
+        .expect("fresh owner bootstrap");
+    bootstrap_inbox_owner_schema(&db)
+        .await
+        .expect("repeat owner bootstrap");
+    let guard = db.guard().await.expect("SQLite pool member");
+    guard.execute(
+        "INSERT INTO inbox_entries (user_jid, partner_jid, kind, last_stanza_id, last_updated) VALUES ('alice@example.test', 'bob@example.test', 'direct', 'stanza-1', 1)",
+        (),
+    ).await.expect("schema accepts inbox row");
+    drop(guard);
+    drop(db);
+
+    let reopened = Database::from_config("reopened inbox", &config)
+        .await
+        .expect("reopened SQLite database");
+    bootstrap_inbox_owner_schema(&reopened)
+        .await
+        .expect("owner bootstrap after reopen");
+    let guard = reopened.guard().await.expect("reopened SQLite pool member");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM inbox_entries WHERE last_stanza_id = 'stanza-1'",
+            (),
+        )
+        .await
+        .expect("read retained inbox row");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("read count")
+        .expect("count row")
+        .get(0)
+        .expect("count");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn inbox_owner_rebuilds_legacy_threads_and_discards_unreceiptable_recovery() {
+    let directory = tempfile::tempdir().expect("SQLite fixture directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("legacy-inbox.db").display()
+    );
+    let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, url);
+    config.pool_size = 1;
+    let db = Database::from_config("legacy inbox", &config)
+        .await
+        .expect("SQLite database");
+    let guard = db.guard().await.expect("SQLite pool member");
+    guard.execute(
+        "CREATE TABLE inbox_entries (user_jid TEXT NOT NULL, partner_jid TEXT NOT NULL, kind TEXT NOT NULL, last_stanza_id TEXT NOT NULL, last_updated INTEGER NOT NULL, unread INTEGER NOT NULL DEFAULT 0, preview TEXT, PRIMARY KEY (user_jid, partner_jid))",
+        (),
+    ).await.expect("legacy inbox table");
+    guard.execute(
+        "INSERT INTO inbox_entries (user_jid, partner_jid, kind, last_stanza_id, last_updated, unread, preview) VALUES ('alice@example.test', 'bob@example.test', 'direct', 'legacy-stanza', 7, 2, 'hello')",
+        (),
+    ).await.expect("legacy inbox row");
+    guard.execute(
+        "CREATE TABLE groupchat_notification_recovery (recipient_bare_jid TEXT NOT NULL, room_jid TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', stanza_id_by TEXT NOT NULL, stanza_id TEXT NOT NULL, sender_jid TEXT NOT NULL, is_live_occupant INTEGER NOT NULL, room_members_only INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, completed_at_ms INTEGER, PRIMARY KEY (recipient_bare_jid, room_jid, thread_id, stanza_id_by, stanza_id))",
+        (),
+    ).await.expect("legacy recovery table");
+    guard.execute(
+        "INSERT INTO groupchat_notification_recovery (recipient_bare_jid, room_jid, stanza_id_by, stanza_id, sender_jid, is_live_occupant, room_members_only, created_at_ms) VALUES ('alice@example.test', 'room@example.test', 'room@example.test', 'legacy-stanza', 'room@example.test/alice', 1, 0, 7)",
+        (),
+    ).await.expect("unreceiptable legacy recovery");
+    drop(guard);
+
+    bootstrap_inbox_owner_schema(&db)
+        .await
+        .expect("owner repairs legacy inbox and recovery");
+    bootstrap_inbox_owner_schema(&db)
+        .await
+        .expect("repeat owner repair");
+    let guard = db.guard().await.expect("SQLite pool member");
+    let mut rows = guard.query(
+        "SELECT thread_id, last_stanza_id, unread, preview FROM inbox_entries WHERE user_jid = 'alice@example.test'",
+        (),
+    ).await.expect("read migrated inbox row");
+    let row = rows
+        .next()
+        .await
+        .expect("read inbox row")
+        .expect("inbox row retained");
+    assert_eq!(row.get::<String>(0).expect("thread"), "");
+    assert_eq!(row.get::<String>(1).expect("stanza"), "legacy-stanza");
+    assert_eq!(row.get::<i64>(2).expect("unread"), 2);
+    assert_eq!(row.get::<String>(3).expect("preview"), "hello");
+    drop(rows);
+    let mut recovery = guard
+        .query("SELECT COUNT(*) FROM groupchat_notification_recovery", ())
+        .await
+        .expect("count recovery rows");
+    let count: i64 = recovery
+        .next()
+        .await
+        .expect("read count")
+        .expect("count row")
+        .get(0)
+        .expect("count");
+    assert_eq!(count, 0, "legacy row without canonical key is discarded");
+    drop(recovery);
+    let mut columns = guard
+        .query("PRAGMA table_info(groupchat_notification_recovery)", ())
+        .await
+        .expect("recovery columns");
+    let mut names = Vec::new();
+    while let Some(row) = columns.next().await.expect("next column") {
+        names.push(row.get::<String>(1).expect("column name"));
+    }
+    assert!(names.contains(&"sender_can_broadcast_channel_mention".to_owned()));
+    assert!(names.contains(&"message_key".to_owned()));
 }

@@ -43,3 +43,4 @@ pub(crate) use implementation::upsert_in_transaction;
 pub use implementation::DatabaseInboxStorage;
 pub use implementation::InboxDecodeError;
 pub use implementation::InboxTxError;
+pub use schema::bootstrap_schema_owner as bootstrap_inbox_owner_schema;
