@@ -13,7 +13,9 @@ use waddle_server::db::physical_attestation::{
     attest_connection, attested_pool, inspect_installation, install, InstallationStatus,
     PgRoleName, PhysicalAttestationConfig, PhysicalAttestationError,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+#[cfg(feature = "test-support")]
+use waddle_server::db::MigrationRunner;
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 
 // Every installer edits pg_control_system's catalog ACL. Cargo test runs
 // cases in this binary concurrently; keep those DDL transactions distinct.

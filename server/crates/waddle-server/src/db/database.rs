@@ -2,7 +2,7 @@
 
 use super::lineage;
 use super::migrations;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use super::physical_attestation::{
     AttestedPgPool, AttestedPostgresWriterCapability, PhysicalAttestationError,
 };
@@ -40,7 +40,7 @@ pub enum DatabaseError {
 
     /// Fail-closed refusal when a dark writer capability is detached from
     /// its physically attested PostgreSQL pool or connection.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     #[error(transparent)]
     PhysicalAttestation(#[from] PhysicalAttestationError),
 
@@ -199,7 +199,7 @@ pub struct Database {
     pub(in crate::db) database_url: String,
     /// Present only when the exact hook-bearing pool and its unforgeable
     /// dark writer capability were consumed together.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(in crate::db) attested_pg_writer: Option<AttestedPostgresWriterCapability>,
 }
 
@@ -244,7 +244,7 @@ impl Database {
             } else {
                 "sqlite:external-pool".to_string()
             },
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         }
     }
@@ -257,7 +257,7 @@ impl Database {
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             database_url: "postgres:external-pool".to_string(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         }
     }
@@ -265,7 +265,7 @@ impl Database {
     /// Wrap the exact physical-attestation pool and retain its dark writer
     /// capability. This constructor accepts the private pool/capability
     /// wrapper as one value, so it cannot bind a token to another pool.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Self {
         let (pool, attested_pg_writer) = pool.into_parts();
         Self {
@@ -278,12 +278,12 @@ impl Database {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn attested_pg_writer_capability(&self) -> Option<AttestedPostgresWriterCapability> {
         self.attested_pg_writer.clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn verify_attested_pg_writer_capability(
         &self,
         capability: &AttestedPostgresWriterCapability,
@@ -370,7 +370,7 @@ impl Database {
             name: name.to_string(),
             driver: config.driver,
             database_url: config.database_url.clone(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         })
     }

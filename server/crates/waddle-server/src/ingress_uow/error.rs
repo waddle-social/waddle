@@ -59,7 +59,7 @@ pub enum IngressUowError {
     ClusteredFencingRequiresPostgres,
     #[error("this repository operation requires PostgreSQL")]
     PostgresRequired,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     #[error("dark ingress writer requires a physically attested PostgreSQL pool")]
     AttestedPoolRequired,
     #[error("live ingress protocol epoch exceeds what this binary supports")]

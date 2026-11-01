@@ -23,7 +23,7 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
@@ -265,7 +265,7 @@ impl PostgresIngressSubstrate {
     /// Start a disposable dark writer using the full-identity capability
     /// retained by its physically attested pool. This path is not wired into
     /// runtime startup.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub(crate) async fn begin_with_attested_pg_writer(
         &self,
         capability: &AttestedPostgresWriterCapability,
@@ -1234,7 +1234,7 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
 /// the trusted physical attestor on this same transaction connection, before
 /// reading the epoch or taking application locks. This path never derives
 /// identity from the active search path or DSN.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) async fn acquire_epoch_lock_first_with_capability(
     tx: &mut Transaction<'_>,
     capability: &AttestedPostgresWriterCapability,
@@ -1323,7 +1323,7 @@ pub(crate) async fn acquire_epoch_lock_first_with_capability(
     Ok(locked_epoch)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 async fn read_epoch_in_relation(
     tx: &mut Transaction<'_>,
     relation: &str,
@@ -1351,7 +1351,7 @@ async fn read_epoch_in_relation(
         .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }

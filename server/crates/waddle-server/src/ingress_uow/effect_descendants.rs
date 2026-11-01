@@ -9,10 +9,10 @@ use uuid::Uuid;
 use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 use super::{IngressUowError, IngressUowTransaction};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, Transaction};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 use crate::ingress_substrate::acquire_epoch_lock_first_with_capability;
 use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
 
@@ -41,7 +41,7 @@ pub(crate) async fn begin_raw_ingress_writer(
 /// independently attested PostgreSQL pool. This path is not wired into normal
 /// startup and verifies the same physical transaction connection before any
 /// application lock or DML.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
