@@ -230,6 +230,39 @@ impl MigrationRunner {
         Ok(ledger)
     }
 
+    /// Verify an already committed ledger without bootstrap DDL or checksum
+    /// backfill. The caller owns a read-only PostgreSQL transaction so this
+    /// cannot silently become an owner operation as the catalog evolves.
+    pub(crate) async fn verify_complete_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+    ) -> Result<(), DatabaseError> {
+        let applied_rows = self.read_ledger(tx).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
+            .await?;
+        self.validate_ledger(&applied_rows, driver, false)?;
+
+        let mut seen = HashSet::new();
+        for row in &applied_rows {
+            if self.owns_version(row.version) && !seen.insert(row.version) {
+                return Err(MigrationLedgerError::DuplicateVersion {
+                    version: row.version,
+                }
+                .into());
+            }
+        }
+        for migration in &self.migrations {
+            if !seen.contains(&migration.version) {
+                return Err(MigrationLedgerError::PendingMigration {
+                    version: migration.version,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// The table each namespace's first migration unconditionally drops and
     /// recreates. The exhaustive match ties the data-loss guard to the
     /// namespace enum: adding a namespace without a sentinel fails to

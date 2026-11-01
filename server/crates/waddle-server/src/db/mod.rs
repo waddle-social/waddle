@@ -5,6 +5,7 @@
 pub mod actor;
 mod backend;
 pub mod blocking;
+pub mod bootstrap;
 pub mod lineage;
 mod migrations;
 mod pool;

@@ -94,69 +94,14 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
     // of a lineage-aware binary) proceeds: enrollment is what creates the
     // row, and refusing here would deadlock the bootstrap. That un-enrolled
     // window is the accepted residual risk and is closed at readiness.
-    db::lineage::ensure_table(db_pool.global())
-        .await
-        .context("Failed to bootstrap database lineage table")?;
-    let global_adopt_matched = match &lineage_config.action {
-        Some(db::lineage::LineageAction::Enroll) => {
-            info!(store = "global", "enrolling database lineage");
-            db::lineage::enroll(db_pool.global(), &lineage_config)
-                .await
-                .context("Failed to enroll global database lineage")?;
-            None
-        }
-        Some(db::lineage::LineageAction::Adopt(expected)) => {
-            match db::lineage::adopt_if_matched(db_pool.global(), &lineage_config, expected)
-                .await
-                .context("Failed to apply global database lineage adoption")?
-            {
-                db::lineage::AdoptOutcome::Adopted { matched, .. } => {
-                    info!(store = "global", matched = %matched, "adopted database lineage");
-                    Some(matched)
-                }
-                db::lineage::AdoptOutcome::NotMatched => None,
-            }
-        }
-        None => None,
-    };
-    match db::lineage::verify(db_pool.global(), &lineage_config).await {
-        Ok(_) => {}
-        Err(db::DatabaseError::Lineage(db::lineage::LineageError::MissingRow)) => {
-            // A clustered node starts writing dynamic control-plane rows
-            // (leases, node registration) right after migrations — before
-            // the full readiness attestation could hold it back. An
-            // un-enrolled database is therefore acceptable only when this
-            // process is the one enrolling it; otherwise a clustered node
-            // mis-pointed at a fresh/foreign row-less database would
-            // mutate it. Single-node deployments stay lenient: they write
-            // nothing dynamic before the readiness gate.
-            if server_config.clustering.enabled
-                && !matches!(
-                    lineage_config.action,
-                    Some(db::lineage::LineageAction::Enroll)
-                )
-            {
-                return Err(anyhow::anyhow!(
-                    "refusing to start clustering against a database with no lineage row: \
-                     enroll it first (WADDLE_DB_LINEAGE_ACTION=enroll on one rollout)"
-                ));
-            }
-            info!("global database has no lineage row yet; proceeding to migrations un-enrolled");
-        }
-        Err(error) => {
-            return Err(anyhow::anyhow!(error).context(
-                "refusing to run migrations: the global database's lineage does not \
-                 describe this deployment (mis-pointed DSN, unadopted restore, or \
-                 missing WADDLE_DEPLOYMENT_UUID)",
-            ));
-        }
-    }
-
-    let migration_runner = db::MigrationRunner::single();
-    migration_runner
-        .run(db_pool.global())
-        .await
-        .context("Failed to run migrations")?;
+    // Keep this owner operation at the same point in startup. A later role
+    // split moves it before a separate read-only runtime attachment.
+    let global_adopt_matched = db::bootstrap::bootstrap_global_owner(
+        db_pool.global(),
+        &lineage_config,
+        server_config.clustering.enabled,
+    )
+    .await?;
 
     info!("Database initialized and migrations complete");
 

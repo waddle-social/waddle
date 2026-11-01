@@ -38,6 +38,12 @@ pub enum MigrationLedgerError {
     )]
     MissingChecksum { version: i64 },
 
+    #[error("migration runtime attachment refuses duplicate ledger version v{version}")]
+    DuplicateVersion { version: i64 },
+
+    #[error("migration runtime attachment requires committed migration v{version}")]
+    PendingMigration { version: i64 },
+
     #[error(
         "migration startup is refusing to continue rather than repairing the ledger: the \
          {namespace} schema exists (found table {table}), but the migration ledger has no \

@@ -5,8 +5,8 @@ This is a dark implementation slice of [#2116](https://github.com/waddle-social/
 ## Contract
 
 - The owner operation preserves the current sequence: create/check `_lineage`; enroll or adopt only under the configured operator action; verify lineage; then run the append-only migration ledger. It preserves the clustered missing-lineage refusal and reports whether adoption matched.
-- The runtime verifier requires an existing, committed lineage row and a complete, valid migration ledger. It performs no `CREATE`, `ALTER`, `INSERT`, `UPDATE`, or backfill. A missing table, missing checksum, pending migration, unknown row, identity mismatch, or unauthorized read refuses attachment. PostgreSQL verification runs in a read-only transaction.
-- The two operations are explicit APIs with distinct names. This slice does not change `main.rs` startup, provision database roles, flip epoch, use the physical attestor, or grant the current runtime login fewer privileges.
+- The runtime verifier requires an existing, committed lineage row, an independently supplied complete expected identity, and a complete, valid migration ledger. It performs no `CREATE`, `ALTER`, `INSERT`, `UPDATE`, or backfill. A missing table, missing checksum, pending migration, unknown row, identity mismatch, or unauthorized read refuses attachment. PostgreSQL verification runs in a read-only transaction. A production operator-to-runtime identity handoff is a later gate.
+- The two operations are explicit APIs with distinct names. `main.rs` delegates its existing owner bootstrap without changing startup behavior or order. This slice does not provision database roles, flip epoch, use the physical attestor, or grant the current runtime login fewer privileges.
 
 ## Verification and later gate
 

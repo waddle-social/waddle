@@ -69,6 +69,7 @@ package(waddle-server) & (
     | binary(xep0313_ingress_archive)
     | binary(liveness_readiness_split)
     | binary(sqlx_cancelled_begin)
+    | binary(owner_bootstrap)
     | test(clustering::)
     | test(db::)
     | test(inbox::)

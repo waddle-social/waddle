@@ -169,3 +169,9 @@ waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_
 # controls require the disposable PostgreSQL service in the publish lane.
 waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
 waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
+
+# P2.1 (#2116/#2046): owner bootstrap and restricted read-only attachment.
+waddle-server::owner_bootstrap owner_bootstrap_commits_before_restricted_runtime_attachment
+waddle-server::owner_bootstrap runtime_attachment_rejects_wrong_identity_schema_and_pending_ledger
+waddle-server::owner_bootstrap restricted_runtime_login_cannot_run_owner_bootstrap_or_mutate_ledger
+waddle-server::owner_bootstrap inherited_raw_postgres_transactions_cannot_verify_a_stale_ledger
