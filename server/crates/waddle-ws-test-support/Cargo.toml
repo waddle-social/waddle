@@ -23,3 +23,7 @@ xmpp-parsers = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+kameo = { workspace = true }
+tokio-util = { workspace = true }

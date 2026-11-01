@@ -353,3 +353,39 @@ async fn intentional_logout_cannot_be_force_resumed() {
     assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
     replacement.close().await.expect("replacement closes");
 }
+
+#[tokio::test]
+async fn failed_resume_can_bind_and_enable_a_fresh_session_on_the_same_websocket() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (owner, stream) = original(&server).await;
+    owner.close().await.expect("terminal XMPP close");
+
+    let mut replacement = authenticate(&server, 0).await;
+    let failed = resume(&mut replacement, &stream, 0).await;
+    assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+    assert!(failed
+        .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+
+    // This is the same client and physical WebSocket used for the failed
+    // resume. Binding and exchanging a ping prove the transport is still live.
+    replacement
+        .bind("fresh-after-failure")
+        .await
+        .expect("fresh bind");
+    send(
+        &mut replacement,
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    let enabled = recv(&mut replacement).await;
+    assert!(enabled.is("enabled", SM_NS));
+    assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
+    assert_ne!(enabled.attr("id").expect("new SM ID"), stream.as_str());
+    assert_handled(&mut replacement, 0).await;
+    ping(&mut replacement, "fresh-session-ping").await;
+    assert_handled(&mut replacement, 1).await;
+    replacement.close().await.expect("fresh session closes");
+}

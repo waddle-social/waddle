@@ -7848,6 +7848,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "hmac 0.13.0",
+ "kameo",
  "libc",
  "pbkdf2",
  "quick-xml",
@@ -7855,6 +7856,7 @@ dependencies = [
  "sha2 0.11.0",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "uuid",
  "xmpp-parsers",
 ]
