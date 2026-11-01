@@ -1,14 +1,50 @@
-use super::{debug, info, DatabaseDriver, DatabasePendingDeliveryStorage, PendingStorageError};
-use crate::db::Value;
+use super::{debug, info, DatabaseDriver, PendingStorageError};
+use crate::db::{Database, IntoParams, Rows, Value};
 
 const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
 const V1014_CLAIM_RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
 const LEGACY_MAM_CLEANUP_SELECT_BATCH: i64 = 128;
 const LEGACY_MAM_CLEANUP_DELETE_BATCH: usize = 128;
 
-pub(super) async fn initialize(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<(), PendingStorageError> {
+/// Owner-side access keeps the existing per-statement pool acquisition and
+/// error mapping without constructing a live pending-delivery storage object.
+struct OwnerSchemaDb<'a> {
+    db: &'a Database,
+}
+
+impl OwnerSchemaDb<'_> {
+    async fn execute(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<u64, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))
+    }
+
+    async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, PendingStorageError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))
+    }
+}
+
+pub async fn bootstrap_schema_owner(db: &Database) -> Result<(), PendingStorageError> {
+    initialize(&OwnerSchemaDb { db }).await
+}
+
+async fn initialize(storage: &OwnerSchemaDb<'_>) -> Result<(), PendingStorageError> {
     // `original_receipt_at` stores `timestamp_millis()` (i64 ms since
     // unix epoch). Postgres `INTEGER` is i32 (max ~2.1B), which
     // overflows on every insert from 2001-09-09 onward — every prod
@@ -300,7 +336,7 @@ pub(super) async fn initialize(
             );
         }
     }
-    super::recovery_order::initialize(storage).await
+    super::recovery_order::initialize(storage.db).await
 }
 
 /// Release pending rows claimed by SM sessions discarded by the V1014
@@ -314,7 +350,7 @@ pub(super) async fn initialize(
 /// prevents a later replica from clearing a claim acquired after the first
 /// replica completed the cutover reset.
 async fn reset_claims_for_ingress_v1014_once(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), PendingStorageError> {
     let mut tx = storage
         .db
@@ -391,7 +427,7 @@ async fn reset_claims_for_ingress_v1014_once(
 }
 
 async fn ensure_startup_migration_marker_table(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), PendingStorageError> {
     let completed_at_type = timestamp_millis_sql_type(storage.db.driver());
     storage
@@ -424,7 +460,7 @@ fn timestamp_millis_sql_type(driver: DatabaseDriver) -> &'static str {
 }
 
 async fn widen_postgres_timestamp_millis_column_to_bigint(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
     table: &'static str,
     column: &'static str,
 ) -> Result<(), PendingStorageError> {
@@ -466,7 +502,7 @@ async fn widen_postgres_timestamp_millis_column_to_bigint(
 }
 
 async fn startup_migration_marker_completed(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
     marker: &str,
 ) -> Result<bool, PendingStorageError> {
     let mut rows = storage
@@ -485,7 +521,7 @@ async fn startup_migration_marker_completed(
 }
 
 async fn mark_startup_migration_completed(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
     marker: &str,
 ) -> Result<(), PendingStorageError> {
     let sql = match storage.db.driver() {
@@ -509,7 +545,7 @@ async fn mark_startup_migration_completed(
 }
 
 async fn delete_legacy_mam_query_frames(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<u64, PendingStorageError> {
     let mut after_row_id = None;
     let mut deleted = 0;
@@ -539,7 +575,7 @@ async fn delete_legacy_mam_query_frames(
 }
 
 async fn legacy_mam_query_frame_candidate_batch(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
     after_row_id: Option<String>,
 ) -> Result<Vec<(String, String)>, PendingStorageError> {
     let (sql, params) = match after_row_id {
@@ -584,7 +620,7 @@ async fn legacy_mam_query_frame_candidate_batch(
 }
 
 async fn delete_legacy_mam_query_frame_rows(
-    storage: &DatabasePendingDeliveryStorage,
+    storage: &OwnerSchemaDb<'_>,
     row_ids: &[String],
 ) -> Result<u64, PendingStorageError> {
     if row_ids.is_empty() {
@@ -667,6 +703,7 @@ mod slice5_dedup_index_tests {
 
 #[cfg(test)]
 mod ingress_v1014_claim_reset_tests {
+    use crate::pending_delivery::DatabasePendingDeliveryStorage;
     use waddle_xmpp::pending_delivery::QuotaPolicy;
 
     use super::*;
@@ -700,7 +737,9 @@ mod ingress_v1014_claim_reset_tests {
                 .expect("seed claimed pending row");
         }
 
-        reset_claims_for_ingress_v1014_once(&storage)
+        let db = storage.database();
+        let owner_schema = OwnerSchemaDb { db: &db };
+        reset_claims_for_ingress_v1014_once(&owner_schema)
             .await
             .expect("run one-time claim reset");
         let mut rows = storage
@@ -729,7 +768,7 @@ mod ingress_v1014_claim_reset_tests {
             )
             .await
             .expect("claim after migration");
-        reset_claims_for_ingress_v1014_once(&storage)
+        reset_claims_for_ingress_v1014_once(&owner_schema)
             .await
             .expect("idempotent rerun");
         let mut rows = storage
@@ -753,8 +792,8 @@ mod ingress_v1014_claim_reset_tests {
 /// Bootstrap receipts independently of the ingress ledger. Serialize both table
 /// creation and additive migration: `IF NOT EXISTS` alone races in PostgreSQL's
 /// type catalog when replicas start together.
-pub(super) async fn initialize_promotion_receipts(
-    storage: &DatabasePendingDeliveryStorage,
+async fn initialize_promotion_receipts(
+    storage: &OwnerSchemaDb<'_>,
 ) -> Result<(), PendingStorageError> {
     const RECEIPT_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_305_784_319_670_198;
     let mut tx = storage
@@ -824,6 +863,7 @@ pub(super) async fn initialize_promotion_receipts(
 #[cfg(test)]
 mod tests {
     use crate::db::{Database, DatabaseConfig};
+    use crate::pending_delivery::DatabasePendingDeliveryStorage;
     use waddle_xmpp::pending_delivery::QuotaPolicy;
 
     use super::*;
@@ -865,9 +905,13 @@ mod tests {
             .expect("reset receipt bootstrap only");
         // Existing neighbouring tables deliberately remain, isolating the new
         // receipt DDL from their independent legacy initialization paths.
+        let first_db = first.database();
+        let second_db = second.database();
+        let first_owner_schema = OwnerSchemaDb { db: &first_db };
+        let second_owner_schema = OwnerSchemaDb { db: &second_db };
         let (left, right) = tokio::join!(
-            initialize_promotion_receipts(&first),
-            initialize_promotion_receipts(&second)
+            initialize_promotion_receipts(&first_owner_schema),
+            initialize_promotion_receipts(&second_owner_schema)
         );
         left.expect("first concurrent bootstrap");
         right.expect("second concurrent bootstrap");

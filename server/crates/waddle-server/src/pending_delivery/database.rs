@@ -29,3 +29,4 @@ pub(crate) use implementation::insert_in_transaction;
 pub(crate) use implementation::mark_notification_outboxed_in_transaction;
 pub use implementation::DatabasePendingDeliveryStorage;
 pub(crate) use implementation::PendingInsertFence;
+pub use schema::bootstrap_schema_owner as bootstrap_pending_delivery_owner_schema;

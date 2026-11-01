@@ -207,7 +207,7 @@ impl DatabasePendingDeliveryStorage {
             fencing: None,
             ack_windows: Default::default(),
         };
-        schema::initialize(&storage).await?;
+        schema::bootstrap_schema_owner(&storage.db).await?;
         info!(
             driver = ?storage.db.driver(),
             "pending_delivery storage initialized (XEP-0160)"

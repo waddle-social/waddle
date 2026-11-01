@@ -15,6 +15,7 @@ use waddle_server::db::lineage::{
 use waddle_server::db::{
     Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationLedgerError,
 };
+use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
 use waddle_server::sm_persistence::bootstrap_portable_sm_owner_schema;
 
 static CATALOG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1056,4 +1057,121 @@ async fn portable_sm_schema_owner_requires_a_schema_writer() {
         "restricted login cannot repair an existing SM schema"
     );
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pending_delivery_schema_owner_requires_a_schema_writer() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {} TO {}",
+        fixture.schema, fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("runtime schema usage");
+    assert!(
+        bootstrap_pending_delivery_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot create pending-delivery schema"
+    );
+    bootstrap_pending_delivery_owner_schema(&fixture.owner)
+        .await
+        .expect("owner provisions pending-delivery schema");
+    bootstrap_pending_delivery_owner_schema(&fixture.owner)
+        .await
+        .expect("owner bootstrap is repeatable");
+    assert!(
+        bootstrap_pending_delivery_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot repair pending-delivery schema"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn pending_delivery_owner_retries_partial_sqlite_schema_and_preserves_claim_reset() {
+    let directory = tempfile::tempdir().expect("SQLite fixture directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("pending-bootstrap.db").display()
+    );
+    let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, url);
+    config.pool_size = 1;
+    let db = Database::from_config("pending owner SQLite", &config)
+        .await
+        .expect("SQLite database");
+    let guard = db.guard().await.expect("SQLite pool member");
+    guard.execute(
+        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY, recipient_jid TEXT NOT NULL, original_receipt_at INTEGER NOT NULL, payload_kind TEXT NOT NULL, archive_stanza_by TEXT, archive_stanza_id TEXT, transient_xml TEXT, flushed_in_session TEXT)",
+        (),
+    ).await.expect("legacy pending table");
+    guard.execute(
+        "INSERT INTO pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, transient_xml, flushed_in_session) VALUES ('legacy-row', 'alice@example.test', 1, 'transient', '<message xmlns=\"jabber:client\"><body>hello</body></message>', 'discarded-session')",
+        (),
+    ).await.expect("legacy claimed row");
+    drop(guard);
+
+    bootstrap_pending_delivery_owner_schema(&db)
+        .await
+        .expect("owner repairs partial schema");
+    bootstrap_pending_delivery_owner_schema(&db)
+        .await
+        .expect("owner retry is repeatable");
+    let guard = db.guard().await.expect("SQLite pool member");
+    let mut rows = guard.query(
+        "SELECT flushed_in_session, notification_recovery_ordinal FROM pending_delivery WHERE row_id = 'legacy-row'",
+        (),
+    ).await.expect("read repaired row");
+    let row = rows.next().await.expect("read row").expect("row retained");
+    assert_eq!(row.get::<Option<String>>(0).expect("claim"), None);
+    assert!(row.get::<i64>(1).expect("recovery ordinal") > 0);
+    drop(rows);
+    let mut markers = guard
+        .query(
+            "SELECT name FROM pending_delivery_startup_migrations ORDER BY name",
+            (),
+        )
+        .await
+        .expect("read markers");
+    let mut names = Vec::new();
+    while let Some(row) = markers.next().await.expect("next marker") {
+        names.push(row.get::<String>(0).expect("marker name"));
+    }
+    assert_eq!(
+        names,
+        [
+            "ingress_v1014_pending_claim_reset_v1",
+            "legacy_mam_query_frames_v1"
+        ]
+    );
+    drop(markers);
+    drop(guard);
+    drop(db);
+
+    let reopened = Database::from_config("reopened pending owner SQLite", &config)
+        .await
+        .expect("reopened SQLite database");
+    bootstrap_pending_delivery_owner_schema(&reopened)
+        .await
+        .expect("owner bootstrap after reopen");
+    let guard = reopened.guard().await.expect("reopened SQLite pool member");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM pending_delivery WHERE row_id = 'legacy-row'",
+            (),
+        )
+        .await
+        .expect("read retained row");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("read count")
+        .expect("count row")
+        .get(0)
+        .expect("count");
+    assert_eq!(count, 1);
 }

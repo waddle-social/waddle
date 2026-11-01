@@ -51,6 +51,7 @@ pub(crate) mod database;
 mod flush;
 mod recovery;
 
+pub use database::bootstrap_pending_delivery_owner_schema;
 pub use database::DatabasePendingDeliveryStorage;
 pub(crate) use flush::resume_flush_for_resource_with_retry;
 pub use flush::{
