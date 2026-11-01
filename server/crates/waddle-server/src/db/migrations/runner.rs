@@ -213,12 +213,17 @@ impl MigrationRunner {
     }
 
     async fn read_ledger(&self, tx: &mut Transaction<'_>) -> Result<Vec<LedgerRow>, DatabaseError> {
-        let mut rows = tx
-            .query(
-                "SELECT version, description, checksum FROM _migrations ORDER BY version",
-                (),
-            )
-            .await?;
+        self.read_ledger_from(tx, "_migrations").await
+    }
+
+    async fn read_ledger_from(
+        &self,
+        tx: &mut Transaction<'_>,
+        ledger_table: &str,
+    ) -> Result<Vec<LedgerRow>, DatabaseError> {
+        let sql =
+            format!("SELECT version, description, checksum FROM {ledger_table} ORDER BY version");
+        let mut rows = tx.query(&sql, ()).await?;
         let mut ledger = Vec::new();
         while let Some(row) = rows.next().await? {
             ledger.push(LedgerRow {
@@ -237,8 +242,9 @@ impl MigrationRunner {
         &self,
         tx: &mut Transaction<'_>,
         driver: DatabaseDriver,
+        ledger_table: &str,
     ) -> Result<(), DatabaseError> {
-        let applied_rows = self.read_ledger(tx).await?;
+        let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
         self.validate_ledger(&applied_rows, driver, false)?;

@@ -52,12 +52,17 @@ pub(super) fn lineage_table_sql(driver: DatabaseDriver) -> &'static str {
     }
 }
 
-pub(super) const READ_ROW_SQL: &str = "SELECT format, lineage_uuid, deployment_uuid, \
-    pg_system_identifier, pg_database_oid, pg_database_name, pg_schema_oid, pg_schema_name \
-    FROM _lineage WHERE id = 1";
+pub(super) fn read_row_sql(table: &str) -> String {
+    format!(
+        "SELECT format, lineage_uuid, deployment_uuid, \
+         pg_system_identifier, pg_database_oid, pg_database_name, pg_schema_oid, pg_schema_name \
+         FROM {table} WHERE id = 1"
+    )
+}
 
-pub(super) const READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL: &str =
-    "SELECT l.format, l.lineage_uuid, \
+pub(super) fn read_postgres_row_with_live_identity_sql(table: &str) -> String {
+    format!(
+        "SELECT l.format, l.lineage_uuid, \
     l.deployment_uuid, l.pg_system_identifier, l.pg_database_oid, l.pg_database_name, \
     l.pg_schema_oid, l.pg_schema_name, \
     (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
@@ -65,7 +70,9 @@ pub(super) const READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL: &str =
     current_database(), \
     (SELECT oid::text FROM pg_catalog.pg_namespace WHERE nspname = current_schema()), \
     current_schema() \
-    FROM _lineage l WHERE l.id = 1";
+    FROM {table} l WHERE l.id = 1"
+    )
+}
 
 pub(super) const READ_POSTGRES_LIVE_IDENTITY_SQL: &str = "SELECT \
     (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \

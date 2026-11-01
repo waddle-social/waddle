@@ -123,7 +123,7 @@ pub async fn verify_global_runtime(
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
     let mut tx = db.begin().await?;
-    if driver == DatabaseDriver::Postgres {
+    let (lineage_table, ledger_table) = if driver == DatabaseDriver::Postgres {
         // A raw pooled BEGIN can survive a prior borrower, and SQLx's BEGIN
         // then only warns about a nested transaction. Two different
         // pre-query isolation settings make an already-used inherited
@@ -167,13 +167,20 @@ pub async fn verify_global_runtime(
             crate::db_params![safe_path],
         )
         .await?;
-    }
-    let attested = lineage::verify_in_transaction(&mut tx, driver, config).await?;
+        (
+            format!("{quoted_schema}._lineage"),
+            format!("{quoted_schema}._migrations"),
+        )
+    } else {
+        ("main._lineage".to_string(), "main._migrations".to_string())
+    };
+    let attested =
+        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
     MigrationRunner::single()
-        .verify_complete_in_transaction(&mut tx, driver)
+        .verify_complete_in_transaction(&mut tx, driver, &ledger_table)
         .await?;
     tx.commit().await?;
     Ok(attested)

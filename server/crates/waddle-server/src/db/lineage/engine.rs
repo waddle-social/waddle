@@ -7,8 +7,8 @@ use sqlx::sqlite::SqlitePool;
 use sqlx::Row as SqlxRow;
 
 use super::sql::{
-    lineage_table_sql, LINEAGE_COLUMNS, LINEAGE_FORMAT, READ_POSTGRES_LIVE_IDENTITY_SQL,
-    READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, READ_ROW_SQL,
+    lineage_table_sql, read_postgres_row_with_live_identity_sql, read_row_sql, LINEAGE_COLUMNS,
+    LINEAGE_FORMAT, READ_POSTGRES_LIVE_IDENTITY_SQL,
 };
 use super::{
     DeploymentUuid, LineageError, LineageRecord, LineageUuid, PgDatabaseIdentity, PgIdentity,
@@ -174,7 +174,8 @@ pub async fn verify_via_sqlite_pool(
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
     ensure_single_row_sqlite(pool).await?;
-    let row = sqlx::query(READ_ROW_SQL)
+    let sql = read_row_sql("_lineage");
+    let row = sqlx::query(&sql)
         .fetch_optional(pool)
         .await
         .map_err(DatabaseError::from)?;
@@ -237,7 +238,8 @@ pub async fn verify_via_pg_pool(
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
     ensure_single_row_pg(pool).await?;
-    let row = sqlx::query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL)
+    let sql = read_postgres_row_with_live_identity_sql("_lineage");
+    let row = sqlx::query(&sql)
         .fetch_optional(pool)
         .await
         .map_err(map_postgres_identity_error)?;
@@ -391,6 +393,17 @@ pub(crate) async fn verify_in_transaction(
     verify_via_query(tx, driver, config).await
 }
 
+/// Runtime attachment reads only the exact durable lineage table supplied by
+/// its trusted boundary, never a TEMP table with the same unqualified name.
+pub(crate) async fn verify_qualified_in_transaction(
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+    lineage_table: &str,
+) -> Result<AttestedLineage, DatabaseError> {
+    verify_via_query_from(tx, driver, config, lineage_table).await
+}
+
 #[async_trait::async_trait]
 trait LineageQuery {
     async fn lineage_query(&mut self, sql: &str, params: Vec<Value>)
@@ -425,12 +438,18 @@ impl LineageQuery for ConnectionGuard {
 /// write a SECOND row into a table already deemed singleton. Both shapes
 /// are typed malformed-table refusals.
 async fn ensure_single_row(query: &mut impl LineageQuery) -> Result<(), DatabaseError> {
-    let mut rows = query
-        .lineage_query(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = 1 THEN 0 ELSE 1 END), 0) FROM _lineage",
-            Vec::new(),
-        )
-        .await?;
+    ensure_single_row_from(query, "_lineage").await
+}
+
+async fn ensure_single_row_from(
+    query: &mut impl LineageQuery,
+    lineage_table: &str,
+) -> Result<(), DatabaseError> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = 1 THEN 0 ELSE 1 END), 0) \
+         FROM {lineage_table}"
+    );
+    let mut rows = query.lineage_query(&sql, Vec::new()).await?;
     let row = rows
         .next()
         .await?
@@ -463,19 +482,26 @@ async fn verify_via_query(
     driver: DatabaseDriver,
     config: &LineageConfig,
 ) -> Result<AttestedLineage, DatabaseError> {
-    ensure_single_row(query).await?;
+    verify_via_query_from(query, driver, config, "_lineage").await
+}
+
+async fn verify_via_query_from(
+    query: &mut impl LineageQuery,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+    lineage_table: &str,
+) -> Result<AttestedLineage, DatabaseError> {
+    ensure_single_row_from(query, lineage_table).await?;
     match driver {
         DatabaseDriver::Sqlite => {
-            let record = read_record(query, driver)
+            let record = read_record_from(query, driver, lineage_table)
                 .await?
                 .ok_or(LineageError::MissingRow)?;
             attested_sqlite_record(record, config)
         }
         DatabaseDriver::Postgres => {
-            let mut rows = match query
-                .lineage_query(READ_POSTGRES_ROW_WITH_LIVE_IDENTITY_SQL, Vec::new())
-                .await
-            {
+            let sql = read_postgres_row_with_live_identity_sql(lineage_table);
+            let mut rows = match query.lineage_query(&sql, Vec::new()).await {
                 Ok(rows) => rows,
                 Err(error) if is_system_identifier_permission_error(&error) => {
                     return Err(LineageError::SystemIdentifierUnavailable.into());
@@ -598,7 +624,16 @@ async fn read_record(
     query: &mut impl LineageQuery,
     driver: DatabaseDriver,
 ) -> Result<Option<LineageRecord>, DatabaseError> {
-    let mut rows = query.lineage_query(READ_ROW_SQL, Vec::new()).await?;
+    read_record_from(query, driver, "_lineage").await
+}
+
+async fn read_record_from(
+    query: &mut impl LineageQuery,
+    driver: DatabaseDriver,
+    lineage_table: &str,
+) -> Result<Option<LineageRecord>, DatabaseError> {
+    let sql = read_row_sql(lineage_table);
+    let mut rows = query.lineage_query(&sql, Vec::new()).await?;
     match rows.next().await? {
         Some(row) => Ok(Some(record_from_row(&row, driver)?)),
         None => Ok(None),

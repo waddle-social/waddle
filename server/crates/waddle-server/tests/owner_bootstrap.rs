@@ -487,18 +487,67 @@ async fn inherited_raw_postgres_transactions_cannot_verify_a_stale_ledger() {
 }
 
 #[tokio::test]
+async fn postgres_temp_copies_cannot_replace_missing_durable_tables() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    fixture.bootstrap().await;
+    let expected = fixture.expected_identity().await;
+    let guard = fixture.runtime.guard().await.expect("runtime pool member");
+    for table in ["_lineage", "_migrations"] {
+        guard
+            .execute(
+                &format!(
+                    "CREATE TEMP TABLE {table} AS SELECT * FROM {}.{table}",
+                    fixture.schema
+                ),
+                (),
+            )
+            .await
+            .expect("valid TEMP copy of durable table");
+    }
+    drop(guard);
+
+    for table in ["_lineage", "_migrations"] {
+        sqlx::query(&format!(
+            "ALTER TABLE {}.{table} RENAME TO {table}_hidden",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("hide durable table while TEMP copy remains");
+        assert!(
+            verify_global_runtime(&fixture.runtime, &fixture.runtime_config(), &expected)
+                .await
+                .is_err(),
+            "TEMP {table} must not stand in for missing durable table"
+        );
+        sqlx::query(&format!(
+            "ALTER TABLE {}.{table}_hidden RENAME TO {table}",
+            fixture.schema
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("restore durable table");
+    }
+    verify_global_runtime(&fixture.runtime, &fixture.runtime_config(), &expected)
+        .await
+        .expect("restored durable tables verify");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn sqlite_owner_bootstrap_and_read_only_verifier_preserve_single_node_behavior() {
     let directory = tempfile::tempdir().expect("SQLite fixture directory");
     let url = format!(
         "sqlite://{}?mode=rwc",
         directory.path().join("owner-bootstrap.db").display()
     );
-    let database = Database::from_config(
-        "SQLite owner bootstrap",
-        &DatabaseConfig::new(DatabaseDriver::Sqlite, url),
-    )
-    .await
-    .expect("SQLite database");
+    let mut database_config = DatabaseConfig::new(DatabaseDriver::Sqlite, url);
+    database_config.pool_size = 1;
+    let database = Database::from_config("SQLite owner bootstrap", &database_config)
+        .await
+        .expect("SQLite database");
     let deployment_uuid = DeploymentUuid(uuid::Uuid::new_v4());
     let owner_config = LineageConfig {
         deployment_uuid: Some(deployment_uuid),
@@ -518,4 +567,59 @@ async fn sqlite_owner_bootstrap_and_read_only_verifier_preserve_single_node_beha
         .await
         .expect("SQLite runtime verifier");
     assert_eq!(verified, expected);
+
+    let guard = database.guard().await.expect("single SQLite pool member");
+    for table in ["_lineage", "_migrations"] {
+        guard
+            .execute(
+                &format!("CREATE TEMP TABLE {table} AS SELECT * FROM main.{table}"),
+                (),
+            )
+            .await
+            .expect("valid TEMP copy on verifier connection");
+    }
+    guard
+        .execute(
+            &format!(
+                "UPDATE main._lineage SET lineage_uuid = '{}'",
+                uuid::Uuid::new_v4()
+            ),
+            (),
+        )
+        .await
+        .expect("change durable lineage while TEMP copy remains valid");
+    drop(guard);
+    assert!(
+        verify_global_runtime(&database, &runtime_config, &expected)
+            .await
+            .is_err(),
+        "TEMP lineage must not hide changed main lineage"
+    );
+
+    let guard = database.guard().await.expect("single SQLite pool member");
+    guard
+        .execute(
+            &format!(
+                "UPDATE main._lineage SET lineage_uuid = '{}'",
+                expected.lineage_uuid.0
+            ),
+            (),
+        )
+        .await
+        .expect("restore durable lineage");
+    guard
+        .execute(
+            "UPDATE main._migrations SET checksum = NULL WHERE version = \
+             (SELECT MAX(version) FROM main._migrations)",
+            (),
+        )
+        .await
+        .expect("change durable ledger while TEMP copy remains valid");
+    drop(guard);
+    assert!(
+        verify_global_runtime(&database, &runtime_config, &expected)
+            .await
+            .is_err(),
+        "TEMP ledger must not hide changed main ledger"
+    );
 }
