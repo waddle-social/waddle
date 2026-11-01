@@ -87,7 +87,7 @@ spec:
               protocol: UDP
   egress:
     # DNS resolution (kube-dns / CoreDNS in kube-system). Needed to
-    # resolve the webhook host (`xmpp.waddle.social`) and ICE/TURN peers.
+    # resolve the internal webhook Service and ICE/TURN peers.
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: kube-system
@@ -98,16 +98,17 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # Outbound to the public internet on 443/TCP:
-    #   - LiveKit posts SFU-authoritative MUC-call cleanup webhooks to
-    #     `https://xmpp.waddle.social/api/v1/livekit/webhook` (a public
-    #     hostname that routes back in through the gateway's external IP,
-    #     i.e. `world`, not an in-cluster service).
-    - toEntities:
-        - world
+    # Signed control-plane webhooks stay on the cluster Service path. The
+    # external gateway hairpin rejects requests from the SFU; allow only the
+    # server endpoints and their HTTP listener, not arbitrary cluster traffic.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: waddle
+            k8s:app.kubernetes.io/name: waddle-server
+            k8s:app.kubernetes.io/instance: waddle-server
       toPorts:
         - ports:
-            - port: "443"
+            - port: "3000"
               protocol: TCP
     # Reach private coturn allocations directly; the relay range has no
     # public NodePort. This is required even when the client uses TLS.
