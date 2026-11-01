@@ -48,16 +48,16 @@ const LIVEKIT_WEBHOOK_SECRET: &str = "test-webhook-secret-with-at-least-32-bytes
 
 // The harness rejects api-secrets shorter than 32 bytes; this one is
 // exactly 32 ASCII characters. The other LIVEKIT_* values are
-// well-formed but never reach a real LiveKit server in this test —
-// no LiveKit connect happens, only JWT mint + transport rewrite.
-fn livekit_test_envs() -> Vec<(&'static str, &'static str)> {
+// well-formed. Provider preparation probes a local HTTP fixture; no
+// external LiveKit process or media connection is used.
+fn livekit_test_envs(ws_url: &str) -> Vec<(&str, &str)> {
     vec![
         ("LIVEKIT_API_KEY", "APItestkeyworkshop"),
         (
             "LIVEKIT_API_SECRET",
             "test-secret-with-at-least-32-bytes-of-payload",
         ),
-        ("LIVEKIT_WS_URL", "wss://livekit.example.test"),
+        ("LIVEKIT_WS_URL", ws_url),
         ("LIVEKIT_TURN_HOST", "turn.example.test"),
         (
             "LIVEKIT_TURN_SHARED_SECRET",
@@ -67,23 +67,31 @@ fn livekit_test_envs() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-async fn start_pair() -> (TestServer, WsXmppClient, WsXmppClient) {
-    let server = TestServer::start_with_extra_envs(
-        &[(ALICE, ALICE_PW), (BOB, BOB_PW)],
-        &livekit_test_envs(),
-    );
+async fn start_call_server(accounts: &[(&str, &str)]) -> (wiremock::MockServer, TestServer) {
+    let admin = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&admin)
+        .await;
+    let ws_url = admin.uri().replacen("http://", "ws://", 1);
+    let server = TestServer::start_with_extra_envs(accounts, &livekit_test_envs(&ws_url));
+    (admin, server)
+}
+
+async fn start_pair() -> (wiremock::MockServer, TestServer, WsXmppClient, WsXmppClient) {
+    let (admin, server) = start_call_server(&[(ALICE, ALICE_PW), (BOB, BOB_PW)]).await;
     let alice = WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, ALICE, ALICE_PW, "ax")
         .await
         .expect("alice connect");
     let bob = WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, BOB, BOB_PW, "bx")
         .await
         .expect("bob connect");
-    (server, alice, bob)
+    (admin, server, alice, bob)
 }
 
 #[tokio::test]
 async fn server_disco_advertises_call_features_when_livekit_enabled() {
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let mut admin = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -128,7 +136,7 @@ async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
     // the `urn:xmpp:jingle:muji:0` feature BEFORE sending a
     // session-initiate. Without this round-trip, a Muji-compliant
     // peer can't safely discover the mixer.
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let mut admin = WsXmppClient::connect_and_auth(
         &server.ws_url(),
         DOMAIN,
@@ -163,7 +171,7 @@ async fn mixer_jid_disco_info_advertises_muji_and_focus_identity() {
 
 #[tokio::test]
 async fn jmi_propose_is_forwarded_to_peer() {
-    let (_server, mut alice, mut bob) = start_pair().await;
+    let (_livekit_admin, _server, mut alice, mut bob) = start_pair().await;
 
     // Alice rings bob with an audio+video JMI propose.
     let sid = "ce2e1";
@@ -195,7 +203,7 @@ async fn jmi_propose_is_forwarded_to_peer() {
 
 #[tokio::test]
 async fn jmi_proceed_round_trips_back_to_caller() {
-    let (_server, mut alice, mut bob) = start_pair().await;
+    let (_livekit_admin, _server, mut alice, mut bob) = start_pair().await;
 
     let alice_full = alice.full_jid.clone().expect("alice bound");
     let sid = "ce2e2";
@@ -241,7 +249,7 @@ async fn jmi_proceed_round_trips_back_to_caller() {
 /// no negotiation stanza.
 #[tokio::test]
 async fn session_initiate_from_blocked_peer_is_rejected_before_dispatch() {
-    let (_server, mut alice, mut bob) = start_pair().await;
+    let (_livekit_admin, _server, mut alice, mut bob) = start_pair().await;
 
     let alice_full = alice.full_jid.clone().expect("alice bound");
     let bob_full = bob.full_jid.clone().expect("bob bound");
@@ -306,7 +314,7 @@ async fn session_initiate_from_blocked_peer_is_rejected_before_dispatch() {
 
 #[tokio::test]
 async fn session_initiate_rewrites_empty_waddle_transport() {
-    let (_server, mut alice, mut bob) = start_pair().await;
+    let (livekit_admin, _server, mut alice, mut bob) = start_pair().await;
 
     let sid = "ce2e3";
     let alice_full = alice.full_jid.clone().expect("alice bound");
@@ -351,10 +359,18 @@ async fn session_initiate_rewrites_empty_waddle_transport() {
     // server scopes the room id by initiator bare JID so an
     // attacker can't pick a colliding sid; assert that scoping is
     // present.
-    // The `url::Url` parser normalises the websocket URL with a
-    // trailing slash on the empty path, so accept either form.
-    assert!(
-        forwarded.contains("livekit.example.test"),
+    let expected_url = url::Url::parse(&livekit_admin.uri().replacen("http://", "ws://", 1))
+        .expect("fixture WebSocket URL");
+    let forwarded_element: Element = forwarded.parse().expect("forwarded IQ XML");
+    let transport = forwarded_element
+        .children()
+        .find(|child| child.name() == "jingle")
+        .and_then(|jingle| jingle.children().find(|child| child.name() == "content"))
+        .and_then(|content| content.children().find(|child| child.name() == "transport"))
+        .expect("forwarded transport");
+    assert_eq!(
+        transport.attr("url"),
+        Some(expected_url.as_str()),
         "url mismatch; got: {forwarded}"
     );
     assert!(
@@ -624,12 +640,57 @@ fn livekit_webhook_auth(body: &[u8]) -> String {
     format!("Bearer {token}")
 }
 
-async fn post_participant_left_webhook(server: &TestServer, room: &str, identity: &str) {
+struct IssuedMujiMedia {
+    attributes: waddle_sfu::ParticipantAttributes,
+    participant_sid: waddle_sfu::ParticipantSid,
+}
+
+async fn post_participant_joined_webhook(
+    server: &TestServer,
+    room: &str,
+    identity: &str,
+    media: &IssuedMujiMedia,
+) {
+    let body = serde_json::to_vec(&json!({
+        "id": format!("EV_{}", uuid::Uuid::new_v4()),
+        "event": "participant_joined",
+        "room": { "name": room },
+        "participant": {
+            "identity": identity,
+            "sid": media.participant_sid.as_str(),
+            "attributes": &media.attributes
+        },
+    }))
+    .expect("joined webhook body");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/v1/livekit/webhook", server.http_base_url()))
+        .header("Authorization", livekit_webhook_auth(&body))
+        .body(body)
+        .send()
+        .await
+        .expect("post participant joined webhook");
+    assert!(
+        response.status().is_success(),
+        "LiveKit join failed: {}",
+        response.status()
+    );
+}
+
+async fn post_participant_left_webhook(
+    server: &TestServer,
+    room: &str,
+    identity: &str,
+    media: &IssuedMujiMedia,
+) {
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_left",
         "room": { "name": room },
-        "participant": { "identity": identity },
+        "participant": {
+            "identity": identity,
+            "sid": media.participant_sid.as_str(),
+            "attributes": &media.attributes
+        },
     }))
     .expect("webhook body");
     let response = reqwest::Client::new()
@@ -667,7 +728,11 @@ async fn send_muji_session_initiate_request(client: &mut WsXmppClient, room: &st
         .expect("send Muji session-initiate");
 }
 
-async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str) {
+async fn send_muji_session_initiate(
+    client: &mut WsXmppClient,
+    room: &str,
+    sid: &str,
+) -> IssuedMujiMedia {
     send_muji_session_initiate_request(client, room, sid).await;
     client
         .recv_matching(|frame| {
@@ -677,7 +742,7 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         })
         .await
         .expect("Muji session-initiate ack");
-    client
+    let accept = client
         .recv_matching(|frame| {
             frame.contains("session-accept")
                 && (frame.contains(&format!("sid='{sid}'"))
@@ -685,6 +750,18 @@ async fn send_muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: 
         })
         .await
         .expect("Muji session-accept");
+    let claims = decode_issued_claims(&accept);
+    assert!(claims.attributes.media_generation.is_some());
+    IssuedMujiMedia {
+        attributes: claims.attributes,
+        // The fixture simulates the provider's connection for this issued
+        // credential. Preserve its SID across repeated leave deliveries.
+        participant_sid: waddle_sfu::ParticipantSid::try_new(format!(
+            "PA_fixture_{}",
+            uuid::Uuid::new_v4()
+        ))
+        .expect("provider fixture SID"),
+    }
 }
 
 async fn send_muji_session_initiate_expect_forbidden(
@@ -793,7 +870,7 @@ async fn query_room_mam(client: &mut WsXmppClient, room: &str, id: &str) -> Vec<
 /// registry.
 #[tokio::test]
 async fn muji_presence_reflects_to_senders_sibling_resource() {
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let admin_pass = server.fixed_account_password().to_string();
 
     // Two WebSocket sessions for the SAME bare JID — "admin" with the
@@ -1025,7 +1102,7 @@ async fn muji_presence_reflects_to_senders_sibling_resource() {
 
 #[tokio::test]
 async fn muji_session_initiate_from_non_occupant_is_forbidden() {
-    let server = TestServer::start_with_extra_envs(&[(BOB, BOB_PW)], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[(BOB, BOB_PW)]).await;
     let admin_pass = server.fixed_account_password().to_string();
     let mut admin_web = WsXmppClient::connect_and_auth(
         &server.ws_url(),
@@ -1092,10 +1169,11 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
     );
 
     send_muji_session_initiate_expect_forbidden(&mut bob, &room, "bob-forbidden").await;
-    send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
+    let admin_media = send_muji_session_initiate(&mut admin_web, &room, "admin-allowed").await;
 
     let admin_web_full_jid = admin_web.full_jid.clone().expect("admin/web has full jid");
-    post_participant_left_webhook(&server, &room, &admin_web_full_jid).await;
+    post_participant_joined_webhook(&server, &room, &admin_web_full_jid, &admin_media).await;
+    post_participant_left_webhook(&server, &room, &admin_web_full_jid, &admin_media).await;
     admin_mobile
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
         .await
@@ -1104,10 +1182,7 @@ async fn muji_session_initiate_from_non_occupant_is_forbidden() {
 
 #[tokio::test]
 async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
-    let server = TestServer::start_with_extra_envs(
-        &[(BOB, BOB_PW), (CAROL, CAROL_PW)],
-        &livekit_test_envs(),
-    );
+    let (_livekit_admin, server) = start_call_server(&[(BOB, BOB_PW), (CAROL, CAROL_PW)]).await;
     let admin_pass = server.fixed_account_password().to_string();
     let mut admin_web = WsXmppClient::connect_and_auth(
         &server.ws_url(),
@@ -1194,11 +1269,15 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
         "non-member must not be able to enter members-only group-DM room: {carol_join}"
     );
     send_muji_session_initiate_expect_forbidden(&mut carol, &room, "carol-forbidden").await;
-    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
-    send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
+    let admin_media =
+        send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-allowed").await;
+    let bob_media = send_muji_session_initiate(&mut bob, &room, "bob-group-dm-allowed").await;
 
     let admin_full_jid = admin_web.full_jid.clone().expect("admin full jid");
-    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
+    post_participant_joined_webhook(&server, &room, &admin_full_jid, &admin_media).await;
+    post_participant_joined_webhook(&server, &room, &bob_full_jid, &bob_media).await;
+    post_participant_left_webhook(&server, &room, &admin_full_jid, &admin_media).await;
     recv_muji_leave_reflection(&mut bob, &room, "admin").await;
     assert_no_call_thread_ended(
         &mut bob,
@@ -1206,10 +1285,11 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
     )
     .await;
 
-    send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
+    let rejoined_admin_media =
+        send_muji_session_initiate(&mut admin_web, &room, "admin-group-dm-rejoin").await;
+    post_participant_joined_webhook(&server, &room, &admin_full_jid, &rejoined_admin_media).await;
 
-    let bob_full_jid = bob.full_jid.clone().expect("bob full jid");
-    post_participant_left_webhook(&server, &room, &bob_full_jid).await;
+    post_participant_left_webhook(&server, &room, &bob_full_jid, &bob_media).await;
     recv_muji_leave_reflection(&mut admin_web, &room, "bob").await;
     assert_no_call_thread_ended(
         &mut admin_web,
@@ -1217,7 +1297,7 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
     )
     .await;
 
-    post_participant_left_webhook(&server, &room, &admin_full_jid).await;
+    post_participant_left_webhook(&server, &room, &admin_full_jid, &rejoined_admin_media).await;
     admin_web
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
         .await
@@ -1226,7 +1306,7 @@ async fn group_dm_muji_call_lifecycle_uses_existing_muc_gate() {
 
 #[tokio::test]
 async fn muji_session_initiate_is_gated_by_requesting_full_jid() {
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let admin_pass = server.fixed_account_password().to_string();
     let mut web =
         WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_pass, "gate-web")
@@ -1251,7 +1331,7 @@ async fn muji_session_initiate_is_gated_by_requesting_full_jid() {
 
 #[tokio::test]
 async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anchor() {
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let admin_pass = server.fixed_account_password().to_string();
     let mut web =
         WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "admin", &admin_pass, "end-web")
@@ -1307,11 +1387,14 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
     })
     .await
     .expect("web receives mobile active muji reflection");
-    send_muji_session_initiate(&mut web, &room, "web-ended").await;
-    send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
+    let web_media = send_muji_session_initiate(&mut web, &room, "web-ended").await;
+    let mobile_media = send_muji_session_initiate(&mut mobile, &room, "mobile-ended").await;
 
     let web_full_jid = web.full_jid.clone().expect("web has full jid");
-    post_participant_left_webhook(&server, &room, &web_full_jid).await;
+    let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
+    post_participant_joined_webhook(&server, &room, &web_full_jid, &web_media).await;
+    post_participant_joined_webhook(&server, &room, &mobile_full_jid, &mobile_media).await;
+    post_participant_left_webhook(&server, &room, &web_full_jid, &web_media).await;
     let no_early_ended = tokio::time::timeout(std::time::Duration::from_millis(750), async {
         mobile
             .recv_matching(|frame| {
@@ -1325,8 +1408,7 @@ async fn livekit_last_participant_left_fastens_ended_summary_to_call_thread_anch
         "first participant leaving must not emit call-thread-ended while another SFU participant remains"
     );
 
-    let mobile_full_jid = mobile.full_jid.clone().expect("mobile has full jid");
-    post_participant_left_webhook(&server, &room, &mobile_full_jid).await;
+    post_participant_left_webhook(&server, &room, &mobile_full_jid, &mobile_media).await;
 
     let ended_frame = web
         .recv_matching(|frame| frame.contains("<call-thread-ended") && frame.contains("<apply-to"))
@@ -1390,11 +1472,16 @@ struct E2eVideoGrant {
 #[derive(serde::Deserialize)]
 struct E2eClaims {
     video: E2eVideoGrant,
+    attributes: waddle_sfu::ParticipantAttributes,
 }
 
 /// Pull the `<token/>` out of an issued Waddle LiveKit transport and
 /// decode its grants.
 fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
+    decode_issued_claims(frame).video
+}
+
+fn decode_issued_claims(frame: &str) -> E2eClaims {
     let elem: Element = frame.parse().expect("frame parses as XML");
     let jingle = elem
         .children()
@@ -1423,7 +1510,6 @@ fn decode_issued_grant(frame: &str) -> E2eVideoGrant {
     jsonwebtoken::decode::<E2eClaims>(&token, &key, &validation)
         .expect("issued token decodes with the deployment signing secret")
         .claims
-        .video
 }
 
 /// `muc#owner` config-submit IQ carrying the given form fields.
@@ -1541,7 +1627,7 @@ async fn muji_session_initiate(client: &mut WsXmppClient, room: &str, sid: &str)
 /// directly or build `StanzaContext` by hand.
 #[tokio::test]
 async fn muji_join_by_voiced_occupant_mints_publishing_token_end_to_end() {
-    let server = TestServer::start_with_extra_envs(&[], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[]).await;
     let admin_pass = server.fixed_account_password().to_string();
     // The server-owner localpart is required for instant-room creation.
     let mut owner = WsXmppClient::connect_and_auth(
@@ -1576,7 +1662,7 @@ async fn muji_join_by_voiced_occupant_mints_publishing_token_end_to_end() {
 /// cooperation is required.
 #[tokio::test]
 async fn muji_join_by_devoiced_visitor_mints_listen_only_token_end_to_end() {
-    let server = TestServer::start_with_extra_envs(&[(BOB, BOB_PW)], &livekit_test_envs());
+    let (_livekit_admin, server) = start_call_server(&[(BOB, BOB_PW)]).await;
     let admin_pass = server.fixed_account_password().to_string();
     // The owner creates the room (and is therefore its moderator);
     // bob joins as a regular occupant and is then devoiced.

@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
 use waddle_xmpp::muc::room_actor::{
-    ClearMujiPresence, ClearMujiPresenceOutcome, MujiPresenceUpdateOutcome,
+    ClearMujiPresence, ClearMujiPresenceOutcome, GetSnapshot, MujiPresenceUpdateOutcome,
 };
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;
 use waddle_xmpp::xep::xep0272::Muji;
@@ -35,6 +35,147 @@ pub(crate) enum WebhookEffectOutcome {
     Stale,
     Retryable(&'static str),
     Permanent(&'static str),
+}
+
+/// The SFU ghost sweep has already removed its exact registration. This path
+/// only repairs the actor advertisement; repeating SFU departure bookkeeping
+/// after an await could revoke a newly published successor's credentials.
+pub(crate) async fn clear_muji_presence_only(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    full_jid: &FullJid,
+) -> WebhookEffectOutcome {
+    let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
+        return WebhookEffectOutcome::Retryable("sfu_unavailable");
+    };
+    let Ok(call_id) = waddle_sfu::CallId::try_new(room_jid.to_string()) else {
+        return WebhookEffectOutcome::Permanent("invalid_call_id");
+    };
+    let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
+    let registration_exists = || sfu.has_call_participant(&call_id, &identity);
+    if registration_exists() {
+        return WebhookEffectOutcome::Stale;
+    }
+    let Some(executor) = state.deps.protocol.call_teardown_executor.as_ref() else {
+        return WebhookEffectOutcome::Retryable("livekit_executor_unavailable");
+    };
+    let connected = tokio::time::timeout(
+        waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT,
+        executor.live_room_occupancy(&call_id),
+    )
+    .await;
+    if registration_exists() {
+        return WebhookEffectOutcome::Stale;
+    }
+    let provider_room_empty = match connected {
+        Ok(Ok(occupancy)) => {
+            if occupancy
+                .waddle
+                .iter()
+                .any(|participant| participant.identity == identity)
+            {
+                return WebhookEffectOutcome::Stale;
+            }
+            // Foreign recorders do not own XMPP call-thread participation.
+            // Other live Waddle media does, even when this owner's cache is cold.
+            occupancy.waddle.is_empty()
+        }
+        Ok(Err(_)) | Err(_) => return WebhookEffectOutcome::Retryable("provider_presence_unknown"),
+    };
+    let actor = match get_room_actor_result(state, room_jid).await {
+        Ok(Some(actor)) => actor,
+        Ok(None) => return WebhookEffectOutcome::Retryable("room_actor_absent"),
+        Err(_) => return WebhookEffectOutcome::Retryable("room_registry_lookup_failed"),
+    };
+    if registration_exists() {
+        return WebhookEffectOutcome::Stale;
+    }
+    let snapshot = match actor
+        .ask(GetSnapshot)
+        .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => return WebhookEffectOutcome::Retryable("room_actor_snapshot_failed"),
+    };
+    if registration_exists() {
+        return WebhookEffectOutcome::Stale;
+    }
+    if snapshot.room.find_occupant_by_real_jid(full_jid).is_none() {
+        if !provider_room_empty {
+            return WebhookEffectOutcome::Completed;
+        }
+        // Preserve caller responsibility as well as the completion-only retry:
+        // enqueue of that retry can itself fail. Repeated actor-only cleanup
+        // is idempotent and never repeats any SFU departure bookkeeping.
+        return super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await;
+    }
+    let Some(occupant) = snapshot.room.session_generation(full_jid) else {
+        return WebhookEffectOutcome::Retryable("occupancy_generation_unavailable");
+    };
+    let clear = actor
+        .ask(ClearMujiPresence {
+            sender_jid: full_jid.clone(),
+            occupant: Some(occupant),
+        })
+        .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
+        .await;
+    // An equal-generation publication may race the actor mailbox. Its
+    // advertisement can be reasserted by the client, but the obsolete ghost
+    // action must never broadcast a leave, end the thread or touch its token.
+    if registration_exists() {
+        return WebhookEffectOutcome::Stale;
+    }
+    match clear {
+        Ok(Some(ClearMujiPresenceOutcome::Updated(outcome))) => {
+            broadcast_muji_clear(state, room_jid, full_jid, &outcome);
+        }
+        Ok(Some(ClearMujiPresenceOutcome::Superseded)) => return WebhookEffectOutcome::Stale,
+        Ok(None) => {}
+        Err(_) => return WebhookEffectOutcome::Retryable("room_actor_clear_failed"),
+    }
+    // The existing completion helper rechecks SFU state under its room lock.
+    // Its baseline asynchronous completion window remains unchanged.
+    if !provider_room_empty {
+        return WebhookEffectOutcome::Completed;
+    }
+    super::call_thread_end::maybe_broadcast_call_thread_ended(state, room_jid).await
+}
+
+pub(crate) async fn enqueue_muji_presence_clear_only(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    departed: &FullJid,
+) -> Result<(), CallTeardownOutboxError> {
+    let call_id = waddle_sfu::CallId::try_new(room_jid.to_string())?;
+    let intent = CallTeardownIntent {
+        call_id,
+        target: TeardownTarget::MujiPresenceClearOnly {
+            room_jid: room_jid.clone(),
+            departed: departed.clone(),
+        },
+        generation: None,
+        occupant: None,
+        unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
+        room_sid: None,
+        session: None,
+    };
+    if let Err(error) = state
+        .deps
+        .protocol
+        .call_teardown_outbox
+        .enqueue(intent.clone())
+        .await
+    {
+        warn!(room = %room_jid, %error, "failed to persist actor-only Muji clear; retaining the same cleanup responsibility");
+        state
+            .deps
+            .protocol
+            .call_teardown_persistence
+            .retry_batch(vec![intent]);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Clear `full_jid`'s Muji advertisement in `room_jid` and broadcast
@@ -379,10 +520,167 @@ mod tests {
     };
     use crate::server::routes::websocket::handlers::presence::handle_muc_join;
     use crate::server::routes::websocket::tests::{
-        create_test_server_owner_session, create_test_websocket_state_with_sfu, RecordingSfu,
+        create_test_server_owner_session, create_test_websocket_state_with_calls,
+        create_test_websocket_state_with_sfu, snapshot_room, EmptyCallAdmin, RecordingSfu,
     };
     use crate::server::routes::websocket::ActiveCallThread;
     use jid::{BareJid, FullJid};
+
+    fn empty_ghost_probe_executor() -> waddle_sfu::LiveKitTeardownExecutor {
+        let config = waddle_sfu::SfuConfig {
+            api_key: waddle_sfu::ApiKey::new("APItestkey"),
+            api_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("API secret"),
+            webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
+                .expect("webhook secret"),
+            ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("URL"))
+                .expect("WebSocket URL"),
+            turn_host: waddle_sfu::TurnHost::new("turn.test"),
+            turn_tls_port: 443,
+            turn_udp_port: 3478,
+            turn_shared_secret: waddle_sfu::TurnSharedSecret::from_text("turn-secret"),
+            token_ttl: chrono::Duration::seconds(3600),
+            turn_ttl: chrono::Duration::seconds(3600),
+        };
+        waddle_sfu::LiveKitSfu::with_admin(config, Arc::new(EmptyCallAdmin)).teardown_executor()
+    }
+
+    struct PauseGhostLookup {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl kameo::message::Message<PauseGhostLookup>
+        for waddle_xmpp::muc::room_registry_actor::RoomRegistryActor
+    {
+        type Reply = ();
+
+        async fn handle(
+            &mut self,
+            message: PauseGhostLookup,
+            _context: &mut kameo::message::Context<Self, Self::Reply>,
+        ) -> Self::Reply {
+            message.entered.notify_one();
+            message.release.notified().await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ghost_actor_cleanup_preserves_publication_during_a_paused_actor_lookup() {
+        let mut state = create_test_websocket_state_with_calls().await;
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .deps
+            .protocol
+            .call_teardown_executor = Some(empty_ghost_probe_executor());
+        let session = create_test_server_owner_session(state.as_ref(), "alice").await;
+        let room_jid: BareJid = "ghost-lookup-race@muc.example.com".parse().expect("room");
+        let alice: FullJid = "alice@example.com/web".parse().expect("JID");
+        let identity = waddle_sfu::Identity::from_jid(alice.clone());
+        let call = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call");
+        let sfu = state.deps.protocol.sfu.as_ref().expect("real SFU");
+        let publish = |generation, name: &str| {
+            sfu.issue_join_token_with_session(
+                &call,
+                &identity,
+                waddle_sfu::MediaCapabilities::direct_call_peer(),
+                &waddle_sfu::SessionBinding::try_new(name).expect("session"),
+                generation,
+                sfu.participant_registration_expectation(&call, &identity)
+                    .expect("expectation"),
+            )
+            .expect("mint")
+            .expect("publish")
+        };
+        let old_token = publish(
+            waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            "ghost-session",
+        );
+        sfu.note_participant_left(&call, &identity, None);
+        assert!(sfu.is_revoked(&old_token.jti));
+        assert!(
+            !sfu.has_call_participant(&call, &identity),
+            "SFU cleanup precedes actor repair"
+        );
+        let successor = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        handle_muc_join(
+            state.as_ref(),
+            "example.com",
+            &room_jid,
+            &alice,
+            "alice",
+            None,
+            crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
+                occupancy_session: successor,
+                authenticated_session: Some(&session),
+                registry_owner: None,
+            },
+        )
+        .await;
+        super::get_room_actor_result(state.as_ref(), &room_jid)
+            .await
+            .expect("lookup")
+            .expect("actor")
+            .ask(waddle_xmpp::muc::room_actor::UpsertMujiPresence {
+                sender_jid: alice.clone(),
+                occupant: None,
+                muji: waddle_xmpp::xep::xep0272::Muji::with_contents(vec![
+                    waddle_xmpp::xep::xep0272::MujiContent::new(
+                        "audio",
+                        waddle_xmpp::xep::xep0272::Creator::Initiator,
+                        waddle_xmpp::xep::xep0167::MediaKind::Audio,
+                    ),
+                ]),
+            })
+            .await
+            .expect("Muji update")
+            .expect("occupant update");
+        state
+            .deps
+            .protocol
+            .call_threads
+            .insert(room_jid.clone(), active_call_thread(alice.to_bare()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let registry = state.deps.protocol.room_registry.clone();
+        let pause = tokio::spawn({
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                registry
+                    .ask(PauseGhostLookup { entered, release })
+                    .await
+                    .expect("paused registry")
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("registry paused");
+        let mut cleanup = Box::pin(super::clear_muji_presence_only(
+            state.as_ref(),
+            &room_jid,
+            &alice,
+        ));
+        assert!(
+            futures::poll!(cleanup.as_mut()).is_pending(),
+            "cleanup passes its absent-SFU check and waits for the registry"
+        );
+        let token = publish(successor, "successor-session");
+        release.notify_one();
+        assert_eq!(cleanup.await, super::WebhookEffectOutcome::Stale);
+        pause.await.expect("registry resumed");
+        assert!(!sfu.is_revoked(&token.jti));
+        assert_eq!(
+            sfu.participant_occupant_session(&call, &identity),
+            Some(successor)
+        );
+        assert!(snapshot_room(state.as_ref(), &room_jid)
+            .await
+            .room
+            .muji_for_session("alice", &alice)
+            .is_some());
+        assert!(state.deps.protocol.call_threads.contains_key(&room_jid));
+    }
     fn active_call_thread(initiator: BareJid) -> ActiveCallThread {
         ActiveCallThread {
             anchor_origin_id: "anchor-origin-id".to_owned(),

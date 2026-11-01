@@ -24,6 +24,10 @@
 # (`include!` in src/ingress/test_support.rs).
 crates/waddle-server/tests/ingress_support.rs::IngressFixture::postgres_with_pool
 
+# Retirement upgrades create/drop waddle_test_retirement_<uuid> and run all
+# migration DDL and outbox queries with that schema's search_path.
+crates/waddle-server/src/call_teardown_outbox/tests/displaced.rs::displaced::postgres_upgrade
+
 # Library unit tests (fixture builds `<prefix>_<uuid>` schemas).
 crates/waddle-server/src/permissions/actor/tests.rs  # affiliation_swap_<uuid>
 crates/waddle-server/src/server/health.rs  # readiness colocation: per-test schemas

@@ -94,12 +94,108 @@ fn livekit_webhook_auth(body: &[u8]) -> String {
     format!("Bearer {token}")
 }
 
-async fn post_participant_joined(server: &TestServer, room: &str, identity: &str) {
+async fn issued_media_attributes(
+    client: &mut WsXmppClient,
+    room: &str,
+) -> waddle_sfu::ParticipantAttributes {
+    use waddle_xmpp::xep::xep0167::opus_audio_description;
+    use waddle_xmpp::xep::xep0272::Muji;
+    use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
+    use xmpp_parsers::iq::Iq;
+    use xmpp_parsers::jingle::{
+        Action, Content, ContentId, Creator, Description, Jingle, SessionId, Transport,
+    };
+
+    let sid = uuid::Uuid::new_v4().to_string();
+    let mut content = Content::new(Creator::Initiator, ContentId("audio".into()));
+    content.description = Some(Description::Rtp(opus_audio_description()));
+    content.transport = Some(Transport::Unknown(
+        WaddleLiveKitTransport::Request.to_element(),
+    ));
+    let mut jingle = Jingle::new(Action::SessionInitiate, SessionId(sid.clone()));
+    jingle.initiator = Some(
+        client
+            .full_jid
+            .as_ref()
+            .expect("bound JID")
+            .parse()
+            .expect("JID"),
+    );
+    jingle.contents.push(content);
+    let mut payload: Element = jingle.into();
+    payload.append_child(Muji::for_room(room.parse().expect("room JID")).to_element());
+    let request = Iq::Set {
+        from: None,
+        to: Some(format!("calls.{DOMAIN}").parse().expect("mixer JID")),
+        id: format!("fixture-muji-{sid}"),
+        payload,
+    };
+    client
+        .send(&String::from(&Element::from(request)))
+        .await
+        .expect("Muji initiate");
+    let frame = client
+        .recv_matching(|frame| frame.contains("session-accept") && frame.contains(&sid))
+        .await
+        .expect("issued Muji credentials");
+    let accept: Element = frame.parse().expect("session accept XML");
+    let issued = accept
+        .children()
+        .find(|child| child.name() == "jingle")
+        .and_then(|jingle| jingle.children().find(|child| child.name() == "content"))
+        .and_then(|content| content.children().find(|child| child.name() == "transport"))
+        .and_then(|transport| transport.children().find(|child| child.name() == "token"))
+        .expect("issued JWT")
+        .text();
+    #[derive(serde::Deserialize)]
+    struct Claims {
+        attributes: waddle_sfu::ParticipantAttributes,
+    }
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_required_spec_claims::<&str>(&[]);
+    let decoded = jsonwebtoken::decode::<Claims>(
+        &issued,
+        &jsonwebtoken::DecodingKey::from_secret(b"test-secret-with-at-least-32-bytes-of-payload"),
+        &validation,
+    )
+    .expect("verify issued JWT");
+    assert!(decoded.claims.attributes.media_generation.is_some());
+    decoded.claims.attributes
+}
+
+async fn post_participant_joined(
+    server: &TestServer,
+    provider: &wiremock::MockServer,
+    room: &str,
+    identity: &str,
+    attributes: Option<&waddle_sfu::ParticipantAttributes>,
+) {
+    let mut participant =
+        json!({ "identity": identity, "sid": format!("PA_fixture_{}", uuid::Uuid::new_v4()) });
+    if let Some(attributes) = attributes {
+        participant["attributes"] = serde_json::to_value(attributes).expect("provider attributes");
+    }
+    // The webhook describes a live participant. The authoritative SID probe
+    // must see that same incarnation, rather than the catch-all empty response.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(
+            "/twirp/livekit.RoomService/ListParticipants",
+        ))
+        .and(wiremock::matchers::body_partial_json(
+            json!({ "room": room }),
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "participants": [participant.clone()] })),
+        )
+        .with_priority(1)
+        .mount(provider)
+        .await;
     let body = serde_json::to_vec(&json!({
         "id": format!("EV_{}", uuid::Uuid::new_v4()),
         "event": "participant_joined",
-        "room": { "name": room },
-        "participant": { "identity": identity },
+        "room": { "name": room, "sid": "RM_voice_fixture" },
+        "participant": participant,
     }))
     .expect("webhook body");
     let response = reqwest::Client::new()
@@ -164,7 +260,8 @@ async fn occupant_join_webhook_pushes_voice_derived_grants() {
         .expect("alice's join completes");
 
     let identity = format!("{ALICE}@{DOMAIN}/ax");
-    post_participant_joined(&server, &room, &identity).await;
+    let attributes = issued_media_attributes(&mut alice, &room).await;
+    post_participant_joined(&server, &mock, &room, &identity, Some(&attributes)).await;
 
     await_admin_call(
         &mock,
@@ -200,7 +297,7 @@ async fn non_occupant_join_webhook_evicts_from_the_call() {
     // A full JID that is NOT an occupant of the room: the local actor
     // answers authoritatively, so this join must end in eviction.
     let ghost = format!("{ALICE}@{DOMAIN}/never-joined");
-    post_participant_joined(&server, &room, &ghost).await;
+    post_participant_joined(&server, &mock, &room, &ghost, None).await;
 
     await_admin_call(
         &mock,
