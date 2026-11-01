@@ -132,6 +132,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 [dev-dependencies]
 waddle-extensions = { path = "../waddle-extensions", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = { workspace = true }
 # Shared WebSocket integration-test harness (TestServer + WsXmppClient).
 # A separate library crate so per-test-binary `dead_code` lints cannot
 # fire on helpers a given binary does not use.

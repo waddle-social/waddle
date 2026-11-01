@@ -5,6 +5,8 @@
 
 #[cfg(feature = "test-support")]
 pub mod iq_forward;
+#[cfg(feature = "test-support")]
+pub mod supervised_io;
 
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;

@@ -1,4 +1,6 @@
-//! An isolated transport laboratory, not a production connection supervisor.
+//! Real loopback transport tests for the test-gated supervised I/O core.
+
+#![cfg(feature = "test-support")]
 
 #[path = "supervised_io/kameo_control.rs"]
 mod kameo_control;
