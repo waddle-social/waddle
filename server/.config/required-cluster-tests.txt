@@ -174,7 +174,7 @@ waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_re
 # or closes each physical checkout, including cancellation and shutdown.
 # The BEGIN wire-gate tests require a loopback TCP PostgreSQL fixture that
 # accepts plaintext locally, or a loopback tunnel that encrypts upstream.
-# They reject host, hostaddr, and port URL query overrides.
+# They reject IPv6 URLs and host, hostaddr, and port URL query overrides.
 waddle-server::postgres_admission_cleanup postgres_wire_proxy_rejects_remote_and_host_overrides
 waddle-server::postgres_admission_cleanup checkout_return_retains_lane_after_commit_rollback_drop_and_guard_query
 waddle-server::postgres_admission_cleanup cancelled_begin_drops_floating_acquisition_before_releasing_admission

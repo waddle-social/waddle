@@ -1,6 +1,6 @@
 #![cfg(feature = "test-support")]
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,13 +216,15 @@ fn begin_proxy_target(value: &str) -> Result<(url::Url, String, u16), &'static s
     }
     let host = match url.host() {
         Some(url::Host::Domain(host)) if host.eq_ignore_ascii_case("localhost") => host.to_owned(),
-        Some(url::Host::Domain(host)) => match host.parse::<IpAddr>() {
+        Some(url::Host::Domain(host)) => match host.parse::<Ipv4Addr>() {
             Ok(address) if address.is_loopback() => address.to_string(),
-            _ => return Err("BEGIN wire gate requires localhost or a loopback IP literal"),
+            _ => return Err("BEGIN wire gate requires localhost or an IPv4 loopback literal"),
         },
         Some(url::Host::Ipv4(host)) if host.is_loopback() => host.to_string(),
-        Some(url::Host::Ipv6(host)) if host.is_loopback() => host.to_string(),
-        _ => return Err("BEGIN wire gate requires localhost or a loopback IP literal"),
+        Some(url::Host::Ipv6(_)) => {
+            return Err("BEGIN wire gate does not support IPv6 URLs with pinned SQLx")
+        }
+        _ => return Err("BEGIN wire gate requires localhost or an IPv4 loopback literal"),
     };
     Ok((url, host, options.get_port()))
 }
@@ -296,6 +298,7 @@ async fn postgres_begin_proxy(
 fn postgres_wire_proxy_rejects_remote_and_host_overrides() {
     for url in [
         "postgresql://203.0.113.1/postgres?sslmode=require",
+        "postgresql://[::1]/postgres",
         "postgresql://[2001:db8::1]/postgres",
         "postgresql://db.example/postgres",
         "postgresql://127.0.0.1/postgres?hostaddr=203.0.113.1",
@@ -309,7 +312,6 @@ fn postgres_wire_proxy_rejects_remote_and_host_overrides() {
     }
     for url in [
         "postgresql://127.0.0.1/postgres?sslmode=require",
-        "postgresql://[::1]/postgres",
         "postgresql://localhost/postgres",
     ] {
         assert!(
@@ -317,6 +319,10 @@ fn postgres_wire_proxy_rejects_remote_and_host_overrides() {
             "loopback target was rejected: {url}"
         );
     }
+    assert!(matches!(
+        begin_proxy_target("postgresql://[::1]/postgres"),
+        Err("BEGIN wire gate does not support IPv6 URLs with pinned SQLx")
+    ));
     let loopback: SocketAddr = "127.0.0.1:5432".parse().expect("loopback address");
     let remote: SocketAddr = "203.0.113.1:5432".parse().expect("remote address");
     assert!(require_loopback_addresses(&[loopback]).is_ok());
