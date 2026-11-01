@@ -446,6 +446,103 @@ backend_test!(postgres_checkpoint_frontier, checkpoint_frontier, Postgres);
 backend_test!(sqlite_receipts_and_gc_cascade, receipts_and_gc, Sqlite);
 backend_test!(postgres_receipts_and_gc_cascade, receipts_and_gc, Postgres);
 
+#[tokio::test]
+async fn postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation() {
+    let Some(fixture) = Fixture::open(DatabaseDriver::Postgres).await else {
+        return;
+    };
+    let key = MessageKey::new();
+    let mut setup = fixture.db.begin_immediate().await.expect("begin setup");
+    record_message(&mut setup, key, &digest(), None)
+        .await
+        .expect("record parent");
+    insert_intent(&mut setup, key, [1; 32]).await;
+    setup.commit().await.expect("commit setup");
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query(
+                    "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                )
+                .execute(connection)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect(fixture.db.database_url())
+        .await
+        .expect("open repeatable-read pool");
+    let receipt_db = Database::from_postgres_pool("pooled-receipt-isolation", pool.clone());
+
+    let mut activation = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("begin activation");
+    activation
+        .execute(
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            (),
+        )
+        .await
+        .expect("hold epoch transition");
+    let writer = tokio::spawn(async move {
+        record_receipt_pooled(
+            &receipt_db,
+            key,
+            EffectReceiptKind::from_storage(1),
+            &[1; 32],
+        )
+        .await
+    });
+
+    let admin = &fixture.postgres.as_ref().expect("Postgres fixture").0;
+    let mut blocked = false;
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1",
+        )
+        .bind("%SELECT epoch FROM ingress_protocol_epoch%")
+        .fetch_one(admin)
+        .await
+        .expect("inspect epoch waiter");
+        if waiting > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(25)).await;
+    }
+    assert!(blocked, "receipt must wait on the held epoch transition");
+    activation.commit().await.expect("commit epoch transition");
+    writer
+        .await
+        .expect("join receipt writer")
+        .expect("receipt observes committed epoch and installs proof");
+
+    let guard = fixture.db.guard().await.expect("verify receipt");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = 1 AND semantic_identity_hash = ?",
+            crate::db_params![key.to_storage().to_string(), vec![1u8; 32]],
+        )
+        .await
+        .expect("count receipt");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("receipt count row")
+        .expect("receipt count exists")
+        .get(0)
+        .expect("decode receipt count");
+    assert_eq!(count, 1);
+    drop(rows);
+    drop(guard);
+    pool.close().await;
+    fixture.close().await;
+}
+
 async fn alias_envelope_completion(driver: DatabaseDriver) {
     let Some(fixture) = Fixture::open(driver).await else {
         return;
