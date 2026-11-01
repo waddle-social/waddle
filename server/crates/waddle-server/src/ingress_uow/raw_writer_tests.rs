@@ -6,26 +6,6 @@ use crate::ingress_substrate::{
 };
 use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
 
-async fn wait_for_blocking_pid(observer: &sqlx::PgPool, waiter: i32, blocker: i32) {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let blocked: bool =
-                sqlx::query_scalar("SELECT $1 = ANY(pg_catalog.pg_blocking_pids($2))")
-                    .bind(blocker)
-                    .bind(waiter)
-                    .fetch_one(observer)
-                    .await
-                    .expect("observe transaction blocker");
-            if blocked {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("identify expected row-lock wait");
-}
-
 #[tokio::test]
 async fn postgres_raw_writer_waits_for_current_epoch_before_application_locks() {
     let Some(fixture) = IngressFixture::postgres("raw_writer_epoch").await else {
