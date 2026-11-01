@@ -148,7 +148,9 @@ async fn backend_pid(transaction: &mut waddle_server::db::Transaction<'_>) -> i6
 async fn forward_postgres_client(
     mut client: tokio::net::tcp::OwnedReadHalf,
     mut server: tokio::net::tcp::OwnedWriteHalf,
-    begin_gate: Arc<Gate>,
+    begin_request_gate: Arc<Gate>,
+    omit_rollback: bool,
+    rollback_rewritten: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     // PostgreSQL's startup packet has no type byte. Subsequent packets have
     // a type byte followed by their length.
@@ -159,11 +161,18 @@ async fn forward_postgres_client(
     server.write_all(&startup).await?;
     loop {
         let tag = client.read_u8().await?;
-        let length = client.read_u32().await?;
+        let mut length = client.read_u32().await?;
         let mut body = vec![0; usize::try_from(length - 4).expect("packet size")];
         client.read_exact(&mut body).await?;
         if tag == b'Q' && body == b"BEGIN\0" {
-            begin_gate.pause_if_armed().await;
+            begin_request_gate.pause_if_armed().await;
+        }
+        if omit_rollback && tag == b'Q' && body == b"ROLLBACK\0" {
+            // Preserve PostgreSQL's response count while simulating a missing
+            // rollback. The connection remains inside the accepted BEGIN.
+            body = b"SELECT 1\0".to_vec();
+            length = u32::try_from(body.len() + 4).expect("replacement packet size");
+            rollback_rewritten.store(true, Ordering::SeqCst);
         }
         server.write_u8(tag).await?;
         server.write_u32(length).await?;
@@ -171,10 +180,33 @@ async fn forward_postgres_client(
     }
 }
 
+async fn forward_postgres_server(
+    mut server: tokio::net::tcp::OwnedReadHalf,
+    mut client: tokio::net::tcp::OwnedWriteHalf,
+    begin_reply_gate: Arc<Gate>,
+) -> std::io::Result<()> {
+    loop {
+        let tag = server.read_u8().await?;
+        let length = server.read_u32().await?;
+        let mut body = vec![0; usize::try_from(length - 4).expect("packet size")];
+        server.read_exact(&mut body).await?;
+        if tag == b'Z' && body == b"T" {
+            // The server accepted BEGIN and sent ReadyForQuery(in transaction),
+            // but SQLx has not yet received the transaction state.
+            begin_reply_gate.pause_if_armed().await;
+        }
+        client.write_u8(tag).await?;
+        client.write_u32(length).await?;
+        client.write_all(&body).await?;
+    }
+}
+
 async fn postgres_begin_proxy(
     url: &str,
-    begin_gate: Arc<Gate>,
-) -> (String, tokio::task::JoinHandle<()>) {
+    begin_request_gate: Arc<Gate>,
+    begin_reply_gate: Arc<Gate>,
+    omit_rollback: bool,
+) -> (String, tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
     let mut url = url::Url::parse(url).expect("parse PostgreSQL URL");
     let host = url.host_str().expect("PostgreSQL TCP host").to_owned();
     let port = url.port().unwrap_or(5432);
@@ -186,27 +218,31 @@ async fn postgres_begin_proxy(
     url.set_port(Some(proxy_port)).expect("set proxy port");
     url.query_pairs_mut().append_pair("sslmode", "disable");
 
+    let rollback_rewritten = Arc::new(AtomicBool::new(false));
+    let rewrites = Arc::clone(&rollback_rewritten);
     let task = tokio::spawn(async move {
         loop {
             let Ok((client, _)) = listener.accept().await else {
                 return;
             };
             let target = (host.clone(), port);
-            let begin_gate = Arc::clone(&begin_gate);
+            let begin_request_gate = Arc::clone(&begin_request_gate);
+            let begin_reply_gate = Arc::clone(&begin_reply_gate);
+            let rollback_rewritten = Arc::clone(&rewrites);
             tokio::spawn(async move {
                 let Ok(server) = TcpStream::connect(target).await else {
                     return;
                 };
-                let (client_read, mut client_write) = client.into_split();
-                let (mut server_read, server_write) = server.into_split();
+                let (client_read, client_write) = client.into_split();
+                let (server_read, server_write) = server.into_split();
                 tokio::select! {
-                    _ = forward_postgres_client(client_read, server_write, begin_gate) => {}
-                    _ = tokio::io::copy(&mut server_read, &mut client_write) => {}
+                    _ = forward_postgres_client(client_read, server_write, begin_request_gate, omit_rollback, rollback_rewritten) => {}
+                    _ = forward_postgres_server(server_read, client_write, begin_reply_gate) => {}
                 }
             });
         }
     });
-    (url.to_string(), task)
+    (url.to_string(), task, rollback_rewritten)
 }
 
 #[tokio::test]
@@ -299,17 +335,13 @@ async fn cancelled_begin_drops_floating_acquisition_before_releasing_admission()
 }
 
 #[tokio::test]
-async fn cancelled_in_flight_begin_is_rolled_back_before_the_lane_is_reused() {
+async fn cancelled_begin_before_send_retains_lane_until_cleanup() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;
     };
-    let parsed = url::Url::parse(&url).expect("parse PostgreSQL URL");
-    if !matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
-        eprintln!("skipping BEGIN wire gate: PostgreSQL is not local");
-        return;
-    }
     let begin_gate = Arc::new(Gate::new());
-    let (proxy_url, proxy) = postgres_begin_proxy(&url, Arc::clone(&begin_gate)).await;
+    let (proxy_url, proxy, _) =
+        postgres_begin_proxy(&url, Arc::clone(&begin_gate), Arc::new(Gate::new()), false).await;
     let pool = pool_with_gates(&proxy_url, Arc::new(Gate::new()), Arc::new(Gate::new()));
     let main = lane(&pool);
     let ingress = lane(&pool);
@@ -329,9 +361,103 @@ async fn cancelled_in_flight_begin_is_rolled_back_before_the_lane_is_reused() {
     begin_gate.release();
     main.query("SELECT 1", ())
         .await
-        .expect("SQLx flushed its queued rollback before returning the checkout");
+        .expect("main lane becomes available after cleanup");
     pool.close().await;
     proxy.abort();
+}
+
+async fn backend_state(connection: &mut PgConnection, pid: i32) -> (String, bool) {
+    sqlx::query_as(
+        "SELECT state, xact_start IS NULL FROM pg_catalog.pg_stat_activity WHERE pid = $1",
+    )
+    .bind(pid)
+    .fetch_optional(connection)
+    .await
+    .expect("inspect backend state")
+    .expect("the same backend remains connected")
+}
+
+async fn assert_accepted_begin_cleanup(url: &str, omit_rollback: bool) {
+    let begin_reply_gate = Arc::new(Gate::new());
+    let (proxy_url, proxy, rollback_rewritten) = postgres_begin_proxy(
+        url,
+        Arc::new(Gate::new()),
+        Arc::clone(&begin_reply_gate),
+        omit_rollback,
+    )
+    .await;
+    let pool = pool_with_gates(&proxy_url, Arc::new(Gate::new()), Arc::new(Gate::new()));
+    let main = lane(&pool);
+    let mut observer = PgConnection::connect(url)
+        .await
+        .expect("observer connection");
+
+    let mut checkout = pool.acquire().await.expect("warm checkout");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *checkout)
+        .await
+        .expect("capture backend PID");
+    drop(checkout);
+    wait_for_idle(&pool).await;
+
+    begin_reply_gate.arm();
+    let mut begin = Box::pin(main.begin_for_admission_test());
+    tokio::select! {
+        _ = begin_reply_gate.wait_until_entered() => {}
+        _ = &mut begin => panic!("BEGIN completed before its reply was released"),
+    }
+    assert_eq!(
+        backend_state(&mut observer, pid).await,
+        ("idle in transaction".to_owned(), false),
+        "PostgreSQL accepted BEGIN before the caller was cancelled"
+    );
+    drop(begin);
+    assert_lane_waits(&main).await;
+    begin_reply_gate.release();
+
+    let mut rows = main
+        .query("SELECT pg_backend_pid()", ())
+        .await
+        .expect("reuse the lane after cleanup");
+    let reused_pid: i64 = rows
+        .next()
+        .await
+        .expect("read reused PID")
+        .expect("reused PID row")
+        .get(0)
+        .expect("integer PID");
+    assert_eq!(reused_pid, i64::from(pid), "the same checkout was reused");
+    wait_for_idle(&pool).await;
+
+    let expected = if omit_rollback {
+        assert!(
+            rollback_rewritten.load(Ordering::SeqCst),
+            "negative control intercepted the queued ROLLBACK"
+        );
+        ("idle in transaction".to_owned(), false)
+    } else {
+        ("idle".to_owned(), true)
+    };
+    assert_eq!(backend_state(&mut observer, pid).await, expected);
+    pool.close().await;
+    observer.close().await.expect("close observer");
+    proxy.abort();
+}
+
+#[tokio::test]
+async fn cancelled_accepted_begin_rolls_back_before_pool_return() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    assert_accepted_begin_cleanup(&url, false).await;
+}
+
+#[tokio::test]
+async fn accepted_begin_negative_control_detects_missing_rollback() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    assert_accepted_begin_cleanup(&url, true).await;
 }
 
 #[tokio::test]
