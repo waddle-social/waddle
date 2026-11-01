@@ -187,6 +187,12 @@ async fn handle_sans_io_iq_with_relay_override(
             *conn_state.carbons_enabled = enabled;
             mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
         }
+        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
+        // A Muji initiate from this connection must still hold the room's
+        // CURRENT occupancy for its full JID (#1703): a superseded
+        // connection's initiate would otherwise mint a token and rebind the
+        // SFU registration over the replacement's. Terminates are fenced by
+        // the registry's occupant+sid gate instead. Mirrors the relayed path.
         // XMPP-native MUC-call membership gate (XEP-0272 Muji): a
         // session may only mint a LiveKit JWT for a room it has
         // actually joined through the XEP-0045 path. The pure
@@ -262,18 +268,6 @@ async fn handle_sans_io_iq_with_relay_override(
                 }
             }
         }
-        let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
-        // A Muji initiate from this connection must still hold the room's
-        // CURRENT occupancy for its full JID (#1703): a superseded
-        // connection's initiate would otherwise mint a token and rebind the
-        // SFU registration over the replacement's. Terminates are fenced by
-        // the registry's occupant+sid gate instead. Mirrors the relayed path.
-        let participant_registration =
-            super::jingle_muji_gate::relayed_muji_room(iq).and_then(|room| {
-                super::jingle_muji_gate::participant_registration_expectation(
-                    state, &room, full_jid,
-                )
-            });
         if muji_terminate_room.is_none() {
             if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
                 match super::jingle_muji_gate::relayed_muji_generation_is_current(
@@ -308,6 +302,74 @@ async fn handle_sans_io_iq_with_relay_override(
                 }
             }
         }
+        // Admit and route before provider work. Only an initiate publishes
+        // credentials; its capabilities must be re-read after preparation.
+        let prepare_room = super::jingle_muji_gate::muji_session_initiate_room(iq);
+        let participant_registration = if let Some(room) = prepare_room {
+            let registration = match super::jingle_muji_gate::participant_registration_expectation(
+                state, &room, full_jid,
+            )
+            .await
+            {
+                Ok(registration) => registration,
+                Err(error) => {
+                    return Some(vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        *error,
+                    )])
+                }
+            };
+            match super::jingle_muji_gate::verify_muji_jingle_request(
+                state,
+                full_jid,
+                iq,
+                super::jingle_muji_gate::GateInvocation::RelayedReplay,
+            )
+            .await
+            {
+                super::jingle_muji_gate::GateOutcome::Allow {
+                    media_capabilities: current_capabilities,
+                } => media_capabilities = current_capabilities,
+                super::jingle_muji_gate::GateOutcome::Deny(error) => {
+                    return Some(vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        *error,
+                    )]);
+                }
+                super::jingle_muji_gate::GateOutcome::RoomNotLocal { .. } => {
+                    return Some(vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error(
+                            "room ownership changed during media preparation; please retry",
+                        ),
+                    )]);
+                }
+            }
+            if let Some(error) = super::jingle_muji_gate::current_muji_generation_error(
+                state,
+                &room,
+                full_jid,
+                *conn_state.occupancy_session,
+            )
+            .await
+            {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    error,
+                )]);
+            }
+            Some(registration)
+        } else {
+            None
+        };
         let (reply_id, reply_from, reply_to) = (ctx.id, ctx.response_from, ctx.response_to);
         let ctx = ProtocolStanzaContext {
             participant_registration,
@@ -319,20 +381,18 @@ async fn handle_sans_io_iq_with_relay_override(
         let events = state.deps.protocol.dispatcher.dispatch_iq(iq, &ctx);
         if muji_terminate_room.is_none() && !events_contain_iq_error(&events) {
             if let Some(room) = super::jingle_muji_gate::relayed_muji_room(iq) {
-                if !super::jingle_muji_gate::initiate_still_current(
+                if let Err(error) = super::jingle_muji_gate::finalize_muji_publication(
                     state,
                     &room,
                     full_jid,
                     *conn_state.occupancy_session,
                     participant_registration,
+                    media_capabilities,
                 )
                 .await
                 {
                     return Some(vec![build_iq_error_xml_typed(
-                        reply_id,
-                        reply_from,
-                        reply_to,
-                        forbidden_iq_error("occupant session was replaced; rejoin before retrying"),
+                        reply_id, reply_from, reply_to, *error,
                     )]);
                 }
             }
@@ -487,7 +547,7 @@ async fn peer_jingle_blocklist_reply(
 /// websocket path must charge before room-locality checks, membership
 /// asks, or cross-node relays do any work, while the handler still
 /// defends non-websocket dispatch.
-fn pre_dispatch_muji_rate_limit_error(
+pub(super) fn pre_dispatch_muji_rate_limit_error(
     state: &WebSocketState,
     sender: &FullJid,
     iq: &xmpp_parsers::iq::Iq,
@@ -506,7 +566,6 @@ fn pre_dispatch_muji_rate_limit_error(
         .map(|jingle| jingle.action)?;
     let sender_bare = sender.to_bare();
     let rate_limited = match action {
-        xmpp_parsers::jingle::Action::SessionInitiate => return None,
         // Terminates are NOT charged here (#1612 review round 10): a
         // pre-dispatch charge cannot be refunded when the local Jingle
         // handler later rejects an unknown session, so bogus terminates
@@ -525,7 +584,7 @@ fn pre_dispatch_muji_rate_limit_error(
                 tracing::warn!(
                     jid = %sender_bare,
                     %exceeded,
-                    "rate-limit dropped Muji non-initiate action before membership or relay checks"
+                    "rate-limit dropped Muji control work before membership, preparation or relay checks"
                 );
                 waddle_xmpp::telemetry::call::increment_call_control_rate_limited(
                     waddle_xmpp::telemetry::attributes::CallControlRateLimitedSurface::MujiAction,

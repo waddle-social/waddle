@@ -78,6 +78,14 @@ pub enum TeardownTarget {
         identity: FullJid,
         participant_sid: Option<ParticipantSid>,
     },
+    /// Retire one displaced media incarnation while its successor keeps the
+    /// same signaling identity. Successful authorized publication owns this
+    /// retirement. A captured SID or the intent's occupant generation fences
+    /// provider execution; later ownership changes do not discard it.
+    DisplacedParticipant {
+        identity: FullJid,
+        participant_sid: Option<ParticipantSid>,
+    },
     Room,
     MujiPresenceClear {
         room_jid: BareJid,
@@ -86,6 +94,12 @@ pub enum TeardownTarget {
         /// relay fallback, which cannot observe the participant
         /// incarnation SID but still must persist the XEP-0272 leave.
         participant_sid: Option<ParticipantSid>,
+    },
+    /// The SFU has already removed its ghost registration. Retry only the
+    /// actor advertisement cleanup, never participant/token bookkeeping.
+    MujiPresenceClearOnly {
+        room_jid: BareJid,
+        departed: FullJid,
     },
     MujiRoomSweep {
         room_jid: BareJid,
@@ -145,13 +159,63 @@ pub struct CallTeardownIntent {
     pub session: Option<SessionBinding>,
 }
 
+impl From<waddle_sfu::CallTeardownIntentLite> for CallTeardownIntent {
+    fn from(intent: waddle_sfu::CallTeardownIntentLite) -> Self {
+        let target = match intent.target {
+            waddle_sfu::TeardownTargetLite::Participant {
+                identity,
+                participant_sid,
+            } => TeardownTarget::Participant {
+                identity: identity.as_jid().clone(),
+                participant_sid,
+            },
+            waddle_sfu::TeardownTargetLite::DisplacedParticipant {
+                identity,
+                participant_sid,
+            } => TeardownTarget::DisplacedParticipant {
+                identity: identity.as_jid().clone(),
+                participant_sid,
+            },
+            waddle_sfu::TeardownTargetLite::Room => TeardownTarget::Room,
+        };
+        Self {
+            call_id: intent.call_id,
+            target,
+            generation: intent.generation,
+            occupant: intent.occupant_session,
+            unbound_occupant: intent.unbound_occupant,
+            room_sid: intent.room_sid,
+            session: intent.session,
+        }
+    }
+}
+
 impl CallTeardownIntent {
+    pub(super) fn validate_retirement_evidence(&self) -> Result<(), CallTeardownOutboxError> {
+        if matches!(
+            self.target,
+            TeardownTarget::DisplacedParticipant {
+                participant_sid: None,
+                ..
+            }
+        ) && self.occupant.is_none()
+        {
+            return Err(CallTeardownOutboxError::InvalidTargetShape(
+                "retire_displaced_participant".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn room_scope(&self) -> Option<BareJid> {
         match &self.target {
             TeardownTarget::MujiPresenceClear { room_jid, .. }
+            | TeardownTarget::MujiPresenceClearOnly { room_jid, .. }
             | TeardownTarget::MujiRoomSweep { room_jid }
             | TeardownTarget::CallThreadEndRetry { room_jid, .. } => Some(room_jid.clone()),
-            TeardownTarget::Participant { .. } | TeardownTarget::Room => {
+            TeardownTarget::Participant { .. }
+            | TeardownTarget::DisplacedParticipant { .. }
+            | TeardownTarget::Room => {
                 // Muji uses the bare room JID verbatim as CallId. Raw 1:1
                 // call IDs are opaque values which do not parse as JIDs.
                 self.call_id.as_str().parse().ok()
@@ -183,6 +247,7 @@ impl CallTeardownStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallTeardownRetryReason {
     MujiPresenceClear,
+    MujiPresenceClearOnly,
     CallThreadEnd,
     LiveKitExecutorUnavailable,
     LiveKitAdmin,
@@ -203,13 +268,17 @@ impl CallTeardownRetryReason {
     pub(crate) const fn is_infrastructure_transient(self) -> bool {
         matches!(
             self,
-            Self::LiveKitExecutorUnavailable | Self::LiveKitAdmin | Self::CallThreadEnd
+            Self::LiveKitExecutorUnavailable
+                | Self::LiveKitAdmin
+                | Self::CallThreadEnd
+                | Self::MujiPresenceClearOnly
         )
     }
 
     pub(crate) const fn as_db_value(self) -> &'static str {
         match self {
             Self::MujiPresenceClear => "muji_presence_clear_retryable",
+            Self::MujiPresenceClearOnly => "muji_presence_clear_only_retryable",
             Self::CallThreadEnd => "call_thread_end_retryable",
             Self::LiveKitExecutorUnavailable => "livekit_teardown_executor_unavailable",
             Self::LiveKitAdmin => "livekit_admin_retryable",
@@ -221,6 +290,7 @@ impl CallTeardownRetryReason {
     fn from_db_value(value: &str) -> Self {
         match value {
             "muji_presence_clear_retryable" => Self::MujiPresenceClear,
+            "muji_presence_clear_only_retryable" => Self::MujiPresenceClearOnly,
             "call_thread_end_retryable" => Self::CallThreadEnd,
             "livekit_teardown_executor_unavailable" => Self::LiveKitExecutorUnavailable,
             "livekit_admin_retryable" => Self::LiveKitAdmin,

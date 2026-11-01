@@ -107,6 +107,8 @@ mod muc_occupant_disco;
 mod muc_owner_config;
 pub(crate) mod muc_owner_moderation;
 mod muc_self_ping;
+#[cfg(test)]
+mod muji_preparation_tests;
 mod pep_addressing;
 mod permissions;
 mod pin_query;
