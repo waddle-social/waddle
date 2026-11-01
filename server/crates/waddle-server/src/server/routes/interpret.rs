@@ -167,6 +167,8 @@ pub(crate) mod offline_delivery;
 mod recipient_selection;
 mod room_dispatch;
 mod room_pin;
+#[cfg(feature = "clustering")]
+mod room_routing;
 mod room_subject;
 mod room_system_message;
 mod route_to_connection;

@@ -3,6 +3,8 @@ use super::super::effects::room::DurableRoomEffect;
 use super::super::effects::room::ExternalRoomEffect;
 use super::super::effects::{DurableEffect, Effect, ExternalEffect, PlanSink, RoomExecutionPath};
 #[cfg(feature = "clustering")]
+use super::super::room_routing::{ImmediateRoomRoute, PlannedRoomRoute, RoomMessageRoute};
+#[cfg(feature = "clustering")]
 use super::Deps;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOrigin;
@@ -178,8 +180,10 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
     let captured = capture.snapshot();
     assert!(!captured.overflowed);
     let (plan, execution) = sink.take();
+    let expected_target =
+        waddle_xmpp::ingress::RelayTargetIdentity::owner_node(remote.node_id, remote.node_epoch);
     assert!(
-        matches!(execution, RoomExecutionPath::Remote { room: planned, .. } if planned == room)
+        matches!(execution, RoomExecutionPath::Remote { room: planned, relay_target } if planned == room && relay_target == expected_target)
     );
     assert!(matches!(
         &plan[0].effect,
@@ -193,7 +197,85 @@ async fn plan_remote_groupchat_resolves_owner_without_a_proxy_bridge() {
         super::super::effects::PlanSuppressionPolicy::Always,
         "origin duplicates must reach owner reconciliation and sender reflection"
     );
-    assert!(capture.snapshot().intents.iter().any(|intent| matches!(intent, IngressEffectIntent::DispatchToRoomRemote { room: planned, .. } if planned == &room)));
+    assert!(captured.intents.iter().any(|intent| matches!(intent,
+        IngressEffectIntent::DispatchToRoomRemote { room: planned, relay_target }
+        if planned == &room && relay_target == &expected_target)));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn room_route_decisions_keep_missing_local_stale_and_failed_claims_distinct() {
+    use super::super::PlanningClaims;
+    use waddle_xmpp::ownership::{
+        Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    let room: BareJid = "decision@muc.example.com".parse().expect("room");
+    let alice: FullJid = "alice@example.com/web".parse().expect("alice");
+    let message = message(&room, &alice);
+    let origin_entity = Entity::new(EntityType::UserActor, alice.to_bare().to_string());
+    let origin = OrderedRelayRouteOrigin {
+        kind: OrderedRelayRouteOriginKind::Entity(origin_entity.clone()),
+        sender_entity: origin_entity,
+        inbound_sequence: 1,
+        handoff: None,
+    };
+    let local = NodeIdentity::new("local", "epoch");
+
+    let empty = Arc::new(InProcessClaimStore::new());
+    let empty_state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                claim_store: Some(empty),
+                node_identity: Some(SharedNodeIdentity::new(local.clone())),
+                ..Default::default()
+            },
+            Arc::new(InMemorySmSessionRegistry::new()),
+        )
+        .await;
+    let mut deps = Deps::registry_only(&empty_state.deps.protocol.connection_registry);
+    deps.web_socket_state = Some(empty_state.as_ref());
+    deps.ordered_relay_origin = Some(origin.clone());
+    let route = RoomMessageRoute {
+        room: &room,
+        message: &message,
+    };
+    assert!(matches!(route.plan(&deps).await, PlannedRoomRoute::Local));
+    assert!(matches!(
+        route.execute(&deps).await,
+        ImmediateRoomRoute::Local
+    ));
+
+    let claims = Arc::new(PlanningClaims::new(local.clone()));
+    let state =
+        crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering(
+            crate::clustering::ClusteringHandles {
+                claim_store: Some(claims.clone()),
+                node_identity: Some(SharedNodeIdentity::new(local)),
+                ..Default::default()
+            },
+            Arc::new(InMemorySmSessionRegistry::new()),
+        )
+        .await;
+    let mut deps = Deps::registry_only(&state.deps.protocol.connection_registry);
+    deps.web_socket_state = Some(state.as_ref());
+    deps.ordered_relay_origin = Some(origin);
+    assert!(matches!(route.plan(&deps).await, PlannedRoomRoute::Local));
+    claims.set_owner(NodeIdentity::new("remote", "new-epoch"));
+    assert!(
+        matches!(route.plan(&deps).await, PlannedRoomRoute::Remote(target)
+        if target == waddle_xmpp::ingress::RelayTargetIdentity::owner_node("remote", "new-epoch"))
+    );
+    claims.set_stale(true);
+    assert!(matches!(
+        route.plan(&deps).await,
+        PlannedRoomRoute::Unavailable(super::super::effects::PlanFailure::RoomClaimStale)
+    ));
+    claims.set_stale(false);
+    claims.fail_reads(true);
+    assert!(matches!(
+        route.plan(&deps).await,
+        PlannedRoomRoute::Unavailable(super::super::effects::PlanFailure::OwnershipLookup)
+    ));
 }
 
 #[tokio::test]
