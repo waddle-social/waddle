@@ -1,4 +1,23 @@
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static RESOURCE_METADATA_WRITE_GATE: (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    );
+}
+
+#[cfg(test)]
+pub(super) async fn wait_before_resource_metadata_write() {
+    if let Ok((entered, release)) = RESOURCE_METADATA_WRITE_GATE
+        .try_with(|(entered, release)| (entered.clone(), release.clone()))
+    {
+        entered.notify_one();
+        release.notified().await;
+    }
+}
+
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,

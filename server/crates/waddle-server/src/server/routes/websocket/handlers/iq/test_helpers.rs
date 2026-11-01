@@ -22,6 +22,14 @@ pub async fn handle_iq(
     });
     let mut roster_interested = false;
     let mut blocklist_interested = false;
+    let registry_owner = phase.bound_jid().and_then(|jid| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(jid)
+            .map(|entry| entry.binding_id())
+    });
 
     let iq = match parse_frame(frame) {
         Ok(InboundFrame::Stanza(stanza)) => match *stanza {
@@ -37,7 +45,7 @@ pub async fn handle_iq(
         roster_interested: &mut roster_interested,
         blocklist_interested: &mut blocklist_interested,
         occupancy_session: &occupancy_session,
-        registry_owner: None,
+        registry_owner: registry_owner.as_ref(),
         state_machine: None,
         ordered_relay_origin: None,
     };

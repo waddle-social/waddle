@@ -169,3 +169,11 @@ waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_
 # controls require the disposable PostgreSQL service in the publish lane.
 waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
 waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
+
+# W1.3 / P3.2 precursor (#2046): same-JID replacement must not inherit a
+# stale IQ metadata update or lose its presence to a prior connection's cleanup.
+waddle-server server::routes::websocket::tests::iq::replaced_binding_cannot_apply_resource_iq_metadata
+waddle-server server::routes::websocket::tests::iq::resource_iq_metadata_requires_a_binding_and_marks_current_blocklist_interest
+waddle-server server::routes::websocket::tests::xep0280_carbons_destination::superseded_carbons_control_returns_error_without_changing_the_successor
+waddle-xmpp registry::connection_registry::tests::resource_metadata_rejects_stale_and_absent_bindings
+waddle-xmpp registry::connection_registry::tests::retiring_connection_keeps_slot_locked_until_presence_is_removed

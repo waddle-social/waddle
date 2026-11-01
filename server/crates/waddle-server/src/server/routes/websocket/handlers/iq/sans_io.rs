@@ -168,15 +168,24 @@ async fn handle_sans_io_iq_with_relay_override(
             }
         }
         if let Some(enabled) = carbons_toggle {
+            #[cfg(test)]
+            super::conn_state::wait_before_resource_metadata_write().await;
+            let Some(owner) = conn_state.registry_owner.filter(|owner| {
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .set_carbons_enabled_if_owner(full_jid, owner, enabled)
+            }) else {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    service_unavailable_iq_error("Resource binding unavailable."),
+                )]);
+            };
             *conn_state.carbons_enabled = enabled;
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .set_carbons_enabled(full_jid, enabled);
-            if let Some(owner) = conn_state.registry_owner {
-                mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
-            }
+            mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
         }
         // XMPP-native MUC-call membership gate (XEP-0272 Muji): a
         // session may only mint a LiveKit JWT for a room it has

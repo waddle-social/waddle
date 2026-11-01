@@ -13,6 +13,8 @@ use xmpp_parsers::carbons::{Disable, Enable};
 use xmpp_parsers::iq::{Iq, IqPayload};
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
+use crate::server::routes::websocket::handlers::iq::RESOURCE_METADATA_WRITE_GATE;
+
 use super::super::state::WsConnState;
 use super::super::WebSocketState;
 use super::iq_destination_support::{
@@ -135,6 +137,52 @@ async fn local_carbons_controls_keep_existing_results_and_update_both_flags() {
             assert_eq!(replies[0].id(), iq.id());
             assert_state(&state, &conn, enable);
         }
+    }
+}
+
+#[tokio::test]
+async fn superseded_carbons_control_returns_error_without_changing_the_successor() {
+    let state = create_test_websocket_state().await;
+    for old_enabled in [false, true] {
+        let (mut old, _old_rx) = connection(&state, old_enabled).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_state = state.clone();
+        let iq = request(None, old_enabled, true, Some(ORIGIN));
+        let task = tokio::spawn(RESOURCE_METADATA_WRITE_GATE.scope(
+            (entered.clone(), release.clone()),
+            async move {
+                let replies = dispatch(&task_state, &mut old, iq).await;
+                (old, replies)
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("old request reached the Carbons write");
+        let (new_tx, _new_rx) = mpsc::channel(8);
+        let new_enabled = !old_enabled;
+        let new_owner = state
+            .deps
+            .protocol
+            .connection_registry
+            .register_with_carbons(origin(), new_tx, new_enabled);
+        release.notify_one();
+        let (old, replies) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("old request finished")
+            .expect("old request task");
+        let [Iq::Error { error, .. }] = replies.as_slice() else {
+            panic!("superseded Carbons control must fail: {replies:?}");
+        };
+        assert_eq!(error.type_, ErrorType::Cancel);
+        assert_eq!(
+            error.defined_condition,
+            DefinedCondition::ServiceUnavailable
+        );
+        assert_eq!(old.carbons_enabled, old_enabled);
+        let registry = &state.deps.protocol.connection_registry;
+        assert!(registry.is_owned_by(&origin(), &new_owner));
+        assert_eq!(registry.is_carbons_enabled(&origin()), new_enabled);
     }
 }
 

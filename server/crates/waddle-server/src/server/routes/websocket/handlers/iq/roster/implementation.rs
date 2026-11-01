@@ -101,15 +101,22 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         }
     };
 
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .mark_roster_interested(full_jid);
-    if let Some(owner) = registry_owner {
-        mirror_remote_roster_interest(state, full_jid, owner).await;
-    }
+    #[cfg(test)]
+    super::super::conn_state::wait_before_resource_metadata_write().await;
+    let Some(owner) = registry_owner.filter(|owner| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .mark_roster_interested_if_owner(full_jid, owner)
+    }) else {
+        return vec![build_xmpp_error_response(
+            iq,
+            XmppError::service_unavailable(None),
+        )];
+    };
     *roster_interested = true;
+    mirror_remote_roster_interest(state, full_jid, owner).await;
     // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
     // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
     if let Some(cached) = query.ver.cached() {

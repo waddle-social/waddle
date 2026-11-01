@@ -11,6 +11,7 @@ use super::{
     WebSocketState, WriteTuple, WsConnState, FIXTURE_BOT_PLUGIN,
 };
 use crate::permissions::{CheckPermission, SubjectType};
+use crate::server::routes::websocket::handlers::iq::RESOURCE_METADATA_WRITE_GATE;
 
 fn disco_feature_vars_for_test(query: &Element) -> std::collections::BTreeSet<String> {
     query
@@ -396,6 +397,12 @@ async fn first_active_device_for_owner_node(
 async fn handle_iq_roster_query_returns_parseable_result() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
     let frame = r#"<iq xmlns="jabber:client" id="roster-1" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
     let responses = handle_iq(
         frame,
@@ -427,6 +434,14 @@ async fn handle_xmpp_frame_roster_get_marks_connection_interested_for_detach() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
     let mut conn = WsConnState::new();
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
     conn.phase = ConnectionPhase::ready(jid, false);
     let frame = r#"<iq xmlns="jabber:client" id="roster-interest" type="get"><query xmlns="jabber:iq:roster"/></iq>"#;
 
@@ -456,7 +471,16 @@ async fn roster_remove_deletes_an_item_that_is_not_an_account() {
         .await
         .expect("seed junk roster item");
     let mut conn = WsConnState::new();
-    conn.phase = ConnectionPhase::ready("alice@example.com/web".parse().expect("alice"), false);
+    let jid: FullJid = "alice@example.com/web".parse().expect("alice");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+    conn.phase = ConnectionPhase::ready(jid, false);
 
     let removed = handle_xmpp_frame(
         r#"<iq xmlns="jabber:client" type="set" id="remove-junk"><query xmlns="jabber:iq:roster"><item jid="chat@example.com" subscription="remove"/></query></iq>"#,
@@ -538,6 +562,12 @@ async fn handle_iq_roster_query_requires_ready_phase() {
 async fn handle_iq_carbons_enable_returns_parseable_result() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .register(jid.clone(), tx);
     let frame = r#"<iq xmlns="jabber:client" id="carbons-1" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#;
     let responses = handle_iq(
         frame,
@@ -610,6 +640,134 @@ async fn handle_iq_carbons_toggle_updates_registry_flag() {
         .protocol
         .connection_registry
         .is_carbons_enabled(&jid));
+}
+
+#[tokio::test]
+async fn replaced_binding_cannot_apply_resource_iq_metadata() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let registry = &state.deps.protocol.connection_registry;
+    for (frame, carbons_before) in [
+        (
+            r#"<iq xmlns="jabber:client" id="roster" type="get"><query xmlns="jabber:iq:roster"/></iq>"#,
+            false,
+        ),
+        (
+            r#"<iq xmlns="jabber:client" id="blocklist" type="get"><blocklist xmlns="urn:xmpp:blocking"/></iq>"#,
+            false,
+        ),
+        (
+            r#"<iq xmlns="jabber:client" id="enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#,
+            false,
+        ),
+        (
+            r#"<iq xmlns="jabber:client" id="disable" type="set"><disable xmlns="urn:xmpp:carbons:2"/></iq>"#,
+            true,
+        ),
+    ] {
+        let (old_tx, _old_rx) = tokio::sync::mpsc::channel(8);
+        let old_owner = registry.register_with_carbons(jid.clone(), old_tx, carbons_before);
+        let mut old_conn = WsConnState::new();
+        old_conn.phase = ConnectionPhase::ready(jid.clone(), false);
+        old_conn.registry_owner = Some(old_owner);
+        old_conn.carbons_enabled = carbons_before;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_state = state.clone();
+        let task = tokio::spawn(RESOURCE_METADATA_WRITE_GATE.scope(
+            (entered.clone(), release.clone()),
+            async move {
+                let frames =
+                    handle_xmpp_frame(frame, "example.com", &task_state, &mut old_conn).await;
+                (old_conn, frames)
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("old request reached its metadata write");
+
+        let (new_tx, _new_rx) = tokio::sync::mpsc::channel(8);
+        let new_owner = registry.register_with_carbons(jid.clone(), new_tx, carbons_before);
+        release.notify_one();
+        let (old_conn, frames) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("stale request completed")
+            .expect("stale request task");
+        assert_eq!(frames.len(), 1);
+        let element = Element::from_str(&frames[0]).expect("parse response XML");
+        let response = Iq::try_from(element).expect("parse response IQ");
+        let Iq::Error { error, .. } = response else {
+            panic!("superseded resource metadata request must fail");
+        };
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+        );
+        assert!(!old_conn.roster_interested);
+        assert!(!old_conn.blocklist_interested);
+        assert_eq!(old_conn.carbons_enabled, carbons_before);
+        assert!(registry.is_owned_by(&jid, &new_owner));
+        assert!(!registry.is_roster_interested(&jid));
+        assert!(!registry.is_blocklist_interested(&jid));
+        assert_eq!(registry.is_carbons_enabled(&jid), carbons_before);
+    }
+}
+
+#[tokio::test]
+async fn resource_iq_metadata_requires_a_binding_and_marks_current_blocklist_interest() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("valid jid");
+    let registry = &state.deps.protocol.connection_registry;
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let owner = registry.register(jid.clone(), tx);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+
+    for frame in [
+        r#"<iq xmlns="jabber:client" id="roster" type="get"><query xmlns="jabber:iq:roster"/></iq>"#,
+        r#"<iq xmlns="jabber:client" id="blocklist" type="get"><blocklist xmlns="urn:xmpp:blocking"/></iq>"#,
+        r#"<iq xmlns="jabber:client" id="enable" type="set"><enable xmlns="urn:xmpp:carbons:2"/></iq>"#,
+    ] {
+        let frames = handle_xmpp_frame(frame, "example.com", &state, &mut conn).await;
+        let response = Iq::try_from(Element::from_str(&frames[0]).expect("response XML"))
+            .expect("response IQ");
+        let Iq::Error { error, .. } = response else {
+            panic!("resource metadata request without an owner must fail");
+        };
+        assert_eq!(
+            error.defined_condition,
+            xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+        );
+    }
+    assert!(!conn.roster_interested);
+    assert!(!conn.blocklist_interested);
+    assert!(!conn.carbons_enabled);
+    assert!(!registry.is_roster_interested(&jid));
+    assert!(!registry.is_blocklist_interested(&jid));
+    assert!(!registry.is_carbons_enabled(&jid));
+
+    conn.registry_owner = Some(owner);
+    let frames = handle_xmpp_frame(
+        r#"<iq xmlns="jabber:client" id="blocklist" type="get"><blocklist xmlns="urn:xmpp:blocking"/></iq>"#,
+        "example.com",
+        &state,
+        &mut conn,
+    )
+    .await;
+    let response =
+        Iq::try_from(Element::from_str(&frames[0]).expect("response XML")).expect("response IQ");
+    let Iq::Result {
+        payload: Some(payload),
+        ..
+    } = response
+    else {
+        panic!("current resource must receive the blocklist");
+    };
+    assert_eq!(payload.name(), "blocklist");
+    assert_eq!(payload.ns(), "urn:xmpp:blocking");
+    assert!(conn.blocklist_interested);
+    assert!(registry.is_blocklist_interested(&jid));
 }
 
 #[tokio::test]

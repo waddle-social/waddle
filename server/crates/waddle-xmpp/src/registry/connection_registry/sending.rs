@@ -519,11 +519,11 @@ impl ConnectionRegistry {
                 return false;
             }
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale closed connection entry");
         }
     }
@@ -560,11 +560,11 @@ impl ConnectionRegistry {
                 return false;
             }
             Self::remove_sm_stream_owner(sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }
     }
