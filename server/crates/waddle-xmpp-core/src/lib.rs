@@ -23,6 +23,8 @@ pub mod waddle_story_reads;
 pub mod xcal;
 pub mod xep0201;
 pub mod xep0359;
+pub mod xep0388;
+pub mod xep0388_server;
 pub mod xep0392;
 pub mod xep0472;
 pub mod xep0501;

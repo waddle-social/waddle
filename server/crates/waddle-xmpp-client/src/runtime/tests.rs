@@ -7,12 +7,12 @@ use url::Url;
 use waddle_xmpp_core::waddle_status_preference::{ManualStatus, StatusPreference};
 
 use super::{
-    AuthMechanism, AuthenticationRequest, ClientConfig, ClientError, ClientEvent, ClientRequest,
-    ConnectionEvent, LifecycleEvent, PagehideAckRequest, RequiredStreamFeature, SessionBinding,
-    SessionPhase, SmNegotiationState, SmResume, SmState, StanzaId, StreamClose, StreamOpen,
-    TransportEvent, TransportMessage, TransportState, XmppRuntime,
+    AuthMechanism, AuthenticationRequest, BootstrapState, ClientConfig, ClientError, ClientEvent,
+    ClientRequest, ConnectionEvent, LifecycleEvent, PagehideAckRequest, RequiredStreamFeature,
+    SessionBinding, SessionPhase, SmNegotiationState, SmResume, SmState, StanzaId, StreamClose,
+    StreamOpen, TransportEvent, TransportMessage, TransportState, XmppRuntime,
 };
-use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
+use crate::bootstrap::{NS_BIND, NS_SASL, NS_SASL2, NS_STREAMS};
 use crate::config::{AccessToken, ClientResource, OAuthBearerConfig, WebSocketConfig};
 use crate::{
     ConnectionConfig, SmResumeState, StreamErrorCondition, StreamId, StreamManagementEvent,
@@ -3151,6 +3151,525 @@ fn runtime_emits_typed_auth_failure() {
             if failure.condition == crate::SaslFailureCondition::NotAuthorized
     )));
     assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn sasl2_oauthbearer_is_preferred_and_continues_without_reopening_the_stream() {
+    let (mut runtime, requested) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+
+    assert!(requested.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationRequested(
+            AuthenticationRequest::Sasl2OAuthBearer(_)
+        ))
+    )));
+    assert!(requested.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "authenticate"
+            && element.ns() == NS_SASL2
+            && element.get_child("inline", NS_SASL2).is_none()
+    )));
+
+    let success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("alice@example.com")
+                .build(),
+        )
+        .build();
+    let success_events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            success,
+        )))
+        .unwrap();
+    assert!(success_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationSucceeded)
+    )));
+    assert!(!success_events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Open(_)))
+    )));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Authenticating);
+
+    let features = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features(),
+        )))
+        .unwrap();
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Binding);
+    assert!(!features.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Open(_)))
+    )));
+    assert!(features.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "iq"
+    )));
+}
+
+#[test]
+fn sasl2_oauthbearer_rejects_present_success_data() {
+    for payload in ["", "AQ=="] {
+        let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+        let success = Element::builder("success", NS_SASL2)
+            .append(
+                Element::builder("additional-data", NS_SASL2)
+                    .append(payload)
+                    .build(),
+            )
+            .append(
+                Element::builder("authorization-identifier", NS_SASL2)
+                    .append("alice@example.com")
+                    .build(),
+            )
+            .build();
+
+        let error = runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                success,
+            )))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientError::UnexpectedOAuthBearerSuccessData
+        ));
+        assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+        assert_eq!(runtime.bootstrap, BootstrapState::Idle);
+    }
+}
+
+#[test]
+fn sasl2_authorization_identifier_must_match_the_configured_bare_account() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("mallory@example.com")
+                .build(),
+        )
+        .build();
+
+    let error = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            success,
+        )))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ClientError::Sasl2AuthorizationIdentityMismatch
+    ));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn sasl2_authorization_identifier_must_not_add_a_resource_without_inline_binding() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("alice@example.com/unsolicited")
+                .build(),
+        )
+        .build();
+
+    let error = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            success,
+        )))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ClientError::Sasl2AuthorizationIdentityMismatch
+    ));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn sasl2_success_with_an_unrequested_inline_result_fails_closed() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("alice@example.com")
+                .build(),
+        )
+        .append(Element::builder("resumed", crate::stream_management::NS_SM).build())
+        .build();
+
+    let error = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            success,
+        )))
+        .unwrap_err();
+
+    assert!(matches!(error, ClientError::UnexpectedSasl2InlineResult));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn sasl2_authentication_failure_is_terminal_and_does_not_retry_sasl1() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let failure = Element::builder("failure", NS_SASL2)
+        .append(Element::builder("not-authorized", NS_SASL).build())
+        .build();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            failure,
+        )))
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationFailed(failure))
+            if failure.condition == crate::SaslFailureCondition::NotAuthorized
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationRequested(_))
+    )));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn sasl2_continue_terminates_authentication_when_task_support_is_unavailable() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let continuation = Element::builder("continue", NS_SASL2)
+        .append(
+            Element::builder("tasks", NS_SASL2)
+                .append(
+                    Element::builder("task", NS_SASL2)
+                        .append("urn:example:totp")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let error = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            continuation,
+        )))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ClientError::UnsupportedSasl2AuthenticationTask
+    ));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(runtime.bootstrap, BootstrapState::Idle);
+}
+
+#[test]
+fn authentication_success_must_use_the_negotiated_sasl_namespace() {
+    let (mut sasl2_runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let legacy_success = Element::builder("success", NS_SASL).build();
+    assert!(matches!(
+        sasl2_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(legacy_success),
+        )),
+        Err(ClientError::UnexpectedSaslAuthenticationProfile)
+    ));
+    assert_eq!(sasl2_runtime.snapshot().phase, SessionPhase::Disconnecting);
+
+    let (mut legacy_runtime, _) = runtime_waiting_for_auth(pre_auth_features());
+    let sasl2_success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("alice@example.com")
+                .build(),
+        )
+        .build();
+    assert!(matches!(
+        legacy_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(sasl2_success),
+        )),
+        Err(ClientError::UnexpectedSaslAuthenticationProfile)
+    ));
+    assert_eq!(legacy_runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn authentication_failure_must_use_the_negotiated_sasl_namespace() {
+    let (mut sasl2_runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let legacy_failure = Element::builder("failure", NS_SASL)
+        .append(Element::builder("not-authorized", NS_SASL).build())
+        .build();
+    assert!(matches!(
+        sasl2_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(legacy_failure),
+        )),
+        Err(ClientError::UnexpectedSaslAuthenticationProfile)
+    ));
+    assert_eq!(sasl2_runtime.snapshot().phase, SessionPhase::Disconnecting);
+
+    let (mut legacy_runtime, _) = runtime_waiting_for_auth(pre_auth_features());
+    let sasl2_failure = Element::builder("failure", NS_SASL2)
+        .append(Element::builder("not-authorized", NS_SASL).build())
+        .build();
+    assert!(matches!(
+        legacy_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(sasl2_failure),
+        )),
+        Err(ClientError::UnexpectedSaslAuthenticationProfile)
+    ));
+    assert_eq!(legacy_runtime.snapshot().phase, SessionPhase::Disconnecting);
+}
+
+#[test]
+fn authentication_challenge_must_use_the_negotiated_sasl_namespace() {
+    let (mut sasl2_runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let legacy_challenge = Element::builder("challenge", NS_SASL)
+        .append("eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=")
+        .build();
+    assert!(matches!(
+        sasl2_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(legacy_challenge),
+        )),
+        Err(ClientError::InvalidSaslChallenge)
+    ));
+    assert_eq!(sasl2_runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(sasl2_runtime.bootstrap, BootstrapState::Idle);
+
+    let (mut legacy_runtime, _) = runtime_waiting_for_auth(pre_auth_features());
+    let sasl2_challenge = Element::builder("challenge", NS_SASL2)
+        .append("eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=")
+        .build();
+    assert!(matches!(
+        legacy_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(sasl2_challenge),
+        )),
+        Err(ClientError::InvalidSaslChallenge)
+    ));
+    assert_eq!(legacy_runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(legacy_runtime.bootstrap, BootstrapState::Idle);
+
+    let wrong_namespace = Element::builder("challenge", "urn:wrong:sasl")
+        .append("AQ==")
+        .build();
+    assert!(matches!(
+        crate::BootstrapElement::parse(&wrong_namespace),
+        Some(Err(ClientError::InvalidSaslChallenge))
+    ));
+}
+
+#[test]
+fn unknown_namespace_auth_outcomes_disconnect_instead_of_being_ignored() {
+    let invalid_outcomes = [
+        Element::builder("success", "urn:wrong:sasl").build(),
+        Element::builder("failure", "urn:wrong:sasl").build(),
+        Element::builder("challenge", "urn:wrong:sasl")
+            .append("AQ==")
+            .build(),
+    ];
+
+    for outcome in invalid_outcomes {
+        let mut runtime = runtime_waiting_for_auth(sasl2_oauthbearer_features()).0;
+        assert!(runtime
+            .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+                outcome
+            ),))
+            .is_err());
+        assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+    }
+}
+
+#[test]
+fn oauthbearer_error_challenge_gets_one_rfc7628_dummy_response_in_the_same_sasl_profile() {
+    let (mut runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    let challenge = Element::builder("challenge", NS_SASL2)
+        .append("eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=")
+        .build();
+
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            challenge.clone(),
+        )))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(response)
+        )) if response.name() == "response"
+            && response.ns() == NS_SASL2
+            && response.text() == "AQ=="
+    )));
+
+    assert!(matches!(
+        runtime.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            challenge
+        ),)),
+        Err(ClientError::InvalidSaslChallenge)
+    ));
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(runtime.bootstrap, BootstrapState::Idle);
+}
+
+#[test]
+fn oauthbearer_error_response_cannot_be_followed_by_sasl_success() {
+    let sasl2_challenge = Element::builder("challenge", NS_SASL2)
+        .append("eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=")
+        .build();
+    let sasl2_success = Element::builder("success", NS_SASL2)
+        .append(
+            Element::builder("authorization-identifier", NS_SASL2)
+                .append("alice@example.com")
+                .build(),
+        )
+        .build();
+    let (mut sasl2_runtime, _) = runtime_waiting_for_auth(sasl2_oauthbearer_features());
+    sasl2_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            sasl2_challenge,
+        )))
+        .unwrap();
+    assert!(matches!(
+        sasl2_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(sasl2_success),
+        )),
+        Err(ClientError::UnexpectedSaslSuccessAfterOAuthError)
+    ));
+    assert_eq!(sasl2_runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(sasl2_runtime.bootstrap, BootstrapState::Idle);
+
+    let legacy_challenge = Element::builder("challenge", NS_SASL)
+        .append("eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=")
+        .build();
+    let (mut legacy_runtime, _) = runtime_waiting_for_auth(pre_auth_features());
+    legacy_runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            legacy_challenge,
+        )))
+        .unwrap();
+    assert!(matches!(
+        legacy_runtime.apply_transport_event(TransportEvent::MessageReceived(
+            TransportMessage::Element(Element::builder("success", NS_SASL).build()),
+        )),
+        Err(ClientError::UnexpectedSaslSuccessAfterOAuthError)
+    ));
+    assert_eq!(legacy_runtime.snapshot().phase, SessionPhase::Disconnecting);
+    assert_eq!(legacy_runtime.bootstrap, BootstrapState::Idle);
+}
+
+#[test]
+fn sasl2_without_oauthbearer_falls_back_to_legacy_oauthbearer_when_available() {
+    let features = Element::builder("features", NS_STREAMS)
+        .append(
+            Element::builder("authentication", NS_SASL2)
+                .append(
+                    Element::builder("mechanism", NS_SASL2)
+                        .append("SCRAM-SHA-256")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("mechanisms", NS_SASL)
+                .append(
+                    Element::builder("mechanism", NS_SASL)
+                        .append("OAUTHBEARER")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let (_, events) = runtime_waiting_for_auth(features);
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationRequested(
+            AuthenticationRequest::OAuthBearer(_)
+        ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::OutboundMessage(
+            TransportMessage::Element(element)
+        )) if element.name() == "auth" && element.ns() == NS_SASL
+    )));
+}
+
+#[test]
+fn sasl2_is_not_selected_over_unencrypted_websocket() {
+    let mut config = config();
+    config.transport.endpoint = Url::parse("ws://chat.example.com/ws").unwrap();
+    let features = Element::builder("features", NS_STREAMS)
+        .append(
+            Element::builder("authentication", NS_SASL2)
+                .append(
+                    Element::builder("mechanism", NS_SASL2)
+                        .append("OAUTHBEARER")
+                        .build(),
+                )
+                .build(),
+        )
+        .append(
+            Element::builder("mechanisms", NS_SASL)
+                .append(
+                    Element::builder("mechanism", NS_SASL)
+                        .append("OAUTHBEARER")
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let (_, events) = runtime_waiting_for_auth_with_config(config, features);
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::AuthenticationRequested(
+            AuthenticationRequest::OAuthBearer(_)
+        ))
+    )));
+}
+
+fn runtime_waiting_for_auth(features: Element) -> (XmppRuntime, Vec<ClientEvent>) {
+    runtime_waiting_for_auth_with_config(config(), features)
+}
+
+fn runtime_waiting_for_auth_with_config(
+    config: ClientConfig,
+    features: Element,
+) -> (XmppRuntime, Vec<ClientEvent>) {
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
+    runtime.queue_request(ClientRequest::Connect).unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
+        .unwrap();
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Open(
+            StreamOpen::from_server(BareJid::from_str("waddle.example").unwrap()),
+        )))
+        .unwrap();
+    let events = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            features,
+        )))
+        .unwrap();
+    (runtime, events)
+}
+
+fn sasl2_oauthbearer_features() -> Element {
+    Element::builder("features", NS_STREAMS)
+        .append(
+            Element::builder("authentication", NS_SASL2)
+                .append(
+                    Element::builder("mechanism", NS_SASL2)
+                        .append("OAUTHBEARER")
+                        .build(),
+                )
+                .append(Element::builder("inline", NS_SASL2).build())
+                .build(),
+        )
+        .build()
 }
 
 fn pre_auth_features() -> Element {
