@@ -2,8 +2,8 @@ use super::{
     create_test_server_owner_session, create_test_websocket_state_with_clustering, drain_due,
     fixture_config, handle_muc_join_with_occupancy_session, occupant_generation,
     participant_intent, state_with_executor, Arc, BareJid, CallGeneration, CallId,
-    CallTeardownIntent, CallTeardownStatus, FromStr, FullJid, Identity, Mutex, NodeIdentity,
-    ObservedCallSids, ParticipantSid, RecordingAdmin, RoomOccupancy, SfuService,
+    CallTeardownIntent, CallTeardownStatus, FromStr, FullJid, Identity, LiveParticipant, Mutex,
+    NodeIdentity, ObservedCallSids, ParticipantSid, RecordingAdmin, RoomOccupancy, SfuService,
     SharedNodeIdentity, TeardownTarget,
 };
 
@@ -411,7 +411,11 @@ async fn occupied_room_intent_is_requeued_not_consumed() {
         Identity::from_jid(FullJid::from_str("alice@example.test/device").expect("full JID"));
     let admin = Arc::new(RecordingAdmin {
         occupancy: Mutex::new(RoomOccupancy {
-            waddle: vec![(alice, None)],
+            waddle: vec![LiveParticipant {
+                identity: alice,
+                participant_sid: None,
+                media_generation: None,
+            }],
             foreign: 0,
         }),
         ..RecordingAdmin::default()

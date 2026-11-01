@@ -605,6 +605,142 @@ async fn alias_envelope_completion(driver: DatabaseDriver) {
     tx.commit().await.expect("commit completed envelope");
     fixture.close().await;
 }
+
+#[derive(Clone, Copy, Debug)]
+enum AliasIdentityField {
+    Sender,
+    TargetKind,
+    TargetJid,
+    OriginId,
+    MalformedSender,
+}
+
+async fn alias_identity_mismatch_fails_closed(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let mut tx = fixture.db.begin_immediate().await.expect("begin aliases");
+    let offered_digest = digest();
+
+    for (index, field) in [
+        AliasIdentityField::Sender,
+        AliasIdentityField::TargetKind,
+        AliasIdentityField::TargetJid,
+        AliasIdentityField::OriginId,
+        AliasIdentityField::MalformedSender,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sender = format!("sender-{index}@example.test")
+            .parse()
+            .expect("sender");
+        let target = NormalizedTarget::Full(
+            format!("recipient@example.test/device-{index}")
+                .parse()
+                .expect("target"),
+        );
+        let origin = OriginId::new(format!("origin-{index}"));
+        let key = MessageKey::new();
+        let alias_key = super::substrate::AliasStorageKey::new(&sender, &target, &origin);
+        let hash = alias_key.hash.to_vec();
+
+        assert_eq!(
+            resolve_and_record_alias(&mut tx, &sender, &target, &origin, &offered_digest, || key)
+                .await
+                .expect("insert exact alias"),
+            AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Inserted(key))
+        );
+        assert_eq!(
+            resolve_and_record_alias(
+                &mut tx,
+                &sender,
+                &target,
+                &origin,
+                &offered_digest,
+                MessageKey::new,
+            )
+            .await
+            .expect("resolve exact alias"),
+            AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Existing(key))
+        );
+        let conflicting_digest = SemanticDigest::from_storage(1, [2; 32]).expect("digest");
+        assert!(matches!(
+            resolve_and_record_alias(
+                &mut tx,
+                &sender,
+                &target,
+                &origin,
+                &conflicting_digest,
+                MessageKey::new,
+            )
+            .await
+            .expect("compare exact alias digest"),
+            AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Conflict(_))
+        ));
+
+        let target_storage = target.to_storage();
+        let mut stored_sender = sender.to_string();
+        let mut stored_target_kind = target_storage.kind();
+        let mut stored_target_jid = target_storage.jid().to_owned();
+        let mut stored_origin = origin.to_string();
+        match field {
+            AliasIdentityField::Sender => {
+                stored_sender = format!("other-{index}@example.test");
+            }
+            AliasIdentityField::TargetKind => {
+                stored_target_kind = 1;
+                stored_target_jid = format!("other-{index}@example.test");
+            }
+            AliasIdentityField::TargetJid => {
+                stored_target_jid = format!("other@example.test/device-{index}");
+            }
+            AliasIdentityField::OriginId => {
+                stored_origin = format!("other-origin-{index}");
+            }
+            AliasIdentityField::MalformedSender => {
+                stored_sender = "not a jid".to_owned();
+            }
+        }
+        const POSTGRES: &str = "UPDATE ingress_origin_aliases SET sender_bare_jid = ?, target_kind = ?, target_jid = ?, origin_id = ? WHERE alias_key_hash = ?";
+        const SQLITE: &str = POSTGRES;
+        assert_eq!(
+            tx.execute(
+                dialect_sql(tx.driver(), POSTGRES, SQLITE),
+                crate::db_params![
+                    stored_sender,
+                    stored_target_kind,
+                    stored_target_jid,
+                    stored_origin,
+                    hash,
+                ],
+            )
+            .await
+            .expect("inject inconsistent alias tuple"),
+            1
+        );
+
+        assert!(
+            matches!(
+                resolve_and_record_alias(
+                    &mut tx,
+                    &sender,
+                    &target,
+                    &origin,
+                    &offered_digest,
+                    MessageKey::new,
+                )
+                .await,
+                Err(IngressSubstrateError::AliasIdentityConflict)
+            ),
+            "persisted {field:?} mismatch must not resolve as the offered alias"
+        );
+    }
+
+    tx.commit().await.expect("commit fixture rows");
+    fixture.close().await;
+}
+
 backend_test!(
     sqlite_alias_envelope_completion,
     alias_envelope_completion,
@@ -613,6 +749,16 @@ backend_test!(
 backend_test!(
     postgres_alias_envelope_completion,
     alias_envelope_completion,
+    Postgres
+);
+backend_test!(
+    sqlite_alias_identity_mismatch_fails_closed,
+    alias_identity_mismatch_fails_closed,
+    Sqlite
+);
+backend_test!(
+    postgres_alias_identity_mismatch_fails_closed,
+    alias_identity_mismatch_fails_closed,
     Postgres
 );
 

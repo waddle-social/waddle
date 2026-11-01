@@ -23,6 +23,8 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
 /// terminal.  The garbage collector receives `now` and binds the derived
@@ -86,6 +88,8 @@ pub enum IngressSubstrateError {
     InvalidStoredTimestamp,
     #[error("ingress substrate returned a malformed semantic digest")]
     InvalidStoredDigest,
+    #[error("persisted ingress alias identity is malformed or inconsistent with its hash")]
+    AliasIdentityConflict,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
     #[error("ingress sm ordinal is already bound to a different message")]
@@ -94,6 +98,12 @@ pub enum IngressSubstrateError {
     DeliveryKeyConflict,
     #[error("live ingress protocol epoch exceeds what this binary supports")]
     UnsupportedLiveEpoch,
+    #[error("ingress schema identity changed before the epoch prelock")]
+    SchemaIdentityMismatch,
+    #[error("ingress epoch changed while preparing the V1009 compatibility lock")]
+    EpochChangedDuringPreparation,
+    #[error("the ingress relation prelock requires READ COMMITTED isolation")]
+    ReadCommittedRequired,
 }
 
 /// Outcome of adding a child identity that requires a live message row.
@@ -251,6 +261,46 @@ impl PostgresIngressSubstrate {
     /// callers supplying another transaction must establish these preconditions
     /// before acquiring application locks. This API does not prove that order.
     pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.begin_inner().await
+    }
+
+    /// Start a disposable dark writer using the full-identity capability
+    /// retained by its physically attested pool. This path is not wired into
+    /// runtime startup.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn begin_with_attested_pg_writer(
+        &self,
+        capability: &AttestedPostgresWriterCapability,
+    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.db
+            .verify_attested_pg_writer_capability(capability)
+            .map_err(DatabaseError::from)
+            .map_err(discard_database_error)?;
+
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(discard_database_error)?;
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(discard_database_error)?;
+        if !tighten_local_transaction_timeouts(&mut tx)
+            .await
+            .map_err(discard_database_error)?
+        {
+            return Err(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            });
+        }
+        let epoch = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+        if epoch > supported_protocol_epoch() {
+            return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+        }
+        Ok(tx)
+    }
+
+    async fn begin_inner(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
         let mut tx = self
             .db
             .begin_immediate()
@@ -1179,6 +1229,135 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
     })
 }
 
+/// Prepare a dark writer from the physical attestor's complete identity.
+///
+/// The schema-qualified epoch relation lock is the first SQL operation after
+/// transaction isolation and timeout setup. Only then does the writer run
+/// the trusted physical attestor on this same transaction connection, before
+/// reading the epoch or taking application locks. This path never derives
+/// identity from the active search path or DSN.
+#[cfg(feature = "test-support")]
+pub(crate) async fn acquire_epoch_lock_first_with_capability(
+    tx: &mut Transaction<'_>,
+    capability: &AttestedPostgresWriterCapability,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    if tx.driver() != DatabaseDriver::Postgres {
+        return Err(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        });
+    }
+
+    let expected = &capability.identity().schema;
+    let relation = format!(
+        "{}.ingress_protocol_epoch",
+        quote_postgres_identifier(&expected.name.0)
+    );
+    tx.execute(
+        &format!("LOCK TABLE ONLY {relation} IN ACCESS SHARE MODE"),
+        (),
+    )
+    .await
+    .map_err(discard_database_error)?;
+
+    capability
+        .attest_transaction(tx)
+        .await
+        .map_err(discard_database_error)?;
+
+    let mut schema_rows = tx
+        .query(
+            "SELECT oid::text FROM pg_catalog.pg_namespace WHERE nspname = ?",
+            crate::db_params![expected.name.0.clone()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let actual_schema_oid = schema_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::SchemaIdentityMismatch)?
+        .get::<String>(0)
+        .map_err(discard_database_error)?
+        .parse::<u32>()
+        .map_err(|_| IngressSubstrateError::SchemaIdentityMismatch)?;
+    drop(schema_rows);
+    if actual_schema_oid != expected.oid {
+        return Err(IngressSubstrateError::SchemaIdentityMismatch);
+    }
+
+    let mut isolation_rows = tx
+        .query("SELECT current_setting('transaction_isolation')", ())
+        .await
+        .map_err(discard_database_error)?;
+    let isolation = isolation_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
+        .get::<String>(0)
+        .map_err(discard_database_error)?;
+    if isolation != "read committed" {
+        return Err(IngressSubstrateError::ReadCommittedRequired);
+    }
+    drop(isolation_rows);
+
+    let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
+    let mut proof = tx
+        .query(
+            "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+            crate::db_params![fresh_epoch.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    proof
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?;
+    drop(proof);
+
+    let locked_epoch = read_epoch_in_relation(tx, &relation, true).await?;
+    if locked_epoch != fresh_epoch {
+        return Err(IngressSubstrateError::EpochChangedDuringPreparation);
+    }
+    Ok(locked_epoch)
+}
+
+#[cfg(feature = "test-support")]
+async fn read_epoch_in_relation(
+    tx: &mut Transaction<'_>,
+    relation: &str,
+    for_share: bool,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    let lock_clause = if for_share { " FOR SHARE" } else { "" };
+    let mut rows = tx
+        .query(
+            &format!("SELECT epoch FROM {relation} WHERE id = 1{lock_clause}"),
+            (),
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let epoch = rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?
+        .get::<i64>(0)
+        .map_err(discard_database_error)?;
+    u32::try_from(epoch)
+        .map(ProtocolEpoch::from_storage)
+        .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
+}
+
+#[cfg(feature = "test-support")]
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 pub(in crate::ingress_substrate) async fn install_gc_timeouts(
     tx: &mut Transaction<'_>,
     budget: &AliasGcBudget,
@@ -1300,9 +1479,43 @@ pub(in crate::ingress_substrate) async fn locked_alias(
         .await
         .map_err(discard_database_error)?;
     match rows.next().await.map_err(discard_database_error)? {
-        Some(row) => decode_stored_alias(&row).map(Some),
+        Some(row) => {
+            validate_stored_alias_identity(&row, key)?;
+            decode_stored_alias(&row).map(Some)
+        }
         None => Ok(None),
     }
+}
+
+fn validate_stored_alias_identity(
+    row: &Row,
+    key: &AliasStorageKey<'_>,
+) -> Result<(), IngressSubstrateError> {
+    let sender_text: String = row.get(3).map_err(discard_database_error)?;
+    let target_kind: i64 = row.get(4).map_err(discard_database_error)?;
+    let target_jid: String = row.get(5).map_err(discard_database_error)?;
+    let origin_text: String = row.get(6).map_err(discard_database_error)?;
+
+    let sender = sender_text
+        .parse::<BareJid>()
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target_kind =
+        i32::try_from(target_kind).map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target = NormalizedTarget::from_storage(target_kind, &target_jid)
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let origin = OriginId::new(origin_text.clone());
+
+    if sender != *key.sender
+        || sender_text != key.sender.to_string()
+        || target.to_storage() != key.target
+        || target_kind != key.target.kind()
+        || target_jid != key.target.jid()
+        || origin != *key.origin_id
+        || origin_text != key.origin_id.as_str()
+    {
+        return Err(IngressSubstrateError::AliasIdentityConflict);
+    }
+    Ok(())
 }
 
 pub(in crate::ingress_substrate) fn decode_stored_alias(
@@ -1762,14 +1975,16 @@ pub(in crate::ingress_substrate) const GC_DELETE_MESSAGE_SQLITE: &str = r#"
                   )
                 "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_POSTGRES: &str = r#"
-            SELECT m.message_key::text, m.digest_version, m.digest
+            SELECT m.message_key::text, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
             FOR UPDATE OF m
             "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_SQLITE: &str = r#"
-            SELECT m.message_key, m.digest_version, m.digest
+            SELECT m.message_key, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
