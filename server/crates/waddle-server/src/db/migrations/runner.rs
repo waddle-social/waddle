@@ -83,9 +83,30 @@ impl MigrationRunner {
             DatabaseDriver::Sqlite => db.begin_immediate().await?,
         };
 
-        let checksum_column_added = self.bootstrap(&mut tx, driver).await?;
-        let applied_rows = self.read_ledger(&mut tx).await?;
-        self.validate_schema_has_ledger(&mut tx, driver, &applied_rows)
+        let newly_applied = self.apply_pending_in_transaction(&mut tx, driver).await?;
+
+        tx.commit().await?;
+
+        if newly_applied.is_empty() {
+            debug!("No new migrations to apply");
+        } else {
+            info!(count = newly_applied.len(), "Applied new migrations");
+        }
+
+        Ok(newly_applied)
+    }
+
+    /// Apply the catalog in the caller's transaction without acquiring locks or
+    /// committing. The caller must establish the required driver-specific
+    /// serialization and search path before entering this method.
+    pub(super) async fn apply_pending_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+    ) -> Result<Vec<i64>, DatabaseError> {
+        let checksum_column_added = self.bootstrap(tx, driver).await?;
+        let applied_rows = self.read_ledger(tx).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
         let adoption_backfill =
             self.validate_ledger(&applied_rows, driver, checksum_column_added)?;
@@ -144,14 +165,6 @@ impl MigrationRunner {
 
             newly_applied.push(migration.version);
             info!(version = migration.version, "Applied migration");
-        }
-
-        tx.commit().await?;
-
-        if newly_applied.is_empty() {
-            debug!("No new migrations to apply");
-        } else {
-            info!(count = newly_applied.len(), "Applied new migrations");
         }
 
         Ok(newly_applied)
