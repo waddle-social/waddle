@@ -1,5 +1,5 @@
 use super::{
-    debug, info, Arc, AtomicBool, BareJid, ConnectionRegistry, FullJid, LastActivityState,
+    debug, info, BareJid, ConnectionRegistry, FullJid, LastActivityState, LocalConnectionBindingId,
     Ordering, PresenceState,
 };
 use chrono::Utc;
@@ -25,22 +25,22 @@ impl ConnectionRegistry {
     }
 
     /// Owner-gated [`Self::update_presence`]: performs the same writes, but
-    /// only while the registry entry still belongs to `owner` (`Arc::ptr_eq`
-    /// on the carbons handle, as in `entry_if_owner`). The check and the
+    /// only while the registry entry still belongs to `owner` (the local
+    /// binding identity, as in `entry_if_owner`). The check and the
     /// writes happen under the same entry guard, so a same-JID replacement
     /// registering concurrently cannot slip between them. Returns false when
     /// the entry is absent or owned by a replacement.
     pub fn update_presence_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         available: bool,
         priority: i8,
     ) -> bool {
         let Some(entry) = self.connections.get(jid) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+        if entry.value().binding_id() != *owner {
             return false;
         }
         entry
@@ -66,7 +66,7 @@ impl ConnectionRegistry {
     pub fn update_presence_state_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         show: Option<String>,
         status: Option<String>,
         priority: i8,
@@ -81,7 +81,7 @@ impl ConnectionRegistry {
         let Some(entry) = self.connections.get(jid) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+        if entry.value().binding_id() != *owner {
             return false;
         }
         self.presence_states.insert(
@@ -130,17 +130,21 @@ impl ConnectionRegistry {
 
     /// Owner-gated [`Self::clear_presence_state`]: removes the JID-keyed
     /// presence state only while the connections entry still belongs to
-    /// `owner` (`Arc::ptr_eq` on the carbons handle, as in `entry_if_owner`).
+    /// `owner` (the local binding identity, as in `entry_if_owner`).
     /// The connections entry guard is held across the removal, so a same-JID
     /// replacement registering concurrently cannot interleave between check
     /// and clear (same lock-order argument as
     /// [`Self::update_presence_state_if_owner`]). Returns false when the
     /// entry is absent or owned by a replacement.
-    pub fn clear_presence_state_if_owner(&self, jid: &FullJid, owner: &Arc<AtomicBool>) -> bool {
+    pub fn clear_presence_state_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+    ) -> bool {
         let Some(entry) = self.connections.get(jid) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.value().carbons_enabled, owner) {
+        if entry.value().binding_id() != *owner {
             return false;
         }
         self.presence_states.remove(jid);

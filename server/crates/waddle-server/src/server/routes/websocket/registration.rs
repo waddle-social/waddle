@@ -233,7 +233,7 @@ fn registration_authoritative(
 async fn rollback_registered_connection(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     conn: &mut WsConnState,
 ) {
     state
@@ -244,7 +244,7 @@ async fn rollback_registered_connection(
     crate::server::dual_registration::mirror_unregister(
         &state.deps.protocol.user_registry,
         jid,
-        Some(owner.clone()),
+        Some(*owner),
     )
     .await;
     unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
@@ -255,7 +255,7 @@ async fn rollback_registered_connection(
 async fn unregister_remote_clustered_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -274,7 +274,7 @@ async fn unregister_remote_clustered_resource_if_owner(
 async fn unregister_remote_clustered_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 
@@ -350,7 +350,7 @@ pub(super) fn record_session_init_failure(
 pub(super) fn publish_stream_id_and_presence(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     conn: &WsConnState,
 ) {
     // Owner-gated: a racing same-JID replacement can take the slot between
@@ -602,7 +602,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         .protocol
         .connection_registry
         .register_entry(jid.clone(), entry);
-    conn.registry_owner = Some(owner.clone());
+    conn.registry_owner = Some(owner);
     if let Some(entry) = state
         .deps
         .protocol
@@ -713,7 +713,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
                     entered.notify_one();
                     release.notified().await;
                 }
-                register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
+                register_remote_clustered_resource(state, &jid, entry, owner).await
             }
             outcome => outcome,
         };
@@ -739,7 +739,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 &jid,
-                Some(owner.clone()),
+                Some(owner),
             )
             .await;
             conn.registry_owner = None;
@@ -810,7 +810,7 @@ async fn register_remote_clustered_resource(
     state: &WebSocketState,
     jid: &FullJid,
     entry: waddle_xmpp::registry::ConnectionEntry,
-    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> MirrorRegisterOutcome {
     use crate::server::dual_registration::MirrorRegisterOutcome;
     let Some(bridge) = state
@@ -830,7 +830,7 @@ async fn register_remote_clustered_resource(
     // across an unstable claim or falling through to an unregistered socket.
     for attempt in 0..RESUME_REGISTRATION_BUSY_ATTEMPTS {
         match bridge
-            .try_register_remote_user_resource(jid, entry.clone(), owner.clone())
+            .try_register_remote_user_resource(jid, entry.clone(), owner)
             .await
         {
             RemoteResourceRegisterOutcome::Registered => {
@@ -868,7 +868,7 @@ async fn register_remote_clustered_resource(
     _state: &WebSocketState,
     _jid: &FullJid,
     _entry: waddle_xmpp::registry::ConnectionEntry,
-    _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> MirrorRegisterOutcome {
     MirrorRegisterOutcome::Failed
 }

@@ -209,7 +209,7 @@ pub(super) async fn handle_blocking_iq(
 async fn mirror_remote_blocklist_interest(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -232,7 +232,7 @@ async fn mirror_remote_blocklist_interest(
 async fn mirror_remote_blocklist_interest(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 

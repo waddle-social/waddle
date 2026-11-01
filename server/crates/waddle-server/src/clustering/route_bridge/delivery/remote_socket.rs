@@ -2,12 +2,12 @@ use super::{
     ask_error_proves_remote_resource_ref_stale, deliver_local_full_jid_after_target_refresh_at,
     deliver_reserved_muc_proxy, muc_proxy_result_to_ordered_outcome, owner_remote_entry_if_current,
     rebind_stanza_sender, remote_resource_route_reply, route_local_bare_jid_with_timeout,
-    stanza_message_id, user_entity, Arc, AtomicBool, BroadcastOutcome, DeliveryKind,
-    FullJidDeliveryOutcome, OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind,
-    OrderedRelayMucProxyOutcome, OrderedRelayNackReason, OrderedRelayRouteOrigin,
-    OrderedRelayRouteOriginKind, OutboundStanza, OutboundWriteAcceptance,
-    RelayDeliverRemoteResourceFrame, RelayDeliverRemoteResourceWriteAcceptedFrame, RelayHandle,
-    RelayRemoteResourceFrameReply, RelayRemoteResourceFrameStatus, RelayRemoteResourceUpdateStatus,
+    stanza_message_id, user_entity, Arc, BroadcastOutcome, DeliveryKind, FullJidDeliveryOutcome,
+    OrderedRelayDeliveryBridge, OrderedRelayMucProxyKind, OrderedRelayMucProxyOutcome,
+    OrderedRelayNackReason, OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind, OutboundStanza,
+    OutboundWriteAcceptance, RelayDeliverRemoteResourceFrame,
+    RelayDeliverRemoteResourceWriteAcceptedFrame, RelayHandle, RelayRemoteResourceFrameReply,
+    RelayRemoteResourceFrameStatus, RelayRemoteResourceUpdateStatus,
     RelayRemoteResourceWriteAcceptedReply, RelayRemoteResourceWriteAcceptedStatus,
     RelayRouteRemoteResourceStanza, RelayRouteRemoteResourceStanzaReply, RelayTraceContext,
     RemoteOwnerRegistration, RemoteResourceOriginSnapshot, RemoteResourceOutboundFrame,
@@ -38,12 +38,12 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn remote_resource_origin_if_owner(
         &self,
         jid: &jid::FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     ) -> Option<RemoteResourceOriginSnapshot> {
         let registrations = self.remote_socket_resources.lock().await;
         let registration = registrations
             .get(jid)
-            .filter(|registration| Arc::ptr_eq(&registration.owner, owner))?;
+            .filter(|registration| registration.owner == *owner)?;
         Some(RemoteResourceOriginSnapshot {
             jid: jid.clone(),
             registration_id: registration.registration_id,

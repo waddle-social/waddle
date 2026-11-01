@@ -1,7 +1,8 @@
-use super::{mpsc, Arc, AtomicBool, Ordering, Stanza};
+use super::{mpsc, Arc, Ordering, Stanza};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
+use std::sync::atomic::AtomicBool;
 
 /// How the destination connection should handle an inbound
 /// [`OutboundStanza`].
@@ -255,12 +256,24 @@ pub enum ForceDetachOutcome {
     NotPersisted,
 }
 
+/// Node-local identity of one published resource binding. This value is
+/// equality evidence, not a node lease or durable endpoint authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalConnectionBindingId(uuid::Uuid);
+
+impl LocalConnectionBindingId {
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
 /// Connection state stored in the registry.
 ///
 /// Contains the outbound sender and shared state that can be queried
 /// by the registry (like carbons_enabled status for XEP-0280).
 #[derive(Debug, Clone)]
 pub struct ConnectionEntry {
+    binding_id: LocalConnectionBindingId,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
@@ -355,6 +368,7 @@ impl ConnectionEntry {
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
+            binding_id: LocalConnectionBindingId::fresh(),
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
@@ -449,12 +463,10 @@ impl ConnectionEntry {
         self.force_detach_rx.lock().ok().and_then(|mut g| g.take())
     }
 
-    /// Get the carbons_enabled handle for this connection.
-    ///
-    /// The returned Arc can be used by the WebSocket C2S adapter to update
-    /// the carbons status when enable/disable IQs are received.
-    pub fn carbons_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.carbons_enabled)
+    /// Return this entry's stable local binding identity. Re-publishing a
+    /// clone retains the identity; a new entry gets a new one.
+    pub fn binding_id(&self) -> LocalConnectionBindingId {
+        self.binding_id
     }
 
     /// Check if carbons is enabled for this connection.

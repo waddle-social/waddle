@@ -401,7 +401,7 @@ where
         .socket_lifecycle
         .clone()
         .expect("incumbent lifecycle");
-    let owner = incumbent.registry_owner.clone().expect("incumbent owner");
+    let owner = incumbent.registry_owner.expect("incumbent owner");
     let mut detach = lifecycle
         .entry
         .take_force_detach_rx()
@@ -479,7 +479,7 @@ async fn fresh_bind_waits_for_incumbent_cleanup_before_publication() {
     let (outcome, mut incumbent, mut rx, _) =
         bind_fresh_test_connection(state.clone(), jid.clone()).await;
     assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
-    let owner = incumbent.registry_owner.clone().expect("incumbent owner");
+    let owner = incumbent.registry_owner.expect("incumbent owner");
     let mut detach = incumbent
         .socket_lifecycle
         .as_ref()
@@ -791,7 +791,7 @@ async fn resumed_registration_busy_retry_is_bounded() {
 #[tokio::test]
 async fn resumed_registration_retries_when_child_stays_busy_for_two_and_a_half_seconds() {
     use kameo::actor::Spawn;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{oneshot, Notify};
     use waddle_xmpp::registry::user_actor::test_support::GateMailbox;
     use waddle_xmpp::registry::user_registry::RecordPendingUserUnregister;
@@ -814,7 +814,7 @@ async fn resumed_registration_retries_when_child_stays_busy_for_two_and_a_half_s
         registry
             .ask(RecordPendingUserUnregister {
                 jid: jid.clone(),
-                owner: Some(Arc::new(AtomicBool::new(false))),
+                owner: Some(waddle_xmpp::registry::LocalConnectionBindingId::fresh()),
             })
             .await
             .expect("record unrelated stale owner");

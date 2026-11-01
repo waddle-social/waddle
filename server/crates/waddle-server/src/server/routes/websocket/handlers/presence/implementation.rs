@@ -46,7 +46,7 @@ pub struct PresenceHandlerContext<'a> {
     pub phase: &'a ConnectionPhase,
     pub authenticated_session: Option<&'a Session>,
     pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
-    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 

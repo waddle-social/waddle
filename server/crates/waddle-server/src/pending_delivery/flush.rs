@@ -131,7 +131,7 @@ where
     /// (`send_pending_flush_if_owner`) so a same-full-JID replacement that
     /// races in mid-flush does not receive rows claimed under the original
     /// session's stream id. `None` (test fixtures) uses the ungated send.
-    pub owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     /// Resolves Archived `PendingRow` references against MAM.
     pub archive_resolver: &'a R,
     /// Canonical archive-order dispatch gate, required by production callers.

@@ -55,7 +55,7 @@ impl SocketFixture {
         let target: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
         let (sender, receiver) = mpsc::channel(4);
         let entry = ConnectionEntry::new(sender);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(target.clone(), entry);
@@ -200,7 +200,7 @@ async fn forged_obligation_cannot_send(fixture: IngressFixture) {
         .expect("other resource");
     let (sender, mut receiver) = mpsc::channel(1);
     let entry = ConnectionEntry::new(sender);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     socket
         .services
         .connection_registry

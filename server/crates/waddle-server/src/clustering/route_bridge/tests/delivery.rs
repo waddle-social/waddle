@@ -239,14 +239,14 @@ async fn remote_socket_delivery_preserves_direct_frame_kind() {
     let target = target_full();
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -302,14 +302,14 @@ async fn remote_socket_delivery_queues_the_frames_ingress_obligation() {
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -402,7 +402,7 @@ async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase)
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let (sender, mut receiver) = mpsc::channel(2);
     let entry = ConnectionEntry::new(sender);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
@@ -651,14 +651,14 @@ async fn remote_socket_write_accepted_waits_for_writer_handoff() {
     let target = target_full();
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -737,14 +737,14 @@ async fn remote_socket_write_accepted_reports_acceptance_closed_when_writer_drop
     let target = target_full();
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -808,14 +808,14 @@ async fn remote_socket_write_accepted_reports_acceptance_pending_when_writer_sta
     let target = target_full();
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -884,14 +884,14 @@ async fn remote_socket_write_accepted_rejects_stale_socket_generation() {
     let target = target_full();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
     bridge
         .test_insert_remote_socket_registration(
             target.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("remote-user-owner".to_owned()),
         )
         .await;
@@ -1009,7 +1009,7 @@ async fn unreachable_write_accepted_ask_is_retryable_and_keeps_the_owner_mirror(
     let target = target_full();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     let stale = RemoteOwnerRegistration {
         occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
         socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
@@ -1059,7 +1059,7 @@ async fn drained_remote_direct_frame_retry_releases_room_effect_as_infrastructur
             registration_id: RemoteResourceRegistrationId::fresh(),
             socket_node: NodeId::new("unreachable-remote-socket".to_owned()),
             socket_generation: RemoteResourceSocketGeneration::next(None),
-            owner: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            owner: waddle_xmpp::registry::LocalConnectionBindingId::fresh(),
         },
     );
     let state = create_test_websocket_state_with_clustering(
@@ -1483,7 +1483,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
     let target = target_full();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry.clone());
@@ -1506,7 +1506,7 @@ async fn stale_registered_remote_resource_cleans_mirror_and_allows_local_fallbac
             registration_id,
             socket_node: NodeId::new("missing-socket-node".to_string()),
             socket_generation: RemoteResourceSocketGeneration::next(None),
-            owner: Arc::clone(&owner),
+            owner,
         },
     );
 
@@ -1557,7 +1557,7 @@ async fn remote_full_jid_route_queues_detached_delivery() {
     let source = sender_full();
     let (source_tx, _source_rx) = mpsc::channel(1);
     let source_entry = ConnectionEntry::new(source_tx);
-    let source_owner = source_entry.carbons_handle();
+    let source_owner = source_entry.binding_id();
     services
         .connection_registry
         .register_entry(source.clone(), source_entry.clone());
@@ -1581,7 +1581,7 @@ async fn remote_full_jid_route_queues_detached_delivery() {
             registration_id,
             socket_node: NodeId::new("source-socket-node".to_string()),
             socket_generation,
-            owner: Arc::clone(&source_owner),
+            owner: source_owner,
         },
     );
 
@@ -1696,7 +1696,7 @@ pub(crate) async fn remote_carbon_owner_reply_with_ingress(
     let owner = source.to_bare();
     let (source_tx, _source_rx) = mpsc::channel(1);
     let source_entry = ConnectionEntry::new(source_tx);
-    let source_owner = source_entry.carbons_handle();
+    let source_owner = source_entry.binding_id();
     services
         .connection_registry
         .register_entry(source.clone(), source_entry.clone());
@@ -1720,7 +1720,7 @@ pub(crate) async fn remote_carbon_owner_reply_with_ingress(
             registration_id,
             socket_node: NodeId::new("carbon-socket-node".to_string()),
             socket_generation,
-            owner: Arc::clone(&source_owner),
+            owner: source_owner,
         },
     );
 
@@ -1830,7 +1830,7 @@ async fn stale_force_detach_error_cleans_old_socket_mirror() {
     let target = target_full();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), old_entry.clone());
@@ -1851,7 +1851,7 @@ async fn stale_force_detach_error_cleans_old_socket_mirror() {
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("missing-old-socket-node".to_string()),
         socket_generation: old_generation,
-        owner: Arc::clone(&old_owner),
+        owner: old_owner,
     };
 
     assert!(
@@ -1917,7 +1917,7 @@ async fn stale_force_detach_busy_actor_retries_and_cleans_without_janitor_work()
     let target = target_full();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), old_entry.clone());
@@ -1975,7 +1975,7 @@ async fn stale_force_detach_busy_actor_retries_and_cleans_without_janitor_work()
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("busy-old-socket-node".to_string()),
         socket_generation: old_generation,
-        owner: Arc::clone(&old_owner),
+        owner: old_owner,
     };
 
     let retire = tokio::spawn({
@@ -2057,7 +2057,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
     let target = target_full();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), old_entry.clone());
@@ -2115,7 +2115,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("stuck-old-socket-node".to_string()),
         socket_generation: old_generation,
-        owner: Arc::clone(&old_owner),
+        owner: old_owner,
     };
     bridge
         .remote_owner_resources
@@ -2245,7 +2245,7 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
     let target = target_full();
     let (old_tx, _old_rx) = mpsc::channel(1);
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), old_entry.clone());
@@ -2302,7 +2302,7 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
         registration_id: RemoteResourceRegistrationId::fresh(),
         socket_node: NodeId::new("busy-socket-node".to_string()),
         socket_generation: RemoteResourceSocketGeneration::next(None),
-        owner: Arc::clone(&old_owner),
+        owner: old_owner,
     };
     crate::occupancy_authority::publish(
         &services.occupancy_database,
@@ -2550,7 +2550,7 @@ async fn user_actor_mirror_queue_preserves_ingress_through_socket_relay_envelope
 
     let (socket_tx, mut socket_rx) = mpsc::channel(1);
     let socket_entry = ConnectionEntry::new(socket_tx);
-    let owner = socket_entry.carbons_handle();
+    let owner = socket_entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), socket_entry);

@@ -175,7 +175,7 @@ impl HoldBatch {
 pub(in crate::server::routes::websocket) async fn hold_until_live_stanza_queued(
     state: &WebSocketState,
     jid: Option<&FullJid>,
-    owner: Option<&Arc<AtomicBool>>,
+    owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     batch: HeldBatch,
 ) {
     let Some(hold) = HOLD_BATCH.as_ref() else {

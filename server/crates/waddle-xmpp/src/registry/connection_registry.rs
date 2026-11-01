@@ -4,7 +4,7 @@
 
 use crate::pending_delivery::SmSessionId;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,8 +30,8 @@ pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, Sock
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
-    ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, SendResult,
-    TerminalOrderingRetryLease,
+    ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
+    SendResult, TerminalOrderingRetryLease,
 };
 pub use sending::{PendingFlushReservation, PendingFlushReserveError};
 pub use state::{LastActivityState, PresenceState};
@@ -113,13 +113,13 @@ impl ConnectionRegistry {
     pub fn set_occupancy_session_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         generation: waddle_xmpp_core::OccupancySessionGeneration,
     ) -> bool {
         let Some(entry) = self.connections.get(jid) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+        if entry.binding_id() != *owner {
             return false;
         }
         if let Ok(mut guard) = entry.occupancy_session.lock() {
@@ -144,13 +144,13 @@ impl ConnectionRegistry {
     pub fn set_sm_stream_id_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         stream_id: Option<SmSessionId>,
     ) -> bool {
         let Some(entry) = self.connections.get_mut(jid) else {
             return false;
         };
-        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+        if entry.binding_id() != *owner {
             return false;
         }
         Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, &entry);

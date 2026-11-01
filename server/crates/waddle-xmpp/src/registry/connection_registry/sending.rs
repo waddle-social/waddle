@@ -1,6 +1,6 @@
 use super::{
-    debug, instrument, mpsc, Arc, AtomicBool, BroadcastOutcome, ConnectionEntry,
-    ConnectionRegistry, DashMap, FullJid, OutboundStanza, OutboundWriteAcceptance, PresenceState,
+    debug, instrument, mpsc, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DashMap,
+    FullJid, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance, PresenceState,
     SendResult, Stanza,
 };
 use crate::pending_delivery::PendingRowId;
@@ -11,7 +11,7 @@ use crate::pending_delivery::SmSessionId;
 #[derive(Debug)]
 pub struct PendingFlushReservation {
     jid: FullJid,
-    owner: Arc<AtomicBool>,
+    owner: LocalConnectionBindingId,
     sender: mpsc::Sender<OutboundStanza>,
     permit: mpsc::OwnedPermit<OutboundStanza>,
 }
@@ -30,15 +30,15 @@ impl ConnectionRegistry {
     pub async fn reserve_pending_flush(
         &self,
         jid: &FullJid,
-        owner: Option<&Arc<AtomicBool>>,
+        owner: Option<&LocalConnectionBindingId>,
     ) -> Result<PendingFlushReservation, PendingFlushReserveError> {
         let entry = self
             .connections
             .get(jid)
-            .filter(|entry| owner.is_none_or(|owner| Arc::ptr_eq(&entry.carbons_enabled, owner)))
+            .filter(|entry| owner.is_none_or(|owner| entry.binding_id() == *owner))
             .ok_or(PendingFlushReserveError::NotConnected)?;
         let sender = entry.sender.clone();
-        let captured_owner = Arc::clone(&entry.carbons_enabled);
+        let captured_owner = entry.binding_id();
         drop(entry);
         match sender.clone().reserve_owned().await {
             Ok(permit) => Ok(PendingFlushReservation {
@@ -60,15 +60,15 @@ impl ConnectionRegistry {
     pub fn try_reserve_pending_flush(
         &self,
         jid: &FullJid,
-        owner: Option<&Arc<AtomicBool>>,
+        owner: Option<&LocalConnectionBindingId>,
     ) -> Result<PendingFlushReservation, PendingFlushReserveError> {
         let entry = self
             .connections
             .get(jid)
-            .filter(|entry| owner.is_none_or(|owner| Arc::ptr_eq(&entry.carbons_enabled, owner)))
+            .filter(|entry| owner.is_none_or(|owner| entry.binding_id() == *owner))
             .ok_or(PendingFlushReserveError::NotConnected)?;
         let sender = entry.sender.clone();
-        let captured_owner = Arc::clone(&entry.carbons_enabled);
+        let captured_owner = entry.binding_id();
         drop(entry);
         match sender.clone().try_reserve_owned() {
             Ok(permit) => Ok(PendingFlushReservation {
@@ -101,7 +101,7 @@ impl ConnectionRegistry {
             permit,
         } = reservation;
         let Some(entry) = self.connections.get_mut(&jid).filter(|entry| {
-            Arc::ptr_eq(&entry.carbons_enabled, &owner)
+            entry.binding_id() == owner
                 && entry.sender.same_channel(&sender)
                 && entry.is_locally_hosted()
                 && entry.is_presence_available()
@@ -216,8 +216,8 @@ impl ConnectionRegistry {
     }
 
     /// Owner-gated [`Self::send_to`]: deliver a `DirectFrame` only while the
-    /// resource's current registry entry still belongs to `owner` (the carbons
-    /// ownership token). Unlike [`Self::send_to`], it does NOT retry on a
+    /// resource's current registry entry still belongs to `owner` (its local
+    /// binding identity). Unlike [`Self::send_to`], it does NOT retry on a
     /// replacement sender — on an owner mismatch it returns `NotConnected`
     /// without delivering.
     ///
@@ -230,13 +230,11 @@ impl ConnectionRegistry {
     pub async fn send_to_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         stanza: Stanza,
     ) -> SendResult {
         let sender = match self.connections.get(jid) {
-            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().sender.clone()
-            }
+            Some(entry) if entry.value().binding_id() == *owner => entry.value().sender.clone(),
             _ => {
                 debug!("Recipient not owned by this session; not delivering");
                 return SendResult::NotConnected;
@@ -283,7 +281,7 @@ impl ConnectionRegistry {
 
     /// Owner-gated variant of [`Self::send_pending_flush`]. Delivers only if
     /// the resource's current registry entry still belongs to `owner` (the
-    /// carbons ownership token, mirroring [`Self::entry_if_owner`] /
+    /// local binding identity, mirroring [`Self::entry_if_owner`] /
     /// [`Self::try_send_outbound_if_owner`]); otherwise returns
     /// `NotConnected` without sending.
     ///
@@ -300,15 +298,13 @@ impl ConnectionRegistry {
     pub async fn send_pending_flush_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         stanza: Stanza,
         row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
         let sender = match self.connections.get(jid) {
-            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().sender.clone()
-            }
+            Some(entry) if entry.value().binding_id() == *owner => entry.value().sender.clone(),
             _ => {
                 debug!("Recipient not owned by this session for pending flush");
                 return SendResult::NotConnected;
@@ -365,7 +361,7 @@ impl ConnectionRegistry {
         else {
             return BroadcastOutcome::NotConnected;
         };
-        self.try_send_outbound_if_owner(jid, &entry.carbons_enabled, outbound)
+        self.try_send_outbound_if_owner(jid, &entry.binding_id(), outbound)
     }
 
     fn try_send_to_matching(
@@ -429,13 +425,11 @@ impl ConnectionRegistry {
     pub fn try_send_outbound_if_owner(
         &self,
         jid: &FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
         outbound: OutboundStanza,
     ) -> BroadcastOutcome {
         let entry = match self.connections.get(jid) {
-            Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().clone()
-            }
+            Some(entry) if entry.value().binding_id() == *owner => entry.value().clone(),
             _ => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
@@ -473,7 +467,7 @@ impl ConnectionRegistry {
     pub fn capture_owned_enqueue_if_owner(
         &self,
         jid: FullJid,
-        owner: Arc<AtomicBool>,
+        owner: LocalConnectionBindingId,
         outbound: OutboundStanza,
     ) -> impl FnOnce() -> BroadcastOutcome + Send + 'static {
         let connections = self.connections.clone();
@@ -481,7 +475,7 @@ impl ConnectionRegistry {
         let sm_stream_owners = self.sm_stream_owners.clone();
         move || {
             let entry = match connections.get(&jid) {
-                Some(entry) if Arc::ptr_eq(&entry.carbons_enabled, &owner) => entry.value().clone(),
+                Some(entry) if entry.binding_id() == owner => entry.value().clone(),
                 _ => {
                     crate::telemetry::reliability::increment_broadcast_not_connected();
                     return BroadcastOutcome::NotConnected;

@@ -11,7 +11,7 @@ use crate::db::Database;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -180,7 +180,7 @@ pub(crate) async fn wire_for_test(
 pub(crate) async fn track_remote_socket_for_test(
     bridge: &OrderedRelayDeliveryBridge,
     jid: &jid::FullJid,
-    owner: Arc<AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> RemoteResourceRegistrationId {
     let registration_id = RemoteResourceRegistrationId::fresh();
     bridge.remote_socket_resources.lock().await.insert(
@@ -244,13 +244,21 @@ pub struct OrderedRelayDeliveryBridge {
     /// (Full JID, socket-owner identity) → dirty flag for resyncs in
     /// flight (#1680): a failed/stale state update schedules exactly one
     /// repair loop instead of killing the live socket. Keyed per socket
-    /// incarnation (the owner flag's pointer identity) so a replacement
+    /// incarnation (its local binding identity) so a replacement
     /// socket's repair is never suppressed by a predecessor's; a failure
     /// arriving while a loop runs sets the dirty flag, which the loop
     /// consumes as another repair round before releasing the key — a
     /// failure landing after the final convergence recheck is therefore
     /// never dropped.
-    remote_state_resyncs_in_flight: Mutex<HashMap<(jid::FullJid, usize), bool>>,
+    remote_state_resyncs_in_flight: Mutex<
+        HashMap<
+            (
+                jid::FullJid,
+                waddle_xmpp::registry::LocalConnectionBindingId,
+            ),
+            bool,
+        >,
+    >,
     /// Owner side (#1685 interim): arrival-order fence for
     /// `remote_resource_update` handlers, per exact registration.
     remote_resource_update_order: RemoteResourceUpdateOrder,
@@ -348,7 +356,7 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn test_insert_remote_socket_registration(
         &self,
         jid: jid::FullJid,
-        owner: Arc<AtomicBool>,
+        owner: waddle_xmpp::registry::LocalConnectionBindingId,
         user_owner: NodeId,
     ) -> RemoteResourceRegistrationId {
         let registration_id = RemoteResourceRegistrationId::fresh();
@@ -379,7 +387,7 @@ impl OrderedRelayDeliveryBridge {
                 registration_id: RemoteResourceRegistrationId::fresh(),
                 socket_node,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
-                owner: Arc::new(AtomicBool::new(false)),
+                owner: waddle_xmpp::registry::LocalConnectionBindingId::fresh(),
             },
         );
     }

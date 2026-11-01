@@ -334,7 +334,7 @@ async fn owner_sweep_retires_obsolete_mirror_but_preserves_rebound_socket() {
     let entry = ConnectionEntry::new(tx);
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     *entry.occupancy_session.lock().expect("occupancy mutex") = Some(generation);
-    let socket_owner = entry.carbons_handle();
+    let socket_owner = entry.binding_id();
     fixture
         .socket
         .services
@@ -450,7 +450,7 @@ async fn owner_sweep_preserves_successor_registered_during_peer_absence_probe() 
     assert_mirror_exists(&fixture.owner, &fixture.services, true).await;
     let current = fixture.owner.remote_owner_resources.lock().await[&target_full()].clone();
     assert_eq!(current.registration_id, successor.registration_id);
-    assert!(Arc::ptr_eq(&current.owner, &successor.owner));
+    assert_eq!(current.owner, successor.owner);
     assert_eq!(
         fixture.owner.sweep_remote_owner_resources().await,
         SweepOutcome::Completed
@@ -793,7 +793,7 @@ async fn owner_sweep_old_registration_cannot_remove_successor_mirror() {
     // A replacement publishes a new owner while an older mirror is still inventoried.
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target_full(), entry.clone());
@@ -1102,7 +1102,7 @@ async fn owner_sweep_pending_age_survives_retries_and_clears_with_incarnation() 
     successor.registration_id = RemoteResourceRegistrationId::fresh();
     successor.socket_generation =
         RemoteResourceSocketGeneration::next(Some(original.socket_generation));
-    successor.owner = Arc::new(AtomicBool::new(false));
+    successor.owner = waddle_xmpp::registry::LocalConnectionBindingId::fresh();
     registrations.insert(target_full(), successor);
     drop(registrations);
     // A late old-incarnation retry must not re-age the successor.

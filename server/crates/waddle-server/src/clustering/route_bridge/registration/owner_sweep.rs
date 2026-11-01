@@ -1,7 +1,7 @@
 //! Reconcile routing mirrors using committed expiry or exact-resource absence.
 use super::super::{
-    Arc, Duration, HashMap, LocalResourcePresence, NodeId, NodeIdentity,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, RemoteOwnerRegistration,
+    Duration, HashMap, LocalResourcePresence, NodeId, NodeIdentity, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, RemoteOwnerRegistration,
 };
 use super::owner::remote_owner_registration_matches;
 use crate::clustering::resource_presence::{peer_resource_reachability, PeerResourceReachability};
@@ -252,7 +252,7 @@ impl OrderedRelayDeliveryBridge {
                 .user_registry
                 .ask(UnregisterAndReleaseIfEmpty {
                     jid: jid.clone(),
-                    owner: Some(Arc::clone(&registration.owner)),
+                    owner: Some(registration.owner),
                 })
                 // The outer deadline bounds enqueue plus reply. A 2s parent
                 // reply timeout would race the child's own 2s Busy result.

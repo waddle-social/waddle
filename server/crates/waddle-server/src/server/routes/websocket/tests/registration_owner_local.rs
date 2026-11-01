@@ -51,7 +51,7 @@ where
     assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
     incumbent.authenticated_session = Some(create_test_session(&state, "alice").await);
     let lifecycle = incumbent.socket_lifecycle.clone().expect("lifecycle");
-    let old_owner = incumbent.registry_owner.clone().expect("owner");
+    let old_owner = incumbent.registry_owner.expect("owner");
     let mut force_detach_rx = Some(lifecycle.entry.take_force_detach_rx().expect("control"));
     let stream_id = "owner-local-stalled-stream";
     incumbent
@@ -176,7 +176,7 @@ where
         successor.occupancy_session(),
         replacement.state.occupancy_session
     );
-    let successor_owner = successor.carbons_handle();
+    let successor_owner = successor.binding_id();
     finish_test_socket_cleanup(&state, &mut incumbent, &mut outbound_rx).await;
     assert!(state
         .deps
@@ -233,7 +233,7 @@ async fn assert_remote_replaces_owner_local(remove_route: bool, timeout_first: b
         .as_ref()
         .expect("lifecycle")
         .clone();
-    let owner = incumbent.registry_owner.clone().expect("owner");
+    let owner = incumbent.registry_owner.expect("owner");
     let mut control = lifecycle.entry.take_force_detach_rx().expect("control");
     let room = state
         .deps

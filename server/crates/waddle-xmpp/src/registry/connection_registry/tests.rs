@@ -1,7 +1,7 @@
 use super::{
     mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance, PendingFlushReserveError,
-    SendResult, Stanza,
+    FullJid, Instant, LocalConnectionBindingId, Ordering, OutboundStanza, OutboundWriteAcceptance,
+    PendingFlushReserveError, SendResult, Stanza,
 };
 use jid::Jid;
 use std::time::Duration;
@@ -135,7 +135,7 @@ async fn send_to_if_owner_delivers_only_to_the_owning_session() {
     let jid = test_jid("user1");
     let (tx, mut rx) = mpsc::channel(16);
     let owner = registry.register(jid.clone(), tx);
-    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stale_owner = LocalConnectionBindingId::fresh();
 
     // A non-matching owner token delivers nothing.
     let outcome = registry
@@ -236,7 +236,7 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
 
     let owner = registry.register_entry(jid.clone(), entry.clone());
 
-    assert!(Arc::ptr_eq(&owner, &entry.carbons_enabled));
+    assert_eq!(owner, entry.binding_id());
     assert!(registry.is_carbons_enabled(&jid));
     assert_eq!(
         registry.roster_interested_resources_for_user(&bare),
@@ -260,19 +260,48 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
 }
 
 #[test]
+fn binding_id_survives_clone_and_republication_but_is_independent_of_carbons_state() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("binding");
+    let (sender, _receiver) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(sender);
+    let binding_id = entry.binding_id();
+
+    assert_eq!(entry.clone().binding_id(), binding_id);
+    assert_eq!(
+        registry.register_entry(jid.clone(), entry.clone()),
+        binding_id
+    );
+    assert_eq!(
+        registry.register_entry(jid.clone(), entry.clone()),
+        binding_id
+    );
+
+    let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
+    let mut replacement = ConnectionEntry::new(replacement_sender);
+    replacement.carbons_enabled = entry.carbons_enabled.clone();
+    assert_ne!(replacement.binding_id(), binding_id);
+    assert_ne!(
+        registry.register_entry(jid.clone(), replacement),
+        binding_id
+    );
+    assert!(!registry.is_owned_by(&jid, &binding_id));
+}
+
+#[test]
 fn test_register_entry_if_owner_or_absent_refuses_replacement_owner() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();
     let (tx1, _rx1) = mpsc::channel(16);
     let entry1 = ConnectionEntry::new(tx1);
-    let owner1 = entry1.carbons_handle();
+    let owner1 = entry1.binding_id();
 
     assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
 
     let (tx2, _rx2) = mpsc::channel(16);
     let entry2 = ConnectionEntry::new(tx2);
-    let owner2 = entry2.carbons_handle();
+    let owner2 = entry2.binding_id();
 
     assert!(!registry.register_entry_if_owner_or_absent(jid.clone(), entry2.clone(), &owner2));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
@@ -719,12 +748,9 @@ fn test_register_with_carbons_seeds_initial_flag() {
     let jid = test_jid("user1");
     let (tx, _rx) = mpsc::channel(16);
 
-    let handle = registry.register_with_carbons(jid.clone(), tx, true);
+    let owner = registry.register_with_carbons(jid.clone(), tx, true);
 
-    assert!(
-        handle.load(Ordering::Relaxed),
-        "handle returned by register_with_carbons(.., true) should start enabled"
-    );
+    assert!(registry.is_owned_by(&jid, &owner));
     assert!(
         registry.is_carbons_enabled(&jid),
         "registry should report carbons as enabled for the seeded entry"
@@ -737,9 +763,9 @@ fn test_register_with_carbons_false_leaves_disabled() {
     let jid = test_jid("user2");
     let (tx, _rx) = mpsc::channel(16);
 
-    let handle = registry.register_with_carbons(jid.clone(), tx, false);
+    let owner = registry.register_with_carbons(jid.clone(), tx, false);
 
-    assert!(!handle.load(Ordering::Relaxed));
+    assert!(registry.is_owned_by(&jid, &owner));
     assert!(!registry.is_carbons_enabled(&jid));
 }
 
@@ -899,8 +925,9 @@ fn sm_stream_replacement_prunes_ended_owner() {
                 registry.register_entry(jid.clone(), ConnectionEntry::new(replacement_tx));
             }
             _ => {
-                let mut replacement = ConnectionEntry::new(replacement_tx);
-                replacement.carbons_enabled = owner.clone();
+                let mut replacement = registry.entry(&jid).expect("current entry");
+                replacement.sender = replacement_tx;
+                replacement.sm_stream_id = Arc::new(std::sync::Mutex::new(None));
                 assert!(registry.register_entry_if_owner_or_absent(
                     jid.clone(),
                     replacement,
@@ -977,7 +1004,7 @@ fn sm_stream_resumed_successor_rejects_stale_owner_cleanup() {
     registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
     let old_enqueue = registry.capture_owned_enqueue_if_owner(
         jid.clone(),
-        old_owner.clone(),
+        old_owner,
         OutboundStanza::new(Stanza::Message(make_test_message("alice@example.com"))),
     );
     let (new_tx, _new_rx) = mpsc::channel(4);
@@ -1252,7 +1279,7 @@ fn clear_presence_state_if_owner_refuses_stale_owner() {
 fn update_presence_state_if_owner_refuses_absent_entry() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("ghost");
-    let orphan_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let orphan_owner = LocalConnectionBindingId::fresh();
     assert!(!registry.update_presence_state_if_owner(
         &jid,
         &orphan_owner,

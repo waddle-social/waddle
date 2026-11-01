@@ -1,5 +1,4 @@
 use jid::FullJid;
-use std::sync::Arc;
 use tracing::warn;
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
@@ -12,7 +11,7 @@ use super::super::WebSocketState;
 async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -31,7 +30,7 @@ async fn unregister_remote_user_resource_if_owner(
 async fn unregister_remote_user_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 
@@ -59,7 +58,7 @@ pub(in crate::server::routes::websocket) async fn finalize_sm_after_registry_reg
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> SmFinalizationReport {
     if let Some(stream_id) = conn.pending_resume_stream_id.take() {
         return complete_pending_resume_claim(state, conn, jid, owner, stream_id).await;
@@ -88,7 +87,7 @@ async fn complete_pending_resume_claim(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: String,
 ) -> SmFinalizationReport {
     if super::flush_ingress_checkpoint(state, &conn.sm_state, &mut conn.sm_inbound_completion)
@@ -289,7 +288,7 @@ async fn reset_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) {
     if let Some(owner) = owner {
         let removed = state
@@ -302,7 +301,7 @@ async fn reset_resume_attempt(
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 jid,
-                Some(Arc::clone(owner)),
+                Some(*owner),
             )
             .await;
             unregister_remote_user_resource_if_owner(state, jid, owner).await;
@@ -357,7 +356,7 @@ async fn close_registered_resume_attempt(
     state: &WebSocketState,
     conn: &mut WsConnState,
     jid: &FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     let removed = state
         .deps
@@ -373,7 +372,7 @@ async fn close_registered_resume_attempt(
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
-            Some(Arc::clone(owner)),
+            Some(*owner),
         )
         .await;
         unregister_remote_user_resource_if_owner(state, jid, owner).await;
@@ -388,6 +387,7 @@ mod tests {
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state_with_sm_registry_and_pending_storage, register_test_connection,
     };
+    use std::sync::Arc;
     use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
     use waddle_xmpp::pending_delivery::SmSessionId;
     use waddle_xmpp::stream_management::persistence::{
@@ -466,7 +466,7 @@ mod tests {
             registry.clone(),
             stream.as_str().to_owned(),
         ));
-        conn.registry_owner = Some(owner.clone());
+        conn.registry_owner = Some(owner);
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
         let report = finalize_sm_after_registry_registration(&state, &mut conn, &jid, &owner).await;

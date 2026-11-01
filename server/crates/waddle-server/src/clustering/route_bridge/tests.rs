@@ -11,7 +11,7 @@ use super::{
     ask_error_allows_target_refresh, ask_error_is_unseen, caller_delivery_outcome,
     channel_diversion_for_ask_error, mpsc, outcome_for_ask_error, outcome_for_nack,
     remote_registration_request, remote_registration_request_from_entry,
-    replies_for_origin_handoff, validate_claims, AtomicBool, BroadcastOutcome, CancellationToken,
+    replies_for_origin_handoff, validate_claims, BroadcastOutcome, CancellationToken,
     ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, FullJidDeliveryOutcome,
     LocalMediaGrantReassertion, LocalResourcePresence, MucProxyOrigin, Mutex, NackChannelAction,
     OrderedRelayClaimRole, OrderedRelayDeliveryBridge, OrderedRelayDiversion,
@@ -43,6 +43,7 @@ use crate::clustering::ordered_relay::OrderedRelaySequence;
 use kameo::actor::Spawn;
 use libp2p::PeerId;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
 

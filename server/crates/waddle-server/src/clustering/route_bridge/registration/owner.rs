@@ -1,6 +1,6 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
 use super::super::{
-    apply_remote_resource_presence_to_registry, apply_remote_resource_state, mpsc, Arc, AtomicBool,
+    apply_remote_resource_presence_to_registry, apply_remote_resource_state, mpsc, Arc,
     ConnectionEntry, Mutex, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     RegisterUserResourceIfOwnerOrAbsent, RelayRegisterRemoteUserResource,
     RelayRemoteResourceRegistrationReply, RelayRemoteResourceRegistrationStatus,
@@ -259,7 +259,7 @@ impl OrderedRelayDeliveryBridge {
             incumbent.state() == waddle_xmpp::registry::SocketCleanupState::Running
                 || services
                     .connection_registry
-                    .is_owned_by(&msg.jid, &incumbent.entry.carbons_handle())
+                    .is_owned_by(&msg.jid, &incumbent.entry.binding_id())
         }) || !bind_guard.pending_retirements().is_empty()
             || !bind_guard.pending_actor_retirements().is_empty()
         {
@@ -364,14 +364,14 @@ impl OrderedRelayDeliveryBridge {
         let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
         let entry = ConnectionEntry::remote_hosted(tx);
         apply_remote_resource_state(&entry, &msg.state);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         let force_detach_rx = entry.take_force_detach_rx();
         match services
             .user_registry
             .ask(RegisterUserResourceIfOwnerOrAbsent {
                 jid: msg.jid.clone(),
                 entry: entry.clone(),
-                owner: owner.clone(),
+                owner,
             })
             .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
             .reply_timeout(REMOTE_OWNER_REGISTER_USER_REGISTRY_REPLY_TIMEOUT)
@@ -418,7 +418,7 @@ impl OrderedRelayDeliveryBridge {
                     registration_id: msg.registration_id,
                     socket_node: msg.socket_node.clone(),
                     socket_generation: msg.socket_generation,
-                    owner: owner.clone(),
+                    owner,
                 };
                 let registered = services
                     .connection_registry
@@ -656,7 +656,7 @@ impl OrderedRelayDeliveryBridge {
 pub(super) async fn unregister_remote_owner_actor_entry(
     services: &OrderedRelayDeliveryServices,
     jid: &jid::FullJid,
-    owner: &Arc<AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> RemoteOwnerActorUnregisterOutcome {
     for attempt in 0..REMOTE_RESOURCE_BUSY_UNREGISTER_ATTEMPTS {
         match services
@@ -664,7 +664,7 @@ pub(super) async fn unregister_remote_owner_actor_entry(
             .ask(
                 waddle_xmpp::registry::user_registry::UnregisterAndReleaseIfEmptyWithoutPendingRecord {
                     jid: jid.clone(),
-                    owner: Some(owner.clone()),
+                    owner: Some(*owner),
                 },
             )
             .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
@@ -686,7 +686,7 @@ pub(super) async fn unregister_remote_owner_actor_entry(
                     .user_registry
                     .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
                         jid: jid.clone(),
-                        owner: Some(owner.clone()),
+                        owner: Some(*owner),
                     })
                     .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
                     .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
@@ -716,7 +716,7 @@ pub(super) async fn unregister_remote_owner_actor_entry(
                     .user_registry
                     .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
                         jid: jid.clone(),
-                        owner: Some(owner.clone()),
+                        owner: Some(*owner),
                     })
                     .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
                     .reply_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
@@ -761,7 +761,7 @@ pub(super) fn remote_owner_registration_matches(
     left.registration_id == right.registration_id
         && left.socket_node == right.socket_node
         && left.socket_generation == right.socket_generation
-        && Arc::ptr_eq(&left.owner, &right.owner)
+        && left.owner == right.owner
 }
 
 #[cfg(test)]
@@ -777,6 +777,7 @@ mod tests {
     use crate::clustering::trace_context::RelayTraceContext;
     use crate::clustering::NodeId;
     use crate::config::ClusteringMessagingConfig;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
@@ -933,6 +934,10 @@ mod tests {
             NodeId::new("replacement-socket".to_owned()),
         )
         .await;
+        let replacement_jid = replacement.jid.clone();
+        let replacement_registration_id = replacement.registration_id;
+        let replacement_socket_generation = replacement.socket_generation;
+        let replacement_socket_node = replacement.socket_node.clone();
         assert_eq!(
             bridge
                 .register_remote_user_resource_on_owner(replacement)
@@ -940,6 +945,27 @@ mod tests {
                 .status,
             RelayRemoteResourceRegistrationStatus::Registered,
             "an actor entry from a timed-out ask must not block its successor"
+        );
+        let mirror = bridge
+            .remote_owner_resources
+            .lock()
+            .await
+            .get(&replacement_jid)
+            .cloned()
+            .expect("remote owner mirror");
+        let (sender, _receiver) = mpsc::channel(1);
+        let socket_entry = ConnectionEntry::new(sender);
+        assert_ne!(mirror.owner, socket_entry.binding_id());
+        assert_eq!(mirror.registration_id, replacement_registration_id);
+        assert_eq!(mirror.socket_generation, replacement_socket_generation);
+        assert_eq!(mirror.socket_node, replacement_socket_node);
+        assert_eq!(
+            services
+                .connection_registry
+                .entry(&replacement_jid)
+                .expect("remote-hosted registry entry")
+                .binding_id(),
+            mirror.owner
         );
     }
 
@@ -954,7 +980,7 @@ mod tests {
             .expect("valid full jid");
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(target.clone(), entry.clone());
@@ -1359,7 +1385,7 @@ mod tests {
         .expect("authority publication is independent of actor waits");
         let (tx, _rx) = mpsc::channel(1);
         let replacement_entry = ConnectionEntry::new(tx);
-        let replacement_owner = replacement_entry.carbons_handle();
+        let replacement_owner = replacement_entry.binding_id();
         if publish_successor_route {
             services
                 .connection_registry

@@ -1,9 +1,9 @@
 //! Timestamp-only relay metadata preserves native SM custody without ingress authority.
 use super::{
     envelope_for_services, mpsc, origin_identity, receiver_identity, sender_full,
-    services_with_claims, sign_envelope, target_full, test_peer_id, Arc, AtomicBool,
-    CancellationToken, ClusteringMessagingConfig, ConnectionEntry, Keypair, Lang, Message, NodeId,
-    NodeIdentity, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNack,
+    services_with_claims, sign_envelope, target_full, test_peer_id, Arc, CancellationToken,
+    ClusteringMessagingConfig, ConnectionEntry, Keypair, Lang, Message, NodeId, NodeIdentity,
+    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, OrderedRelayNack,
     OrderedRelayNackReason, OrderedRelayPayload, OrderedRelayReply, OutboundStanza,
     RelayRouteRemoteResourceStanza, RelayTraceContext, RemoteOwnerRegistration,
     RemoteResourceOutboundFrame, RemoteResourceRegistrationId, RemoteResourceRouteTarget,
@@ -116,10 +116,13 @@ pub(crate) struct RemoteOwnerFixture {
 pub(crate) async fn register_live_target(
     services: &OrderedRelayDeliveryServices,
     target: &jid::FullJid,
-) -> (Arc<AtomicBool>, mpsc::Receiver<OutboundStanza>) {
+) -> (
+    waddle_xmpp::registry::LocalConnectionBindingId,
+    mpsc::Receiver<OutboundStanza>,
+) {
     let (sender, receiver) = mpsc::channel(4);
     let entry = ConnectionEntry::new(sender);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry.clone());
@@ -154,7 +157,7 @@ pub(crate) async fn remote_owner_fixture() -> RemoteOwnerFixture {
     let source = sender_full();
     let (sender, source_receiver) = mpsc::channel(1);
     let entry = ConnectionEntry::new(sender);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(source.clone(), entry.clone());

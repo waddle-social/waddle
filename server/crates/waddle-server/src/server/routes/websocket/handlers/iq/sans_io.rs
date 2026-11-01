@@ -1098,7 +1098,7 @@ struct IqReplyAddressing<'a> {
 async fn mirror_remote_carbons_update(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     enabled: bool,
 ) {
     if let Some(bridge) = state
@@ -1122,7 +1122,7 @@ async fn mirror_remote_carbons_update(
 async fn mirror_remote_carbons_update(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     _enabled: bool,
 ) {
 }

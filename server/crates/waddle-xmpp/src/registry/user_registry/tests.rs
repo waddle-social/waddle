@@ -16,6 +16,7 @@ use crate::ownership::{
 use crate::registry::connection_registry::{ConnectionEntry, ForceDetachOutcome, OutboundStanza};
 use crate::registry::user_actor::delivery::GetConnectionEntry;
 use crate::registry::user_actor::GetResources;
+use crate::registry::LocalConnectionBindingId;
 use async_trait::async_trait;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
@@ -2731,9 +2732,9 @@ async fn busy_force_detach_records_pending_unregister_and_retry_frees_slot() {
 fn duplicate_owner_gated_pending_unregister_uses_one_inventory_entry() {
     let mut registry = UserRegistryActor::new();
     let jid = full("dedupe-owner", "phone");
-    let owner = Arc::new(AtomicBool::new(true));
+    let owner = LocalConnectionBindingId::fresh();
 
-    registry.remember_pending_unregister(jid.clone(), Some(owner.clone()));
+    registry.remember_pending_unregister(jid.clone(), Some(owner));
     registry.remember_pending_unregister(jid, Some(owner));
 
     assert_eq!(registry.pending_unregisters.len(), 1);
@@ -2794,7 +2795,7 @@ async fn busy_owner_gated_pending_unregister_allows_immediate_resumed_registrati
     let bare_jid = jid.to_bare();
     let (old_tx, _old_rx) = outbound_channel();
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     registry
         .ask(RegisterUserResource {
             jid: jid.clone(),
@@ -2836,14 +2837,14 @@ async fn busy_owner_gated_pending_unregister_allows_immediate_resumed_registrati
 
     let (fresh_tx, _fresh_rx) = outbound_channel();
     let fresh_entry = ConnectionEntry::new(fresh_tx);
-    let fresh_owner = fresh_entry.carbons_handle();
+    let fresh_owner = fresh_entry.binding_id();
     release.notify_one();
     assert!(
         registry
             .ask(RegisterUserResourceIfOwnerOrAbsent {
                 jid: jid.clone(),
                 entry: fresh_entry,
-                owner: fresh_owner.clone(),
+                owner: fresh_owner,
             })
             .await
             .expect("immediate resumed registration"),
@@ -2860,7 +2861,7 @@ async fn busy_owner_gated_pending_unregister_allows_immediate_resumed_registrati
         .await
         .expect("get fresh entry")
         .expect("fresh entry");
-    assert!(Arc::ptr_eq(&registered.carbons_handle(), &fresh_owner));
+    assert!(registered.binding_id() == fresh_owner);
     assert_eq!(registry.ask(UserCount).await.expect("count"), 1);
 }
 
@@ -2870,7 +2871,7 @@ async fn stale_owner_gated_pending_unregister_preserves_fresh_same_resource() {
     let jid = full("stale-pending", "phone");
     let (old_tx, _old_rx) = outbound_channel();
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     registry
         .ask(RegisterUserResource {
             jid: jid.clone(),
@@ -2881,8 +2882,8 @@ async fn stale_owner_gated_pending_unregister_preserves_fresh_same_resource() {
 
     let (fresh_tx, _fresh_rx) = outbound_channel();
     let fresh_entry = ConnectionEntry::new(fresh_tx);
-    let fresh_owner = fresh_entry.carbons_handle();
-    assert!(!Arc::ptr_eq(&old_owner, &fresh_owner));
+    let fresh_owner = fresh_entry.binding_id();
+    assert!(old_owner != fresh_owner);
     registry
         .ask(RegisterUserResource {
             jid: jid.clone(),
@@ -2903,7 +2904,7 @@ async fn stale_owner_gated_pending_unregister_preserves_fresh_same_resource() {
             .ask(RegisterUserResourceIfOwnerOrAbsent {
                 jid: jid.clone(),
                 entry: fresh_entry,
-                owner: fresh_owner.clone(),
+                owner: fresh_owner,
             })
             .await
             .expect("re-register fresh owner"),
@@ -2922,7 +2923,7 @@ async fn stale_owner_gated_pending_unregister_preserves_fresh_same_resource() {
         .await
         .expect("get fresh entry")
         .expect("fresh entry");
-    assert!(Arc::ptr_eq(&registered.carbons_handle(), &fresh_owner));
+    assert!(registered.binding_id() == fresh_owner);
 }
 
 #[tokio::test]
@@ -3003,7 +3004,7 @@ async fn pending_unregister_state_loss_does_not_recreate_the_user_actor() {
     let bare_jid = jid.to_bare();
     let (old_tx, _old_rx) = outbound_channel();
     let old_entry = ConnectionEntry::new(old_tx);
-    let old_owner = old_entry.carbons_handle();
+    let old_owner = old_entry.binding_id();
     registry
         .ask(RegisterUserResource {
             jid: jid.clone(),

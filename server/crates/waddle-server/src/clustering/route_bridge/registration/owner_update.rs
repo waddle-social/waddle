@@ -1,9 +1,8 @@
 use super::super::{
-    ActorRef, Arc, AtomicBool, ConnectionEntry, ConnectionRegistry, Future,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, Ordering,
-    RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUpdateReply,
-    RelayRemoteResourceUpdateStatus, RelayUpdateRemoteUserResource, RemoteOwnerRegistration,
-    RemoteResourceStateUpdate, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+    ActorRef, Arc, ConnectionEntry, ConnectionRegistry, Future, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, Ordering, RelayRemoteResourceRegistrationStatus,
+    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus, RelayUpdateRemoteUserResource,
+    RemoteOwnerRegistration, RemoteResourceStateUpdate, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
 };
 use super::apply_remote_resource_presence_to_registry;
 use super::owner_update_order::{
@@ -193,7 +192,7 @@ pub(in super::super) async fn owner_remote_entry_if_current(
     actor: &ActorRef<waddle_xmpp::registry::user_actor::UserActor>,
     registry: &ConnectionRegistry,
     jid: &jid::FullJid,
-    owner: &Arc<AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Result<ConnectionEntry, RelayRemoteResourceUpdateStatus> {
     let actor_entry = match actor
         .ask(waddle_xmpp::registry::GetConnectionEntry { jid: jid.clone() })
@@ -205,7 +204,7 @@ pub(in super::super) async fn owner_remote_entry_if_current(
         Ok(None) => return Err(RelayRemoteResourceUpdateStatus::StaleRegistration),
         Err(_) => return Err(RelayRemoteResourceUpdateStatus::Unavailable),
     };
-    if !Arc::ptr_eq(&actor_entry.carbons_enabled, owner) {
+    if actor_entry.binding_id() != *owner {
         return Err(RelayRemoteResourceUpdateStatus::StaleRegistration);
     }
     let Some(registry_entry) = registry.entry_if_owner(jid, owner) else {
@@ -308,7 +307,7 @@ mod tests {
         let target = target.parse::<jid::FullJid>().expect("valid full jid");
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(target.clone(), entry.clone());

@@ -1,7 +1,7 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
 use super::super::{
     ask_error_definitively_proves_remote_resource_ref_stale, ask_error_is_owner_lookup_miss, Arc,
-    AtomicBool, ClaimSnapshot, ConnectionEntry, ForceDetachOutcome, ForceDetachRequest, NodeId,
+    ClaimSnapshot, ConnectionEntry, ForceDetachOutcome, ForceDetachRequest, NodeId,
     OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, PendingRemoteSocketUnregister,
     PendingRemoteSocketUnregisterKey, RelayAskError, RelayForceDetachRemoteUserResource,
     RelayForceDetachRemoteUserResourceReply, RelayHandle, RelayRegisterRemoteUserResource,
@@ -212,7 +212,7 @@ impl OrderedRelayDeliveryBridge {
         self: &Arc<Self>,
         jid: &jid::FullJid,
         entry: ConnectionEntry,
-        owner: Arc<AtomicBool>,
+        owner: waddle_xmpp::registry::LocalConnectionBindingId,
     ) -> RemoteResourceRegisterOutcome {
         let Some(services) = self.services.get().cloned() else {
             return RemoteResourceRegisterOutcome::Failed;
@@ -323,14 +323,14 @@ impl OrderedRelayDeliveryBridge {
                         .is_some();
                     let slot_available = registrations
                         .get(jid)
-                        .is_none_or(|current| Arc::ptr_eq(&current.owner, &owner));
+                        .is_none_or(|current| current.owner == owner);
                     if socket_still_ours && slot_available {
                         registrations.insert(
                             jid.clone(),
                             RemoteSocketRegistration {
                                 registration_id,
                                 socket_generation,
-                                owner: Arc::clone(&owner),
+                                owner,
                                 user_owner: user_owner.clone(),
                             },
                         );
@@ -471,14 +471,12 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn unregister_remote_user_resource_if_owner(
         self: &Arc<Self>,
         jid: &jid::FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     ) -> RemoteResourceUnregisterOutcome {
         let registration = {
             let mut registrations = self.remote_socket_resources.lock().await;
             match registrations.get(jid) {
-                Some(registration) if Arc::ptr_eq(&registration.owner, owner) => {
-                    registrations.remove(jid)
-                }
+                Some(registration) if registration.owner == *owner => registrations.remove(jid),
                 _ => None,
             }
         };
@@ -705,14 +703,14 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn update_remote_user_resource_if_owner(
         self: &Arc<Self>,
         jid: &jid::FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
         update: RemoteResourceStateUpdate,
     ) {
         let registration = {
             let registrations = self.remote_socket_resources.lock().await;
             registrations
                 .get(jid)
-                .filter(|registration| Arc::ptr_eq(&registration.owner, owner))
+                .filter(|registration| registration.owner == *owner)
                 .cloned()
         };
         let Some(registration) = registration else {
@@ -819,12 +817,16 @@ impl OrderedRelayDeliveryBridge {
     /// re-registration IS correct: the owner proves the registration stale
     /// (its mirror is a different registration, so displacement cannot hit
     /// this socket), or ownership moved to this node (local promotion).
-    fn schedule_remote_state_resync(self: &Arc<Self>, jid: &jid::FullJid, owner: &Arc<AtomicBool>) {
+    fn schedule_remote_state_resync(
+        self: &Arc<Self>,
+        jid: &jid::FullJid,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    ) {
         let bridge = Arc::clone(self);
         let jid = jid.clone();
-        let owner = Arc::clone(owner);
+        let owner = *owner;
         tokio::spawn(async move {
-            let key = (jid.clone(), Arc::as_ptr(&owner) as usize);
+            let key = (jid.clone(), owner);
             {
                 let mut in_flight = bridge.remote_state_resyncs_in_flight.lock().await;
                 if let Some(dirty) = in_flight.get_mut(&key) {
@@ -900,7 +902,7 @@ impl OrderedRelayDeliveryBridge {
     async fn run_remote_state_resync_attempt(
         self: &Arc<Self>,
         jid: &jid::FullJid,
-        owner: &Arc<AtomicBool>,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     ) -> bool {
         let Some(services) = self.services.get().cloned() else {
             return true;
@@ -914,7 +916,7 @@ impl OrderedRelayDeliveryBridge {
             let registrations = self.remote_socket_resources.lock().await;
             registrations
                 .get(jid)
-                .filter(|registration| Arc::ptr_eq(&registration.owner, owner))
+                .filter(|registration| registration.owner == *owner)
                 .cloned()
         };
         let Some(registration) = registration else {
@@ -926,7 +928,7 @@ impl OrderedRelayDeliveryBridge {
             // NotRemote means ownership meanwhile moved local, where the
             // mirror register is the promotion.
             return match self
-                .try_register_remote_user_resource(jid, entry, Arc::clone(owner))
+                .try_register_remote_user_resource(jid, entry, *owner)
                 .await
             {
                 RemoteResourceRegisterOutcome::Registered => {
@@ -1164,7 +1166,7 @@ impl OrderedRelayDeliveryBridge {
             current.registration_id == registration.registration_id
                 && current.socket_generation == registration.socket_generation
                 && current.user_owner == registration.user_owner
-                && Arc::ptr_eq(&current.owner, &registration.owner)
+                && current.owner == registration.owner
         }) {
             registrations.remove(jid);
         }
@@ -1173,7 +1175,7 @@ impl OrderedRelayDeliveryBridge {
     pub(in super::super) async fn remove_remote_socket_registration_if_snapshot(
         &self,
         remote_origin: &RemoteResourceOriginSnapshot,
-        owner: &Arc<AtomicBool>,
+        owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     ) {
         let mut registrations = self.remote_socket_resources.lock().await;
         if registrations
@@ -1181,7 +1183,7 @@ impl OrderedRelayDeliveryBridge {
             .is_some_and(|registration| {
                 registration.registration_id == remote_origin.registration_id
                     && registration.socket_generation == remote_origin.socket_generation
-                    && Arc::ptr_eq(&registration.owner, owner)
+                    && registration.owner == *owner
             })
         {
             registrations.remove(&remote_origin.jid);
@@ -1637,7 +1639,7 @@ mod tests {
             .expect("valid full jid");
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(jid.clone(), entry.clone());
@@ -1650,7 +1652,7 @@ mod tests {
             RemoteSocketRegistration {
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
-                owner: Arc::clone(&owner),
+                owner,
                 user_owner: NodeId::new("owner-node".to_string()),
             },
         );
@@ -1955,7 +1957,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
         *entry.occupancy_session.lock().unwrap() = Some(generation);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         let mut cleanup_rx = entry.take_force_detach_rx().unwrap();
         let mut bind = state
             .deps
@@ -1989,7 +1991,7 @@ mod tests {
                 RemoteSocketRegistration {
                     registration_id,
                     socket_generation: RemoteResourceSocketGeneration::next(None),
-                    owner: owner.clone(),
+                    owner,
                     user_owner: NodeId::new("owner-node".to_owned()),
                 },
             );
@@ -2168,7 +2170,7 @@ mod tests {
             .expect("valid full jid");
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(jid.clone(), entry.clone());

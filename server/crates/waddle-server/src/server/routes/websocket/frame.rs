@@ -751,7 +751,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {
@@ -812,7 +812,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {

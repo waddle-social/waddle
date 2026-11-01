@@ -1,6 +1,6 @@
 use super::{
-    Arc, AtomicBool, BTreeMap, BTreeSet, CarbonKind, ConnectionEntry, DeliveryKind, Duration,
-    Entity, FullJidDeliveryOutcome, Future, Keypair, MucProxyOrigin, NodeId, NodeIdentity,
+    Arc, BTreeMap, BTreeSet, CarbonKind, ConnectionEntry, DeliveryKind, Duration, Entity,
+    FullJidDeliveryOutcome, Future, Keypair, MucProxyOrigin, NodeId, NodeIdentity,
     OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDeliveryServices, OrderedRelayMucProxyKind,
     OrderedRelayPayload, Ordering, OriginInboundSequence, Pin, PresenceState, RemoteElement,
     RemoteStanza, RemoteStanzaEnvelope, RosterItem, RosterVersion, Stanza,
@@ -398,7 +398,7 @@ pub(super) enum RemoteResourceOriginRefresh {
 pub(super) struct RemoteSocketRegistration {
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
-    pub(super) owner: Arc<AtomicBool>,
+    pub(super) owner: waddle_xmpp::registry::LocalConnectionBindingId,
     pub(super) user_owner: NodeId,
 }
 
@@ -433,7 +433,7 @@ pub(super) struct RemoteOwnerRegistration {
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_node: NodeId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
-    pub(super) owner: Arc<AtomicBool>,
+    pub(super) owner: waddle_xmpp::registry::LocalConnectionBindingId,
 }
 
 /// Each live mirror has exactly one sweep slot. Freezing a finite round keeps

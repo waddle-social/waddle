@@ -107,7 +107,7 @@ async fn ingress_append_authority(
     bridge.wire(services.clone());
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(source.clone(), entry.clone());
@@ -335,7 +335,7 @@ async fn ingress_append_authority(
                 let alternate = sender_full();
                 let (tx, _alternate_rx) = mpsc::channel(1);
                 let entry = ConnectionEntry::new(tx);
-                let owner = entry.carbons_handle();
+                let owner = entry.binding_id();
                 services
                     .connection_registry
                     .register_entry(alternate.clone(), entry.clone());
@@ -573,7 +573,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
     let stanza = Stanza::Message(message.clone());
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(source.clone(), entry.clone());
@@ -915,7 +915,7 @@ impl RegisteredRemoteOwner {
         message.to = Some(recipient.clone().into());
         let (tx, _rx) = mpsc::channel(1);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(source.clone(), entry.clone());

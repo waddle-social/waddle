@@ -103,7 +103,7 @@ impl SmEnableCommit {
         sm_state: &mut StreamManagementState,
         sm_ingress_fence: &mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         bound_jid: Option<&jid::FullJid>,
-        registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     ) {
         let registry_published = match (bound_jid, registry_owner) {
             (Some(jid), Some(owner)) => state
@@ -191,7 +191,7 @@ impl Drop for SmEnableClaimGuard {
 pub(in crate::server::routes::websocket) fn terminate_if_demoted_during_publication(
     state: &WebSocketState,
     jid: &jid::FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
 ) {
     let Some(stream_id) = stream_id.map(waddle_xmpp::pending_delivery::SmSessionId::as_str) else {

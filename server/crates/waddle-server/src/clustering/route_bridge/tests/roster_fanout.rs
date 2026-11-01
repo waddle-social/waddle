@@ -88,7 +88,7 @@ impl RemoteRosterFixture {
             ))))
             .expect("fill owner mirror before fanout");
         let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-        let mirror_owner = mirror_entry.carbons_handle();
+        let mirror_owner = mirror_entry.binding_id();
         state
             .deps
             .protocol
@@ -118,7 +118,7 @@ impl RemoteRosterFixture {
         socket_bridge.wire(socket_services.clone());
         let (socket_sender, socket_receiver) = mpsc::channel(4);
         let socket_entry = ConnectionEntry::new(socket_sender);
-        let socket_owner = socket_entry.carbons_handle();
+        let socket_owner = socket_entry.binding_id();
         socket_services
             .connection_registry
             .register_entry(target.clone(), socket_entry);
@@ -466,7 +466,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     let [remote, local] = <[_; 2]>::try_from(order.clone()).expect("two live resources");
     let (mirror_sender, mut mirror_receiver) = mpsc::channel(2);
     let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-    let mirror_owner = mirror_entry.carbons_handle();
+    let mirror_owner = mirror_entry.binding_id();
     registry.register_entry(remote.clone(), mirror_entry);
     let (local_sender, mut local_receiver) = mpsc::channel(2);
     registry.register_entry(local.clone(), ConnectionEntry::new(local_sender));
@@ -485,7 +485,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     let socket_entry = socket_registry
         .entry(&fixture.target)
         .expect("actual B socket");
-    let socket_owner = socket_entry.carbons_handle();
+    let socket_owner = socket_entry.binding_id();
     socket_registry.register_entry(remote.clone(), socket_entry);
     let registration_id = fixture
         .socket_bridge

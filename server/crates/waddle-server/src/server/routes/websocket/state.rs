@@ -1788,7 +1788,7 @@ pub(super) struct WsConnState {
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
-    pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
     pub(super) write_interruption: tokio_util::sync::CancellationToken,
     /// Resume preflight is serviced only by this connection's owning task,

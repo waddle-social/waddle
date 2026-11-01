@@ -115,7 +115,7 @@ async fn socket_registered_with_departed_owner(
     let target = target_full();
     let (tx, _rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);
