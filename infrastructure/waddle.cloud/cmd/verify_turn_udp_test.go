@@ -1,14 +1,48 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/turnprobe"
 )
+
+func TestTURNVerifierRequiresAuthenticationAndEchoPeer(t *testing.T) {
+	t.Setenv("TURN_USERNAME", "")
+	t.Setenv("TURN_PASSWORD", "")
+	command := newVerifyTurnUDPCmd()
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&output)
+	command.SetArgs([]string{"--peer", "192.0.2.10:3479"})
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "TURN_USERNAME") {
+		t.Fatalf("missing credentials must fail before reporting listener reachability, got %v", err)
+	}
+	if strings.Contains(output.String(), "is reachable") {
+		t.Fatal("unauthenticated Binding must not establish relay success")
+	}
+	command = newVerifyTurnUDPCmd()
+	t.Setenv("TURN_USERNAME", "user")
+	t.Setenv("TURN_PASSWORD", "secret-password")
+	command.SetArgs(nil)
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "peer") || strings.Contains(err.Error(), "secret-password") {
+		t.Fatalf("missing controlled peer must fail without leaking credentials, got %v", err)
+	}
+}
+
+func TestTURNVerifierRejectsUnboundedTimeout(t *testing.T) {
+	command := newVerifyTurnUDPCmd()
+	command.SetArgs([]string{"--timeout", "0s"})
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("zero timeout must not start an unbounded probe, got %v", err)
+	}
+}
 
 // stunBindingSuccess mirrors a TURN/STUN server reply: a Binding success
 // response echoing the request transaction id and carrying an
@@ -107,5 +141,41 @@ func TestUDPRoundTripperTimesOutWhenUnreachable(t *testing.T) {
 	// 203.0.113.0/24 (TEST-NET-3) is reserved and unrouted, so nothing replies.
 	if _, err := turnprobe.Probe(udpRoundTripper("203.0.113.1:30478", 200*time.Millisecond)); err == nil {
 		t.Fatal("expected timeout error for unreachable address, got nil")
+	}
+}
+
+// udpRoundTripper returns a turnprobe.RoundTripper that performs one
+// request/response exchange against addr over UDP, bounded by timeout.
+func udpRoundTripper(addr string, timeout time.Duration) turnprobe.RoundTripper {
+	return func(request []byte) ([]byte, error) {
+		conn, err := net.DialTimeout("udp", addr, timeout)
+		if err != nil {
+			return nil, fmt.Errorf("dial udp %s: %w", addr, err)
+		}
+		defer conn.Close()
+
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write(request); err != nil {
+			return nil, fmt.Errorf("write request: %w", err)
+		}
+
+		// Correlate the reply to the request: a connected UDP socket still
+		// admits stray/stale datagrams from the same peer, so discard any
+		// whose transaction id does not match and keep reading until the
+		// deadline rather than reporting a false "unreachable".
+		var want [12]byte
+		copy(want[:], request[8:20])
+		buf := make([]byte, 1500)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return nil, fmt.Errorf("read response: %w", err)
+			}
+			if n >= 20 && [12]byte(buf[8:20]) == want {
+				return append([]byte(nil), buf[:n]...), nil
+			}
+		}
 	}
 }

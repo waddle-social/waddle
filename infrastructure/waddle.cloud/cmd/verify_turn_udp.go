@@ -1,86 +1,96 @@
 package cmd
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
-	"net"
+	"net/netip"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/waddle-social/waddle/infrastructure/waddle.cloud/internal/turnprobe"
 )
 
-// defaultTurnUDPAddr is the production LiveKit embedded-TURN UDP listener
-// advertised to clients (turn.waddle.social, NodePort 30478/UDP). It is
-// kept in lockstep with gitops/livekit-sfu/helmrelease.yaml.
 const defaultTurnUDPAddr = "turn.waddle.social:30478"
 
-var verifyTurnUDPCmd = &cobra.Command{
-	Use:   "verify-turn-udp",
-	Short: "Probe the LiveKit TURN/UDP relay for external reachability",
-	Long: "Send a STUN Binding request to the LiveKit embedded-TURN UDP " +
-		"listener and report whether a response returns. A success proves a " +
-		"UDP datagram traversed the NodePort and node firewall to the TURN " +
-		"server, so LiveKit can hand clients a usable udp relay candidate " +
-		"instead of silently forcing calls onto the TCP/443 relay. " +
-		"This relies on the embedded TURN server answering an unauthenticated " +
-		"STUN Binding request (the base STUN method, which pion/turn serves on " +
-		"the TURN port); a NOT-reachable result against a known-good data plane " +
-		"may indicate that assumption changed (e.g. after a LiveKit upgrade).",
-	RunE: runVerifyTurnUDP,
+var verifyTurnUDPCmd = newVerifyTurnUDPCmd()
+
+func newVerifyTurnUDPCmd() *cobra.Command {
+	command := &cobra.Command{
+		Use:   "verify-turn-udp",
+		Short: "Qualify authenticated TURN relay over UDP or TLS",
+		Long: "Allocate an authenticated UDP relay, create a permission and channel, " +
+			"and verify bidirectional payload echo through TURN. This requires an " +
+			"explicit controlled UDP echo peer allowed by the qualification server. " +
+			"The production SFU media port is not an echo service; use real calls " +
+			"to qualify the production policy. Credentials come only from " +
+			"TURN_USERNAME and TURN_PASSWORD. TLS certificates are verified.",
+		Args: cobra.NoArgs,
+		RunE: runVerifyTurnUDP,
+	}
+	command.Flags().String("addr", defaultTurnUDPAddr, "TURN host:port (TLS default: turn.waddle.social:443)")
+	command.Flags().String("transport", "udp", "client-to-TURN transport: udp or tls")
+	command.Flags().String("peer", "", "explicit controlled UDP echo peer IP:port in an isolated qualification environment")
+	command.Flags().String("ca", "", "additional PEM CA certificate for an isolated TLS qualification server")
+	command.Flags().Duration("timeout", 3*time.Second, "total probe deadline, greater than zero and at most 10s")
+	return command
 }
 
 func runVerifyTurnUDP(cmd *cobra.Command, _ []string) error {
-	addr, _ := cmd.Flags().GetString("addr")
 	timeout, _ := cmd.Flags().GetDuration("timeout")
-
-	reflexive, err := turnprobe.Probe(udpRoundTripper(addr, timeout))
+	if timeout <= 0 || timeout > 10*time.Second {
+		return errors.New("timeout must be greater than zero and at most 10s")
+	}
+	username, password := os.Getenv("TURN_USERNAME"), os.Getenv("TURN_PASSWORD")
+	if username == "" || password == "" {
+		return errors.New("TURN_USERNAME and TURN_PASSWORD environment variables are required")
+	}
+	peerText, _ := cmd.Flags().GetString("peer")
+	peer, err := netip.ParseAddrPort(peerText)
 	if err != nil {
-		return fmt.Errorf("TURN/UDP relay at %s is NOT reachable: %w", addr, err)
+		return errors.New("peer must name an explicit controlled UDP echo peer IP:port")
 	}
-
-	fmt.Fprintf(cmd.OutOrStdout(),
-		"TURN/UDP relay at %s is reachable; server-reflexive address %s\n", addr, reflexive)
-	return nil
-}
-
-// udpRoundTripper returns a turnprobe.RoundTripper that performs one
-// request/response exchange against addr over UDP, bounded by timeout.
-func udpRoundTripper(addr string, timeout time.Duration) turnprobe.RoundTripper {
-	return func(request []byte) ([]byte, error) {
-		conn, err := net.DialTimeout("udp", addr, timeout)
+	transportText, _ := cmd.Flags().GetString("transport")
+	transport := turnprobe.Transport(transportText)
+	if transport != turnprobe.UDP && transport != turnprobe.TLS {
+		return errors.New("transport must be udp or tls")
+	}
+	address, _ := cmd.Flags().GetString("addr")
+	if transport == turnprobe.TLS && !cmd.Flags().Changed("addr") {
+		address = "turn.waddle.social:443"
+	}
+	config := turnprobe.RelayConfig{ServerAddr: address, Transport: transport, Username: username, Password: password, Peer: peer}
+	caFile, _ := cmd.Flags().GetString("ca")
+	if caFile != "" {
+		if transport != turnprobe.TLS {
+			return errors.New("ca is only valid for TLS transport")
+		}
+		pem, err := os.ReadFile(caFile)
 		if err != nil {
-			return nil, fmt.Errorf("dial udp %s: %w", addr, err)
+			return fmt.Errorf("read TURN qualification CA: %w", err)
 		}
-		defer conn.Close()
-
-		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-			return nil, err
+		roots, err := x509.SystemCertPool()
+		if err != nil {
+			return fmt.Errorf("read system TLS roots: %w", err)
 		}
-		if _, err := conn.Write(request); err != nil {
-			return nil, fmt.Errorf("write request: %w", err)
+		if !roots.AppendCertsFromPEM(pem) {
+			return errors.New("TURN qualification CA has no valid PEM certificates")
 		}
-
-		// Correlate the reply to the request: a connected UDP socket still
-		// admits stray/stale datagrams from the same peer, so discard any
-		// whose transaction id does not match and keep reading until the
-		// deadline rather than reporting a false "unreachable".
-		var want [12]byte
-		copy(want[:], request[8:20])
-		buf := make([]byte, 1500)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return nil, fmt.Errorf("read response: %w", err)
-			}
-			if n >= 20 && [12]byte(buf[8:20]) == want {
-				return append([]byte(nil), buf[:n]...), nil
-			}
-		}
+		config.TLSConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+	defer cancel()
+	result, err := turnprobe.VerifyRelay(ctx, config)
+	if err != nil {
+		return fmt.Errorf("TURN/%s authenticated bidirectional relay at %s was NOT verified: %w", transport, address, err)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "TURN/%s authenticated bidirectional relay at %s verified through %s to controlled peer %s\n", transport, address, result.RelayedAddr, peer)
+	return err
 }
 
 func init() {
-	verifyTurnUDPCmd.Flags().String("addr", defaultTurnUDPAddr, "host:port of the TURN/UDP listener to probe")
-	verifyTurnUDPCmd.Flags().Duration("timeout", 3*time.Second, "round-trip timeout")
 	rootCmd.AddCommand(verifyTurnUDPCmd)
 }

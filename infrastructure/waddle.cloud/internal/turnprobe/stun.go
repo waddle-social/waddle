@@ -1,10 +1,7 @@
-// Package turnprobe builds and interprets the minimal STUN Binding
-// exchange (RFC 8489) used to confirm that the self-hosted LiveKit
-// embedded-TURN UDP listener is reachable end-to-end from outside the
-// cluster. A Binding success response proves a UDP datagram traversed the
-// NodePort and node firewall to the TURN server and a reply came back, so
-// LiveKit can hand clients a usable `udp` relay candidate instead of
-// silently forcing calls onto the slow TCP/443 relay.
+// Package turnprobe qualifies authenticated TURN relay traffic (RFC 8656).
+// Its lower-level STUN Binding helpers check listener reachability only;
+// VerifyRelay additionally proves authentication, allocation, permission,
+// channel setup and bidirectional payload delivery to a controlled peer.
 package turnprobe
 
 import (
