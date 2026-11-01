@@ -474,27 +474,24 @@ pub(crate) async fn bootstrap_store_lineage(
     database: crate::db::Database,
 ) -> Result<()> {
     let config = &state.lineage_config;
-    crate::db::lineage::ensure_table(&database).await?;
-    match &config.action {
-        Some(crate::db::lineage::LineageAction::Enroll) => {
-            info!(store = %store, "enrolling database lineage");
-            crate::db::lineage::enroll(&database, config).await?;
-        }
-        Some(crate::db::lineage::LineageAction::Adopt(expected)) => {
-            match crate::db::lineage::adopt_if_matched(&database, config, expected).await? {
-                crate::db::lineage::AdoptOutcome::Adopted { matched, .. } => {
-                    info!(store = %store, matched = %matched, "adopted database lineage");
-                    state.note_lineage_adopt_match(matched);
-                }
-                crate::db::lineage::AdoptOutcome::NotMatched => {
-                    info!(
-                        store = %store,
-                        "lineage adopt action did not name this boundary; leaving it untouched"
-                    );
-                }
-            }
-        }
-        None => {}
+    if matches!(
+        config.action,
+        Some(crate::db::lineage::LineageAction::Enroll)
+    ) {
+        info!(store = %store, "enrolling database lineage");
+    }
+    let matched = crate::db::bootstrap::bootstrap_store_owner(&database, config).await?;
+    if let Some(matched) = matched {
+        info!(store = %store, matched = %matched, "adopted database lineage");
+        state.note_lineage_adopt_match(matched);
+    } else if matches!(
+        config.action,
+        Some(crate::db::lineage::LineageAction::Adopt(_))
+    ) {
+        info!(
+            store = %store,
+            "lineage adopt action did not name this boundary; leaving it untouched"
+        );
     }
     Ok(())
 }

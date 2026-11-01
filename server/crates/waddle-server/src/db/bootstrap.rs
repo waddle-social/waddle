@@ -10,7 +10,7 @@ use tracing::info;
 use crate::config::LineageConfig;
 
 use super::lineage::{self, AttestedLineage, LineageAction, LineageError, LineageUuid};
-use super::{Database, DatabaseDriver, DatabaseError, MigrationRunner};
+use super::{Database, DatabaseDriver, DatabaseError, MigrationRunner, Transaction};
 
 #[derive(Debug, Error)]
 pub enum OwnerBootstrapError {
@@ -33,6 +33,16 @@ pub enum OwnerBootstrapError {
     PreMigrationLineage(#[source] DatabaseError),
     #[error("failed to run migrations")]
     Migrations(#[source] DatabaseError),
+}
+
+#[derive(Debug, Error)]
+pub enum StoreOwnerBootstrapError {
+    #[error("failed to bootstrap store database lineage table")]
+    LineageTable(#[source] DatabaseError),
+    #[error("failed to enroll store database lineage")]
+    Enrollment(#[source] DatabaseError),
+    #[error("failed to apply store database lineage adoption")]
+    Adoption(#[source] DatabaseError),
 }
 
 #[derive(Debug, Error)]
@@ -101,6 +111,36 @@ pub async fn bootstrap_global_owner(
     Ok(global_adopt_matched)
 }
 
+/// Preserve the existing per-store lineage owner action. Store schema
+/// constructors currently precede this call, so this is not yet a complete
+/// owner bootstrap or a runtime attachment boundary.
+pub async fn bootstrap_store_owner(
+    db: &Database,
+    config: &LineageConfig,
+) -> Result<Option<LineageUuid>, StoreOwnerBootstrapError> {
+    lineage::ensure_table(db)
+        .await
+        .map_err(StoreOwnerBootstrapError::LineageTable)?;
+    match config.action.as_ref() {
+        Some(LineageAction::Enroll) => {
+            lineage::enroll(db, config)
+                .await
+                .map_err(StoreOwnerBootstrapError::Enrollment)?;
+            Ok(None)
+        }
+        Some(LineageAction::Adopt(expected)) => {
+            match lineage::adopt_if_matched(db, config, expected)
+                .await
+                .map_err(StoreOwnerBootstrapError::Adoption)?
+            {
+                lineage::AdoptOutcome::Adopted { matched, .. } => Ok(Some(matched)),
+                lineage::AdoptOutcome::NotMatched => Ok(None),
+            }
+        }
+        None => Ok(None),
+    }
+}
+
 /// Prove that this already-provisioned global database has an attested lineage
 /// and the complete committed migration catalog. No schema repair, enrollment,
 /// adoption or checksum backfill is attempted. `expected` must come from an
@@ -112,6 +152,44 @@ pub async fn verify_global_runtime(
     config: &LineageConfig,
     expected: &AttestedLineage,
 ) -> Result<AttestedLineage, RuntimeAttachmentError> {
+    let (mut tx, driver, lineage_table, ledger_table) =
+        begin_runtime_lineage_check(db, config, expected).await?;
+    let attested =
+        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+    if &attested != expected {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+    MigrationRunner::single()
+        .verify_complete_in_transaction(&mut tx, driver, &ledger_table)
+        .await?;
+    tx.commit().await?;
+    Ok(attested)
+}
+
+/// Verify only the committed lineage and physical identity of an already
+/// provisioned durable store. The store's schema and grants are separate
+/// owner/bootstrap gates; this is not wired into normal startup yet.
+pub async fn verify_store_lineage_runtime(
+    db: &Database,
+    config: &LineageConfig,
+    expected: &AttestedLineage,
+) -> Result<AttestedLineage, RuntimeAttachmentError> {
+    let (mut tx, driver, lineage_table, _) =
+        begin_runtime_lineage_check(db, config, expected).await?;
+    let attested =
+        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+    if &attested != expected {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+    tx.commit().await?;
+    Ok(attested)
+}
+
+async fn begin_runtime_lineage_check<'a>(
+    db: &'a Database,
+    config: &LineageConfig,
+    expected: &AttestedLineage,
+) -> Result<(Transaction<'a>, DatabaseDriver, String, String), RuntimeAttachmentError> {
     if config.action.is_some() {
         return Err(RuntimeAttachmentError::OperatorActionConfigured);
     }
@@ -174,14 +252,5 @@ pub async fn verify_global_runtime(
     } else {
         ("main._lineage".to_string(), "main._migrations".to_string())
     };
-    let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
-    if &attested != expected {
-        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
-    }
-    MigrationRunner::single()
-        .verify_complete_in_transaction(&mut tx, driver, &ledger_table)
-        .await?;
-    tx.commit().await?;
-    Ok(attested)
+    Ok((tx, driver, lineage_table, ledger_table))
 }

@@ -6,7 +6,8 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use waddle_server::config::LineageConfig;
 use waddle_server::db::bootstrap::{
-    bootstrap_global_owner, verify_global_runtime, RuntimeAttachmentError,
+    bootstrap_global_owner, bootstrap_store_owner, verify_global_runtime,
+    verify_store_lineage_runtime, RuntimeAttachmentError,
 };
 use waddle_server::db::lineage::{
     self, AttestedLineage, DeploymentUuid, LineageAction, LineageUuid,
@@ -102,6 +103,26 @@ impl Fixture {
             .await
             .expect("runtime read grant");
         }
+        sqlx::query(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {}",
+            self.schema, self.runtime_role
+        ))
+        .execute(&self.admin)
+        .await
+        .expect("runtime schema usage");
+    }
+
+    async fn bootstrap_store(&self) {
+        bootstrap_store_owner(&self.owner, &self.owner_config())
+            .await
+            .expect("store owner bootstrap");
+        sqlx::query(&format!(
+            "GRANT SELECT ON TABLE {}._lineage TO {}",
+            self.schema, self.runtime_role
+        ))
+        .execute(&self.admin)
+        .await
+        .expect("runtime lineage read grant");
         sqlx::query(&format!(
             "GRANT USAGE ON SCHEMA {} TO {}",
             self.schema, self.runtime_role
@@ -621,5 +642,384 @@ async fn sqlite_owner_bootstrap_and_read_only_verifier_preserve_single_node_beha
             .await
             .is_err(),
         "TEMP ledger must not hide changed main ledger"
+    );
+}
+
+#[tokio::test]
+async fn store_owner_and_runtime_boundaries_work_without_a_migration_ledger() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    fixture.bootstrap_store().await;
+    let expected = fixture.expected_identity().await;
+    let attested =
+        verify_store_lineage_runtime(&fixture.runtime, &fixture.runtime_config(), &expected)
+            .await
+            .expect("restricted lineage-only attachment");
+    assert_eq!(attested, expected);
+    let migration_tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = '_migrations'",
+    )
+    .bind(&fixture.schema)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect store schema");
+    assert_eq!(migration_tables, 0, "store verifier needs no global ledger");
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime login");
+    assert!(sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = lineage_uuid",
+        fixture.schema
+    ))
+    .execute(&mut runtime)
+    .await
+    .is_err());
+    drop(runtime);
+
+    let wrong = LineageConfig {
+        deployment_uuid: Some(DeploymentUuid(uuid::Uuid::new_v4())),
+        action: None,
+    };
+    assert!(
+        verify_store_lineage_runtime(&fixture.runtime, &wrong, &expected)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        verify_store_lineage_runtime(&fixture.runtime, &fixture.owner_config(), &expected).await,
+        Err(RuntimeAttachmentError::OperatorActionConfigured)
+    ));
+    let mut wrong_expected = expected.clone();
+    wrong_expected.lineage_uuid = LineageUuid::new();
+    assert!(verify_store_lineage_runtime(
+        &fixture.runtime,
+        &fixture.runtime_config(),
+        &wrong_expected
+    )
+    .await
+    .is_err());
+    let mut incomplete = expected.clone();
+    incomplete.postgres_identity = None;
+    assert!(matches!(
+        verify_store_lineage_runtime(&fixture.runtime, &fixture.runtime_config(), &incomplete)
+            .await,
+        Err(RuntimeAttachmentError::MissingExpectedPostgresIdentity)
+    ));
+
+    let other_schema = format!("waddle_boot_x_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE SCHEMA {other_schema} AUTHORIZATION {}",
+        fixture.owner_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("second owner schema");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {other_schema} TO {}",
+        fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("second schema usage");
+    let wrong_url = url_with_schema_user(&fixture.base_url, &other_schema, &fixture.runtime_role);
+    let wrong_db = open_database("wrong-store", &wrong_url).await;
+    assert!(
+        verify_store_lineage_runtime(&wrong_db, &fixture.runtime_config(), &expected)
+            .await
+            .is_err()
+    );
+    drop(wrong_db);
+    sqlx::query(&format!("DROP SCHEMA {other_schema} CASCADE"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop second schema");
+
+    let guard = fixture.runtime.guard().await.expect("runtime pool member");
+    guard
+        .execute(
+            &format!(
+                "CREATE TEMP TABLE _lineage AS SELECT * FROM {}._lineage",
+                fixture.schema
+            ),
+            (),
+        )
+        .await
+        .expect("copy durable lineage into TEMP");
+    drop(guard);
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage RENAME TO _lineage_hidden",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("hide durable lineage");
+    assert!(
+        verify_store_lineage_runtime(&fixture.runtime, &fixture.runtime_config(), &expected)
+            .await
+            .is_err(),
+        "TEMP copy cannot substitute for durable lineage"
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage_hidden RENAME TO _lineage",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore durable lineage");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn store_runtime_rejects_an_inherited_stale_postgres_snapshot() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    fixture.bootstrap_store().await;
+    let expected = fixture.expected_identity().await;
+    let guard = fixture.runtime.guard().await.expect("runtime pool member");
+    guard
+        .execute("BEGIN ISOLATION LEVEL REPEATABLE READ", ())
+        .await
+        .expect("pin raw transaction");
+    guard.query("SELECT 1", ()).await.expect("pin snapshot");
+    drop(guard);
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1",
+        fixture.schema
+    ))
+    .bind(LineageUuid::new().0.to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("change committed lineage after snapshot");
+    assert!(
+        verify_store_lineage_runtime(&fixture.runtime, &fixture.runtime_config(), &expected)
+            .await
+            .is_err(),
+        "stale inherited transaction cannot attest prior lineage"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn store_owner_adopts_two_distinct_postgres_schemas_independently() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    fixture.bootstrap_store().await;
+    let first = fixture.expected_identity().await;
+    let second_schema = format!("waddle_boot_x_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE SCHEMA {second_schema} AUTHORIZATION {}",
+        fixture.owner_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("second owner schema");
+    let second_url = url_with_schema_user(&fixture.base_url, &second_schema, &fixture.owner_role);
+    let second_db = open_database("second-store", &second_url).await;
+    bootstrap_store_owner(&second_db, &fixture.owner_config())
+        .await
+        .expect("enroll second boundary");
+    let second = lineage::verify(&second_db, &fixture.runtime_config())
+        .await
+        .expect("second committed identity");
+    assert_ne!(first.lineage_uuid, second.lineage_uuid);
+    let adoption = LineageConfig {
+        deployment_uuid: Some(fixture.deployment_uuid),
+        action: Some(LineageAction::Adopt(vec![
+            first.lineage_uuid,
+            second.lineage_uuid,
+        ])),
+    };
+    assert_eq!(
+        bootstrap_store_owner(&fixture.owner, &adoption)
+            .await
+            .expect("adopt first boundary"),
+        Some(first.lineage_uuid)
+    );
+    assert_eq!(
+        bootstrap_store_owner(&second_db, &adoption)
+            .await
+            .expect("adopt second boundary"),
+        Some(second.lineage_uuid)
+    );
+    assert_eq!(
+        bootstrap_store_owner(&fixture.owner, &adoption)
+            .await
+            .expect("first no longer matches"),
+        None
+    );
+    assert_eq!(
+        bootstrap_store_owner(&second_db, &adoption)
+            .await
+            .expect("second no longer matches"),
+        None
+    );
+    assert_ne!(
+        lineage::verify(&fixture.owner, &fixture.runtime_config())
+            .await
+            .expect("first rotated identity")
+            .lineage_uuid,
+        first.lineage_uuid
+    );
+    assert_ne!(
+        lineage::verify(&second_db, &fixture.runtime_config())
+            .await
+            .expect("second rotated identity")
+            .lineage_uuid,
+        second.lineage_uuid
+    );
+    drop(second_db);
+    sqlx::query(&format!("DROP SCHEMA {second_schema} CASCADE"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop second schema");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn interrupted_store_table_bootstrap_refuses_runtime_until_enrollment() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let no_action = fixture.runtime_config();
+    bootstrap_store_owner(&fixture.owner, &no_action)
+        .await
+        .expect("owner creates lineage table only");
+    sqlx::query(&format!(
+        "GRANT SELECT ON TABLE {}._lineage TO {}",
+        fixture.schema, fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("runtime read grant");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {} TO {}",
+        fixture.schema, fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("runtime schema usage");
+    let expected = AttestedLineage {
+        lineage_uuid: LineageUuid::new(),
+        deployment_uuid: fixture.deployment_uuid,
+        postgres_identity: Some(
+            lineage::live_postgres_identity(&fixture.owner)
+                .await
+                .expect("owner reads physical identity"),
+        ),
+    };
+    assert!(
+        verify_store_lineage_runtime(&fixture.runtime, &no_action, &expected)
+            .await
+            .is_err(),
+        "table without a committed row cannot attach"
+    );
+    bootstrap_store_owner(&fixture.owner, &fixture.owner_config())
+        .await
+        .expect("owner retries enrollment");
+    let committed = fixture.expected_identity().await;
+    assert_eq!(
+        verify_store_lineage_runtime(&fixture.runtime, &no_action, &committed)
+            .await
+            .expect("attach after owner retry"),
+        committed
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_store_owner_rotates_a_shared_boundary_once() {
+    let directory = tempfile::tempdir().expect("SQLite fixture directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("store-bootstrap.db").display()
+    );
+    let mut database_config = DatabaseConfig::new(DatabaseDriver::Sqlite, url);
+    database_config.pool_size = 1;
+    let database = Database::from_config("SQLite store", &database_config)
+        .await
+        .expect("SQLite database");
+    let deployment_uuid = DeploymentUuid(uuid::Uuid::new_v4());
+    let enroll = LineageConfig {
+        deployment_uuid: Some(deployment_uuid),
+        action: Some(LineageAction::Enroll),
+    };
+    assert_eq!(
+        bootstrap_store_owner(&database, &enroll)
+            .await
+            .expect("enroll"),
+        None
+    );
+    let runtime = LineageConfig {
+        deployment_uuid: Some(deployment_uuid),
+        action: None,
+    };
+    let original = lineage::verify(&database, &runtime)
+        .await
+        .expect("read committed lineage");
+    assert_eq!(
+        verify_store_lineage_runtime(&database, &runtime, &original)
+            .await
+            .expect("read-only store attachment"),
+        original
+    );
+    let adoption = LineageConfig {
+        deployment_uuid: Some(deployment_uuid),
+        action: Some(LineageAction::Adopt(vec![original.lineage_uuid])),
+    };
+    assert_eq!(
+        bootstrap_store_owner(&database, &adoption)
+            .await
+            .expect("first label rotates"),
+        Some(original.lineage_uuid)
+    );
+    assert_eq!(
+        bootstrap_store_owner(&database, &adoption)
+            .await
+            .expect("shared second label skips"),
+        None
+    );
+    assert!(verify_store_lineage_runtime(&database, &runtime, &original)
+        .await
+        .is_err());
+    let rotated = lineage::verify(&database, &runtime)
+        .await
+        .expect("read rotated lineage");
+    assert_ne!(rotated.lineage_uuid, original.lineage_uuid);
+    assert_eq!(
+        verify_store_lineage_runtime(&database, &runtime, &rotated)
+            .await
+            .expect("verify rotated boundary"),
+        rotated
+    );
+
+    let guard = database.guard().await.expect("SQLite pool member");
+    guard
+        .execute(
+            "CREATE TEMP TABLE _lineage AS SELECT * FROM main._lineage",
+            (),
+        )
+        .await
+        .expect("TEMP shadow");
+    guard
+        .execute(
+            &format!(
+                "UPDATE main._lineage SET lineage_uuid = '{}'",
+                LineageUuid::new().0
+            ),
+            (),
+        )
+        .await
+        .expect("change durable lineage");
+    drop(guard);
+    assert!(
+        verify_store_lineage_runtime(&database, &runtime, &rotated)
+            .await
+            .is_err(),
+        "TEMP shadow cannot hide changed durable lineage"
     );
 }
