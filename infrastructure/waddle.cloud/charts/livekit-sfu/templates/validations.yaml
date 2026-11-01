@@ -28,8 +28,8 @@
 {{- if and .Values.sharedTURN.configSecretName .Values.livekit.turn.enabled -}}
 {{- fail "sharedTURN.configSecretName and embedded livekit.turn.enabled are mutually exclusive" -}}
 {{- end -}}
-{{- if and .Values.sharedTURN.configSecretName (not .Values.tmpDir.enabled) -}}
-{{- fail "sharedTURN.configSecretName requires tmpDir.enabled for the private runtime configuration" -}}
+{{- if and .Values.sharedTURN.configSecretName (or (not .Values.tmpDir.enabled) (ne .Values.tmpDir.mountPath "/tmp")) -}}
+{{- fail "sharedTURN.configSecretName requires tmpDir.enabled and tmpDir.mountPath=/tmp for the private runtime configuration" -}}
 {{- end -}}
 {{- $nodePortMax := 32767 -}}
 {{- $capabilities := default (list) .Values.securityContext.capabilities.add -}}

@@ -25,4 +25,3 @@ Use this isolated issue branch and PR. Preserve unrelated workspace changes. Kee
 ## Remaining operational acceptance
 
 This branch does not deploy. Production Cilium public-NodePort hairpin/private-allocation flow, restricted-network UDP and TLS443 WebRTC on web and Android, first-transition maintenance, production certificate trust, and live drain/rollout remain explicit gates in infrastructure/waddle.cloud/docs/shared-turn.md. Local packet and browser qualification do not satisfy those gates.
-

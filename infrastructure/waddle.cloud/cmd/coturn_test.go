@@ -67,7 +67,7 @@ func TestSharedTURNRetainsUDPNodePortAndSelectsCoturn(t *testing.T) {
 }
 
 func TestSharedTURNRejectsEmbeddedRelayAndMissingPrivateStorage(t *testing.T) {
-	for _, override := range []string{"livekit.turn.enabled=true", "tmpDir.enabled=false"} {
+	for _, override := range []string{"livekit.turn.enabled=true", "tmpDir.enabled=false", "tmpDir.mountPath=/elsewhere"} {
 		t.Run(override, func(t *testing.T) {
 			out, err := renderLivekitChart(t, "livekit.turn.enabled=false", "sharedTURN.configSecretName=livekit-turn-config", override)
 			if err == nil || !strings.Contains(out, "sharedTURN.configSecretName") {
