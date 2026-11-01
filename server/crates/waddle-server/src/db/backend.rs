@@ -1,14 +1,19 @@
+use std::future::Future;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
 };
 use sqlx::Row as SqlxRow;
+use sqlx::TransactionManager;
 
 use super::{DatabaseError, IntoParams, Row, Rows, Value};
 
@@ -16,9 +21,9 @@ use super::{DatabaseError, IntoParams, Row, Rows, Value};
 ///
 /// The underlying pool may have capacity for several lanes, while each
 /// `Database` handle limits its own callers to the lane's budget. A permit is
-/// held while a transaction owns its connection and while a guard operation
-/// checks out a connection. This preserves reserved ingress capacity without
-/// creating a second physical pool.
+/// held while a transaction or guard operation owns a checkout and, for
+/// PostgreSQL, until SQLx has returned or closed it. This preserves reserved
+/// ingress capacity without creating a second physical pool.
 #[derive(Clone)]
 pub(super) struct PoolAdmission {
     permits: Arc<tokio::sync::Semaphore>,
@@ -79,6 +84,176 @@ impl PoolAdmission {
             Ok(Err(_)) => Err(DatabaseError::Internal(sqlx::Error::PoolClosed)),
             Err(_) => Err(DatabaseError::Internal(sqlx::Error::PoolTimedOut)),
         }
+    }
+}
+
+type PgTransactionManager = <sqlx::Postgres as sqlx::Database>::TransactionManager;
+type PgAcquireFuture =
+    Pin<Box<dyn Future<Output = Result<PoolConnection<sqlx::Postgres>, sqlx::Error>> + Send>>;
+type PgReturnFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Bound the time an unhealthy checkout can hold a lane while SQLx flushes
+/// pending work, runs its release hook, and returns or closes the connection.
+const PG_RETURN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Keep the lane permit until the acquisition future is destroyed. SQLx can
+/// have a physical connection floating inside `Pool::acquire` while it checks
+/// an idle connection or runs a connection hook.
+struct PendingPgAcquire {
+    operation: Option<PgAcquireFuture>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl PendingPgAcquire {
+    fn new(
+        pool: PgPool,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: tokio::time::Instant,
+    ) -> Self {
+        let operation = async move {
+            tokio::time::timeout_at(deadline, pool.acquire())
+                .await
+                .map_err(|_| sqlx::Error::PoolTimedOut)?
+        };
+        Self {
+            operation: Some(Box::pin(operation)),
+            permit: Some(permit),
+        }
+    }
+
+    async fn acquire(mut self) -> Result<PgLease, DatabaseError> {
+        let result = self
+            .operation
+            .as_mut()
+            .expect("pending PostgreSQL acquisition has a future")
+            .await;
+        drop(self.operation.take());
+        let connection = result?;
+        let permit = self
+            .permit
+            .take()
+            .expect("pending PostgreSQL acquisition has a permit");
+        Ok(PgLease {
+            connection: Some(connection),
+            permit: Some(permit),
+            transaction_open: false,
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+}
+
+impl Drop for PendingPgAcquire {
+    fn drop(&mut self) {
+        drop(self.operation.take());
+        drop(self.permit.take());
+    }
+}
+
+/// The future owns SQLx's floating physical connection. Explicit drop order
+/// also applies if Tokio cancels the cleanup task during runtime shutdown.
+struct PendingPgReturn {
+    operation: Option<PgReturnFuture>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl PendingPgReturn {
+    async fn finish(mut self) {
+        let operation = self
+            .operation
+            .as_mut()
+            .expect("pending PostgreSQL return has a future");
+        if tokio::time::timeout(PG_RETURN_TIMEOUT, operation)
+            .await
+            .is_err()
+        {
+            tracing::warn!("timed out returning PostgreSQL connection to pool");
+        }
+    }
+}
+
+impl Drop for PendingPgReturn {
+    fn drop(&mut self) {
+        // SQLx 0.8.6's `return_to_pool` future owns the floating connection;
+        // dropping it closes the socket and releases SQLx's physical slot.
+        drop(self.operation.take());
+        drop(self.permit.take());
+    }
+}
+
+/// Own a SQLx checkout together with the admission that paid for it.
+struct PgLease {
+    connection: Option<PoolConnection<sqlx::Postgres>>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    transaction_open: bool,
+    runtime: tokio::runtime::Handle,
+}
+
+impl PgLease {
+    async fn begin(&mut self) -> Result<(), DatabaseError> {
+        // SQLx's pinned PostgreSQL transaction manager queues a rollback if
+        // BEGIN is cancelled before it can return a transaction handle.
+        PgTransactionManager::begin(self, None).await?;
+        self.transaction_open = true;
+        Ok(())
+    }
+
+    async fn rollback(&mut self) -> Result<(), DatabaseError> {
+        PgTransactionManager::rollback(self).await?;
+        self.transaction_open = false;
+        Ok(())
+    }
+
+    async fn commit(&mut self) -> Result<(), DatabaseError> {
+        PgTransactionManager::commit(self).await?;
+        self.transaction_open = false;
+        Ok(())
+    }
+}
+
+impl Deref for PgLease {
+    type Target = sqlx::PgConnection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_deref()
+            .expect("PostgreSQL lease has a connection until drop")
+    }
+}
+
+impl DerefMut for PgLease {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_deref_mut()
+            .expect("PostgreSQL lease has a connection until drop")
+    }
+}
+
+impl Drop for PgLease {
+    fn drop(&mut self) {
+        if self.transaction_open {
+            PgTransactionManager::start_rollback(self);
+        }
+
+        let mut connection = self
+            .connection
+            .take()
+            .expect("PostgreSQL lease has a connection until drop");
+        let permit = self
+            .permit
+            .take()
+            .expect("PostgreSQL lease has a permit until drop");
+
+        // `return_to_pool` takes the connection before creating its future.
+        // Enter the original runtime for SQLx's empty PoolConnection drop,
+        // which may spawn min-connections maintenance even during shutdown.
+        let _runtime_guard = self.runtime.enter();
+        let operation = connection.return_to_pool();
+        drop(connection);
+        let pending = PendingPgReturn {
+            operation: Some(Box::pin(operation)),
+            permit: Some(permit),
+        };
+        self.runtime.spawn(pending.finish());
     }
 }
 
@@ -257,10 +432,12 @@ impl DatabaseBackend {
         &self,
         sql: &str,
         params: Vec<Value>,
+        permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<ExecutionResult, DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
+                let _permit = permit;
                 let mut query = sqlx::query(sql);
                 for value in params {
                     query = bind_sqlite(query, value);
@@ -272,9 +449,10 @@ impl DatabaseBackend {
                 })
             }
             DatabaseBackend::Postgres(pool) => {
-                let mut connection = tokio::time::timeout_at(acquisition_deadline, pool.acquire())
-                    .await
-                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
+                let mut connection =
+                    PendingPgAcquire::new(pool.clone(), permit, acquisition_deadline)
+                        .acquire()
+                        .await?;
                 let sql = rewrite_positional_for_postgres(sql);
                 let mut query = sqlx::query(&sql);
                 for value in params {
@@ -292,10 +470,12 @@ impl DatabaseBackend {
     async fn execute_batch(
         &self,
         sql: &str,
+        permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<(), DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
+                let _permit = permit;
                 let mut tx = pool.begin().await?;
                 for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
                     sqlx::query(statement).execute(&mut *tx).await?;
@@ -303,7 +483,10 @@ impl DatabaseBackend {
                 tx.commit().await?;
             }
             DatabaseBackend::Postgres(pool) => {
-                let mut tx = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                let mut tx = PendingPgAcquire::new(pool.clone(), permit, acquisition_deadline)
+                    .acquire()
+                    .await?;
+                tokio::time::timeout_at(acquisition_deadline, tx.begin())
                     .await
                     .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
                 for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
@@ -319,10 +502,12 @@ impl DatabaseBackend {
         &self,
         sql: &str,
         params: Vec<Value>,
+        permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<Rows, DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
+                let _permit = permit;
                 let mut query = sqlx::query(sql);
                 for value in params {
                     query = bind_sqlite(query, value);
@@ -331,9 +516,10 @@ impl DatabaseBackend {
                 sqlite_rows_to_rows(fetched)
             }
             DatabaseBackend::Postgres(pool) => {
-                let mut connection = tokio::time::timeout_at(acquisition_deadline, pool.acquire())
-                    .await
-                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
+                let mut connection =
+                    PendingPgAcquire::new(pool.clone(), permit, acquisition_deadline)
+                        .acquire()
+                        .await?;
                 let sql = rewrite_positional_for_postgres(sql);
                 let mut query = sqlx::query(&sql);
                 for value in params {
@@ -594,12 +780,33 @@ impl ConnectionGuard {
         }
     }
 
+    /// Construct a bounded lane over a supplied pool for admission tests.
+    #[cfg(feature = "test-support")]
+    pub fn postgres_admission_for_test(
+        pool: PgPool,
+        limit: u32,
+        acquire_timeout: Duration,
+    ) -> Self {
+        Self::new(
+            DatabaseBackend::Postgres(pool),
+            PoolAdmission::new(limit, acquire_timeout, PoolLane::Main),
+        )
+    }
+
+    /// Begin through the same admission and transaction path as `Database`.
+    #[cfg(feature = "test-support")]
+    pub async fn begin_for_admission_test(&self) -> Result<Transaction<'_>, DatabaseError> {
+        let deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(deadline).await?;
+        Transaction::begin(&self.backend, permit, deadline).await
+    }
+
     pub async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, DatabaseError> {
         let acquisition_deadline = self.admission.acquisition_deadline();
-        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
         let result = self
             .backend
-            .execute(sql, params.into_params(), acquisition_deadline)
+            .execute(sql, params.into_params(), permit, acquisition_deadline)
             .await?;
         if let Some(rowid) = result.last_insert_rowid {
             self.last_insert_rowid.store(rowid, Ordering::Relaxed);
@@ -609,15 +816,17 @@ impl ConnectionGuard {
 
     pub async fn execute_batch(&self, sql: &str) -> Result<(), DatabaseError> {
         let acquisition_deadline = self.admission.acquisition_deadline();
-        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
-        self.backend.execute_batch(sql, acquisition_deadline).await
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        self.backend
+            .execute_batch(sql, permit, acquisition_deadline)
+            .await
     }
 
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, DatabaseError> {
         let acquisition_deadline = self.admission.acquisition_deadline();
-        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
         self.backend
-            .query(sql, params.into_params(), acquisition_deadline)
+            .query(sql, params.into_params(), permit, acquisition_deadline)
             .await
     }
 }
@@ -629,12 +838,12 @@ impl ConnectionGuard {
 /// roll back.
 pub struct Transaction<'a> {
     inner: TransactionInner<'a>,
-    _admission_permit: tokio::sync::OwnedSemaphorePermit,
+    _sqlite_admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 enum TransactionInner<'a> {
     Sqlite(sqlx::Transaction<'a, sqlx::Sqlite>),
-    Postgres(sqlx::Transaction<'a, sqlx::Postgres>),
+    Postgres(PgLease),
 }
 
 /// Take SQLite's write lock on a task of its own, so the caller's timeout
@@ -674,18 +883,25 @@ impl<'a> Transaction<'a> {
         admission_permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<Self, DatabaseError> {
-        let inner = match backend {
-            DatabaseBackend::Sqlite(pool) => TransactionInner::Sqlite(pool.begin().await?),
+        let (inner, sqlite_permit) = match backend {
+            DatabaseBackend::Sqlite(pool) => (
+                TransactionInner::Sqlite(pool.begin().await?),
+                Some(admission_permit),
+            ),
             DatabaseBackend::Postgres(pool) => {
-                let transaction = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                let mut lease =
+                    PendingPgAcquire::new(pool.clone(), admission_permit, acquisition_deadline)
+                        .acquire()
+                        .await?;
+                tokio::time::timeout_at(acquisition_deadline, lease.begin())
                     .await
                     .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
-                TransactionInner::Postgres(transaction)
+                (TransactionInner::Postgres(lease), None)
             }
         };
         Ok(Self {
             inner,
-            _admission_permit: admission_permit,
+            _sqlite_admission_permit: sqlite_permit,
         })
     }
 
@@ -709,20 +925,25 @@ impl<'a> Transaction<'a> {
         admission_permit: tokio::sync::OwnedSemaphorePermit,
         acquisition_deadline: tokio::time::Instant,
     ) -> Result<Self, DatabaseError> {
-        let inner = match backend {
-            DatabaseBackend::Sqlite(pool) => {
-                TransactionInner::Sqlite(begin_sqlite_immediate(pool.clone()).await?)
-            }
+        let (inner, sqlite_permit) = match backend {
+            DatabaseBackend::Sqlite(pool) => (
+                TransactionInner::Sqlite(begin_sqlite_immediate(pool.clone()).await?),
+                Some(admission_permit),
+            ),
             DatabaseBackend::Postgres(pool) => {
-                let transaction = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                let mut lease =
+                    PendingPgAcquire::new(pool.clone(), admission_permit, acquisition_deadline)
+                        .acquire()
+                        .await?;
+                tokio::time::timeout_at(acquisition_deadline, lease.begin())
                     .await
                     .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
-                TransactionInner::Postgres(transaction)
+                (TransactionInner::Postgres(lease), None)
             }
         };
         Ok(Self {
             inner,
-            _admission_permit: admission_permit,
+            _sqlite_admission_permit: sqlite_permit,
         })
     }
 
@@ -820,7 +1041,7 @@ impl<'a> Transaction<'a> {
     pub async fn rollback(self) -> Result<(), DatabaseError> {
         match self.inner {
             TransactionInner::Sqlite(tx) => tx.rollback().await?,
-            TransactionInner::Postgres(tx) => tx.rollback().await?,
+            TransactionInner::Postgres(mut tx) => tx.rollback().await?,
         }
         Ok(())
     }
@@ -829,7 +1050,7 @@ impl<'a> Transaction<'a> {
     pub async fn commit(self) -> Result<(), DatabaseError> {
         match self.inner {
             TransactionInner::Sqlite(tx) => tx.commit().await?,
-            TransactionInner::Postgres(tx) => tx.commit().await?,
+            TransactionInner::Postgres(mut tx) => tx.commit().await?,
         }
         Ok(())
     }
