@@ -632,18 +632,10 @@ pub(in crate::notification_outbox::legacy_ancestry) async fn begin_bounded(
     db: &Database,
 ) -> Result<Transaction<'_>, IngressUowError> {
     let timeout = std::time::Duration::from_millis(100);
-    let mut tx = tokio::time::timeout(timeout, db.begin_immediate())
+    let mut tx = tokio::time::timeout(timeout, crate::ingress_uow::begin_raw_ingress_writer(db))
         .await
         .map_err(|_| IngressUowError::Timeout)??;
-    if !crate::ingress_substrate::set_local_transaction_timeouts(
-        &mut tx,
-        timeout,
-        std::time::Duration::from_millis(250),
-    )
-    .await?
-    {
-        return Err(IngressUowError::TransactionBoundsUnproven);
-    }
+    crate::ingress_uow::bound_raw_transaction(&mut tx).await?;
     Ok(tx)
 }
 

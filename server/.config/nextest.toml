@@ -71,6 +71,7 @@ package(waddle-server) & (
     | binary(sqlx_cancelled_begin)
     | binary(owner_bootstrap)
     | binary(physical_attestation)
+    | binary(ingress_relation_guard_lab)
     | test(clustering::)
     | test(db::)
     | test(inbox::)

@@ -324,11 +324,7 @@ impl NotificationOutboxStore {
         let job_id: String = selected.get(0)?;
         let selected_status: String = selected.get(11)?;
         let selected_token: Option<String> = selected.get(14)?;
-        let mut tx = self.db.begin_immediate().await?;
-        if tx.driver() == DatabaseDriver::Postgres {
-            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                .await?;
-        }
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, &job_id).await?;
         let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
@@ -854,7 +850,7 @@ impl NotificationOutboxStore {
             STATUS_PUBLISHED
         };
         let now = crate::time::now_ms();
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let changed = tx.execute(
             "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = CASE WHEN ? = 1 THEN 0 ELSE queue_acceptance_may_exist END, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ?, published_at_ms = CASE WHEN ? = 1 THEN ? ELSE published_at_ms END WHERE job_id = ? AND status = ? AND (claim_token = ? OR (claim_token IS NULL AND ? = 1 AND queue_acceptance_may_exist = 1)) AND recipient_bare_jid = ? AND push_service_jid = ? AND node = ? AND approved_payload_xml = ? AND (approved_publish_options_xml = ? OR (approved_publish_options_xml IS NULL AND ? = 0))",
@@ -969,7 +965,7 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
         clear_invocation_uncertainty: bool,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
@@ -1120,7 +1116,7 @@ impl NotificationOutboxStore {
         } else {
             STATUS_QUEUED
         };
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let row_lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"
@@ -1172,7 +1168,7 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
     ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let affected = tx
             .execute(
@@ -1220,7 +1216,7 @@ impl NotificationOutboxStore {
         &self,
         job: &NotificationOutboxJob,
     ) -> Result<bool, NotificationOutboxError> {
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let affected = tx
             .execute(
@@ -1263,7 +1259,7 @@ impl NotificationOutboxStore {
     ) -> Result<bool, NotificationOutboxError> {
         let failure = failure.into();
         let now_ms = crate::time::now_ms();
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let affected = tx
             .execute(
@@ -1327,7 +1323,7 @@ impl NotificationOutboxStore {
     ) -> Result<Option<i64>, NotificationOutboxError> {
         let failure = failure.into();
         let next_attempt_count = job.attempt_count.saturating_add(1);
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let row_lock = if tx.driver() == DatabaseDriver::Postgres {
             " FOR UPDATE"

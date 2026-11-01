@@ -56,6 +56,8 @@ mod tests;
 
 mod substrate;
 pub(crate) use substrate::acquire_epoch_lock_first;
+#[cfg(feature = "test-support")]
+pub(crate) use substrate::acquire_epoch_lock_first_with_capability;
 use substrate::decode_stored_alias;
 use substrate::dialect_sql;
 use substrate::discard_database_error;
@@ -69,6 +71,7 @@ pub use substrate::resolve_and_record_alias;
 pub(crate) use substrate::set_local_transaction_timeouts;
 pub use substrate::supported_protocol_epoch;
 pub use substrate::terminalize_message;
+pub(crate) use substrate::tighten_local_transaction_timeouts;
 pub use substrate::AliasGcBudget;
 pub use substrate::AliasGcError;
 pub use substrate::AliasGcFailure;

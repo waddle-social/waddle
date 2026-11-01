@@ -60,7 +60,7 @@ impl NotificationOutboxStore {
             match xep0191_blocks_notification_candidate(&candidate, blocking_storage).await {
                 Ok(true) => {
                     let now_ms = crate::time::now_ms();
-                    let mut tx = self.db.begin_immediate().await?;
+                    let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
                     lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                     record_candidate_suppressed_reason_tx(
                         &mut tx,
@@ -159,7 +159,7 @@ impl NotificationOutboxStore {
             let rich = match outcome {
                 T1PushDispatchOutcome::Suppressed { reason } => {
                     let now_ms = crate::time::now_ms();
-                    let mut tx = self.db.begin_immediate().await?;
+                    let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
                     lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                     record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
@@ -218,7 +218,7 @@ impl NotificationOutboxStore {
             if targets.is_empty() {
                 let reason = SuppressedReason::Xep0357NoRegistration;
                 let now_ms = crate::time::now_ms();
-                let mut tx = self.db.begin_immediate().await?;
+                let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
                 lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                 record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                 let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
@@ -242,7 +242,7 @@ impl NotificationOutboxStore {
             }
             let context = build_waddle_context(&candidate);
             let now_ms = crate::time::now_ms();
-            let mut tx = self.db.begin_immediate().await?;
+            let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
             lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
             let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
             if claimed == 0 {
@@ -267,7 +267,7 @@ impl NotificationOutboxStore {
         let next_policy_error_count = candidate.policy_error_count + 1;
         if next_policy_error_count >= MAX_CANDIDATE_POLICY_ATTEMPTS {
             let reason = SuppressedReason::PolicyRetriesExhausted;
-            let mut tx = self.db.begin_immediate().await?;
+            let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
             lock_candidate_ancestry_tx(&mut tx, candidate).await?;
             tx.execute(
                 r#"
@@ -414,7 +414,7 @@ impl NotificationOutboxStore {
             .map(|raw| uuid::Uuid::parse_str(&raw))
             .transpose()
             .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
-        let mut tx = self.db.begin_immediate().await?;
+        let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
         if let Some(id) = id {
             EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id).await?;
         }
