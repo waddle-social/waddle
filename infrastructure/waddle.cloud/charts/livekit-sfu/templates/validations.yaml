@@ -25,6 +25,12 @@
 {{- fail "livekit-sfu is intentionally single-node for now; replicaCount must be 1" -}}
 {{- end -}}
 {{- $nodePortMin := 30000 -}}
+{{- if and .Values.sharedTURN.configSecretName .Values.livekit.turn.enabled -}}
+{{- fail "sharedTURN.configSecretName and embedded livekit.turn.enabled are mutually exclusive" -}}
+{{- end -}}
+{{- if and .Values.sharedTURN.configSecretName (or (not .Values.tmpDir.enabled) (ne .Values.tmpDir.mountPath "/tmp")) -}}
+{{- fail "sharedTURN.configSecretName requires tmpDir.enabled and tmpDir.mountPath=/tmp for the private runtime configuration" -}}
+{{- end -}}
 {{- $nodePortMax := 32767 -}}
 {{- $capabilities := default (list) .Values.securityContext.capabilities.add -}}
 {{- $canBindPrivileged := has "NET_BIND_SERVICE" $capabilities -}}
@@ -61,10 +67,10 @@
 {{- if and .Values.nodePorts.rtc.enabled .Values.nodePorts.rtc.udp (or (lt (int .Values.nodePorts.rtc.udp) $nodePortMin) (gt (int .Values.nodePorts.rtc.udp) $nodePortMax)) -}}
 {{- fail "nodePorts.rtc.udp must be inside the Kubernetes NodePort range 30000-32767" -}}
 {{- end -}}
-{{- if and .Values.nodePorts.turnUdp.enabled (not (and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port)) -}}
-{{- fail "nodePorts.turnUdp.enabled=true requires livekit.turn.enabled=true and livekit.turn.udp_port to be set" -}}
+{{- if and .Values.nodePorts.turnUdp.enabled (not .Values.sharedTURN.configSecretName) (not (and .Values.livekit.turn.enabled .Values.livekit.turn.udp_port)) -}}
+{{- fail "nodePorts.turnUdp.enabled=true requires sharedTURN.configSecretName or an enabled embedded TURN UDP listener" -}}
 {{- end -}}
-{{- if and .Values.nodePorts.turnUdp.enabled .Values.livekit.turn.udp_port .Values.nodePorts.turnUdp.udp (ne (int .Values.nodePorts.turnUdp.udp) (int .Values.livekit.turn.udp_port)) -}}
+{{- if and .Values.livekit.turn.enabled .Values.nodePorts.turnUdp.enabled .Values.livekit.turn.udp_port .Values.nodePorts.turnUdp.udp (ne (int .Values.nodePorts.turnUdp.udp) (int .Values.livekit.turn.udp_port)) -}}
 {{- fail "nodePorts.turnUdp.udp must match livekit.turn.udp_port so LiveKit advertises a reachable TURN/UDP port" -}}
 {{- end -}}
 {{- if and .Values.nodePorts.turnUdp.enabled .Values.nodePorts.turnUdp.udp (or (lt (int .Values.nodePorts.turnUdp.udp) $nodePortMin) (gt (int .Values.nodePorts.turnUdp.udp) $nodePortMax)) -}}

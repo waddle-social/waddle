@@ -1,4 +1,4 @@
-{{- if and .Values.nodePorts.turnUdp.enabled .Values.livekit.turn.enabled .Values.livekit.turn.udp_port }}
+{{- if and .Values.nodePorts.turnUdp.enabled (or .Values.sharedTURN.configSecretName .Values.livekit.turn.enabled) }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,10 +14,15 @@ spec:
   externalTrafficPolicy: {{ .Values.nodePorts.turnUdp.externalTrafficPolicy }}
   ports:
     - name: turn-udp
-      port: {{ .Values.livekit.turn.udp_port }}
+      port: {{ .Values.nodePorts.turnUdp.udp }}
       targetPort: turn-udp
       nodePort: {{ .Values.nodePorts.turnUdp.udp }}
       protocol: UDP
   selector:
+    {{- if .Values.sharedTURN.configSecretName }}
+    app.kubernetes.io/name: coturn
+    app.kubernetes.io/instance: coturn
+    {{- else }}
     {{- include "livekit-sfu.selectorLabels" . | nindent 4 }}
+    {{- end }}
 {{- end }}

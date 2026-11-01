@@ -1,0 +1,48 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: coturn
+  namespace: livekit
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: coturn
+      app.kubernetes.io/instance: coturn
+  ingress:
+    - fromEntities: [ingress, host, remote-node, world]
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "30478"
+              protocol: UDP
+    # Relay addresses remain private pod IPs: only an SFU sends media
+    # to allocations. No public Service exposes this range.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/name: livekit-sfu
+            app.kubernetes.io/instance: livekit-sfu
+      toPorts:
+        - ports:
+            - port: "49152"
+              endPort: 49251
+              protocol: UDP
+  egress:
+    # coturn permits only the verified node IPv4 as a peer. Cilium
+    # independently narrows the destination to the SFU media port,
+    # including NodePort hairpin after DNAT to the SFU endpoint.
+    - toEntities: [host]
+      toPorts:
+        - ports:
+            - port: "30882"
+              protocol: UDP
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/name: livekit-sfu
+            app.kubernetes.io/instance: livekit-sfu
+      toPorts:
+        - ports:
+            - port: "30882"
+              protocol: UDP

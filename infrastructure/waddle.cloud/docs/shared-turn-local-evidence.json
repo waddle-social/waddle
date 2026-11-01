@@ -1,0 +1,116 @@
+{
+  "date": "2026-11-01",
+  "purpose": "Local media qualification for issue #1447",
+  "server": "livekit/livekit-server:v1.11.0",
+  "coturn": "coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3",
+  "sdk": "livekit-client 2.21.0",
+  "browser": "HeadlessChrome 156.0.8078.80 (Playwright v1.64.1 container)",
+  "setup": [
+    "Two browser participants publish microphone and camera to one room.",
+    "iceTransportPolicy=relay with exactly one coturn URL per transport.",
+    "Actual GitOps coturn start.sh and ready.sh run as uid65534 with a read-only root filesystem, private runtime tmpfs and the production peer-address rules.",
+    "Only fixture secrets and a local certificate were used. Browser trusts the fixture certificate by explicit SPKI exception; independent Go TLS probes verify trusted/untrusted certificate behavior.",
+    "SFU advertises its private Docker IP; coturn allocations remain private. This does not prove production public-node/Cilium routing."
+  ],
+  "udp": {
+    "participants": 2,
+    "selectedCandidateTypes": [
+      "relay",
+      "relay"
+    ],
+    "relayProtocols": [
+      "udp",
+      "udp"
+    ],
+    "receivedBytes": [
+      251115,
+      597277
+    ],
+    "sentBytes": [
+      1628537,
+      1210589
+    ],
+    "decodedFrames": [
+      98,
+      120
+    ],
+    "allCountersIncreasedBetweenSamples": true,
+    "passed": true
+  },
+  "tls": {
+    "participants": 2,
+    "selectedCandidateTypes": [
+      "relay",
+      "relay"
+    ],
+    "relayProtocols": [
+      "tls",
+      "tls"
+    ],
+    "receivedBytes": [
+      305641,
+      479999
+    ],
+    "sentBytes": [
+      1395737,
+      1165346
+    ],
+    "decodedFrames": [
+      108,
+      103
+    ],
+    "allCountersIncreasedBetweenSamples": true,
+    "passed": true
+  },
+  "remaining": [
+    "Production Cilium peer-port and public NodePort path",
+    "Physical Android and restricted external network",
+    "Kubernetes rollout preserving a live allocation"
+  ],
+  "sfuRenderedStartup": {
+    "server": "livekit/livekit-server:v1.11.0",
+    "imageDigest": "sha256:100b9a870616d02f5e3795b34e0b593b5054a26f8131a94fd3fa322ed3154b16",
+    "exactRenderedDeploymentCommand": true,
+    "user": "1000:1000",
+    "readOnlyRootFilesystem": true,
+    "readOnlyConfigAndSecretVolumes": true,
+    "privateTmpfsRuntimeConfigMode": "0600",
+    "quotedSecretAndBackslashPreserved": true,
+    "rtcTurnServers": [
+      "udp:30478",
+      "tls:443"
+    ],
+    "embeddedTurnDisabled": true,
+    "httpHealth": "OK",
+    "emptySecretFragmentFailsBeforeServerStart": true,
+    "emptySecretExitCode": 1,
+    "productionConfigOrDeploymentChanged": false
+  },
+  "serverProvidedCredentials": {
+    "participants": 2,
+    "transport": "tls",
+    "noClientIceServerOverride": true,
+    "selectedCandidateTypes": [
+      "relay",
+      "relay"
+    ],
+    "relayProtocols": [
+      "tls",
+      "tls"
+    ],
+    "receivedBytes": [
+      552797,
+      584793
+    ],
+    "sentBytes": [
+      1376587,
+      1159601
+    ],
+    "decodedFrames": [
+      113,
+      118
+    ],
+    "allCountersIncreasedBetweenSamples": true,
+    "passed": true
+  }
+}

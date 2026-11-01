@@ -22,19 +22,8 @@ spec:
         {{- if and (not .Values.apiKeys.existingSecret) (gt (len .Values.apiKeys.values) 0) }}
         checksum/api-keys: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
-        # NOTE: there is intentionally NO checksum annotation for the
-        # cert-manager-issued TURN cert Secret (`turn.secretName`).
-        # Hashing it would force a pod restart on every cert renewal,
-        # and since this is a single-replica SFU (see validations.yaml)
-        # a restart drops every active call. The cert is mounted as a
-        # projected Secret volume, so kubelet syncs the renewed
-        # material into the pod within its sync period (~60s by default,
-        # bounded by `--sync-frequency`). LiveKit reloads the TURN/TLS
-        # certificate from disk, so calls keep running across a renewal
-        # without a restart. The ~60s propagation lag is acceptable
-        # because cert-manager renews well before expiry (default 2/3 of
-        # lifetime). If a future multi-replica setup makes restarts
-        # non-disruptive, re-add a `checksum/turn-cert` here.
+        # External credentials/certificates require an explicitly
+        # scheduled restart until call-safe rotation lands in #1554.
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -63,14 +52,37 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.sharedTURN.configSecretName }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              umask 077
+              awk '
+                { print }
+                $0 == "rtc:" {
+                  count = 0
+                  while ((getline line < "/etc/livekit/shared-turn/turn-servers.yaml") > 0) {
+                    print "  " line
+                    count++
+                  }
+                  if (count == 0) exit 1
+                  inserted++
+                }
+                END { if (inserted != 1) exit 1 }
+              ' /etc/livekit/config/config.yaml > /tmp/livekit.yaml
+              exec /livekit-server --config /tmp/livekit.yaml --disable-strict-config
+          {{- else }}
           args:
             - --disable-strict-config
+          {{- end }}
           env:
+            {{- if not .Values.sharedTURN.configSecretName }}
             - name: LIVEKIT_CONFIG
               valueFrom:
                 configMapKeyRef:
                   name: {{ include "livekit-sfu.fullname" . }}
                   key: config.yaml
+            {{- end }}
             {{- if $turnTLSSecret }}
             - name: LIVEKIT_TURN_CERT
               value: {{ printf "%s/%s" .Values.turn.mountPath .Values.turn.certKey | quote }}
@@ -116,8 +128,16 @@ spec:
               port: http
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled }}
+          {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled .Values.sharedTURN.configSecretName }}
           volumeMounts:
+            {{- if .Values.sharedTURN.configSecretName }}
+            - name: config
+              mountPath: /etc/livekit/config
+              readOnly: true
+            - name: shared-turn
+              mountPath: /etc/livekit/shared-turn
+              readOnly: true
+            {{- end }}
             {{- if $apiKeysEnabled }}
             - name: api-keys
               mountPath: {{ dir .Values.apiKeys.mountPath }}
@@ -133,8 +153,20 @@ spec:
               mountPath: {{ .Values.tmpDir.mountPath }}
             {{- end }}
           {{- end }}
-      {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled }}
+      {{- if or $apiKeysEnabled $turnTLSSecret .Values.tmpDir.enabled .Values.sharedTURN.configSecretName }}
       volumes:
+        {{- if .Values.sharedTURN.configSecretName }}
+        - name: config
+          configMap:
+            name: {{ include "livekit-sfu.fullname" . }}
+        - name: shared-turn
+          secret:
+            secretName: {{ .Values.sharedTURN.configSecretName }}
+            defaultMode: 0440
+            items:
+              - key: turn-servers.yaml
+                path: turn-servers.yaml
+        {{- end }}
         {{- if $apiKeysEnabled }}
         - name: api-keys
           secret:

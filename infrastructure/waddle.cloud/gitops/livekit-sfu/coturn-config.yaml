@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coturn
+  namespace: livekit
+data:
+  turnserver.conf: |
+    listening-port=30478
+    tls-listening-port=443
+    realm=turn.waddle.social
+    server-name=turn.waddle.social
+    use-auth-secret
+    fingerprint
+    cert=/etc/coturn/tls/tls.crt
+    pkey=/etc/coturn/tls/tls.key
+    min-port=49152
+    max-port=49251
+    no-tcp
+    no-tcp-relay
+    no-multicast-peers
+    denied-peer-ip=0.0.0.0-255.255.255.255
+    denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+    stale-nonce=600
+    total-quota=200
+    user-quota=8
+    max-allocate-lifetime=3600
+    drain-min-allocations=0
+    no-tlsv1
+    no-tlsv1_1
+    log-file=stdout
+    simple-log
+    pidfile=/tmp/turnserver.pid
+    userdb=/tmp/turndb
+  start.sh: |
+    #!/bin/sh
+    set -eu
+    umask 077
+    # Single-node contract: the SFU advertises this node's public IPv4,
+    # verified against DNS/STUN before rollout. Multi-node expands this
+    # explicit peer list together with the media destination policy.
+    case "$SFU_PEER_IP" in
+      ''|*[!0-9.]*) echo "SFU peer must be the verified node IPv4" >&2; exit 1 ;;
+    esac
+    if [ "$(wc -l < /etc/coturn/shared/shared-secret)" -ne 0 ] ||
+       LC_ALL=C grep -q '[[:cntrl:]]' /etc/coturn/shared/shared-secret; then
+      echo "TURN shared secret must be a single line" >&2
+      exit 1
+    fi
+    secret="$(cat /etc/coturn/shared/shared-secret)"
+    test -n "$secret"
+    cat /etc/coturn/base/turnserver.conf > /tmp/turnserver.conf
+    printf '\nstatic-auth-secret=%s\nlistening-ip=%s\nrelay-ip=%s\nallowed-peer-ip=%s\n' \
+      "$secret" "$POD_IP" "$POD_IP" "$SFU_PEER_IP" >> /tmp/turnserver.conf
+    exec turnserver -c /tmp/turnserver.conf
+  ready.sh: |
+    #!/bin/sh
+    set -eu
+    kill -0 "$(cat /tmp/turnserver.pid)"
+    # Validate the actual TLS listener and served certificate, not just
+    # readable projected files or a successful STUN Binding response.
+    timeout 3 openssl s_client -connect "$POD_IP:443" \
+      -servername turn.waddle.social -verify_hostname turn.waddle.social \
+      -verify_return_error -CAfile /etc/ssl/certs/ca-certificates.crt \
+      </dev/null >/dev/null 2>&1
+  drain.sh: |
+    #!/bin/sh
+    set -eu
+    pid="$(cat /tmp/turnserver.pid)"
+    kill -USR1 "$pid"
+    # Kubernetes sends SIGTERM as soon as preStop returns. Wait here
+    # until the foreground process exits after its final allocation.
+    while kill -0 "$pid" 2>/dev/null; do sleep 1; done

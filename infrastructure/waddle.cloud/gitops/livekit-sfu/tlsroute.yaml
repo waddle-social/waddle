@@ -12,5 +12,5 @@ spec:
       sectionName: turn-passthrough
   rules:
     - backendRefs:
-        - name: livekit-sfu-turn
+        - name: coturn
           port: 443

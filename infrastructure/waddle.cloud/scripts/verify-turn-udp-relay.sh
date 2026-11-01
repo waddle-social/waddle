@@ -1,66 +1,37 @@
 #!/usr/bin/env bash
-# Verify the self-hosted LiveKit embedded-TURN UDP relay is reachable
-# end-to-end and cross-check the call-media telemetry, per issue #1000.
+# Authenticated TURN qualification against an explicitly controlled UDP echo peer.
+# This verifies Allocate, CreatePermission, ChannelBind and payload echo, not
+# merely an unauthenticated STUN Binding response. Supports UDP and TLS:443.
 #
-# This is the HITL/ops step: the chart and gitops config are validated by
-# `go test ./...`, but external reachability and the TCP-relay share can
-# only be confirmed against the running environment.
+# Usage (credentials must already be present in the environment):
+#   TURN_USERNAME / TURN_PASSWORD: short-lived coturn REST credentials
+#   ./scripts/verify-turn-udp-relay.sh --addr <test-turn>:3478 --peer <echo-ip>:3479
+#   ./scripts/verify-turn-udp-relay.sh --transport tls --addr <test-turn>:443 \
+#     --peer <echo-ip>:3479 [--ca <qualification-ca.pem>]
 #
-# Usage:
-#   ./scripts/verify-turn-udp-relay.sh [host:port]
+# For a self-contained pinned-coturn qualification:
+#   bash internal/turnprobe/testdata/qualify-coturn.sh
 #
-# Defaults to turn.waddle.social:30478 (production NodePort for the
-# TURN/UDP listener; kept in lockstep with gitops/livekit-sfu/helmrelease.yaml).
-#
-# Prerequisites:
-#   - Go toolchain (runs the `verify-turn-udp` STUN probe)
-#   - Outbound UDP to the target host:port from where you run this
-#
-# A reachable result proves a UDP datagram traversed the NodePort and node
-# firewall to the TURN server and a reply returned, so LiveKit can hand
-# clients a usable `udp` relay candidate instead of forcing TCP/443.
+# Run this against an isolated qualification server with a deliberately allowed
+# echo peer. The production policy allows SFU media only, and the SFU is not a
+# raw echo service. Do not relax production peer restrictions to run this probe.
 set -euo pipefail
 
-ADDR="${1:-turn.waddle.social:30478}"
-MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+: "${TURN_USERNAME:?provide short-lived TURN_USERNAME through the environment}"
+: "${TURN_PASSWORD:?provide TURN_PASSWORD through the environment}"
+module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+(cd "${module_dir}" && go run . verify-turn-udp "$@")
 
-echo "==> Probing TURN/UDP relay reachability at ${ADDR}"
-if (cd "${MODULE_DIR}" && go run . verify-turn-udp --addr "${ADDR}"); then
-  reachable=1
-else
-  reachable=0
-fi
+cat <<'EOF'
 
-cat <<EOF
+Authenticated controlled-peer qualification passed. Production acceptance also
+requires a real web and Android call from a restricted network:
+  - Force and confirm a selected relay ICE candidate on UDP and TLS:443.
+  - Verify bidirectional media, not just successful credential issuance.
+  - Exercise a coturn rollout while an allocation is active.
+  - Confirm denied peer destinations/ports remain denied by the live policies.
+  - Correlate client relay telemetry with the actual selected candidate pair.
 
-==> Telemetry cross-check (call-media relay-rate, established by #996/#998)
-
-The probe above confirms the UDP listener is reachable from THIS host. To
-confirm real calls are not silently stuck on the TCP relay, inspect the
-call-media telemetry emitted on the Faro beacon:
-
-  - Field: succeeded ICE candidate-pair transport (udp vs tcp) and type
-    (host / srflx / relay), per published/subscribed call.
-  - Acceptance: the share of calls whose succeeded pair is a *TCP relay*
-    must be at or below the pre-change baseline. A non-trivial TCP-relay
-    share with this probe reporting "reachable" points at a client-network
-    or DNS/external-IP issue rather than the cluster data plane.
-
-If the probe reports NOT reachable, check, in order:
-  1. NodePort exposure   — kubectl -n livekit get svc livekit-sfu-turn-udp
-  2. External IP / DNS    — turn.waddle.social resolves to the node ingress IP
-  3. Node firewall / LB   — 30478/UDP open inbound at the cloud/edge layer
-  4. relay port range     — livekit.turn.relay_range_start/end reachable for media
-  5. probe assumption     — the probe expects the embedded TURN server to
-                            answer an unauthenticated STUN Binding request;
-                            a LiveKit/pion-turn upgrade could change that and
-                            yield a false negative against a healthy relay.
-
+A local echo qualification does not prove production routing, Cilium enforcement,
+Kubernetes draining or restricted-network/device media behavior.
 EOF
-
-if [ "${reachable}" -eq 1 ]; then
-  echo "==> TURN/UDP relay reachable from this host."
-else
-  echo "==> TURN/UDP relay NOT reachable from this host; see checklist above." >&2
-  exit 1
-fi

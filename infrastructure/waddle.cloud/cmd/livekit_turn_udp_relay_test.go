@@ -12,12 +12,17 @@ import (
 // listener, kept in lockstep across the chart, gitops, and networkpolicy.
 const turnUDPPort = 30478
 
+type sharedTURNValues struct {
+	ConfigSecretName string `yaml:"configSecretName"`
+}
+
 // livekitHelmRelease captures the TURN/RTC reachability knobs of the
 // production Flux HelmRelease values.
 type livekitHelmRelease struct {
 	Spec struct {
 		Values struct {
-			Livekit struct {
+			SharedTURN sharedTURNValues `yaml:"sharedTURN"`
+			Livekit    struct {
 				RTC struct {
 					UseExternalIP bool `yaml:"use_external_ip"`
 				} `yaml:"rtc"`
@@ -53,11 +58,17 @@ type ciliumNetworkPolicy struct {
 	} `yaml:"spec"`
 }
 
+type k8sServiceMetadata struct {
+	Name string `yaml:"name"`
+}
+
 // k8sService is the rendered NodePort Service shape we assert on.
 type k8sService struct {
-	Spec struct {
-		Type  string `yaml:"type"`
-		Ports []struct {
+	Metadata k8sServiceMetadata `yaml:"metadata"`
+	Spec     struct {
+		Selector map[string]string `yaml:"selector"`
+		Type     string            `yaml:"type"`
+		Ports    []struct {
 			Name       string `yaml:"name"`
 			Port       int    `yaml:"port"`
 			TargetPort string `yaml:"targetPort"`
@@ -172,11 +183,8 @@ func TestProductionHelmReleaseWiresTurnUDPRelay(t *testing.T) {
 	hr := readYAML[livekitHelmRelease](t, gitOpsPath("livekit-sfu", "helmrelease.yaml"))
 	v := hr.Spec.Values
 
-	if !v.Livekit.Turn.Enabled {
-		t.Fatal("livekit.turn.enabled must be true in production")
-	}
-	if v.Livekit.Turn.UDPPort != turnUDPPort {
-		t.Fatalf("livekit.turn.udp_port = %d, want %d", v.Livekit.Turn.UDPPort, turnUDPPort)
+	if v.Livekit.Turn.Enabled {
+		t.Fatal("production uses shared coturn; embedded TURN must be disabled")
 	}
 	if !v.NodePorts.TurnUDP.Enabled {
 		t.Fatal("nodePorts.turnUdp.enabled must be true so the TURN/UDP listener is reachable")
@@ -193,7 +201,7 @@ func TestProductionHelmReleaseWiresTurnUDPRelay(t *testing.T) {
 // internet; a NodePort without this allow would render the relay
 // unreachable.
 func TestNetworkPolicyAdmitsTurnUDPFromWorld(t *testing.T) {
-	np := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-sfu", "networkpolicy.yaml"))
+	np := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-sfu", "coturn-networkpolicy.yaml"))
 
 	for _, rule := range np.Spec.Ingress {
 		if !contains(rule.FromEntities, "world") {

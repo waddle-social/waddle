@@ -43,6 +43,12 @@ webhook:
   apiKey: ""
   urls: []
 
+# An existing Secret whose turn-servers.yaml key contains an RTC
+# turn_servers fragment. Compose it in pod-local storage; credentials
+# must never pass through Helm values, release storage or ConfigMaps.
+sharedTURN:
+  configSecretName: ""
+
 livekit:
   port: 7880
   prometheus_port: 6789
@@ -51,12 +57,10 @@ livekit:
     use_external_ip: true
     tcp_port: 30881
     udp_port: 30882
-  # Defaults state the production posture (TURN live at turn.waddle.social
-  # over TLS/443 + UDP/30478): the previous `enabled: false` default,
-  # while production ran TURN-on via the Flux HelmRelease override, already
-  # misled one investigation.
+  # Embedded TURN is an optional chart mode. Production uses shared
+  # coturn with the credential Secret configured by sharedTURN instead.
   turn:
-    enabled: true
+    enabled: false
     domain: turn.waddle.social
     udp_port: 30478
     tls_port: 443
@@ -96,7 +100,7 @@ nodePorts:
     tcp: 30881
     udp: 30882
   turnUdp:
-    enabled: true
+    enabled: false
     annotations: {}
     externalTrafficPolicy: Cluster
     udp: 30478
