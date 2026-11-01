@@ -282,11 +282,55 @@ pub struct Sasl2Authenticate {
     pub mechanism: Sasl2Mechanism,
     /// Optional decoded initial response.
     pub initial_response: Option<Sasl2Data>,
-    /// Optional XEP-0388 inline feature requests.
-    pub inline: Option<Sasl2InlineFeatures>,
+    // These are direct children, not the <inline/> feature-advertisement
+    // container. Keep even unrecognized children so the receiving server can
+    // decide whether it supports each requested extension.
+    additional_children: Vec<Element>,
 }
 
 impl Sasl2Authenticate {
+    /// Create a request without a user agent or inline feature requests.
+    #[must_use]
+    pub fn new(mechanism: Sasl2Mechanism, initial_response: Option<Sasl2Data>) -> Self {
+        Self {
+            mechanism,
+            initial_response,
+            additional_children: Vec::new(),
+        }
+    }
+
+    /// Direct children other than the initial response, including the optional
+    /// user agent and any requested inline extensions.
+    #[must_use]
+    pub fn additional_children(&self) -> &[Element] {
+        &self.additional_children
+    }
+
+    /// Add a direct request child without silently replacing protocol fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Sasl2Error::InvalidElement`] for a second initial response, an
+    /// advertisement-only `<inline/>` container, or a duplicate user agent.
+    pub fn push_additional_child(&mut self, child: Element) -> Result<(), Sasl2Error> {
+        if child.ns() == NS_SASL2 {
+            match child.name() {
+                "initial-response" | "inline" => return Err(Sasl2Error::InvalidElement),
+                "user-agent"
+                    if self
+                        .additional_children
+                        .iter()
+                        .any(|existing| existing.is("user-agent", NS_SASL2)) =>
+                {
+                    return Err(Sasl2Error::InvalidElement);
+                }
+                _ => {}
+            }
+        }
+        self.additional_children.push(child);
+        Ok(())
+    }
+
     /// Parse an XEP-0388 `<authenticate/>` request.
     ///
     /// # Errors
@@ -301,31 +345,21 @@ impl Sasl2Authenticate {
             .attr("mechanism")
             .and_then(Sasl2Mechanism::parse)
             .ok_or(Sasl2Error::InvalidMechanism)?;
-        let mut initial_responses = element
-            .children()
-            .filter(|child| child.name() == "initial-response" && child.ns() == NS_SASL2);
-        let initial_response = initial_responses
-            .next()
-            .map(|child| Sasl2Data::from_element_text(&child.text()))
-            .transpose()?;
-        if initial_responses.next().is_some() {
+        if !element.text().trim().is_empty() {
             return Err(Sasl2Error::InvalidElement);
         }
-        let mut inline_features = element
-            .children()
-            .filter(|child| child.name() == "inline" && child.ns() == NS_SASL2);
-        let inline = inline_features
-            .next()
-            .map(Sasl2InlineFeatures::from_element)
-            .transpose()?;
-        if inline_features.next().is_some() {
-            return Err(Sasl2Error::InvalidElement);
+        let mut request = Self::new(mechanism, None);
+        for child in element.children() {
+            if child.is("initial-response", NS_SASL2) {
+                if request.initial_response.is_some() || child.children().next().is_some() {
+                    return Err(Sasl2Error::InvalidElement);
+                }
+                request.initial_response = Some(Sasl2Data::from_element_text(&child.text())?);
+            } else {
+                request.push_additional_child(child.clone())?;
+            }
         }
-        Ok(Self {
-            mechanism,
-            initial_response,
-            inline,
-        })
+        Ok(request)
     }
 
     /// Build an XEP-0388 `<authenticate/>` request.
@@ -342,8 +376,8 @@ impl Sasl2Authenticate {
                     .build(),
             );
         }
-        if let Some(inline) = &self.inline {
-            builder = builder.append(inline.to_element());
+        for child in &self.additional_children {
+            builder = builder.append(child.clone());
         }
         builder.build()
     }

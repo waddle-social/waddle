@@ -344,11 +344,10 @@ impl OAuthBearerRequest {
     /// Serialize this value as a SASL2 `<authenticate/>` element without inline requests.
     #[must_use]
     pub fn to_sasl2_element(&self) -> Element {
-        Sasl2Authenticate {
-            mechanism: Sasl2Mechanism::OAuthBearer,
-            initial_response: Some(SaslPayload::new(self.initial_response_payload())),
-            inline: None,
-        }
+        Sasl2Authenticate::new(
+            Sasl2Mechanism::OAuthBearer,
+            Some(SaslPayload::new(self.initial_response_payload())),
+        )
         .to_element()
     }
 

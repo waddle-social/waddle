@@ -44,11 +44,10 @@ fn xep0388_preserves_valid_extension_mechanisms_and_rejects_invalid_names() {
 
 #[test]
 fn xep0388_authenticate_encodes_initial_response_and_does_not_invent_inline_requests() {
-    let authenticate = Sasl2Authenticate {
-        mechanism: Sasl2Mechanism::OAuthBearer,
-        initial_response: Some(Sasl2Data::new(b"n,,\x01auth=Bearer token\x01\x01".to_vec())),
-        inline: None,
-    };
+    let authenticate = Sasl2Authenticate::new(
+        Sasl2Mechanism::OAuthBearer,
+        Some(Sasl2Data::new(b"n,,\x01auth=Bearer token\x01\x01".to_vec())),
+    );
 
     let element = authenticate.to_element();
     assert_eq!(element.name(), "authenticate");
