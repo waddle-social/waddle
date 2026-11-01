@@ -7,6 +7,7 @@ mod backend;
 pub mod blocking;
 pub mod lineage;
 mod migrations;
+pub mod physical_attestation;
 mod pool;
 pub mod roster;
 mod schema;
