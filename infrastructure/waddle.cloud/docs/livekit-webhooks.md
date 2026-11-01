@@ -18,8 +18,9 @@ The verifier needs Python with the existing PyYAML tooling, an explicit
 Kubernetes context, read access to the two existing webhook secrets, and exec
 access to a ready SFU pod containing BusyBox wget. It resolves the configured
 webhook-key inside the **SFU** keys.yaml and checks that the server's
-verifier secret matches, without printing either. The JWT travels to kubectl
-through stdin and only HTTP statuses are printed.
+verifier secret matches, without printing either. Malformed credential YAML or
+value shapes produce a generic error without parser input or traceback. The
+JWT travels to kubectl through stdin and only HTTP statuses are printed.
 
 After the GitOps policy is applied:
 
@@ -69,6 +70,9 @@ be checked in or pasted into a PR.
 - The server recorded the accepted `other` event at
   `2026-11-01T22:36:00.019731Z` and the invalid-token rejection at
   `2026-11-01T22:36:12.121349Z`. The temporary policy was removed afterward.
+- The retained verifier itself was subsequently executed with an explicit
+  context, public comparison and temporary egress: it reported 403/200/401 and
+  confirmed policy cleanup.
 
 These observations prove the diagnosed routing boundary and signed handler
 reachability. They do not claim the committed GitOps change has deployed or
@@ -100,6 +104,14 @@ replica keep the path healthy, and delivery recovery clears the alert:
 ```sh
 cd infrastructure/waddle.cloud
 sh rules/tests/run.sh
+```
+
+Credential-error output is tested at the actual verifier CLI boundary with a
+synthetic kubectl executable; the tests never contact a cluster:
+
+```sh
+python3 -m unittest discover -s infrastructure/waddle.cloud/scripts \
+  -p test_verify_livekit_webhook_delivery.py
 ```
 
 ## Rollout and rollback

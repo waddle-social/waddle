@@ -33,12 +33,22 @@ def main():
     def kube_json(*arguments):
         return json.loads(subprocess.check_output([*kubectl, *arguments, "-o", "json"]))
 
-    sfu = kube_json("get", "secret", "-n", "livekit", "livekit-sfu-api-keys")["data"]
-    server = kube_json("get", "secret", "-n", "waddle", "waddle-livekit-config")["data"]
-    issuer = base64.b64decode(sfu["webhook-key"]).decode()
-    keys = yaml.safe_load(base64.b64decode(sfu["keys.yaml"]))
-    secret = keys[issuer].encode()
-    if not hmac.compare_digest(secret, base64.b64decode(server["LIVEKIT_WEBHOOK_SECRET"])):
+    try:
+        sfu = kube_json("get", "secret", "-n", "livekit", "livekit-sfu-api-keys")["data"]
+        server = kube_json("get", "secret", "-n", "waddle", "waddle-livekit-config")["data"]
+        issuer = base64.b64decode(sfu["webhook-key"], validate=True).decode()
+        keys = yaml.safe_load(base64.b64decode(sfu["keys.yaml"], validate=True))
+        if not issuer or not isinstance(keys, dict) or not isinstance(keys.get(issuer), str):
+            raise ValueError("invalid signer mapping")
+        secret = keys[issuer].encode()
+        verifier_secret = base64.b64decode(server["LIVEKIT_WEBHOOK_SECRET"], validate=True)
+        if not secret or not verifier_secret:
+            raise ValueError("empty webhook secret")
+    except (KeyError, TypeError, ValueError, yaml.YAMLError):
+        # YAML parser diagnostics can embed source lines containing secrets.
+        # Suppress both their message and chained traceback at the CLI boundary.
+        raise SystemExit("webhook credentials are malformed or incomplete") from None
+    if not hmac.compare_digest(secret, verifier_secret):
         raise RuntimeError("SFU signer and server verifier secrets differ")
     pods = kube_json(
         "get", "pods", "-n", "livekit", "-l",

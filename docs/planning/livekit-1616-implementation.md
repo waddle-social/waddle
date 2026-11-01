@@ -35,6 +35,10 @@ Use this isolated issue branch and PR. Preserve unrelated workspace changes. Kee
   missing telemetry, idle calls, healthy cross-replica events and recovery.
 - Added a repeatable signed diagnostic helper and sanitized runbook. The helper
   uses existing PyYAML operator tooling and adds no application dependency.
+- Follow-up review found that malformed YAML diagnostics could embed credential
+  source lines. The CLI now fails with a generic redacted error without chained
+  parser context; two subprocess-level regression tests cover malformed YAML
+  and invalid credential shapes through a fake kubectl boundary.
 
 ## Verification
 
@@ -47,6 +51,9 @@ Use this isolated issue branch and PR. Preserve unrelated workspace changes. Kee
   promtool 3.15.1; its release archive SHA-256 was verified.
 - GitOps Kustomize rendering, Rust formatting/import-structure checks,
   diagnostic Python compilation/help and `git diff --check` passed.
+- Both credential-redaction CLI tests pass after reproducing the original
+  traceback failure. The exact retained live verifier also reported
+  public/internal/invalid-signature HTTP 403/200/401 with temporary-policy cleanup.
 - Full server workspace, signed HTTP integrations and doctests are being run by
   the integration owner after the focused checks; do not infer their result from
   the SFU tests above.
