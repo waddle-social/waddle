@@ -16,6 +16,8 @@ mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod effect_descendants;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use effect_descendants::begin_raw_ingress_writer_with_capability;
 pub(crate) use effect_descendants::canonical_nowait_error;
 pub(crate) use effect_descendants::{begin_raw_ingress_writer, bound_raw_transaction};
 mod error;
@@ -65,11 +67,15 @@ pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 use std::time::Duration;
 
 use crate::config::LineageConfig;
-use crate::db::lineage::PgSchemaIdentity;
+#[cfg(any(test, feature = "test-support"))]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{lineage, Database, DatabaseDriver, Transaction};
 use crate::ingress_substrate::{
-    acquire_epoch_lock_first, acquire_epoch_lock_first_with_schema, set_local_transaction_timeouts,
-    supported_protocol_epoch,
+    acquire_epoch_lock_first, set_local_transaction_timeouts, supported_protocol_epoch,
+};
+#[cfg(any(test, feature = "test-support"))]
+use crate::ingress_substrate::{
+    acquire_epoch_lock_first_with_capability, tighten_local_transaction_timeouts,
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -91,10 +97,10 @@ pub struct IngressUnitOfWork {
     observations: std::sync::Arc<std::sync::atomic::AtomicBool>,
     db: Database,
     lineage: LineageConfig,
-    /// Optional dark writer capability supplied by an independent attestor.
-    /// Normal startup does not populate this until its identity handoff is
-    /// wired and reviewed.
-    expected_pg_schema: Option<PgSchemaIdentity>,
+    /// Optional full-identity dark writer capability retained by the exact
+    /// physically attested pool. Normal startup does not populate this.
+    #[cfg(any(test, feature = "test-support"))]
+    attested_pg_writer: Option<AttestedPostgresWriterCapability>,
     /// The server's canonical node identity source. Bound once at
     /// construction so claim fences can only be minted against the real
     /// rotation gate, never a caller-constructed one.
@@ -120,23 +126,24 @@ impl IngressUnitOfWork {
             observations: Default::default(),
             db,
             lineage,
-            expected_pg_schema: None,
+            #[cfg(any(test, feature = "test-support"))]
+            attested_pg_writer: None,
             fencing: IngressFencing::SingleNode,
         })
     }
 
-    /// Attach an independently attested schema identity for dark writer-path
-    /// qualification. This must not be built from the current pooled
-    /// connection's search path or DSN.
-    #[cfg(test)]
-    pub(crate) fn with_expected_pg_schema(
-        mut self,
-        expected: PgSchemaIdentity,
-    ) -> Result<Self, IngressUowError> {
+    /// Enable the dark full-identity writer path using the capability retained
+    /// by this unit of work's exact physically attested PostgreSQL pool.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_attested_pg_writer(mut self) -> Result<Self, IngressUowError> {
         if self.db.driver() != DatabaseDriver::Postgres {
             return Err(IngressUowError::PostgresRequired);
         }
-        self.expected_pg_schema = Some(expected);
+        self.attested_pg_writer = Some(
+            self.db
+                .attested_pg_writer_capability()
+                .ok_or(IngressUowError::AttestedPoolRequired)?,
+        );
         Ok(self)
     }
 
@@ -197,6 +204,12 @@ impl IngressUnitOfWork {
         &self,
         bounds: Option<(Duration, Duration)>,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(capability) = &self.attested_pg_writer {
+            self.db
+                .verify_attested_pg_writer_capability(capability)
+                .map_err(crate::db::DatabaseError::from)?;
+        }
         let acquisition = async {
             match self.db.driver() {
                 DatabaseDriver::Sqlite => self.db.begin_immediate().await,
@@ -219,12 +232,21 @@ impl IngressUnitOfWork {
                 return Err(IngressUowError::TransactionBoundsUnproven);
             }
         }
-        let protocol_epoch = match &self.expected_pg_schema {
-            Some(expected) => {
-                acquire_epoch_lock_first_with_schema(&mut transaction, expected).await?
+        #[cfg(any(test, feature = "test-support"))]
+        if self.attested_pg_writer.is_some()
+            && !tighten_local_transaction_timeouts(&mut transaction).await?
+        {
+            return Err(IngressUowError::TransactionBoundsUnproven);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        let protocol_epoch = match &self.attested_pg_writer {
+            Some(capability) => {
+                acquire_epoch_lock_first_with_capability(&mut transaction, capability).await?
             }
             None => acquire_epoch_lock_first(&mut transaction).await?,
         };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
         let supported = supported_protocol_epoch();
         if protocol_epoch > supported {
             return Err(IngressUowError::EpochUnsupported {
@@ -233,7 +255,11 @@ impl IngressUnitOfWork {
             });
         }
 
-        if self.db.driver() == DatabaseDriver::Postgres && self.expected_pg_schema.is_none() {
+        #[cfg(any(test, feature = "test-support"))]
+        let has_attested_writer = self.attested_pg_writer.is_some();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let has_attested_writer = false;
+        if self.db.driver() == DatabaseDriver::Postgres && !has_attested_writer {
             let mut proof = transaction
                 .query(
                     r#"
@@ -257,11 +283,25 @@ impl IngressUnitOfWork {
         let lineage = if self.db.is_in_memory_sqlite() {
             IngressLineage::Ephemeral
         } else {
-            IngressLineage::Attested(
+            #[cfg(any(test, feature = "test-support"))]
+            let verified = match &self.attested_pg_writer {
+                Some(capability) => capability
+                    .attested_lineage_for_deployment(self.lineage.deployment_uuid)
+                    .map_err(IngressUowError::Lineage)?,
+                None => lineage::verify_in_transaction(
+                    &mut transaction,
+                    self.db.driver(),
+                    &self.lineage,
+                )
+                .await
+                .map_err(IngressUowError::Lineage)?,
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let verified =
                 lineage::verify_in_transaction(&mut transaction, self.db.driver(), &self.lineage)
                     .await
-                    .map_err(IngressUowError::Lineage)?,
-            )
+                    .map_err(IngressUowError::Lineage)?;
+            IngressLineage::Attested(verified)
         };
 
         Ok(IngressUowTransaction {
@@ -352,7 +392,7 @@ impl<'a> IngressUowTransaction<'a> {
 
     /// Raw SQL remains confined to ingress repositories so callers cannot
     /// bypass the epoch, lineage, and claim-fencing invariants.
-    fn transaction_mut(&mut self) -> &mut Transaction<'a> {
+    pub(crate) fn transaction_mut(&mut self) -> &mut Transaction<'a> {
         &mut self.transaction
     }
 

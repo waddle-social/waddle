@@ -23,7 +23,8 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
-use crate::db::lineage::PgSchemaIdentity;
+#[cfg(any(test, feature = "test-support"))]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
 /// terminal.  The garbage collector receives `now` and binds the derived
@@ -258,23 +259,46 @@ impl PostgresIngressSubstrate {
     /// callers supplying another transaction must establish these preconditions
     /// before acquiring application locks. This API does not prove that order.
     pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
-        self.begin_inner(None).await
+        self.begin_inner().await
     }
 
-    /// Start a disposable dark writer with an independently attested schema
-    /// capability. This test-only path is not wired into runtime startup.
-    #[cfg(test)]
-    pub(crate) async fn begin_with_expected_pg_schema(
+    /// Start a disposable dark writer using the full-identity capability
+    /// retained by its physically attested pool. This path is not wired into
+    /// runtime startup.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn begin_with_attested_pg_writer(
         &self,
-        expected: &PgSchemaIdentity,
+        capability: &AttestedPostgresWriterCapability,
     ) -> Result<Transaction<'_>, IngressSubstrateError> {
-        self.begin_inner(Some(expected)).await
+        self.db
+            .verify_attested_pg_writer_capability(capability)
+            .map_err(DatabaseError::from)
+            .map_err(discard_database_error)?;
+
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(discard_database_error)?;
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(discard_database_error)?;
+        if !tighten_local_transaction_timeouts(&mut tx)
+            .await
+            .map_err(discard_database_error)?
+        {
+            return Err(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            });
+        }
+        let epoch = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+        if epoch > supported_protocol_epoch() {
+            return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+        }
+        Ok(tx)
     }
 
-    async fn begin_inner(
-        &self,
-        expected: Option<&PgSchemaIdentity>,
-    ) -> Result<Transaction<'_>, IngressSubstrateError> {
+    async fn begin_inner(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
         let mut tx = self
             .db
             .begin_immediate()
@@ -292,24 +316,13 @@ impl PostgresIngressSubstrate {
                     retry_class: DbRetryClass::NotRetryable,
                 });
             }
-            let epoch = match expected {
-                Some(expected) => {
-                    let epoch = acquire_epoch_lock_first_with_schema(&mut tx, expected).await?;
-                    if epoch > supported_protocol_epoch() {
-                        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
-                    }
-                    epoch
-                }
-                None => acquire_supported_epoch_lock_first(&mut tx).await?,
-            };
-            if expected.is_none() {
-                tx.execute(
-                    "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
-                    crate::db_params![epoch.to_storage().to_string()],
-                )
-                .await
-                .map_err(discard_database_error)?;
-            }
+            let epoch = acquire_supported_epoch_lock_first(&mut tx).await?;
+            tx.execute(
+                "SELECT set_config('waddle.protocol_epoch', ?, true), set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+                crate::db_params![epoch.to_storage().to_string()],
+            )
+            .await
+            .map_err(discard_database_error)?;
         }
         Ok(tx)
     }
@@ -1214,37 +1227,25 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
     })
 }
 
-/// Prepare a dark writer with an independently attested schema identity.
+/// Prepare a dark writer from the physical attestor's complete identity.
 ///
-/// This path deliberately takes the schema-qualified relation lock before
-/// reading the epoch, then installs a fresh transaction proof and retains the
-/// V1009 row lock. The expected identity must come from outside the current
-/// pooled session; it must never be reconstructed from `current_schema()`,
-/// the DSN, or the connection's search path.
-pub(crate) async fn acquire_epoch_lock_first_with_schema(
+/// The schema-qualified epoch relation lock is the first SQL operation after
+/// transaction isolation and timeout setup. Only then does the writer run
+/// the trusted physical attestor on this same transaction connection, before
+/// reading the epoch or taking application locks. This path never derives
+/// identity from the active search path or DSN.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn acquire_epoch_lock_first_with_capability(
     tx: &mut Transaction<'_>,
-    expected: &PgSchemaIdentity,
+    capability: &AttestedPostgresWriterCapability,
 ) -> Result<ProtocolEpoch, IngressSubstrateError> {
     if tx.driver() != DatabaseDriver::Postgres {
-        return acquire_epoch_lock_first(tx).await;
+        return Err(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        });
     }
 
-    let mut isolation_rows = tx
-        .query("SELECT current_setting('transaction_isolation')", ())
-        .await
-        .map_err(discard_database_error)?;
-    let isolation = isolation_rows
-        .next()
-        .await
-        .map_err(discard_database_error)?
-        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
-        .get::<String>(0)
-        .map_err(discard_database_error)?;
-    if isolation != "read committed" {
-        return Err(IngressSubstrateError::ReadCommittedRequired);
-    }
-    drop(isolation_rows);
-
+    let expected = &capability.identity().schema;
     let relation = format!(
         "{}.ingress_protocol_epoch",
         quote_postgres_identifier(&expected.name.0)
@@ -1255,6 +1256,11 @@ pub(crate) async fn acquire_epoch_lock_first_with_schema(
     )
     .await
     .map_err(discard_database_error)?;
+
+    capability
+        .attest_transaction(tx)
+        .await
+        .map_err(discard_database_error)?;
 
     let mut schema_rows = tx
         .query(
@@ -1276,6 +1282,22 @@ pub(crate) async fn acquire_epoch_lock_first_with_schema(
     if actual_schema_oid != expected.oid {
         return Err(IngressSubstrateError::SchemaIdentityMismatch);
     }
+
+    let mut isolation_rows = tx
+        .query("SELECT current_setting('transaction_isolation')", ())
+        .await
+        .map_err(discard_database_error)?;
+    let isolation = isolation_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::ReadCommittedRequired)?
+        .get::<String>(0)
+        .map_err(discard_database_error)?;
+    if isolation != "read committed" {
+        return Err(IngressSubstrateError::ReadCommittedRequired);
+    }
+    drop(isolation_rows);
 
     let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
     let mut proof = tx
@@ -1301,6 +1323,7 @@ pub(crate) async fn acquire_epoch_lock_first_with_schema(
     Ok(locked_epoch)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn read_epoch_in_relation(
     tx: &mut Transaction<'_>,
     relation: &str,
@@ -1328,6 +1351,7 @@ async fn read_epoch_in_relation(
         .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }

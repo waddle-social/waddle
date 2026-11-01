@@ -6,15 +6,20 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Row};
 use thiserror::Error;
 
+#[cfg(any(test, feature = "test-support"))]
+use super::lineage::LineageError;
 use super::lineage::LINEAGE_FORMAT;
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
 };
+#[cfg(any(test, feature = "test-support"))]
+use super::DatabaseError;
 
 mod installer;
 pub use installer::{inspect_installation, install, InstallationStatus};
@@ -31,6 +36,10 @@ pub enum PhysicalAttestationError {
     WrongConfiguredLogin,
     #[error("configured installer login differs from the provisioned installer login")]
     WrongInstallerLogin,
+    #[error("physical attestation capability belongs to a different PostgreSQL pool")]
+    WrongPool,
+    #[error("physical attestation capability requires PostgreSQL")]
+    PostgresRequired,
     #[error("physical connection identity differs at {field}")]
     Mismatch { field: &'static str },
     #[error("physical connection returned invalid {field}")]
@@ -80,6 +89,94 @@ pub struct PhysicalAttestationConfig {
     runtime_login: PgRoleName,
     definer_role: PgRoleName,
     trusted_schema: PgSchemaName,
+}
+
+/// PostgreSQL pool whose connections are checked by the physical attestor
+/// before SQLx lends them. The private capability is consumed with this pool
+/// when it is wrapped as a [`Database`](super::Database); callers cannot
+/// attach it to a different pool. The configured endpoint must preserve a
+/// server session across checkout and transaction start; transaction- and
+/// statement-pooling proxies are unsupported unless session pinning is
+/// independently guaranteed.
+#[derive(Clone)]
+pub struct AttestedPgPool {
+    pool: PgPool,
+    #[cfg(any(test, feature = "test-support"))]
+    writer_capability: AttestedPostgresWriterCapability,
+}
+
+/// Opaque authority for dark PostgreSQL ingress writers. It is created only
+/// together with the hook-bearing pool and carries the full physical identity
+/// and lineage expected by the trusted SECURITY DEFINER attestor.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub(crate) struct AttestedPostgresWriterCapability {
+    binding: std::sync::Arc<()>,
+    config: PhysicalAttestationConfig,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AttestedPostgresWriterCapability {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn identity(&self) -> &PgIdentity {
+        self.config.postgres()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn belongs_to(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.binding, &other.binding)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn attest_transaction(
+        &self,
+        transaction: &mut super::Transaction<'_>,
+    ) -> Result<(), DatabaseError> {
+        let connection = transaction
+            .postgres_connection()
+            .ok_or(PhysicalAttestationError::PostgresRequired)?;
+        attest_connection(connection, &self.config)
+            .await
+            .map_err(DatabaseError::from)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn attested_lineage_for_deployment(
+        &self,
+        configured: Option<DeploymentUuid>,
+    ) -> Result<AttestedLineage, DatabaseError> {
+        let persisted = self.config.lineage.deployment_uuid;
+        match configured {
+            Some(configured) if configured == persisted => Ok(self.config.lineage.clone()),
+            Some(configured) => Err(LineageError::DeploymentUuidMismatch {
+                configured,
+                persisted,
+            }
+            .into()),
+            None => Err(LineageError::DeploymentUuidUnconfigured { persisted }.into()),
+        }
+    }
+}
+
+impl AttestedPgPool {
+    /// Acquire through the same hook-bearing SQLx pool that carries this
+    /// wrapper's capability.
+    pub async fn acquire(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
+        self.pool.acquire().await
+    }
+
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
+    pub fn num_idle(&self) -> usize {
+        self.pool.num_idle()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn into_parts(self) -> (PgPool, AttestedPostgresWriterCapability) {
+        (self.pool, self.writer_capability)
+    }
 }
 
 impl PhysicalAttestationConfig {
@@ -315,6 +412,11 @@ pub async fn attest_connection(
 }
 
 /// A dark pool constructor: no production caller currently invokes it.
+///
+/// The endpoint must preserve a PostgreSQL server session across the
+/// before-acquire hook and transaction start. Transaction- and
+/// statement-pooling proxies are unsupported unless session pinning is
+/// independently guaranteed.
 /// SQLx may retry a failed hook until the acquire deadline, so callers must
 /// treat a timeout as unavailable, not as a definitive identity diagnosis.
 pub fn attested_pool(
@@ -322,12 +424,13 @@ pub fn attested_pool(
     config: PhysicalAttestationConfig,
     max_connections: u32,
     acquire_timeout: Duration,
-) -> Result<PgPool, PhysicalAttestationError> {
+) -> Result<AttestedPgPool, PhysicalAttestationError> {
     if options.get_username() != config.runtime_login.as_str() {
         return Err(PhysicalAttestationError::WrongConfiguredLogin);
     }
     let on_connect = config.clone();
-    Ok(PgPoolOptions::new()
+    let before_acquire = config.clone();
+    let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(max_connections)
         .acquire_timeout(acquire_timeout)
@@ -340,7 +443,7 @@ pub fn attested_pool(
             })
         })
         .before_acquire(move |connection, _| {
-            let config = config.clone();
+            let config = before_acquire.clone();
             Box::pin(async move {
                 // SQLx tracks ReadyForQuery transaction state internally but
                 // does not expose it to pool hooks. A borrower can issue raw
@@ -354,5 +457,13 @@ pub fn attested_pool(
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
             })
         })
-        .connect_lazy_with(options))
+        .connect_lazy_with(options);
+    Ok(AttestedPgPool {
+        pool,
+        #[cfg(any(test, feature = "test-support"))]
+        writer_capability: AttestedPostgresWriterCapability {
+            binding: std::sync::Arc::new(()),
+            config,
+        },
+    })
 }
