@@ -388,6 +388,39 @@ fn test_blocklist_interest_tracks_only_requesting_resources() {
 }
 
 #[test]
+fn resource_metadata_rejects_stale_and_absent_bindings() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("metadata");
+    let (old_tx, _old_rx) = mpsc::channel(4);
+    let old_owner = registry.register(jid.clone(), old_tx);
+    let (new_tx, _new_rx) = mpsc::channel(4);
+    let new_owner = registry.register(jid.clone(), new_tx);
+    let mirrored_entry = registry.entry(&jid).expect("current entry");
+
+    assert!(!registry.mark_roster_interested_if_owner(&jid, &old_owner));
+    assert!(!registry.mark_blocklist_interested_if_owner(&jid, &old_owner));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &old_owner, true));
+    assert!(!registry.is_roster_interested(&jid));
+    assert!(!registry.is_blocklist_interested(&jid));
+    assert!(!registry.is_carbons_enabled(&jid));
+
+    assert!(registry.mark_roster_interested_if_owner(&jid, &new_owner));
+    assert!(registry.mark_blocklist_interested_if_owner(&jid, &new_owner));
+    assert!(registry.set_carbons_enabled_if_owner(&jid, &new_owner, true));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &old_owner, false));
+    assert!(mirrored_entry.roster_interested.load(Ordering::Relaxed));
+    assert!(mirrored_entry.blocklist_interested.load(Ordering::Relaxed));
+    assert!(mirrored_entry.is_carbons_enabled());
+    assert!(registry.set_carbons_enabled_if_owner(&jid, &new_owner, false));
+    assert!(!mirrored_entry.is_carbons_enabled());
+
+    assert!(registry.unregister_if_owner(&jid, &new_owner).is_some());
+    assert!(!registry.mark_roster_interested_if_owner(&jid, &new_owner));
+    assert!(!registry.mark_blocklist_interested_if_owner(&jid, &new_owner));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &new_owner, true));
+}
+
+#[test]
 fn test_register_with_stream_state_seeds_blocklist_interest() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();
@@ -1136,6 +1169,118 @@ fn sm_stream_cleanup_keeps_connection_locked_until_reverse_owner_is_pruned() {
         Some(stream_id.clone())
     );
     assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid));
+}
+
+#[test]
+fn retiring_connection_keeps_slot_locked_until_presence_is_removed() {
+    use dashmap::try_result::TryResult;
+    use std::sync::mpsc as sync_mpsc;
+    use std::thread;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Removal {
+        Unconditional,
+        Binding,
+        SmStream,
+        Closed,
+        ClosedOwner,
+    }
+
+    for removal in [
+        Removal::Unconditional,
+        Removal::Binding,
+        Removal::SmStream,
+        Removal::Closed,
+        Removal::ClosedOwner,
+    ] {
+        let registry = Arc::new(ConnectionRegistry::new());
+        let jid = test_jid("presence-cleanup");
+        let (old_tx, old_rx) = mpsc::channel(4);
+        let old_owner = registry.register(jid.clone(), old_tx.clone());
+        let stream_id = crate::pending_delivery::SmSessionId::new("presence-cleanup-stream");
+        assert!(registry.set_sm_stream_id_if_owner(&jid, &old_owner, Some(stream_id.clone())));
+        assert!(registry.update_presence_state_if_owner(
+            &jid,
+            &old_owner,
+            None,
+            Some("old".to_string()),
+            0,
+            Vec::new(),
+        ));
+        drop(old_rx);
+
+        // Stall the presence removal. The cleanup must keep the connection
+        // slot locked throughout, so the successor cannot publish first.
+        let presence_guard = registry
+            .presence_states
+            .get_mut(&jid)
+            .expect("old presence");
+        let cleanup_registry = registry.clone();
+        let cleanup_jid = jid.clone();
+        let cleanup = thread::spawn(move || match removal {
+            Removal::Unconditional => cleanup_registry.unregister(&cleanup_jid).is_some(),
+            Removal::Binding => cleanup_registry
+                .unregister_if_owner(&cleanup_jid, &old_owner)
+                .is_some(),
+            Removal::SmStream => cleanup_registry
+                .unregister_if_sm_stream_id(&cleanup_jid, &stream_id)
+                .is_some(),
+            Removal::Closed => {
+                cleanup_registry.remove_if_sender_closed(&cleanup_jid);
+                true
+            }
+            Removal::ClosedOwner => {
+                cleanup_registry.remove_if_sender_closed_owner(&cleanup_jid, &old_tx);
+                true
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let connection_locked = loop {
+            match registry.connections.try_get(&jid) {
+                TryResult::Locked => break true,
+                TryResult::Absent => break false,
+                TryResult::Present(entry) => drop(entry),
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::yield_now();
+        };
+        if !connection_locked {
+            drop(presence_guard);
+            cleanup.join().expect("cleanup thread");
+            panic!("{removal:?} released the connection slot before clearing presence");
+        }
+
+        let successor_registry = registry.clone();
+        let successor_jid = jid.clone();
+        let (started_tx, started_rx) = sync_mpsc::channel();
+        let (new_tx, _new_rx) = mpsc::channel(4);
+        let successor = thread::spawn(move || {
+            started_tx.send(()).expect("signal successor start");
+            let owner = successor_registry.register(successor_jid.clone(), new_tx);
+            assert!(successor_registry.update_presence_state_if_owner(
+                &successor_jid,
+                &owner,
+                None,
+                Some("successor".to_string()),
+                3,
+                Vec::new(),
+            ));
+            owner
+        });
+        let successor_started = started_rx.recv_timeout(Duration::from_secs(5));
+        drop(presence_guard);
+        assert!(cleanup.join().expect("cleanup thread"));
+        let new_owner = successor.join().expect("successor thread");
+        successor_started.expect("successor began while cleanup held the slot");
+
+        assert!(registry.is_owned_by(&jid, &new_owner), "{removal:?}");
+        let presence = registry.presence_state(&jid).expect("successor presence");
+        assert_eq!(presence.status.as_deref(), Some("successor"), "{removal:?}");
+        assert_eq!(presence.priority, 3, "{removal:?}");
+    }
 }
 
 /// ADR-0017 Phase 1 (Greptile P1 on PR #1177): the SM-expiry janitor must not

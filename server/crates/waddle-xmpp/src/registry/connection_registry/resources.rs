@@ -1,4 +1,6 @@
-use super::{BareJid, ConnectionRegistry, FullJid, Ordering, SendResult, Stanza};
+use super::{
+    BareJid, ConnectionRegistry, FullJid, LocalConnectionBindingId, Ordering, SendResult, Stanza,
+};
 use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
@@ -7,6 +9,7 @@ impl ConnectionRegistry {
     /// RFC 6121 defines interested resources as those that requested the
     /// roster during this session. Roster pushes are sent only to these
     /// resources.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn mark_roster_interested(&self, jid: &FullJid) {
         if let Some(entry) = self.connections.get(jid) {
             entry
@@ -14,6 +17,23 @@ impl ConnectionRegistry {
                 .roster_interested
                 .store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Mark roster interest only for the current local binding. The entry
+    /// guard keeps a replacement from being installed between the check and write.
+    pub fn mark_roster_interested_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if entry.binding_id() != *owner {
+            return false;
+        }
+        entry.roster_interested.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Check whether a connected resource is interested in roster pushes.
@@ -40,6 +60,7 @@ impl ConnectionRegistry {
     ///
     /// XEP-0191 sends block/unblock pushes only to resources that requested the
     /// blocklist during the current session.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn mark_blocklist_interested(&self, jid: &FullJid) {
         if let Some(entry) = self.connections.get(jid) {
             entry
@@ -47,6 +68,22 @@ impl ConnectionRegistry {
                 .blocklist_interested
                 .store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Mark blocklist interest only for the current local binding.
+    pub fn mark_blocklist_interested_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if entry.binding_id() != *owner {
+            return false;
+        }
+        entry.blocklist_interested.store(true, Ordering::Relaxed);
+        true
     }
 
     /// Check whether a connected resource is interested in XEP-0191 blocklist pushes.
@@ -172,6 +209,7 @@ impl ConnectionRegistry {
     /// Update the XEP-0280 Message Carbons opt-in flag for a connected resource.
     ///
     /// Returns false when the resource is not currently connected.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn set_carbons_enabled(&self, jid: &FullJid, enabled: bool) -> bool {
         if let Some(entry) = self.connections.get(jid) {
             entry
@@ -182,5 +220,22 @@ impl ConnectionRegistry {
         } else {
             false
         }
+    }
+
+    /// Set Carbons for the exact current local binding.
+    pub fn set_carbons_enabled_if_owner(
+        &self,
+        jid: &FullJid,
+        owner: &LocalConnectionBindingId,
+        enabled: bool,
+    ) -> bool {
+        let Some(entry) = self.connections.get(jid) else {
+            return false;
+        };
+        if entry.binding_id() != *owner {
+            return false;
+        }
+        entry.carbons_enabled.store(enabled, Ordering::Relaxed);
+        true
     }
 }

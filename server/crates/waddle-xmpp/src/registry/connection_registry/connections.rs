@@ -126,11 +126,11 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered connection");
         } else {
             debug!("Connection was not registered");
@@ -161,11 +161,11 @@ impl ConnectionRegistry {
                 return false;
             }
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered owned connection");
         } else {
             debug!("Skipped unregister: ownership moved to replacement connection");
@@ -194,11 +194,11 @@ impl ConnectionRegistry {
                 return false;
             }
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered SM-owned connection at expiry");
         } else {
             debug!("Skipped expiry unregister: entry belongs to a different session or is absent");

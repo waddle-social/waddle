@@ -9956,13 +9956,30 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
-    let _ = handle_xmpp_frame(
+    let (bob_tx, _bob_rx) = mpsc::channel(8);
+    let bob_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob_jid.clone(), bob_tx);
+    bob.registry_owner = Some(bob_owner);
+    let roster_reply = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="bob-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
             state.as_ref(),
             &mut bob,
         )
         .await;
+    assert!(roster_reply
+        .iter()
+        .any(|frame| frame.contains("type='result'")));
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(&bob_jid, &bob_owner)
+        .is_some());
+    bob.registry_owner = None;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",

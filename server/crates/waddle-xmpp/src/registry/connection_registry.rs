@@ -92,6 +92,12 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Called while holding the connection slot's exclusive map guard.
+    /// Presence must be cleared before a same-JID successor can publish it.
+    fn remove_retired_presence(presence_states: &DashMap<FullJid, PresenceState>, jid: &FullJid) {
+        presence_states.remove(jid);
+    }
+
     /// Publish (or clear) the XEP-0198 SM stream id a connection owns,
     /// updating both the entry's own field and the registry-wide reverse
     /// index (ADR-0017 Phase 3 Slice 6). Supersedes bare
