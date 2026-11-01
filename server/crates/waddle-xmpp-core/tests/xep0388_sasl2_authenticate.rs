@@ -1,7 +1,9 @@
 //! XEP-0388 authenticate direct-child wire conformance.
 
 use minidom::Element;
-use waddle_xmpp_core::xep0388::{Sasl2Authenticate, Sasl2Data, Sasl2Mechanism, NS_SASL2};
+use waddle_xmpp_core::xep0388::{
+    Sasl2Authenticate, Sasl2Data, Sasl2Mechanism, Sasl2Response, NS_SASL2,
+};
 
 #[test]
 fn xep0388_authenticate_preserves_direct_inline_requests_and_user_agent() {
@@ -111,4 +113,24 @@ fn xep0388_authenticate_rejects_malformed_or_duplicate_protocol_children() {
         .build();
     assert!(Sasl2Authenticate::from_element(&root().append(nested).build()).is_err());
     assert!(Sasl2Authenticate::from_element(&root().append("unexpected").build()).is_err());
+}
+
+#[test]
+fn xep0388_response_parses_decoded_payload_and_rejects_invalid_shapes() {
+    let response = Sasl2Response {
+        data: Sasl2Data::new([0x01]),
+    };
+    assert_eq!(
+        Sasl2Response::from_element(&response.to_element()).unwrap(),
+        response
+    );
+    assert!(
+        Sasl2Response::from_element(&Element::builder("response", "urn:wrong").build()).is_err()
+    );
+    let malformed = Element::builder("response", NS_SASL2).append("%%%").build();
+    assert!(Sasl2Response::from_element(&malformed).is_err());
+    let nested = Element::builder("response", NS_SASL2)
+        .append(Element::builder("extra", "urn:example:feature").build())
+        .build();
+    assert!(Sasl2Response::from_element(&nested).is_err());
 }

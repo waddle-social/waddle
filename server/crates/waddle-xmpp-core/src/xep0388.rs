@@ -422,6 +422,21 @@ pub struct Sasl2Response {
 }
 
 impl Sasl2Response {
+    /// Parse an XEP-0388 `<response/>` element.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an unexpected element, nested child, or
+    /// malformed Base64 payload.
+    pub fn from_element(element: &Element) -> Result<Self, Sasl2Error> {
+        if !element.is("response", NS_SASL2) || element.children().next().is_some() {
+            return Err(Sasl2Error::InvalidElement);
+        }
+        Ok(Self {
+            data: Sasl2Data::from_element_text(&element.text())?,
+        })
+    }
+
     /// Build an XEP-0388 `<response/>` element.
     #[must_use]
     pub fn to_element(&self) -> Element {
