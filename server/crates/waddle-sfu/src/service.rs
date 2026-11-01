@@ -6,8 +6,8 @@ use super::Pin;
 use super::SfuError;
 use super::{ApiSecret, WebsocketUrl};
 use super::{
-    CallId, Identity, MediaCapabilities, ObservedCallSids, SessionBinding, SessionScopedTeardown,
-    SidObservationDirection, SidObservationDisposition, TeardownDisposition,
+    CallId, CallTeardownIntentLite, Identity, MediaCapabilities, ObservedCallSids, SessionBinding,
+    SessionScopedTeardown, SidObservationDirection, SidObservationDisposition, TeardownDisposition,
 };
 use super::{JoinToken, Jti};
 use super::{TurnCredential, TurnHost};
@@ -75,7 +75,43 @@ impl ParticipantRegistrationExpectation {
     }
 }
 
+/// A displaced-media obligation that has not yet completed durable persistence.
+/// The opaque receipt prevents an older persistence acknowledgement from
+/// removing a newer report of the same intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMediaRetirement {
+    pub intent: CallTeardownIntentLite,
+    pub(crate) receipt_id: uuid::Uuid,
+}
+
+/// Why a bounded provider preparation could not establish a publishable fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ParticipantPreparationError {
+    #[error("media provider unavailable")]
+    ProviderUnavailable,
+    #[error("media observation changed during preparation")]
+    ObservationChanged,
+    #[error("signaling registration was superseded")]
+    Superseded,
+    #[error("media preparation context unavailable")]
+    ContextUnavailable,
+}
+
 pub trait SfuService: Send + Sync + 'static {
+    /// Snapshot unpersisted takeover obligations, including work currently
+    /// being persisted by a background sink. Reading never consumes them.
+    fn pending_media_retirements(
+        &self,
+        _call_id: &CallId,
+        _identity: &Identity,
+    ) -> Vec<PendingMediaRetirement> {
+        Vec::new()
+    }
+
+    /// Acknowledge only after this exact receipt's intent has committed to
+    /// durable storage. Acknowledging a superseded receipt is a no-op.
+    fn acknowledge_media_retirement(&self, _receipt: &PendingMediaRetirement) {}
+
     /// Mint a short-lived LiveKit join JWT for `identity` to enter
     /// `call_id` with the given media capabilities. The returned token
     /// carries the LiveKit websocket URL, the room name, and an
@@ -96,6 +132,19 @@ pub trait SfuService: Send + Sync + 'static {
         _identity: &Identity,
     ) -> Option<ParticipantRegistrationExpectation> {
         None
+    }
+
+    /// Recover provider media before asynchronous Muji authorization. The
+    /// returned expectation fences both that observation and token publication.
+    /// Retry one transient failure without adopting a newer signaling request.
+    /// Exhaustion or supersession returns a typed error before publication.
+    fn prepare_participant_registration<'a>(
+        &'a self,
+        call_id: &'a CallId,
+        identity: &'a Identity,
+    ) -> ParticipantPreparationFuture<'a> {
+        let expected = self.participant_registration_expectation(call_id, identity);
+        Box::pin(async move { expected.ok_or(ParticipantPreparationError::ContextUnavailable) })
     }
 
     /// Publish a join token and signaling registration only if the exact
@@ -505,6 +554,16 @@ pub trait SfuService: Send + Sync + 'static {
     fn participants_for_call(&self, call_id: &CallId) -> Vec<Identity>;
 }
 
+/// Preparation is the asynchronous adapter seam; authorization and publication
+/// remain separate, and the existing synchronous publication uses its CAS fence.
+pub type ParticipantPreparationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ParticipantRegistrationExpectation, ParticipantPreparationError>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// Future returned by [`SfuReconciler::reconcile_active_calls`]. Named
 /// so the boxed-future shape stays readable at the trait + impl sites.
 pub type ReconcileFuture<'a> = Pin<Box<dyn Future<Output = ReconcilePassSummary> + Send + 'a>>;
@@ -522,9 +581,8 @@ pub struct ReconcilePassSummary {
 
 /// Periodic reconciliation against the SFU's ground truth.
 ///
-/// Separate from [`SfuService`] because it is inherently async (an
-/// HTTP round-trip to LiveKit's `ListParticipants`) whereas
-/// `SfuService` is deliberately sync. A background task in
+/// Separate periodic provider I/O from [`SfuService`]'s call setup and
+/// accounting operations. A background task in
 /// `waddle-server` drives this on an interval so that a lost
 /// `participant_left` / `room_finished` webhook delivery cannot leave
 /// a permanent ghost in the registry (and therefore in MUC presence):

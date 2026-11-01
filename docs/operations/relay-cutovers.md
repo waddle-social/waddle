@@ -1,5 +1,74 @@
 # Relay cutovers and the RollingUpdate guard
 
+## Displaced media retirement rollout (#1732)
+
+Only an authorized fresh Jingle publication creates displaced-media retirement.
+Ordinary joins, cached-token reloads and polling never classify a generation
+mismatch as a takeover. Existing untagged media keeps its legacy lifecycle;
+there is no requirement to drain LiveKit or rotate signing keys for this scope.
+JWT expiry limits initial admission, not an already-connected participant's
+lifetime. Do not claim strict generation retirement for untagged legacy media.
+
+The new retirement and actor-only `call_teardown_outbox` actions remain
+incompatible with old readers.
+Main auto-deploys, so merge in an explicitly authorized Recreate window. Expect
+an XMPP connection interruption; verify call recovery instead of assuming it.
+
+1. The independent startup prerequisite (#2058) is merged. Prepare the reviewed,
+   digest-pinned server image. Preserve the deployment UUID and existing LiveKit
+   credentials. Recreate must stop old readers before new writers start.
+2. Verify the new fleet is ready, old readers are gone, new Muji tokens carry
+   `waddle.occupancy_generation`, and clients cannot change metadata. Check the
+   outbox schema accepts generation-only retirement.
+3. Exercise cached-token tab reload with a new XMPP occupancy generation and no
+   Jingle setup: its media must survive joins and polling. Then explicitly
+   re-initiate: g1 must retire when g2 delays its media connection, while a
+   connected g2 and its cached-token reload survive an older g1 retirement.
+4. Test a cold-cache restart followed immediately by explicit re-initiation,
+   delayed/missing SID evidence, room rotation during preparation, ownerless
+   and foreign-owner outbox draining, and admin-request retry/convergence.
+   Record fleet and live acceptance separately from native tests and CI.
+5. Restore RollingUpdate in a separate change after fleet verification, using
+   the publisher revision accepted by the guard below. Keep unrelated
+   publisher-triggering changes out of the gap.
+
+Prefer roll-forward recovery. **One incompatible row can stall all teardown:**
+the old decoder fails the whole claimed batch, including unrelated supported
+jobs, rather than skipping the new action. Binary rollback requires stopping
+all new writers and drainers, exporting the incompatible rows for audit, and
+explicitly abandoning their pending cleanup before starting old binaries.
+
+Inspect the affected work first (SQLite and PostgreSQL):
+
+```sql
+SELECT action, status, COUNT(*) AS jobs
+FROM call_teardown_outbox
+WHERE action IN ('retire_displaced_participant', 'muji_presence_clear_only')
+GROUP BY action, status;
+```
+
+Only as the final, explicitly chosen rollback disposal step, with writers and
+drainers still stopped, run this exact destructive transaction. It deletes all
+statuses of the two new actions, so no unsupported historical row remains to
+poison an old reader; it preserves every other action:
+
+```sql
+BEGIN;
+DELETE FROM call_teardown_outbox
+WHERE action IN ('retire_displaced_participant', 'muji_presence_clear_only');
+COMMIT;
+```
+
+Re-run the inspection query and require zero rows before starting old drainers.
+This abandons displaced-media retirement and actor-only repair responsibilities;
+it does not undo completed removals or invalidate old credentials. No signing
+keys need restoring. These instructions do not authorize or assert a deployment,
+rollback, SQL execution or live verification.
+
+LiveKit removal is identity-keyed: a successor connecting after the final SID
+probe can still be removed. Local JTI revocation is bookkeeping, not provider
+admission enforcement. Neither limitation is changed by this rollout.
+
 ## Extension effect authority cutover (#1660)
 
 V1025 changes collection authority and the guest ABI becomes

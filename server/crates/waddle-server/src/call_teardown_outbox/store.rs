@@ -86,6 +86,7 @@ impl CallTeardownOutboxStore {
         let mut transaction = self.db.begin().await?;
         let mut intent_ids = Vec::with_capacity(intents.len());
         for intent in intents {
+            intent.validate_retirement_evidence()?;
             let intent_id = CallTeardownIntentId::new();
             let encoded = encode_target(&intent.target);
             let generation = encode_generation(intent.generation)?;
@@ -134,6 +135,7 @@ impl CallTeardownOutboxStore {
         intent: CallTeardownIntent,
         now_ms: i64,
     ) -> Result<CallTeardownIntentId, CallTeardownOutboxError> {
+        intent.validate_retirement_evidence()?;
         let producing_node_guard = self
             .producing_node_guard(intent.room_scope().is_none())
             .await?;
@@ -424,7 +426,24 @@ fn encode_target(target: &TeardownTarget) -> EncodedTarget<'_> {
             None,
             participant_sid.as_ref().map(ParticipantSid::as_str),
         ),
+        TeardownTarget::DisplacedParticipant {
+            identity,
+            participant_sid,
+        } => EncodedTarget::without_thread(
+            "retire_displaced_participant",
+            Some(identity.to_string()),
+            None,
+            participant_sid.as_ref().map(ParticipantSid::as_str),
+        ),
         TeardownTarget::Room => EncodedTarget::without_thread("delete_room", None, None, None),
+        TeardownTarget::MujiPresenceClearOnly { room_jid, departed } => {
+            EncodedTarget::without_thread(
+                "muji_presence_clear_only",
+                Some(departed.to_string()),
+                Some(room_jid.to_string()),
+                None,
+            )
+        }
         TeardownTarget::MujiPresenceClear {
             room_jid,
             departed,

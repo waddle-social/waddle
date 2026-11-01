@@ -1353,6 +1353,8 @@ pub enum CallSetupFailureReason {
     /// lookup or room-actor ask error) before the SFU was ever
     /// contacted.
     MembershipCheckFailed,
+    /// Bounded media-provider preparation failed before dispatch and minting.
+    MediaPreparationFailed,
     /// The room is owned by another node and that node could not be
     /// reached, so the request never got as far as an authorization
     /// decision (#1445). Distinct from `MembershipCheckFailed`: the
@@ -1388,7 +1390,7 @@ pub enum CallSetupFailureReason {
 impl CallSetupFailureReason {
     /// Every allowed value. Startup zero-registration (#1436) iterates
     /// this so every failure series exists before the first real call.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::RoomNotFound,
         Self::MembershipDenied,
         Self::NotAuthorized,
@@ -1398,6 +1400,7 @@ impl CallSetupFailureReason {
         Self::FederationUnsupported,
         Self::TokenMintFailed,
         Self::MembershipCheckFailed,
+        Self::MediaPreparationFailed,
         Self::OwnerUnreachable,
         Self::PeerUnavailable,
         Self::RouteAbandoned,
@@ -1421,6 +1424,7 @@ impl MetricAttribute for CallSetupFailureReason {
             Self::FederationUnsupported => "federation_unsupported",
             Self::TokenMintFailed => "token_mint_failed",
             Self::MembershipCheckFailed => "membership_check_failed",
+            Self::MediaPreparationFailed => "media_preparation_failed",
             Self::OwnerUnreachable => "owner_unreachable",
             Self::PeerUnavailable => "peer_unavailable",
             Self::RouteAbandoned => "route_abandoned",

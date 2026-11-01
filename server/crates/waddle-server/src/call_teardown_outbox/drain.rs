@@ -33,10 +33,9 @@ pub(crate) struct CallTeardownDrainSummary {
     pub failed: u64,
 }
 
-/// Drain a bounded batch. Muji call IDs are room JIDs and therefore run only
-/// on the node whose room registry currently owns that room. A raw 1:1 call
-/// ID is process-local and runs only on the exact process incarnation that
-/// produced it.
+/// Drain a bounded batch. Ordinary Muji effects require the room owner and
+/// raw 1:1 effects require their producing process. Authorized retirement
+/// receipts travel across owners and execute under exact provider fences.
 pub(crate) async fn drain_due(
     state: &WebSocketState,
     batch_size: usize,
@@ -51,7 +50,12 @@ pub(super) async fn drain_due_at(
 ) -> Result<CallTeardownDrainSummary, CallTeardownOutboxError> {
     let store = &state.deps.protocol.call_teardown_outbox;
     let jobs = store.claim_due_at(batch_size, now_ms).await?;
-    let needs_room_ownership = jobs.iter().any(|job| job.intent.room_scope().is_some());
+    let needs_room_ownership = jobs.iter().any(|job| {
+        !matches!(
+            job.intent.target,
+            TeardownTarget::DisplacedParticipant { .. }
+        ) && job.intent.room_scope().is_some()
+    });
     let local_rooms = if needs_room_ownership {
         local_room_jids(&state.deps.protocol.room_registry).await
     } else {
@@ -60,8 +64,19 @@ pub(super) async fn drain_due_at(
     let mut summary = CallTeardownDrainSummary::default();
 
     for job in jobs {
-        let room_scope = job.intent.room_scope();
-        let _producing_node_guard = if room_scope.is_none() {
+        // Only an authorized successful publication can create retirement
+        // work. Its receipt travels across room owners; provider generation
+        // and SID checks fence execution without a live room dependency.
+        let retirement = matches!(
+            job.intent.target,
+            TeardownTarget::DisplacedParticipant { .. }
+        );
+        let room_scope = if retirement {
+            None
+        } else {
+            job.intent.room_scope()
+        };
+        let _producing_node_guard = if !retirement && room_scope.is_none() {
             let guard = match job.producing_node.as_ref() {
                 Some(producer) => store.guard_if_current_producer(producer).await,
                 None => None,
@@ -301,6 +316,8 @@ fn stale_superseded_by_live_participant(
         // Completion-only and room-wide targets carry no participant to
         // supersede (CallThreadEndRetry is additionally non-destructive).
         TeardownTarget::Room
+        | TeardownTarget::MujiPresenceClearOnly { .. }
+        | TeardownTarget::DisplacedParticipant { .. }
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => return false,
     };
@@ -409,11 +426,14 @@ fn claim_permits_dead_letter(claim: Option<&ClaimSnapshot>) -> bool {
 fn executes_without_room_owner(intent: &CallTeardownIntent) -> bool {
     match &intent.target {
         TeardownTarget::CallThreadEndRetry { .. } => true,
+        TeardownTarget::DisplacedParticipant { .. } => true,
         TeardownTarget::Participant {
             participant_sid, ..
         } => participant_sid.is_some(),
         TeardownTarget::Room => intent.room_sid.is_some(),
-        TeardownTarget::MujiPresenceClear { .. } | TeardownTarget::MujiRoomSweep { .. } => false,
+        TeardownTarget::MujiPresenceClear { .. }
+        | TeardownTarget::MujiPresenceClearOnly { .. }
+        | TeardownTarget::MujiRoomSweep { .. } => false,
     }
 }
 
@@ -485,6 +505,24 @@ async fn execute_intent(
     executor: Option<&LiveKitTeardownExecutor>,
     intent: &CallTeardownIntent,
 ) -> IntentExecution {
+    if let TeardownTarget::MujiPresenceClearOnly { room_jid, departed } = &intent.target {
+        return match tokio::time::timeout(
+            ROOM_OWNERSHIP_LOOKUP_TIMEOUT,
+            crate::server::routes::muc_muji_clear::clear_muji_presence_only(
+                state, room_jid, departed,
+            ),
+        )
+        .await
+        {
+            Ok(WebhookEffectOutcome::Completed | WebhookEffectOutcome::Permanent(_)) => {
+                IntentExecution::Done
+            }
+            Ok(WebhookEffectOutcome::Stale) => IntentExecution::Stale,
+            Ok(WebhookEffectOutcome::Retryable(_)) | Err(_) => {
+                IntentExecution::Retryable(CallTeardownRetryReason::MujiPresenceClearOnly)
+            }
+        };
+    }
     if let TeardownTarget::MujiPresenceClear {
         room_jid,
         departed,
@@ -661,8 +699,16 @@ async fn execute_intent(
             identity: Identity::from_jid(identity.clone()),
             participant_sid: participant_sid.clone(),
         },
+        TeardownTarget::DisplacedParticipant {
+            identity,
+            participant_sid,
+        } => TeardownTargetLite::DisplacedParticipant {
+            identity: Identity::from_jid(identity.clone()),
+            participant_sid: participant_sid.clone(),
+        },
         TeardownTarget::Room => TeardownTargetLite::Room,
         TeardownTarget::MujiPresenceClear { .. }
+        | TeardownTarget::MujiPresenceClearOnly { .. }
         | TeardownTarget::MujiRoomSweep { .. }
         | TeardownTarget::CallThreadEndRetry { .. } => {
             return IntentExecution::Done;

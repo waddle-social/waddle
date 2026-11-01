@@ -34,7 +34,7 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
             Ok(CallGeneration::try_from(value)?)
         })
         .transpose()?;
-    Ok(CallTeardownJob {
+    let job = CallTeardownJob {
         intent_id: CallTeardownIntentId::from_stored(row.get(0)?),
         intent: CallTeardownIntent {
             call_id: CallId::try_new(row.get::<String>(1)?)?,
@@ -53,7 +53,7 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
                 Some(other) => {
                     return Err(CallTeardownOutboxError::InvalidUnboundOccupantPolicy(
                         other.to_string(),
-                    ))
+                    ));
                 }
             },
             room_sid: row
@@ -77,7 +77,9 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
         next_attempt_at_ms: row.get(12)?,
         claim_token: row.get::<Option<String>>(13)?.map(ClaimToken::from_stored),
         created_at_ms: row.get(14)?,
-    })
+    };
+    job.intent.validate_retirement_evidence()?;
+    Ok(job)
 }
 
 /// The `call_thread_end_retry` payload columns, grouped so the row
@@ -97,6 +99,18 @@ fn decode_target(
     thread: ThreadPayloadColumns,
 ) -> Result<TeardownTarget, CallTeardownOutboxError> {
     match action {
+        "retire_displaced_participant" => match (identity, room_jid, participant_sid) {
+            (Some(identity), None, participant_sid) if !identity.is_empty() => {
+                Ok(TeardownTarget::DisplacedParticipant {
+                    identity: FullJid::from_str(&identity)
+                        .map_err(|_| CallTeardownOutboxError::InvalidFullJid(identity))?,
+                    participant_sid: participant_sid.map(ParticipantSid::try_new).transpose()?,
+                })
+            }
+            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
+                action.to_owned(),
+            )),
+        },
         "remove_participant" => match (identity, room_jid) {
             (Some(identity), None) if !identity.is_empty() => Ok(TeardownTarget::Participant {
                 identity: FullJid::from_str(&identity)
@@ -110,6 +124,19 @@ fn decode_target(
         "delete_room" if identity.is_none() && room_jid.is_none() && participant_sid.is_none() => {
             Ok(TeardownTarget::Room)
         }
+        "muji_presence_clear_only" => match (identity, room_jid, participant_sid) {
+            (Some(departed), Some(room_jid), None) if !departed.is_empty() => {
+                Ok(TeardownTarget::MujiPresenceClearOnly {
+                    departed: FullJid::from_str(&departed)
+                        .map_err(|_| CallTeardownOutboxError::InvalidFullJid(departed))?,
+                    room_jid: BareJid::from_str(&room_jid)
+                        .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
+                })
+            }
+            _ => Err(CallTeardownOutboxError::InvalidTargetShape(
+                action.to_owned(),
+            )),
+        },
         "muji_presence_clear" => match (identity, room_jid) {
             (Some(departed), Some(room_jid)) if !departed.is_empty() => {
                 Ok(TeardownTarget::MujiPresenceClear {
