@@ -13,6 +13,14 @@ use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
 use crate::state::{SessionBinding, StreamId};
 use crate::transport::TransportMessage;
+use waddle_xmpp_core::xep0388::{
+    Sasl2Authenticate, Sasl2Failure as CoreSasl2Failure,
+    Sasl2FailureCondition as CoreSasl2FailureCondition, Sasl2Mechanism, Sasl2Response,
+    NS_SASL2 as CORE_NS_SASL2,
+};
+pub use waddle_xmpp_core::xep0388::{
+    Sasl2Data as SaslPayload, Sasl2Feature as Sasl2Authentication, Sasl2Success,
+};
 
 /// Protocol token `urn:ietf:params:xml:ns:xmpp-bind`.
 pub const NS_BIND: &str = "urn:ietf:params:xml:ns:xmpp-bind";
@@ -20,6 +28,8 @@ pub const NS_BIND: &str = "urn:ietf:params:xml:ns:xmpp-bind";
 pub const NS_CLIENT: &str = "jabber:client";
 /// Protocol token `urn:ietf:params:xml:ns:xmpp-sasl`.
 pub const NS_SASL: &str = "urn:ietf:params:xml:ns:xmpp-sasl";
+/// Protocol token `urn:xmpp:sasl:2` from XEP-0388.
+pub const NS_SASL2: &str = CORE_NS_SASL2;
 /// Protocol token `urn:ietf:params:xml:ns:xmpp-session`.
 pub const NS_SESSION: &str = "urn:ietf:params:xml:ns:xmpp-session";
 /// Protocol token `urn:xmpp:sm:3`.
@@ -147,11 +157,33 @@ impl fmt::Display for SaslFailureCondition {
     }
 }
 
+impl From<CoreSasl2FailureCondition> for SaslFailureCondition {
+    fn from(condition: CoreSasl2FailureCondition) -> Self {
+        match condition {
+            CoreSasl2FailureCondition::Aborted => Self::Aborted,
+            CoreSasl2FailureCondition::AccountDisabled => Self::AccountDisabled,
+            CoreSasl2FailureCondition::CredentialsExpired => Self::CredentialsExpired,
+            CoreSasl2FailureCondition::EncryptionRequired => Self::EncryptionRequired,
+            CoreSasl2FailureCondition::IncorrectEncoding => Self::IncorrectEncoding,
+            CoreSasl2FailureCondition::InvalidAuthzid => Self::InvalidAuthzid,
+            CoreSasl2FailureCondition::InvalidMechanism => Self::InvalidMechanism,
+            CoreSasl2FailureCondition::MalformedRequest => Self::MalformedRequest,
+            CoreSasl2FailureCondition::MechanismTooWeak => Self::MechanismTooWeak,
+            CoreSasl2FailureCondition::NotAuthorized => Self::NotAuthorized,
+            CoreSasl2FailureCondition::TemporaryAuthFailure => Self::TemporaryAuthFailure,
+            CoreSasl2FailureCondition::Unknown => Self::Unknown,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Recognized SASL, resource-binding, session, and stream-management features advertised by the peer.
 pub struct StreamFeatures {
     /// SASL mechanisms advertised by the server.
     pub mechanisms: Vec<AuthMechanism>,
+    /// SASL2 authentication feature, when advertised by the server.
+    pub sasl2_authentication: Option<Sasl2Authentication>,
     /// Whether resource binding was advertised by the server.
     pub bind: bool,
     /// Whether the server advertises legacy session establishment.
@@ -174,6 +206,7 @@ impl StreamFeatures {
         }
 
         let mut mechanisms = Vec::new();
+        let mut sasl2_authentication = None;
         let mut bind = false;
         let mut legacy_session = false;
         let mut stream_management = false;
@@ -196,6 +229,15 @@ impl StreamFeatures {
                         }
                     }
                 }
+                "authentication" if ns == NS_SASL2 => {
+                    if sasl2_authentication.is_some() {
+                        return Err(ClientError::InvalidSasl2Feature);
+                    }
+                    sasl2_authentication = Some(
+                        Sasl2Authentication::from_element(child)
+                            .map_err(|_| ClientError::InvalidSasl2Feature)?,
+                    );
+                }
                 "bind" if ns == NS_BIND => bind = true,
                 "session" if ns == NS_SESSION => legacy_session = true,
                 "sm" if ns == NS_SM => {
@@ -208,6 +250,7 @@ impl StreamFeatures {
 
         Ok(Self {
             mechanisms,
+            sasl2_authentication,
             bind,
             legacy_session,
             stream_management,
@@ -220,6 +263,15 @@ impl StreamFeatures {
     pub fn supports(&self, mechanism: AuthMechanism) -> bool {
         self.mechanisms.contains(&mechanism)
     }
+
+    /// Whether the peer advertised the requested mechanism through SASL2.
+    #[must_use]
+    pub fn supports_sasl2(&self, mechanism: AuthMechanism) -> bool {
+        self.sasl2_authentication.as_ref().is_some_and(|feature| {
+            mechanism == AuthMechanism::OAuthBearer
+                && feature.mechanisms.contains(&Sasl2Mechanism::OAuthBearer)
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +280,8 @@ impl StreamFeatures {
 pub enum AuthenticationRequest {
     /// A SASL OAUTHBEARER initial response ready for transmission.
     OAuthBearer(OAuthBearerRequest),
+    /// A SASL2 OAUTHBEARER request containing no inline requests.
+    Sasl2OAuthBearer(OAuthBearerRequest),
 }
 
 impl AuthenticationRequest {
@@ -240,11 +294,21 @@ impl AuthenticationRequest {
         })
     }
 
+    /// Construct a SASL2 OAUTHBEARER request from validated client configuration.
+    #[must_use]
+    pub fn sasl2_oauthbearer_from_config(config: &OAuthBearerConfig) -> Self {
+        Self::Sasl2OAuthBearer(OAuthBearerRequest {
+            account: config.account.clone(),
+            access_token: config.access_token.clone(),
+        })
+    }
+
     /// Serialize this value as a typed XML element.
     #[must_use]
     pub fn to_element(&self) -> Element {
         match self {
             Self::OAuthBearer(request) => request.to_element(),
+            Self::Sasl2OAuthBearer(request) => request.to_sasl2_element(),
         }
     }
 
@@ -277,14 +341,29 @@ impl OAuthBearerRequest {
             .build()
     }
 
+    /// Serialize this value as a SASL2 `<authenticate/>` element without inline requests.
+    #[must_use]
+    pub fn to_sasl2_element(&self) -> Element {
+        Sasl2Authenticate {
+            mechanism: Sasl2Mechanism::OAuthBearer,
+            initial_response: Some(SaslPayload::new(self.initial_response_payload())),
+            inline: None,
+        }
+        .to_element()
+    }
+
     fn encoded_initial_response(&self) -> String {
+        BASE64_STANDARD.encode(self.initial_response_payload())
+    }
+
+    fn initial_response_payload(&self) -> Vec<u8> {
         let mut payload = format!("n,a={},", self.account).into_bytes();
         payload.push(0x01);
         payload.extend_from_slice(b"auth=Bearer ");
         payload.extend_from_slice(self.access_token.as_str().as_bytes());
         payload.push(0x01);
         payload.push(0x01);
-        BASE64_STANDARD.encode(payload)
+        payload
     }
 }
 
@@ -311,17 +390,70 @@ impl SaslFailure {
     ///
     /// Returns `ClientError::InvalidSaslFailure` unless the root is a failure element in the SASL namespace. A missing or unrecognized condition becomes `SaslFailureCondition::Unknown`.
     pub fn from_element(element: &Element) -> ClientResult<Self> {
-        if element.name() != "failure" || element.ns() != NS_SASL {
+        if element.name() != "failure" || !matches!(element.ns().as_str(), NS_SASL | NS_SASL2) {
             return Err(ClientError::InvalidSaslFailure);
         }
 
+        if element.ns() == NS_SASL2 {
+            let failure = CoreSasl2Failure::from_element(element)
+                .map_err(|_| ClientError::InvalidSaslFailure)?;
+            return Ok(Self {
+                condition: failure.condition.into(),
+            });
+        }
+
+        let namespace = element.ns();
         let condition = element
             .children()
-            .find(|child| child.name() != "text")
+            .find(|child| child.name() != "text" && child.ns() == namespace)
             .map(|child| SaslFailureCondition::parse(child.name()))
             .unwrap_or(SaslFailureCondition::Unknown);
 
         Ok(Self { condition })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoded SASL challenge data and the namespace used for its response.
+pub struct SaslChallenge {
+    /// Base64-decoded challenge bytes.
+    pub data: SaslPayload,
+    /// Whether the challenge belongs to SASL2 rather than legacy SASL.
+    pub sasl2: bool,
+}
+
+impl SaslChallenge {
+    /// Parse a legacy SASL or SASL2 challenge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::InvalidSaslChallenge`] for a different element,
+    /// namespace, or invalid Base64 payload.
+    pub fn from_element(element: &Element) -> ClientResult<Self> {
+        let sasl2 = match element.ns().as_str() {
+            NS_SASL => false,
+            NS_SASL2 => true,
+            _ => return Err(ClientError::InvalidSaslChallenge),
+        };
+        if element.name() != "challenge" {
+            return Err(ClientError::InvalidSaslChallenge);
+        }
+        let data = SaslPayload::from_element_text(&element.text())
+            .map_err(|_| ClientError::InvalidSaslChallenge)?;
+        Ok(Self { data, sasl2 })
+    }
+
+    /// Build the OAUTHBEARER error response required by RFC 7628 §3.2.
+    #[must_use]
+    pub fn oauthbearer_error_response_element(&self) -> Element {
+        let data = SaslPayload::new(vec![0x01]);
+        if self.sasl2 {
+            Sasl2Response { data }.to_element()
+        } else {
+            Element::builder("response", NS_SASL)
+                .append(BASE64_STANDARD.encode(data.as_bytes()))
+                .build()
+        }
     }
 }
 
@@ -458,8 +590,16 @@ pub enum BootstrapElement {
     StreamFeatures(StreamFeatures),
     /// The SASL exchange completed successfully.
     SaslSuccess,
+    /// SASL2 exchange completed with an authorization identifier.
+    Sasl2Success(Sasl2Success),
+    /// Server requested an additional task after a successful SASL2 exchange.
+    Sasl2Continue,
+    /// Peer requested the next OAUTHBEARER SASL exchange step.
+    SaslChallenge(SaslChallenge),
     /// Authentication rejection reported by the peer.
     SaslFailure(SaslFailure),
+    /// Authentication rejection reported through SASL2.
+    Sasl2Failure(SaslFailure),
     /// Successful resource binding reported by the peer.
     ResourceBindingResult(ResourceBindingResult),
 }
@@ -477,10 +617,25 @@ impl BootstrapElement {
             "features" if is_streams_ns(&ns) => {
                 Some(StreamFeatures::from_element(element).map(Self::StreamFeatures))
             }
-            "success" if ns == NS_SASL => Some(Ok(Self::SaslSuccess)),
-            "failure" if ns == NS_SASL => {
-                Some(SaslFailure::from_element(element).map(Self::SaslFailure))
-            }
+            "success" => match ns.as_str() {
+                NS_SASL => Some(Ok(Self::SaslSuccess)),
+                NS_SASL2 => Some(
+                    Sasl2Success::from_element(element)
+                        .map(Self::Sasl2Success)
+                        .map_err(|_| ClientError::InvalidSasl2Success),
+                ),
+                _ => Some(Err(ClientError::UnexpectedSaslAuthenticationProfile)),
+            },
+            "continue" => match ns.as_str() {
+                NS_SASL2 => Some(Ok(Self::Sasl2Continue)),
+                _ => Some(Err(ClientError::UnexpectedSaslAuthenticationProfile)),
+            },
+            "challenge" => Some(SaslChallenge::from_element(element).map(Self::SaslChallenge)),
+            "failure" => match ns.as_str() {
+                NS_SASL => Some(SaslFailure::from_element(element).map(Self::SaslFailure)),
+                NS_SASL2 => Some(SaslFailure::from_element(element).map(Self::Sasl2Failure)),
+                _ => Some(Err(ClientError::InvalidSaslFailure)),
+            },
             "iq" => {
                 let bind = element
                     .children()

@@ -98,6 +98,33 @@ pub enum ClientError {
     #[error("received invalid SASL failure payload")]
     /// Received invalid SASL failure payload.
     InvalidSaslFailure,
+    #[error("received invalid SASL2 authentication feature")]
+    /// Received malformed or duplicate SASL2 authentication features.
+    InvalidSasl2Feature,
+    #[error("received invalid SASL challenge payload")]
+    /// Received an invalid SASL challenge payload.
+    InvalidSaslChallenge,
+    #[error("received invalid SASL2 success payload")]
+    /// Received a SASL2 success without a valid authorization identifier.
+    InvalidSasl2Success,
+    #[error("SASL2 authorized an identity different from the configured account")]
+    /// SASL2 authorization identifier did not match the configured bare account.
+    Sasl2AuthorizationIdentityMismatch,
+    #[error("SASL2 success included a result for an unrequested inline feature")]
+    /// SASL2 success carried an inline result even though the client sent no inline requests.
+    UnexpectedSasl2InlineResult,
+    #[error("server requested an unsupported SASL2 authentication task")]
+    /// The client does not implement the task offered by SASL2 continuation.
+    UnsupportedSasl2AuthenticationTask,
+    #[error("OAUTHBEARER SASL2 success included undefined mechanism data")]
+    /// OAUTHBEARER success included additional data, which RFC 7628 does not define.
+    UnexpectedOAuthBearerSuccessData,
+    #[error("SASL succeeded after the OAUTHBEARER error response")]
+    /// The server completed authentication after the client sent RFC 7628's failure response.
+    UnexpectedSaslSuccessAfterOAuthError,
+    #[error("SASL response used a namespace different from the negotiated profile")]
+    /// SASL success or failure used an unexpected protocol namespace.
+    UnexpectedSaslAuthenticationProfile,
     #[error("received invalid bind response payload")]
     /// Received invalid bind response payload.
     InvalidBindResponse,

@@ -7992,6 +7992,7 @@ dependencies = [
 name = "waddle-xmpp-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "jid",
  "minidom",
