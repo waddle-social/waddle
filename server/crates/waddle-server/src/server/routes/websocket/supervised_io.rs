@@ -61,6 +61,23 @@ impl TransportLimits {
     }
 }
 
+/// WebSocket Close frame and exact peer-close rejection classifier.
+pub struct ShutdownProtocol<M, IsSendAfterClose> {
+    shutdown_frame: M,
+    is_send_after_close: IsSendAfterClose,
+}
+
+impl<M, IsSendAfterClose> ShutdownProtocol<M, IsSendAfterClose> {
+    /// Create a close protocol description. The classifier should recognize
+    /// only the sink error that means a peer Close already changed write state.
+    pub fn new(shutdown_frame: M, is_send_after_close: IsSendAfterClose) -> Self {
+        Self {
+            shutdown_frame,
+            is_send_after_close,
+        }
+    }
+}
+
 /// Invalid count or byte bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("queue limits must be positive and fit Tokio's semaphore capacity")]
@@ -235,14 +252,20 @@ impl<T> BoundedSender<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteProgress {
     Admitted,
+    /// The sink accepted `start_send`; a later flush can still be uncertain.
     Attempted,
     Completed,
+    /// An accepted sink write did not reach a completed local flush.
     Uncertain,
+    /// The sink rejected the write before `start_send` returned success.
     NotAttempted,
 }
 
 /// Receipt for one outbound item. Completion means the local sink flush
 /// completed; it does not mean the peer processed or acknowledged the frame.
+/// A later exact transport rejection does not downgrade an already published
+/// `Attempted` milestone; it remains `Uncertain` because the receipt does not
+/// distinguish a sink-buffered frame from one that reached the transport.
 #[derive(Debug, Clone)]
 pub struct WriteReceipt(Arc<AtomicU8>);
 
@@ -313,7 +336,6 @@ impl<T> WriteSender<T> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum InboundExit<E> {
     Stopped,
-    Shutdown,
     PeerClosed,
     Overloaded,
     IoFailure(E),
@@ -332,6 +354,8 @@ pub enum OutboundExit<E> {
 /// How a supervisor retires its two pump tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetirementMode {
+    /// Send a local Close and wait for peer Close or EOF. Use
+    /// `shutdown_with_deadline` when retirement must be bounded.
     Graceful,
     Forced,
 }
@@ -390,8 +414,10 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
         self.stop.cancelled().await;
     }
 
-    /// Begin graceful shutdown. This seals outbound admission before waking the
-    /// writer. Admitted but abandoned requests report `NotAttempted`.
+    /// Begin graceful shutdown. This seals outbound admission, wakes the writer,
+    /// and leaves the reader active for the peer Close handshake. Inbound
+    /// application frames are discarded after this point. Admitted but
+    /// abandoned requests report `NotAttempted`.
     pub fn begin_graceful_shutdown(&self) {
         let mut admission_open = match self.admission_open.lock() {
             Ok(admission_open) => admission_open,
@@ -577,12 +603,12 @@ impl<T> Drop for TaskOwner<T> {
 }
 
 /// Split socket halves into supervised read and write pumps.
-pub fn spawn_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose>(
+pub fn spawn_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose, IsSendAfterClose>(
     connection_ref: ConnectionRef,
     reader: R,
     writer: W,
     limits: TransportLimits,
-    shutdown_frame: M,
+    shutdown_protocol: ShutdownProtocol<M, IsSendAfterClose>,
     frame_size: Size,
     is_close: IsClose,
 ) -> (
@@ -598,7 +624,12 @@ where
     WriteError: Send + 'static,
     Size: Fn(&M) -> usize + Send + 'static,
     IsClose: Fn(&M) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
 {
+    let ShutdownProtocol {
+        shutdown_frame,
+        is_send_after_close,
+    } = shutdown_protocol;
     let stop = StopSignal::new();
     let force_stop = CancellationToken::new();
     let shutdown = CancellationToken::new();
@@ -637,15 +668,19 @@ where
     let writer_force_stop = force_stop.clone();
     let writer_shutdown = shutdown.clone();
     let writer_peer_close = peer_close;
+    let writer_signals = WriterSignals {
+        stop: writer_stop,
+        force_stop: writer_force_stop,
+        shutdown: writer_shutdown,
+        peer_close: writer_peer_close,
+    };
     let outbound_task = tokio::spawn(async move {
         run_writer(
             writer,
             outbound_rx,
-            writer_stop,
-            writer_force_stop,
-            writer_shutdown,
-            writer_peer_close,
+            writer_signals,
             Some(shutdown_frame),
+            is_send_after_close,
         )
         .await
     });
@@ -695,11 +730,15 @@ where
     Size: Fn(&M) -> usize,
     IsClose: Fn(&M) -> bool,
 {
+    let mut closing = false;
     loop {
         let frame = tokio::select! {
             biased;
             _ = stop.cancelled() => return InboundExit::Stopped,
-            _ = shutdown.cancelled() => return InboundExit::Shutdown,
+            _ = shutdown.cancelled(), if !closing => {
+                closing = true;
+                continue;
+            }
             frame = reader.next() => frame,
         };
         match frame {
@@ -708,6 +747,7 @@ where
                 stop.cancel(StopReason::PeerClosed);
                 return InboundExit::PeerClosed;
             }
+            Some(Ok(_frame)) if closing => {}
             Some(Ok(frame)) => {
                 let byte_len = frame_size(&frame);
                 match inbound.try_send(frame, byte_len) {
@@ -732,31 +772,56 @@ where
     }
 }
 
-async fn run_writer<W, M, E>(
-    mut writer: W,
-    mut outbound: mpsc::Receiver<QueueItem<WriteRequest<M>>>,
+struct WriterSignals {
     stop: StopSignal,
     force_stop: CancellationToken,
     shutdown: CancellationToken,
     peer_close: CancellationToken,
+}
+
+async fn run_writer<W, M, E, IsSendAfterClose>(
+    mut writer: W,
+    mut outbound: mpsc::Receiver<QueueItem<WriteRequest<M>>>,
+    signals: WriterSignals,
     mut shutdown_frame: Option<M>,
+    is_send_after_close: IsSendAfterClose,
 ) -> OutboundExit<E>
 where
     W: Sink<M, Error = E> + Unpin,
+    IsSendAfterClose: Fn(&E) -> bool,
 {
+    let WriterSignals {
+        stop,
+        force_stop,
+        shutdown,
+        peer_close,
+    } = signals;
     loop {
         let work = tokio::select! {
             biased;
             _ = force_stop.cancelled() => return OutboundExit::Stopped,
             _ = peer_close.cancelled() => {
-                return flush_peer_close_reply(&mut writer, &force_stop).await;
+                return flush_peer_close_reply(
+                    &mut writer,
+                    &force_stop,
+                    &is_send_after_close,
+                )
+                .await;
             }
             _ = stop.cancelled() => return OutboundExit::Stopped,
             _ = shutdown.cancelled() => {
                 let Some(frame) = shutdown_frame.take() else {
                     return OutboundExit::Stopped;
                 };
-                return send_shutdown_frame(&mut writer, frame, &stop).await;
+                return send_shutdown_frame(
+                    &mut writer,
+                    frame,
+                    &stop,
+                    &force_stop,
+                    &peer_close,
+                    &is_send_after_close,
+                )
+                .await;
             }
             work = outbound.recv() => match work {
                 Some(work) => work,
@@ -774,19 +839,29 @@ where
             &force_stop,
             &shutdown,
             &peer_close,
+            &is_send_after_close,
         )
         .await
         {
             SendOutcome::Sent => {}
             SendOutcome::Stopped => return OutboundExit::Stopped,
             SendOutcome::PeerClosed => {
-                return flush_peer_close_reply(&mut writer, &force_stop).await;
+                return flush_peer_close_reply(&mut writer, &force_stop, &is_send_after_close)
+                    .await;
             }
             SendOutcome::Shutdown => {
                 let Some(frame) = shutdown_frame.take() else {
                     return OutboundExit::Stopped;
                 };
-                return send_shutdown_frame(&mut writer, frame, &stop).await;
+                return send_shutdown_frame(
+                    &mut writer,
+                    frame,
+                    &stop,
+                    &force_stop,
+                    &peer_close,
+                    &is_send_after_close,
+                )
+                .await;
             }
             SendOutcome::IoFailure(error) => {
                 stop.cancel(StopReason::OutboundIoFailure);
@@ -811,6 +886,7 @@ async fn send_queued<W, M, E>(
     force_stop: &CancellationToken,
     shutdown: &CancellationToken,
     peer_close: &CancellationToken,
+    is_send_after_close: &impl Fn(&E) -> bool,
 ) -> SendOutcome<E>
 where
     W: Sink<M, Error = E> + Unpin,
@@ -826,17 +902,26 @@ where
         ready = poll_fn(|context| Pin::new(&mut *writer).poll_ready(context)) => ready,
     };
     if let Err(error) = ready {
+        if is_send_after_close(&error) {
+            return wait_for_peer_close_or_force(force_stop, peer_close).await;
+        }
         return SendOutcome::IoFailure(error);
     }
 
-    progress.attempted();
     let value = request
         .value
         .take()
         .expect("write request retains its value until first attempt");
+    progress.begin_attempt();
     if let Err(error) = Pin::new(&mut *writer).start_send(value) {
+        if is_send_after_close(&error) {
+            progress.not_attempted();
+            return wait_for_peer_close_or_force(force_stop, peer_close).await;
+        }
+        progress.uncertain();
         return SendOutcome::IoFailure(error);
     }
+    progress.attempted();
 
     let flushed = tokio::select! {
         biased;
@@ -851,43 +936,87 @@ where
             progress.completed();
             SendOutcome::Sent
         }
+        Err(error) if is_send_after_close(&error) => {
+            wait_for_peer_close_or_force(force_stop, peer_close).await
+        }
         Err(error) => SendOutcome::IoFailure(error),
+    }
+}
+
+async fn wait_for_peer_close_or_force<E>(
+    force_stop: &CancellationToken,
+    peer_close: &CancellationToken,
+) -> SendOutcome<E> {
+    tokio::select! {
+        biased;
+        _ = force_stop.cancelled() => SendOutcome::Stopped,
+        _ = peer_close.cancelled() => SendOutcome::PeerClosed,
     }
 }
 
 async fn flush_peer_close_reply<W, M, E>(
     writer: &mut W,
     force_stop: &CancellationToken,
+    is_send_after_close: &impl Fn(&E) -> bool,
 ) -> OutboundExit<E>
 where
     W: Sink<M, Error = E> + Unpin,
 {
-    let result = tokio::select! {
+    let mut result = tokio::select! {
         biased;
         _ = force_stop.cancelled() => return OutboundExit::Stopped,
         result = writer.flush() => result,
     };
+
+    // SplitSink consumes its buffered frame before forwarding it. If Tungstenite
+    // rejects it because the peer already closed, retry once to flush the
+    // automatic reply that the reader queued. Preserve any retry error.
+    if result.as_ref().is_err_and(is_send_after_close) {
+        result = tokio::select! {
+            biased;
+            _ = force_stop.cancelled() => return OutboundExit::Stopped,
+            result = writer.flush() => result,
+        };
+    }
+
     match result {
         Ok(()) => OutboundExit::PeerClosedReplyFlushed,
         Err(error) => OutboundExit::IoFailure(error),
     }
 }
 
-async fn send_shutdown_frame<W, M, E>(
+async fn send_shutdown_frame<W, M, E, IsSendAfterClose>(
     writer: &mut W,
     shutdown_frame: M,
     stop: &StopSignal,
+    force_stop: &CancellationToken,
+    peer_close: &CancellationToken,
+    is_send_after_close: &IsSendAfterClose,
 ) -> OutboundExit<E>
 where
     W: Sink<M, Error = E> + Unpin,
+    IsSendAfterClose: Fn(&E) -> bool,
 {
     let result = tokio::select! {
         biased;
+        _ = force_stop.cancelled() => return OutboundExit::Stopped,
+        _ = peer_close.cancelled() => {
+            return flush_peer_close_reply(writer, force_stop, is_send_after_close).await;
+        }
         _ = stop.cancelled() => return OutboundExit::Stopped,
         result = writer.send(shutdown_frame) => result,
     };
     match result {
         Ok(()) => OutboundExit::ShutdownClose,
+        Err(error) if is_send_after_close(&error) => {
+            tokio::select! {
+                biased;
+                _ = force_stop.cancelled() => OutboundExit::Stopped,
+                _ = peer_close.cancelled() => {
+                    flush_peer_close_reply(writer, force_stop, is_send_after_close).await
+                }
+            }
+        }
         Err(error) => {
             stop.cancel(StopReason::OutboundIoFailure);
             OutboundExit::IoFailure(error)
@@ -910,14 +1039,31 @@ impl InFlightWrite {
         }
     }
 
+    fn begin_attempt(&mut self) {
+        // Keep the externally visible receipt at Admitted until `start_send`
+        // returns, but classify a panic during that synchronous call as
+        // uncertain when this guard drops.
+        self.attempted = true;
+    }
+
     fn attempted(&mut self) {
         self.attempted = true;
         self.receipt.0.store(WRITE_ATTEMPTED, Ordering::Release);
     }
 
+    fn uncertain(&mut self) {
+        self.attempted = true;
+        self.receipt.0.store(WRITE_UNCERTAIN, Ordering::Release);
+    }
+
     fn completed(&mut self) {
         self.completed = true;
         self.receipt.0.store(WRITE_COMPLETED, Ordering::Release);
+    }
+
+    fn not_attempted(&mut self) {
+        self.attempted = false;
+        self.receipt.0.store(WRITE_NOT_ATTEMPTED, Ordering::Release);
     }
 }
 
