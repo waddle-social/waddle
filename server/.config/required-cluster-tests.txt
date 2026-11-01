@@ -177,3 +177,11 @@ waddle-server server::routes::websocket::tests::iq::resource_iq_metadata_require
 waddle-server server::routes::websocket::tests::xep0280_carbons_destination::superseded_carbons_control_returns_error_without_changing_the_successor
 waddle-xmpp registry::connection_registry::tests::resource_metadata_rejects_stale_and_absent_bindings
 waddle-xmpp registry::connection_registry::tests::retiring_connection_keeps_slot_locked_until_presence_is_removed
+
+# P3.1 (#2137/#2046): a physical transport reference survives rebind on one
+# socket, differs across sockets, and fences remote mirrors after node rotation.
+waddle-server clustering::route_bridge::registration::owner::tests::remote_registration_rejects_replayed_generation_with_a_different_transport_ref
+waddle-server clustering::route_bridge::registration::owner::tests::source_lease_rotation_after_actor_admission_preserves_the_successor
+waddle-server clustering::route_bridge::registration::owner_update::tests::delayed_remote_state_update_rejects_rotated_source_lease_before_mutation
+waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
+waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement

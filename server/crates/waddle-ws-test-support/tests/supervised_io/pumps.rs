@@ -431,6 +431,9 @@ async fn outbound_count_and_byte_overload_stop_the_transport_without_an_attempt(
             lab.write(Message::binary(vec![2; rejected])),
             Err(OfferError::Overloaded)
         ));
+        timeout(TEST_TIMEOUT, lab.supervisor.stop.cancelled())
+            .await
+            .expect("outbound overload stops transport before retirement");
         let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire(false))
             .await
             .expect("join pumps");
