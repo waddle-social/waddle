@@ -1,6 +1,7 @@
 import os
-import shutil
+import runpy
 import struct
+import sys
 import tempfile
 import unittest
 import zlib
@@ -8,7 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from archive import archive
-from build import compile_probe
 from inspect_artifact import MAX_ARCHIVE, inspect_archive, inspect_elf
 
 
@@ -51,6 +51,18 @@ class ArchiveTests(unittest.TestCase):
     def setUp(self):
         self.good = archive({"dev": b"", "init": bytes(elf())})
         self.raw = zlib.decompress(self.good, 31)
+
+    def test_build_script_rejects_direct_cli_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "unwanted-output"
+            with (
+                patch.object(sys, "argv", ["build.py", "--out", str(output)]),
+                self.assertRaises(SystemExit),
+            ):
+                runpy.run_path(
+                    str(Path(__file__).parent / "build.py"), run_name="__main__"
+                )
+            self.assertFalse(output.exists())
 
     def reject(self, value):
         with self.assertRaises(ValueError):
@@ -225,33 +237,22 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             archive({"dev": b"", "init": bytes(elf()), "extra": b""})
 
-    @unittest.skipUnless(os.environ.get("PROBE_TEST_CC"), "static compiler required")
+    @unittest.skipUnless(
+        os.environ.get("PROBE_TEST_BINARY_A") and os.environ.get("PROBE_TEST_BINARY_B"),
+        "independent Nix-built binaries required",
+    )
     def test_independent_probe_compiles_and_archive_rebuilds(self):
-        # Independent compiler/linker invocations; no init binary is executed.
-        binaries, archives = [], []
-        with tempfile.TemporaryDirectory() as temporary:
-            for index, mask, timestamp in ((0, 0o022, 1), (1, 0o077, 900000000)):
-                directory = Path(temporary) / f"separate-source-{index}"
-                directory.mkdir()
-                previous = os.umask(mask)
-                try:
-                    for name in (
-                        reversed(("init.c", "model.c", "model.h"))
-                        if index
-                        else ("init.c", "model.c", "model.h")
-                    ):
-                        shutil.copyfile(Path(__file__).parent / name, directory / name)
-                        os.utime(directory / name, (timestamp, timestamp))
-                    binary = directory / "different-output-name"
-                    compile_probe(Path(os.environ["PROBE_TEST_CC"]), directory, binary)
-                    data = binary.read_bytes()
-                    inspect_elf(data)
-                    binaries.append(data)
-                    packed = archive({"init": data, "dev": b""})
-                    inspect_archive(packed)
-                    archives.append(packed)
-                finally:
-                    os.umask(previous)
+        # Nix compiled these with different paths, creation order, timestamps and umasks.
+        binaries = [
+            Path(os.environ[name]).read_bytes()
+            for name in ("PROBE_TEST_BINARY_A", "PROBE_TEST_BINARY_B")
+        ]
+        archives = []
+        for data in binaries:
+            inspect_elf(data)
+            packed = archive({"init": data, "dev": b""})
+            inspect_archive(packed)
+            archives.append(packed)
         self.assertEqual(binaries[0], binaries[1])
         self.assertEqual(archives[0], archives[1])
 

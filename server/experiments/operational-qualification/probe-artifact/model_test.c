@@ -102,6 +102,12 @@ int main(void) {
     assert(encode_report(report, sizeof(report), &before, &after, &controls));
     assert(strstr(report, "\"guest_checks\":\"expected\"") != NULL);
     assert(strstr(report, "\"host_isolation\":\"unverified\"") != NULL);
+    size_t exact_length = strlen(report);
+    char exact[REPORT_LIMIT];
+    assert(encode_report(exact, exact_length + 1, &before, &after, &controls));
+    assert(strcmp(exact, report) == 0);
+    assert(!encode_report(exact, exact_length, &before, &after, &controls));
+    assert(exact[0] == '\0');
 
     assert(classify_loopback(0, 0) == INCONCLUSIVE);
     assert(classify_loopback(1, 0) == REJECTED);

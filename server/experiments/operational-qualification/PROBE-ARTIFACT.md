@@ -100,6 +100,19 @@ or establish full kernel/toolchain reproducibility. [Local build evidence](probe
 [exact hashes](probe-artifact-evidence/manifest.json) and [byte inspection](probe-artifact-evidence/inspection.json)
 are recorded alongside this document; runtime bootability and socket behavior remain
 unverified until the separately reviewed first-boot phase.
+The recorded workflow hash describes the reviewed guest-artifact head
+`177f41f9f8460504deae7fd879c995ce388c84ce`; later changes to the shared
+non-publishing workflow do not update that historical build record.
+
+The follow-up for #2112's hosted SonarCloud findings removes the path-taking
+build CLI and its compiler subprocess. The default Nix derivation selects the
+compiler and inputs, and direct execution of `build.py` is rejected. Its C
+report encoder no longer accepts a format string. The [follow-up manifest](probe-artifact-evidence/followup-manifest.json),
+[inspection](probe-artifact-evidence/followup-inspection.json) and
+[verification record](probe-artifact-evidence/followup-verification.json) describe
+that later build. The default locked inputs matter: overriding Nix arguments
+does not inherit the recorded provenance. Independent review of the follow-up found no blocking findings; hosted Sonar
+verification remains pending.
 
 ## Gates
 

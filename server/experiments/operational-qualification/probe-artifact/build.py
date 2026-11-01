@@ -1,33 +1,13 @@
 """Build and inspect only. This module never executes init or starts a guest."""
 
-import argparse
 import hashlib
 import json
-import os
 import shutil
-import subprocess
 from pathlib import Path
 
 from archive import archive
 from inspect_artifact import inspect_archive
 
-FLAGS = [
-    "-std=c11",
-    "-O2",
-    "-Wall",
-    "-Wextra",
-    "-Wpedantic",
-    "-Werror",
-    "-static",
-    "-no-pie",
-    "-fno-pie",
-    "-fno-ident",
-    "-fstack-protector-strong",
-    "-D_FORTIFY_SOURCE=2",
-    "-frandom-seed=waddle-isolation-probe-v1",
-    "-s",
-    "-Wl,--build-id=none,-z,noexecstack,-z,relro,-z,now",
-]
 REQUIRED_CONFIG = (
     "BLK_DEV_INITRD",
     "RD_GZIP",
@@ -43,32 +23,6 @@ REQUIRED_CONFIG = (
 def sha256(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def compile_probe(compiler, source, output):
-    # Clear ambient compiler/linker injection; wrapper defaults are in its pinned closure.
-    environment = {
-        "PATH": os.environ["PATH"],
-        "LC_ALL": "C",
-        "TZ": "UTC",
-        "SOURCE_DATE_EPOCH": "0",
-        "NIX_HARDENING_ENABLE": "",
-    }
-    subprocess.run(
-        [
-            str(compiler),
-            *FLAGS,
-            f"-ffile-prefix-map={source}=.",
-            f"-fdebug-prefix-map={source}=.",
-            str(source / "init.c"),
-            str(source / "model.c"),
-            "-o",
-            str(output),
-        ],
-        env=environment,
-        check=True,
-        timeout=120,
-    )
 
 
 def closure_metadata(registration):
@@ -104,56 +58,55 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in (
-        "cc",
-        "kernel",
-        "kernel-config",
-        "kernel-source",
-        "toolchain-registration",
-        "repository-lock",
-        "out",
-    ):
-        parser.add_argument(f"--{name}", type=Path, required=True)
-    arguments = parser.parse_args()
+def build_artifact(
+    *,
+    init,
+    compiler,
+    compiler_flags,
+    kernel,
+    kernel_config,
+    kernel_source,
+    toolchain_registration,
+    repository_lock,
+    output,
+):
+    """Build from inputs supplied by the locked Nix derivation, not a CLI."""
     source = Path(__file__).resolve().parent
-    lock = json.loads(arguments.repository_lock.read_text())
+    lock = json.loads(repository_lock.read_text())
     pin = lock["nodes"]["nixpkgs"]["locked"]
-    config = arguments.kernel_config.read_text()
+    config = kernel_config.read_text()
     if any(f"CONFIG_{name}=y\n" not in config for name in REQUIRED_CONFIG):
         raise ValueError("kernel lacks a required built-in feature")
-    output = arguments.out
     output.mkdir(parents=True, exist_ok=False)
-    compile_probe(arguments.cc, source, output / "init")
+    shutil.copyfile(init, output / "init")
     compressed = archive({"dev": b"", "init": (output / "init").read_bytes()})
     inspection = inspect_archive(compressed)
     (output / "initramfs.cpio.gz").write_bytes(compressed)
-    shutil.copyfile(arguments.kernel, output / "bzImage")
-    shutil.copyfile(arguments.kernel_config, output / "kernel.config")
+    shutil.copyfile(kernel, output / "bzImage")
+    shutil.copyfile(kernel_config, output / "kernel.config")
     write_json(output / "inspection.json", inspection)
     write_json(
         output / "toolchain-closure.json",
-        closure_metadata(arguments.toolchain_registration),
+        closure_metadata(toolchain_registration),
     )
     source_names = sorted(
         path.name
         for path in source.iterdir()
-        if path.suffix in {".c", ".h", ".py", ".nix"}
+        if path.suffix in {".c", ".h", ".py", ".nix", ".json"}
     )
     manifest = {
         "schema_version": 1,
         "nixpkgs": {"revision": pin["rev"], "nar_hash": pin["narHash"]},
         "source_sha256": {name: sha256(source / name) for name in source_names},
-        "repository_lock_sha256": sha256(arguments.repository_lock),
+        "repository_lock_sha256": sha256(repository_lock),
         "compiler": {
-            "path": str(arguments.cc),
-            "sha256": sha256(arguments.cc),
-            "flags": FLAGS,
+            "path": str(compiler),
+            "sha256": sha256(compiler),
+            "flags": compiler_flags,
         },
         "kernel_source": {
-            "path": str(arguments.kernel_source),
-            "sha256": sha256(arguments.kernel_source),
+            "path": str(kernel_source),
+            "sha256": sha256(kernel_source),
         },
         "files_sha256": {
             name: sha256(output / name)
@@ -175,4 +128,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit("Run the pinned Nix derivation; direct invocation is unsupported")

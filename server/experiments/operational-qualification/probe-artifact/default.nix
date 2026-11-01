@@ -11,6 +11,7 @@ let
   kernel = pkgs.linux_6_18;
   compiler = pkgs.pkgsStatic.stdenv.cc;
   compilerCommand = "${compiler}/bin/${compiler.targetPrefix}cc";
+  compilerFlags = builtins.fromJSON (builtins.readFile ./compiler-flags.json);
   closure = pkgs.closureInfo {
     rootPaths = [
       compiler
@@ -38,6 +39,7 @@ pkgs.stdenvNoCC.mkDerivation {
           ".h"
           ".py"
           ".nix"
+          ".json"
         ];
   };
   nativeBuildInputs = [
@@ -55,19 +57,59 @@ pkgs.stdenvNoCC.mkDerivation {
     ${compilerCommand} -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
       model.c model_test.c -o model-test
     ./model-test
-    PROBE_TEST_CC=${compilerCommand} ${pkgs.python3}/bin/python3 -m unittest -v test_artifact
+    source_a="$NIX_BUILD_TOP/independent-a"
+    source_b="$NIX_BUILD_TOP/independent-b"
+    (
+      umask 022
+      mkdir "$source_a"
+      cp init.c model.c model.h "$source_a/"
+      touch -d @1 "$source_a/init.c" "$source_a/model.c" "$source_a/model.h"
+      ${pkgs.coreutils}/bin/timeout --kill-after=5s 120s \
+        ${pkgs.coreutils}/bin/env -i PATH="$PATH" LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=0 NIX_HARDENING_ENABLE="" \
+        ${compilerCommand} ${pkgs.lib.escapeShellArgs compilerFlags} \
+        -ffile-prefix-map="$source_a"=. -fdebug-prefix-map="$source_a"=. \
+        "$source_a/init.c" "$source_a/model.c" -o "$source_a/init-a"
+    )
+    (
+      umask 077
+      mkdir "$source_b"
+      cp model.h model.c init.c "$source_b/"
+      touch -d @900000000 "$source_b/init.c" "$source_b/model.c" "$source_b/model.h"
+      ${pkgs.coreutils}/bin/timeout --kill-after=5s 120s \
+        ${pkgs.coreutils}/bin/env -i PATH="$PATH" LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=0 NIX_HARDENING_ENABLE="" \
+        ${compilerCommand} ${pkgs.lib.escapeShellArgs compilerFlags} \
+        -ffile-prefix-map="$source_b"=. -fdebug-prefix-map="$source_b"=. \
+        "$source_b/init.c" "$source_b/model.c" -o "$source_b/init-b"
+    )
+    PROBE_TEST_BINARY_A="$source_a/init-a" PROBE_TEST_BINARY_B="$source_b/init-b" \
+      ${pkgs.python3}/bin/python3 -m unittest -v test_artifact
     runHook postCheck
   '';
   installPhase = ''
     runHook preInstall
-    ${pkgs.python3}/bin/python3 build.py \
-      --cc ${compilerCommand} \
-      --kernel ${kernel}/bzImage \
-      --kernel-config ${kernel.configfile} \
-      --kernel-source ${kernel.src} \
-      --toolchain-registration ${closure}/registration \
-      --repository-lock ${repositoryLock} \
-      --out "$out"
+    # Compiler inputs are fixed by this derivation; no user CLI selects a program.
+    ${pkgs.coreutils}/bin/timeout --kill-after=5s 120s \
+      ${pkgs.coreutils}/bin/env -i PATH="$PATH" LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=0 NIX_HARDENING_ENABLE="" \
+      ${compilerCommand} ${pkgs.lib.escapeShellArgs compilerFlags} \
+      -ffile-prefix-map="$PWD"=. -fdebug-prefix-map="$PWD"=. \
+      "$PWD/init.c" "$PWD/model.c" -o "$NIX_BUILD_TOP/probe-init"
+    ${pkgs.python3}/bin/python3 - <<'PY'
+    import os
+    from pathlib import Path
+    from build import build_artifact
+
+    build_artifact(
+        init=Path(os.environ["NIX_BUILD_TOP"]) / "probe-init",
+        compiler=Path(${builtins.toJSON compilerCommand}),
+        compiler_flags=${builtins.toJSON compilerFlags},
+        kernel=Path(${builtins.toJSON "${kernel}/bzImage"}),
+        kernel_config=Path(${builtins.toJSON (toString kernel.configfile)}),
+        kernel_source=Path(${builtins.toJSON (toString kernel.src)}),
+        toolchain_registration=Path(${builtins.toJSON "${closure}/registration"}),
+        repository_lock=Path("${repositoryLock}"),
+        output=Path(os.environ["out"]),
+    )
+    PY
     ${pkgs.python3}/bin/python3 inspect_artifact.py "$out/initramfs.cpio.gz"
     runHook postInstall
   '';

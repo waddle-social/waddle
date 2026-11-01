@@ -72,3 +72,40 @@ jobs:
           probe_output="$(nix-build server/experiments/operational-qualification/probe-artifact/default.nix --no-out-link)"
           python3 server/experiments/operational-qualification/probe-artifact/inspect_artifact.py "$probe_output/initramfs.cpio.gz"
           nix-build server/experiments/operational-qualification/probe-artifact/default.nix --check --no-out-link
+  host-inspection-probe:
+    name: Pinned build-only host inspection probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: experimental-features = nix-command flakes
+      - name: Build and test the probe without executing it
+        run: nix-build server/experiments/operational-qualification/host-canary/default.nix --no-out-link
+  host-controller:
+    name: Pinned build-only host controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
+        with:
+          extra-conf: experimental-features = nix-command flakes
+      - name: Build controller and run only pure models and integration fakes
+        run: nix-build server/experiments/operational-qualification/host-controller/default.nix --no-out-link
+      - name: Build gated resource inspection and capture tools
+        run: |
+          set -euo pipefail
+          nix-build server/experiments/operational-qualification/host-controller/resource-guard.nix --no-out-link
+          nix-build server/experiments/operational-qualification/host-controller/resource-reader.nix --no-out-link

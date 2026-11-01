@@ -6,8 +6,6 @@
 #include <linux/if_link.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -218,52 +216,59 @@ static const char *result_name(enum result result) {
 
 struct writer { char *bytes; size_t capacity, length; bool valid; };
 
-static void append(struct writer *writer, const char *format, ...) {
+/* All text comes from fixed literals, closed result names, or locally encoded hex. */
+static void append_text(struct writer *writer, const char *text) {
     if (!writer->valid) return;
-    va_list arguments;
-    va_start(arguments, format);
-    int count = vsnprintf(writer->bytes + writer->length,
-                         writer->capacity - writer->length, format, arguments);
-    va_end(arguments);
-    if (count < 0 || (size_t)count >= writer->capacity - writer->length) {
+    size_t count = strlen(text);
+    if (count >= writer->capacity - writer->length) {
         writer->valid = false;
         return;
     }
-    writer->length += (size_t)count;
+    memcpy(writer->bytes + writer->length, text, count + 1);
+    writer->length += count;
 }
 
 static void encode_inventory(struct writer *writer, const struct inventory *inventory) {
     static const char *const names[] = { "interfaces", "addresses", "routes" };
     static const char hex[] = "0123456789abcdef";
-    append(writer, "{");
+    append_text(writer, "{");
     for (unsigned i = 0; i < 3; ++i) {
         const struct dump *dump = &inventory->dumps[i];
-        append(writer, "%s\"%s\":{\"status\":\"%s\",\"rtnetlink_hex\":\"",
-               i == 0 ? "" : ",", names[i],
-               result_name(inspect_dump((enum dump_kind)i, dump)));
+        append_text(writer, i == 0 ? "\"" : ",\"");
+        append_text(writer, names[i]);
+        append_text(writer, "\":{\"status\":\"");
+        append_text(writer, result_name(inspect_dump((enum dump_kind)i, dump)));
+        append_text(writer, "\",\"rtnetlink_hex\":\"");
         if (dump->length > DUMP_LIMIT) { writer->valid = false; return; }
-        for (size_t j = 0; j < dump->length; ++j)
-            append(writer, "%c%c", hex[dump->bytes[j] >> 4], hex[dump->bytes[j] & 15]);
-        append(writer, "\"}");
+        for (size_t j = 0; j < dump->length; ++j) {
+            const char encoded[] = { hex[dump->bytes[j] >> 4], hex[dump->bytes[j] & 15], '\0' };
+            append_text(writer, encoded);
+        }
+        append_text(writer, "\"}");
     }
-    append(writer, "}");
+    append_text(writer, "}");
 }
 
 bool encode_report(char *output, size_t capacity, const struct inventory *before,
                    const struct inventory *after, const struct controls *controls) {
     if (capacity == 0 || capacity > REPORT_LIMIT) return false;
     struct writer writer = { output, capacity, 0, true };
-    append(&writer, "{\"schema_version\":1,\"guest_checks\":\"%s\","
-           "\"host_isolation\":\"unverified\",\"qualification\":\"not_assessed\","
-           "\"inventory_format\":\"linux-rtnetlink-native-little-endian-v1\",\"before\":",
-           result_name(classify_report(before, after, controls)));
+    append_text(&writer, "{\"schema_version\":1,\"guest_checks\":\"");
+    append_text(&writer, result_name(classify_report(before, after, controls)));
+    append_text(&writer, "\",\"host_isolation\":\"unverified\",\"qualification\":\"not_assessed\","
+                "\"inventory_format\":\"linux-rtnetlink-native-little-endian-v1\",\"before\":");
     encode_inventory(&writer, before);
-    append(&writer, ",\"after\":");
+    append_text(&writer, ",\"after\":");
     encode_inventory(&writer, after);
-    append(&writer, ",\"udp_loopback_v4\":\"%s\",\"udp_loopback_v6\":\"%s\","
-           "\"udp_no_route_v4\":\"%s\",\"udp_no_route_v6\":\"%s\"}\n",
-           result_name(controls->loopback4), result_name(controls->loopback6),
-           result_name(controls->no_route4), result_name(controls->no_route6));
+    append_text(&writer, ",\"udp_loopback_v4\":\"");
+    append_text(&writer, result_name(controls->loopback4));
+    append_text(&writer, "\",\"udp_loopback_v6\":\"");
+    append_text(&writer, result_name(controls->loopback6));
+    append_text(&writer, "\",\"udp_no_route_v4\":\"");
+    append_text(&writer, result_name(controls->no_route4));
+    append_text(&writer, "\",\"udp_no_route_v6\":\"");
+    append_text(&writer, result_name(controls->no_route6));
+    append_text(&writer, "\"}\n");
     if (!writer.valid) output[0] = '\0';
     return writer.valid;
 }
