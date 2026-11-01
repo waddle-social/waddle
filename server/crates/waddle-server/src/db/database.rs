@@ -351,9 +351,11 @@ impl Database {
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             // PgConnectOptions can carry startup parameters that SQLx's URL
-            // rendering drops. This sentinel prevents downstream consumers
-            // from silently creating a raw, un-attested child pool.
-            database_url: "postgres:attested-pool".to_owned(),
+            // rendering drops. Keep an intentionally invalid PostgreSQL URI;
+            // PostgreSQL-prefix consumers select that driver and SQLx rejects
+            // it. The in-memory SQLite mode only prevents a disk file if a
+            // future consumer misclassifies this marker.
+            database_url: "postgres://[attested-pool?mode=memory".to_owned(),
             attested_pg_writer: Some(attested_pg_writer),
         })
     }

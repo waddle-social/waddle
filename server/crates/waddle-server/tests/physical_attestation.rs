@@ -3000,8 +3000,40 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
 
     assert_eq!(
         database_pool.global().database_url(),
-        "postgres:attested-pool",
+        "postgres://[attested-pool?mode=memory",
         "the non-round-trippable PgConnectOptions must not become a child-pool DSN"
+    );
+    let attested_pool_url = database_pool.global().database_url();
+    assert!(
+        PgConnectOptions::from_str(attested_pool_url).is_err(),
+        "the attested-pool marker must be rejected by SQLx's PostgreSQL URL parser"
+    );
+    let sqlite_fallback_path = sqlx::sqlite::SqliteConnectOptions::from_str(attested_pool_url)
+        .expect("SQLite fallback marker parses without disk mode")
+        .get_filename()
+        .to_owned();
+    assert!(
+        !sqlite_fallback_path.exists(),
+        "the safe SQLite marker path must not already exist"
+    );
+    assert!(
+        waddle_server::sm_persistence::DatabaseSmPersistence::open(Some(attested_pool_url))
+            .await
+            .is_err(),
+        "the public SM opener must reject the non-reconnectable pool marker"
+    );
+    assert!(
+        waddle_server::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(attested_pool_url),
+            waddle_xmpp::pending_delivery::QuotaPolicy::default_policy(),
+        )
+        .await
+        .is_err(),
+        "the public pending-delivery opener must reject the non-reconnectable pool marker"
+    );
+    assert!(
+        !sqlite_fallback_path.exists(),
+        "public child-store openers must not create a SQLite file from the marker"
     );
     let connection = database_pool
         .global()
