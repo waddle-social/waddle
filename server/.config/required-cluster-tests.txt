@@ -169,3 +169,11 @@ waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_
 # controls require the disposable PostgreSQL service in the publish lane.
 waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
 waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
+
+# #2162: the dark room-pin store must preserve exact operation outcomes and
+# reject stale claims across lifecycle changes on real PostgreSQL.
+waddle-server muc_durable::pin_durability::tests::exact_operation_id_is_idempotent_and_rejects_payload_mismatch
+waddle-server muc_durable::pin_durability::tests::outcome_and_full_snapshot_restore_under_successor_claim
+waddle-server muc_durable::pin_durability::tests::exact_outcome_remains_queryable_after_room_recreation
+waddle-server muc_durable::pin_durability::tests::stale_claim_cannot_commit_a_pin_outcome
+waddle-server muc_durable::pin_durability::tests::failed_outcome_append_rolls_back_the_snapshot_update
