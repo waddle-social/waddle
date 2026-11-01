@@ -94,79 +94,90 @@ func TestTURNResponseRejectsUnauthenticatedTrailingAttributes(t *testing.T) {
 	}
 }
 
+type nonceChallengeScenario struct {
+	name      string
+	signed    bool
+	tampered  bool
+	repeat    bool
+	wantError bool
+}
+
 func TestAuthenticatedTURNStaleNonceChallenges(t *testing.T) {
-	for _, scenario := range []struct {
-		name      string
-		signed    bool
-		tampered  bool
-		repeat    bool
-		wantError bool
-	}{
+	for _, scenario := range []nonceChallengeScenario{
 		{name: "unsigned438-retries"},
 		{name: "signed438-retries", signed: true},
 		{name: "tampered-signed438-refused", signed: true, tampered: true, wantError: true},
 		{name: "repeated438-is-bounded", repeat: true, wantError: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			client, server := net.Pipe()
-			defer client.Close()
-			defer server.Close()
-			deadline := time.Now().Add(time.Second)
-			_ = client.SetDeadline(deadline)
-			_ = server.SetDeadline(deadline)
-			key := []byte("qualification-key")
-			realm := []byte("turn.example.test")
-			session := relaySession{conn: client, stream: true, deadline: deadline, username: "user", realm: realm, nonce: []byte("old-nonce"), key: key}
-			serverResult := make(chan error, 1)
-			go func() {
-				wire := relaySession{conn: server, stream: true, deadline: deadline}
-				for attempt := 0; attempt < 2; attempt++ {
-					packet, err := wire.readFrame()
-					if err != nil {
-						serverResult <- err
-						return
-					}
-					request, err := parseMessage(packet)
-					if err != nil {
-						serverResult <- err
-						return
-					}
-					if attempt == 1 && string(request.value(attrNonce)) != "fresh-nonce" {
-						serverResult <- fmt.Errorf("nonce retry did not use the replacement challenge")
-						return
-					}
-					attrs := []attribute{{attrError, []byte{0, 0, 4, 38}}, {attrRealm, realm}, {attrNonce, []byte("fresh-nonce")}}
-					kind := createPermission | 0x0110
-					var signingKey []byte
-					if scenario.signed {
-						signingKey = key
-					}
-					if attempt == 1 && !scenario.repeat {
-						kind, attrs, signingKey = createPermission|0x0100, nil, key
-					}
-					response := buildMessage(kind, request.txID, attrs, signingKey)
-					if scenario.tampered {
-						response[len(response)-1] ^= 1
-					}
-					if err := wire.writeFrame(response); err != nil {
-						serverResult <- err
-						return
-					}
-					if scenario.tampered {
-						break
-					}
-				}
-				serverResult <- nil
-			}()
-			_, err := session.authenticated(createPermission, nil)
-			if (err != nil) != scenario.wantError {
-				t.Fatalf("stale nonce result: %v, want error=%v", err, scenario.wantError)
-			}
-			if serverErr := <-serverResult; serverErr != nil {
-				t.Fatal(serverErr)
-			}
+			runNonceChallengeScenario(t, scenario)
 		})
 	}
+}
+
+func runNonceChallengeScenario(t *testing.T, scenario nonceChallengeScenario) {
+	t.Helper()
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	deadline := time.Now().Add(time.Second)
+	_ = client.SetDeadline(deadline)
+	_ = server.SetDeadline(deadline)
+	key := []byte("qualification-key")
+	realm := []byte("turn.example.test")
+	session := relaySession{conn: client, stream: true, deadline: deadline, username: "user", realm: realm, nonce: []byte("old-nonce"), key: key}
+	serverResult := make(chan error, 1)
+	go func() {
+		wire := relaySession{conn: server, stream: true, deadline: deadline}
+		serverResult <- serveNonceChallenges(&wire, scenario, realm, key)
+	}()
+	_, err := session.authenticated(createPermission, nil)
+	if (err != nil) != scenario.wantError {
+		t.Fatalf("stale nonce result: %v, want error=%v", err, scenario.wantError)
+	}
+	if serverErr := <-serverResult; serverErr != nil {
+		t.Fatal(serverErr)
+	}
+}
+
+func serveNonceChallenges(wire *relaySession, scenario nonceChallengeScenario, realm, key []byte) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		packet, err := wire.readFrame()
+		if err != nil {
+			return err
+		}
+		request, err := parseMessage(packet)
+		if err != nil {
+			return err
+		}
+		if attempt == 1 && string(request.value(attrNonce)) != "fresh-nonce" {
+			return fmt.Errorf("nonce retry did not use the replacement challenge")
+		}
+		if err := wire.writeFrame(scenario.response(request, attempt, realm, key)); err != nil {
+			return err
+		}
+		if scenario.tampered {
+			break
+		}
+	}
+	return nil
+}
+
+func (s nonceChallengeScenario) response(request stunMessage, attempt int, realm, key []byte) []byte {
+	attrs := []attribute{{attrError, []byte{0, 0, 4, 38}}, {attrRealm, realm}, {attrNonce, []byte("fresh-nonce")}}
+	kind := createPermission | 0x0110
+	var signingKey []byte
+	if s.signed {
+		signingKey = key
+	}
+	if attempt == 1 && !s.repeat {
+		kind, attrs, signingKey = createPermission|0x0100, nil, key
+	}
+	response := buildMessage(kind, request.txID, attrs, signingKey)
+	if s.tampered {
+		response[len(response)-1] ^= 1
+	}
+	return response
 }
 
 // These are real coturn tests, not a synthetic TURN implementation. The
@@ -183,76 +194,92 @@ func TestVerifyRelayAgainstCoturn(t *testing.T) {
 	}
 	for _, transport := range []Transport{UDP, TLS} {
 		t.Run(string(transport), func(t *testing.T) {
-			address := os.Getenv("TURNPROBE_TEST_" + strings.ToUpper(string(transport)) + "_ADDR")
-			if address == "" {
-				t.Fatal("missing real coturn address for " + string(transport))
-			}
-			config := RelayConfig{ServerAddr: address, Transport: transport, Username: os.Getenv("TURNPROBE_TEST_USERNAME"), Password: os.Getenv("TURNPROBE_TEST_PASSWORD"), Peer: peer}
-			if transport == TLS {
-				pem, err := os.ReadFile(os.Getenv("TURNPROBE_TEST_CA"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				roots := x509.NewCertPool()
-				if !roots.AppendCertsFromPEM(pem) {
-					t.Fatal("fixture CA is invalid")
-				}
-				config.TLSConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			testCoturnTransport(t, coturnFixtureConfig(t, transport, peer))
+		})
+	}
+}
+
+func coturnFixtureConfig(t *testing.T, transport Transport, peer netip.AddrPort) RelayConfig {
+	t.Helper()
+	address := os.Getenv("TURNPROBE_TEST_" + strings.ToUpper(string(transport)) + "_ADDR")
+	if address == "" {
+		t.Fatal("missing real coturn address for " + string(transport))
+	}
+	config := RelayConfig{ServerAddr: address, Transport: transport, Username: os.Getenv("TURNPROBE_TEST_USERNAME"), Password: os.Getenv("TURNPROBE_TEST_PASSWORD"), Peer: peer}
+	if transport != TLS {
+		return config
+	}
+	pem, err := os.ReadFile(os.Getenv("TURNPROBE_TEST_CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		t.Fatal("fixture CA is invalid")
+	}
+	config.TLSConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	return config
+}
+
+func testCoturnTransport(t *testing.T, config RelayConfig) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := VerifyRelay(ctx, config)
+	if err != nil {
+		t.Fatalf("authenticated bidirectional relay: %v", err)
+	}
+	if !result.RelayedAddr.IsValid() || result.RelayedAddr.Port() == 0 {
+		t.Fatal("relay result lacks the actual allocated address")
+	}
+	testCoturnRejections(t, config)
+	if config.Transport == TLS {
+		t.Run("untrusted-certificate", func(t *testing.T) {
+			config.TLSConfig = nil
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			result, err := VerifyRelay(ctx, config)
-			if err != nil {
-				t.Fatalf("authenticated bidirectional relay: %v", err)
-			}
-			if !result.RelayedAddr.IsValid() || result.RelayedAddr.Port() == 0 {
-				t.Fatal("relay result lacks the actual allocated address")
-			}
-			t.Run("wrong-password", func(t *testing.T) {
-				wrong := config
-				wrong.Password = "incorrect-password"
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				if _, err := VerifyRelay(ctx, wrong); err == nil {
-					t.Fatal("wrong credentials must not pass relay verification")
-				}
-			})
-			t.Run("denied-peer", func(t *testing.T) {
-				denied := config
-				denied.Peer = netip.MustParseAddrPort("172.30.171.10:3479")
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				if _, err := VerifyRelay(ctx, denied); err == nil || !strings.Contains(err.Error(), "CreatePermission") {
-					t.Fatalf("coturn must reject a peer outside its allowlist, got %v", err)
-				}
-			})
-			if transport == TLS {
-				t.Run("untrusted-certificate", func(t *testing.T) {
-					config.TLSConfig = nil
-					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					defer cancel()
-					if _, err := VerifyRelay(ctx, config); err == nil {
-						t.Fatal("untrusted TURN certificate must not be accepted")
-					}
-				})
-			}
-			if transport == UDP && os.Getenv("TURNPROBE_TEST_STALE_NONCE") == "1" {
-				t.Run("stale-nonce-recovery", func(t *testing.T) {
-					proxyAddress, staleReplies, closeProxy := staleNonceProxy(t, config.ServerAddr)
-					defer closeProxy()
-					config.ServerAddr = proxyAddress
-					ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-					defer cancel()
-					if _, err := VerifyRelay(ctx, config); err != nil {
-						t.Fatalf("real coturn stale nonce must be refreshed: %v", err)
-					}
-					if staleReplies.Load() == 0 {
-						t.Fatal("fixture did not exercise a real coturn438 response")
-					}
-				})
+			if _, err := VerifyRelay(ctx, config); err == nil {
+				t.Fatal("untrusted TURN certificate must not be accepted")
 			}
 		})
 	}
+	if config.Transport == UDP && os.Getenv("TURNPROBE_TEST_STALE_NONCE") == "1" {
+		t.Run("stale-nonce-recovery", func(t *testing.T) {
+			proxyAddress, staleReplies, closeProxy := staleNonceProxy(t, config.ServerAddr)
+			defer closeProxy()
+			config.ServerAddr = proxyAddress
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			if _, err := VerifyRelay(ctx, config); err != nil {
+				t.Fatalf("real coturn stale nonce must be refreshed: %v", err)
+			}
+			if staleReplies.Load() == 0 {
+				t.Fatal("fixture did not exercise a real coturn438 response")
+			}
+		})
+	}
+}
+
+func testCoturnRejections(t *testing.T, config RelayConfig) {
+	t.Helper()
+	t.Run("wrong-password", func(t *testing.T) {
+		wrong := config
+		wrong.Password = "incorrect-password"
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := VerifyRelay(ctx, wrong); err == nil {
+			t.Fatal("wrong credentials must not pass relay verification")
+		}
+	})
+	t.Run("denied-peer", func(t *testing.T) {
+		denied := config
+		denied.Peer = netip.MustParseAddrPort("172.30.171.10:3479")
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := VerifyRelay(ctx, denied); err == nil || !strings.Contains(err.Error(), "CreatePermission") {
+			t.Fatalf("coturn must reject a peer outside its allowlist, got %v", err)
+		}
+	})
 }
 
 // Delay only the first real server challenge until its one-second nonce

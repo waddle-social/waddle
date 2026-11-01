@@ -139,9 +139,10 @@ func VerifyRelay(ctx context.Context, config RelayConfig) (RelayResult, error) {
 	}
 	session.realm = challenge.value(attrRealm)
 	session.nonce = challenge.value(attrNonce)
-	// TURN's long-term credential key is MD5(username:realm:password), per
-	// RFC 8489 §9.2. MD5 is the interoperable key derivation, not a file hash.
-	key := md5.Sum([]byte(config.Username + ":" + string(session.realm) + ":" + config.Password))
+	// Classic coturn REST authentication uses the RFC 8489 §9.2.2 MD5
+	// long-term key and §14.5 HMAC-SHA1 integrity formula, not password
+	// storage or file signatures. Negotiated SHA-256 is a separate STUN mode.
+	key := md5.Sum([]byte(config.Username + ":" + string(session.realm) + ":" + config.Password)) // NOSONAR: reviewed classic coturn REST interoperability.
 	session.key = key[:]
 	allocated, err := session.authenticated(allocate, requestAttrs)
 	if err != nil {
@@ -162,30 +163,37 @@ func VerifyRelay(ctx context.Context, config RelayConfig) (RelayResult, error) {
 	if _, err := session.authenticated(channelBind, []attribute{{attrChannel, []byte{0x40, 0, 0, 0}}, {attrPeer, encodeXorAddress(config.Peer)}}); err != nil {
 		return RelayResult{}, fmt.Errorf("TURN ChannelBind: %w", err)
 	}
+	if err := session.verifyChannelEcho(); err != nil {
+		return RelayResult{}, err
+	}
+	return RelayResult{RelayedAddr: relayed}, nil
+}
+
+func (s *relaySession) verifyChannelEcho() error {
 	payload := make([]byte, 32)
 	if _, err := rand.Read(payload); err != nil {
-		return RelayResult{}, fmt.Errorf("generate relay payload: %w", err)
+		return fmt.Errorf("generate relay payload: %w", err)
 	}
 	frame := make([]byte, 4+len(payload))
 	binary.BigEndian.PutUint16(frame, probeChannel)
 	binary.BigEndian.PutUint16(frame[2:], uint16(len(payload)))
 	copy(frame[4:], payload)
-	if err := session.writeFrame(frame); err != nil {
-		return RelayResult{}, fmt.Errorf("send relayed payload: %w", err)
+	if err := s.writeFrame(frame); err != nil {
+		return fmt.Errorf("send relayed payload: %w", err)
 	}
 	for {
-		response, err := session.readFrame()
+		response, err := s.readFrame()
 		if err != nil {
-			return RelayResult{}, fmt.Errorf("receive echoed relay payload: %w", err)
+			return fmt.Errorf("receive echoed relay payload: %w", err)
 		}
 		if len(response) < 4 || binary.BigEndian.Uint16(response) != probeChannel {
 			continue
 		}
 		length := int(binary.BigEndian.Uint16(response[2:]))
 		if length != len(payload) || len(response) < 4+length || !bytes.Equal(response[4:4+length], payload) {
-			return RelayResult{}, errors.New("relayed echo did not match the unpredictable probe payload")
+			return errors.New("relayed echo did not match the unpredictable probe payload")
 		}
-		return RelayResult{RelayedAddr: relayed}, nil
+		return nil
 	}
 }
 
@@ -215,21 +223,9 @@ func (s *relaySession) authenticated(method uint16, attrs []attribute) (stunMess
 			return stunMessage{}, err
 		}
 		if response.kind == method|0x0110 && response.errorCode() == 438 {
-			// RFC 8489 §9.2.4 permits unsigned438 challenges. Authenticate
-			// them when signed, and require a fully authenticated success
-			// after the bounded retry before trusting any allocation.
-			if response.value(attrIntegrity) != nil {
-				if err := verifyIntegrity(response.raw, s.key); err != nil {
-					return stunMessage{}, err
-				}
+			if err := s.acceptStaleNonce(response, attempt); err != nil {
+				return stunMessage{}, err
 			}
-			if attempt != 0 {
-				return stunMessage{}, errors.New("TURN nonce retry exhausted")
-			}
-			if len(response.value(attrNonce)) == 0 || bytes.Equal(response.value(attrNonce), s.nonce) || !bytes.Equal(response.value(attrRealm), s.realm) {
-				return stunMessage{}, errors.New("invalid TURN stale-nonce challenge")
-			}
-			s.nonce = response.value(attrNonce)
 			continue
 		}
 		if response.kind != method|0x0100 {
@@ -243,10 +239,28 @@ func (s *relaySession) authenticated(method uint16, attrs []attribute) (stunMess
 	return stunMessage{}, errors.New("TURN nonce retry exhausted")
 }
 
-func (s *relaySession) exchange(method uint16, attrs []attribute, key []byte) (stunMessage, error) {
+func (s *relaySession) acceptStaleNonce(response stunMessage, attempt int) error {
+	// RFC 8489 §9.2.4 permits unsigned438 challenges. Authenticate them
+	// when signed; authenticated still requires a signed success afterward.
+	if response.value(attrIntegrity) != nil {
+		if err := verifyIntegrity(response.raw, s.key); err != nil {
+			return err
+		}
+	}
+	if attempt != 0 {
+		return errors.New("TURN nonce retry exhausted")
+	}
+	if len(response.value(attrNonce)) == 0 || bytes.Equal(response.value(attrNonce), s.nonce) || !bytes.Equal(response.value(attrRealm), s.realm) {
+		return errors.New("invalid TURN stale-nonce challenge")
+	}
+	s.nonce = response.value(attrNonce)
+	return nil
+}
+
+func buildRequest(method uint16, attrs []attribute, key []byte) ([]byte, TxID, error) {
 	var id TxID
 	if _, err := rand.Read(id[:]); err != nil {
-		return stunMessage{}, err
+		return nil, TxID{}, err
 	}
 	// IPv6 XOR-PEER-ADDRESS includes this request's transaction ID.
 	for i := range attrs {
@@ -257,7 +271,14 @@ func (s *relaySession) exchange(method uint16, attrs []attribute, key []byte) (s
 			}
 		}
 	}
-	request := buildMessage(method, id, attrs, key)
+	return buildMessage(method, id, attrs, key), id, nil
+}
+
+func (s *relaySession) exchange(method uint16, attrs []attribute, key []byte) (stunMessage, error) {
+	request, id, err := buildRequest(method, attrs, key)
+	if err != nil {
+		return stunMessage{}, err
+	}
 	for attempt := 0; ; attempt++ {
 		if err := s.writeFrame(request); err != nil {
 			return stunMessage{}, err
@@ -271,22 +292,30 @@ func (s *relaySession) exchange(method uint16, attrs []attribute, key []byte) (s
 		if err := s.conn.SetReadDeadline(readDeadline); err != nil {
 			return stunMessage{}, err
 		}
-		for {
-			frame, err := s.readFrame()
-			if err != nil {
-				var netErr net.Error
-				if !s.stream && attempt < 3 && time.Now().Before(s.deadline) && errors.As(err, &netErr) && netErr.Timeout() {
-					break
-				}
-				return stunMessage{}, err
-			}
-			response, err := parseMessage(frame)
-			if err != nil || response.txID != id {
-				continue
-			}
-			_ = s.conn.SetReadDeadline(s.deadline)
+		response, err := s.readResponse(id)
+		if err == nil {
 			return response, nil
 		}
+		var netErr net.Error
+		if !s.stream && attempt < 3 && time.Now().Before(s.deadline) && errors.As(err, &netErr) && netErr.Timeout() {
+			continue
+		}
+		return stunMessage{}, err
+	}
+}
+
+func (s *relaySession) readResponse(id TxID) (stunMessage, error) {
+	for {
+		frame, err := s.readFrame()
+		if err != nil {
+			return stunMessage{}, err
+		}
+		response, err := parseMessage(frame)
+		if err != nil || response.txID != id {
+			continue
+		}
+		_ = s.conn.SetReadDeadline(s.deadline)
+		return response, nil
 	}
 }
 
@@ -393,20 +422,25 @@ func verifyIntegrity(packet, key []byte) error {
 			if !hmac.Equal(mac.Sum(nil), attr.value) {
 				return errors.New("TURN response MESSAGE-INTEGRITY mismatch")
 			}
-			if trailing := message.attrs[index+1:]; len(trailing) > 0 {
-				if len(trailing) != 1 || trailing[0].kind != 0x8028 || len(trailing[0].value) != 4 {
-					return errors.New("unauthenticated attributes after TURN MESSAGE-INTEGRITY")
-				}
-				fingerprint := crc32.ChecksumIEEE(packet[:offset+24]) ^ 0x5354554e
-				if binary.BigEndian.Uint32(trailing[0].value) != fingerprint {
-					return errors.New("TURN response FINGERPRINT mismatch")
-				}
-			}
-			return nil
+			return verifyIntegritySuffix(packet, offset+24, message.attrs[index+1:])
 		}
 		offset += 4 + ((len(attr.value) + 3) &^ 3)
 	}
 	return errors.New("authenticated TURN response lacks MESSAGE-INTEGRITY")
+}
+
+func verifyIntegritySuffix(packet []byte, signedEnd int, trailing []attribute) error {
+	if len(trailing) == 0 {
+		return nil
+	}
+	if len(trailing) != 1 || trailing[0].kind != 0x8028 || len(trailing[0].value) != 4 {
+		return errors.New("unauthenticated attributes after TURN MESSAGE-INTEGRITY")
+	}
+	fingerprint := crc32.ChecksumIEEE(packet[:signedEnd]) ^ 0x5354554e
+	if binary.BigEndian.Uint32(trailing[0].value) != fingerprint {
+		return errors.New("TURN response FINGERPRINT mismatch")
+	}
+	return nil
 }
 
 func encodeXorAddress(address netip.AddrPort) []byte {

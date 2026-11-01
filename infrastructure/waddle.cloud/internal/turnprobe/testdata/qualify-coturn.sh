@@ -79,7 +79,10 @@ for attempt in {1..20}; do
   sleep 0.2
 done
 export TURNPROBE_TEST_USERNAME="$(($(date +%s) + 600)):turnprobe"
-export TURNPROBE_TEST_PASSWORD="$(printf '%s' "${TURNPROBE_TEST_USERNAME}" | openssl dgst -sha1 -hmac isolated-turnprobe-secret -binary | openssl base64 -A)"
+# Coturn REST derives its ephemeral password as base64(HMAC-SHA1(secret,
+# username)); it feeds classic long-term auth (RFC 8489 §9.2.2 and §14.5),
+# not password storage or file signatures. Negotiated STUN SHA-256 is separate.
+export TURNPROBE_TEST_PASSWORD="$(printf '%s' "${TURNPROBE_TEST_USERNAME}" | openssl dgst -sha1 -hmac isolated-turnprobe-secret -binary | openssl base64 -A)" # NOSONAR: reviewed coturn REST fixture formula.
 docker create --name "${fixture_name}-client" --network "${fixture_name}" \
   -e TURNPROBE_TEST_UDP_ADDR=172.30.171.3:3478 -e TURNPROBE_TEST_TLS_ADDR=172.30.171.3:5349 \
   -e TURNPROBE_TEST_PEER=172.30.171.2:3479 -e TURNPROBE_TEST_CA=/fixture/tls.crt \
