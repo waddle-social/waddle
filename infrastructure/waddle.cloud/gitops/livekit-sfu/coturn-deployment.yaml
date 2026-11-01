@@ -39,7 +39,10 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
-              add: [NET_BIND_SERVICE]
+              # The pinned upstream binary carries this file capability;
+              # dropping it prevents execution with no-new-privileges.
+              # It also binds TLS443; all other capabilities stay dropped.
+              add: [NET_BIND_SERVICE] # NOSONAR: required for pinned-image execution and TLS443 binding.
           env:
             - name: POD_IP
               valueFrom:
