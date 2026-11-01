@@ -46,6 +46,7 @@ underlying connection once both tasks relinquish their halves.
 | Requester cancellation after admission | The requester is joined as cancelled, but an already attempted writer operation remains uncertain; stopping the transport and joining the pumps are separate actions. |
 | Reader panic or writer abort | The first result is observed, the surviving pump is interrupted, and both task results are joined. An abort request alone is not a join. |
 | Graceful shutdown | The unstalled writer emits a WebSocket close, the peer reads it, and both tasks are joined. A separately tested stalled shutdown uses a deadline, aborts remaining tasks, and joins their results; no close handshake is claimed in that case. |
+| Peer-initiated close | The writer flushes the queued close reply and the peer reads it. A stalled reply is interrupted by forced retirement or the deadline, and both pumps are joined. |
 | Kameo control experiment | An actual Kameo actor with a bounded 256-entry mailbox is held in one turn. Filling all 256 slots rejects a control tell. An independent cancellation signal reaches that turn only because the handler cooperatively polls it. |
 
 A transport admission is not durable custody. The experiment labels a frame
