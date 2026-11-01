@@ -186,6 +186,14 @@ waddle-server clustering::route_bridge::registration::owner_update::tests::delay
 waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
 waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
 
+# Dark endpoint transition model: logical lifetime and exact seal/commit
+# outcomes are characterized before a durable repository or runtime cutover.
+waddle-xmpp ownership::endpoint_transition::tests::successful_cross_node_resume_keeps_logical_generation_and_changes_transport
+waddle-xmpp ownership::endpoint_transition::tests::failed_resume_then_fresh_bind_reuses_physical_socket_not_binding_or_logical_state
+waddle-xmpp ownership::endpoint_transition::tests::slow_reserved_enqueue_rechecks_after_seal_and_never_runs
+waddle-xmpp ownership::endpoint_transition::tests::unknown_reply_requires_journal_resolution_not_assumed_rollback
+waddle-xmpp ownership::endpoint_transition::tests::cancelled_prepare_stays_sealed_until_exact_compensation
+
 # P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
 # native loopback, bounded overload, exact completion and both-pump joins.
 waddle-server::supervised_io pumps::outbound_count_and_byte_overload_stops_before_retirement
@@ -194,5 +202,7 @@ waddle-server::supervised_io pumps::completion_keeps_its_exact_connection_refere
 waddle-server::supervised_io pumps::reader_panic_is_preserved_while_its_writer_is_stopped_and_joined
 waddle-server::supervised_io pumps::graceful_shutdown_seals_admission_and_marks_abandoned_receipts_not_attempted
 waddle-server::supervised_io pumps::peer_close_flushes_the_queued_reply_before_bounded_retirement
+waddle-server::supervised_io pumps::peer_close_during_local_close_flush_still_gets_a_server_close
+waddle-server::supervised_io pumps::send_after_closing_waits_for_peer_close_then_flushes_reply
 waddle-server::supervised_io pumps::forced_retirement_interrupts_a_stalled_peer_close_reply
 waddle-server::supervised_io kameo_control::full_256_entry_kameo_mailbox_requires_an_independent_interrupt_path

@@ -165,6 +165,7 @@ pub struct EndpointSlot {
     active: Option<EndpointBinding>,
     staged: Option<Staged>,
     used_logical_generations: HashSet<LogicalResourceGeneration>,
+    used_binding_generations: HashSet<ResourceBindingGeneration>,
     operations: HashMap<EndpointOperationId, OperationDisposition>,
 }
 
@@ -176,6 +177,7 @@ impl EndpointSlot {
             active: None,
             staged: None,
             used_logical_generations: HashSet::new(),
+            used_binding_generations: HashSet::new(),
             operations: HashMap::new(),
         }
     }
@@ -209,26 +211,24 @@ impl EndpointSlot {
         if self.staged.is_some() {
             return Err(StageError::AlreadyStaged);
         }
+        if self
+            .used_binding_generations
+            .contains(&candidate.binding.binding_generation)
+        {
+            return Err(StageError::BindingGenerationReused);
+        }
         match (candidate.kind, self.active.as_ref()) {
-            (BindKind::Fresh, current) => {
+            (BindKind::Fresh, _) => {
                 if self
                     .used_logical_generations
                     .contains(&candidate.binding.logical_generation)
                 {
                     return Err(StageError::LogicalGenerationReused);
                 }
-                if current.is_some_and(|current| {
-                    current.binding_generation == candidate.binding.binding_generation
-                }) {
-                    return Err(StageError::BindingGenerationReused);
-                }
             }
             (BindKind::Resume, Some(current)) => {
                 if current.logical_generation != candidate.binding.logical_generation {
                     return Err(StageError::LogicalGenerationMismatch);
-                }
-                if current.binding_generation == candidate.binding.binding_generation {
-                    return Err(StageError::BindingGenerationReused);
                 }
                 if current.connection_ref == candidate.binding.connection_ref {
                     return Err(StageError::ResumeOnSameTransport);
@@ -241,6 +241,8 @@ impl EndpointSlot {
             self.used_logical_generations
                 .insert(candidate.binding.logical_generation);
         }
+        self.used_binding_generations
+            .insert(candidate.binding.binding_generation);
         self.revision = next;
         self.staged = Some(Staged {
             operation_id,
@@ -526,6 +528,23 @@ mod tests {
             Err(TransitionError::StaleOperation)
         );
         assert_eq!(slot.active(), Some(&fresh));
+        // The compensated resume's binding fence cannot be minted again for a
+        // later successor, even though it is no longer the active binding.
+        let mut reused_failed_binding =
+            binding(new_connection(), LogicalResourceGeneration::fresh());
+        reused_failed_binding.binding_generation = failed.binding_generation;
+        assert_eq!(
+            slot.stage(
+                slot.revision(),
+                EndpointOperationId::fresh(),
+                EndpointCandidate {
+                    binding: reused_failed_binding,
+                    kind: BindKind::Fresh,
+                }
+            ),
+            Err(StageError::BindingGenerationReused)
+        );
+        assert_eq!(slot.active(), Some(&fresh));
         assert_eq!(
             slot.stage(
                 slot.revision(),
@@ -739,7 +758,7 @@ mod tests {
                 slot.revision(),
                 EndpointOperationId::fresh(),
                 EndpointCandidate {
-                    binding: candidate,
+                    binding: binding(new_connection(), candidate.logical_generation),
                     kind: BindKind::Fresh,
                 }
             ),
