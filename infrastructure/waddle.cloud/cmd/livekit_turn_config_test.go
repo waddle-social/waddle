@@ -188,22 +188,18 @@ func TestConfigMapCarriesTurnAuthKeys(t *testing.T) {
 	}
 }
 
-// The production HelmRelease must state the TURN auth posture explicitly
-// rather than silently inheriting chart defaults: the restricted-peer
-// relay policy is a deliberate per-deployment security decision, and the
-// credential window must survive a chart-default change.
+// The production credential source must be coturn's existing REST secret,
+// shared by Waddle's XEP-0215 mint and LiveKit's signal response.
 func TestProductionHelmReleaseStatesTurnAuthPosture(t *testing.T) {
-	hr := readYAML[livekitHelmRelease](t, gitOpsPath("livekit-sfu", "helmrelease.yaml"))
-	turn := hr.Spec.Values.Livekit.Turn
-
-	if turn.TTL == nil || *turn.TTL != turnCredentialTTLSeconds {
-		t.Fatalf("production livekit.turn.ttl_seconds = %v, want explicit %d", turn.TTL, turnCredentialTTLSeconds)
-	}
-	if turn.AllowRestrictedPeerCIDRs == nil {
-		t.Fatal("production livekit.turn.allow_restricted_peer_cidrs must be set explicitly (empty list is the deliberate choice for our public-candidate-only topology)")
-	}
-	if len(*turn.AllowRestrictedPeerCIDRs) != 0 {
-		t.Fatalf("production livekit.turn.allow_restricted_peer_cidrs = %v; widening it lets any TURN-authenticated client relay UDP into that range — change this test only with a topology rationale", *turn.AllowRestrictedPeerCIDRs)
+	secret := readYAML[struct {
+		Spec struct {
+			Data []struct {
+				RemoteRef struct{ Key, Property string } `yaml:"remoteRef"`
+			} `yaml:"data"`
+		} `yaml:"spec"`
+	}](t, gitOpsPath("livekit-sfu", "coturn-external-secret.yaml"))
+	if len(secret.Spec.Data) != 1 || secret.Spec.Data[0].RemoteRef.Key != "livekit-sfu" || secret.Spec.Data[0].RemoteRef.Property != "turn-shared-secret" {
+		t.Fatal("coturn and LiveKit must consume the existing Waddle TURN REST secret")
 	}
 }
 
@@ -214,8 +210,8 @@ func TestChartDefaultsMatchProductionTurnPosture(t *testing.T) {
 	values := readYAML[chartValues](t, "../charts/livekit-sfu/values.yaml")
 	turn := values.Livekit.Turn
 
-	if !turn.Enabled {
-		t.Fatal("values.yaml livekit.turn.enabled must default to true (production posture)")
+	if turn.Enabled {
+		t.Fatal("values.yaml must not enable embedded TURN by default")
 	}
 	if turn.Domain != "turn.waddle.social" {
 		t.Fatalf("values.yaml livekit.turn.domain = %q, want turn.waddle.social", turn.Domain)
@@ -226,7 +222,7 @@ func TestChartDefaultsMatchProductionTurnPosture(t *testing.T) {
 	if turn.UDPPort != turnUDPPort {
 		t.Fatalf("values.yaml livekit.turn.udp_port = %d, want %d", turn.UDPPort, turnUDPPort)
 	}
-	if !values.NodePorts.TurnUDP.Enabled {
-		t.Fatal("values.yaml nodePorts.turnUdp.enabled must default to true (production posture)")
+	if values.NodePorts.TurnUDP.Enabled {
+		t.Fatal("values.yaml must not expose a TURN NodePort without an explicitly configured relay")
 	}
 }

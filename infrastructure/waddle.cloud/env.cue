@@ -120,9 +120,8 @@ schema.#Project & {
 					  --set webhook.enabled=true \
 					  --set webhook.apiKey=ci-key \
 					  --set 'webhook.urls={https://xmpp.waddle.social/api/v1/livekit/webhook}' \
-					  --set turn.secretName=turn-waddle-social-tls \
-					  --set livekit.turn.enabled=true \
-					  --set livekit.turn.domain=turn.waddle.social \
+					  --set sharedTURN.configSecretName=livekit-turn-config \
+					  --set livekit.turn.enabled=false \
 					  --set nodePorts.turnUdp.enabled=true
 					helm package charts/livekit-sfu -d /tmp/charts
 					chart_version="$(helm show chart charts/livekit-sfu | awk '$1 == "version:" { print $2 }')"

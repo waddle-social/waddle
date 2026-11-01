@@ -172,11 +172,8 @@ func TestProductionHelmReleaseWiresTurnUDPRelay(t *testing.T) {
 	hr := readYAML[livekitHelmRelease](t, gitOpsPath("livekit-sfu", "helmrelease.yaml"))
 	v := hr.Spec.Values
 
-	if !v.Livekit.Turn.Enabled {
-		t.Fatal("livekit.turn.enabled must be true in production")
-	}
-	if v.Livekit.Turn.UDPPort != turnUDPPort {
-		t.Fatalf("livekit.turn.udp_port = %d, want %d", v.Livekit.Turn.UDPPort, turnUDPPort)
+	if v.Livekit.Turn.Enabled {
+		t.Fatal("production uses shared coturn; embedded TURN must be disabled")
 	}
 	if !v.NodePorts.TurnUDP.Enabled {
 		t.Fatal("nodePorts.turnUdp.enabled must be true so the TURN/UDP listener is reachable")
@@ -193,7 +190,7 @@ func TestProductionHelmReleaseWiresTurnUDPRelay(t *testing.T) {
 // internet; a NodePort without this allow would render the relay
 // unreachable.
 func TestNetworkPolicyAdmitsTurnUDPFromWorld(t *testing.T) {
-	np := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-sfu", "networkpolicy.yaml"))
+	np := readYAML[ciliumNetworkPolicy](t, gitOpsPath("livekit-sfu", "coturn-networkpolicy.yaml"))
 
 	for _, rule := range np.Spec.Ingress {
 		if !contains(rule.FromEntities, "world") {

@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coturn
+  namespace: livekit
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: coturn
+      app.kubernetes.io/instance: coturn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: coturn
+        app.kubernetes.io/instance: coturn
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 14400
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coturn
+          image: coturn/coturn:4.18.0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          command: ["/bin/sh", "/etc/coturn/base/start.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SFU_PEER_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: turn-udp
+              containerPort: 30478
+              protocol: UDP
+            - name: turn-tls
+              containerPort: 443
+              protocol: TCP
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "/etc/coturn/base/ready.sh"]
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 24
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "/etc/coturn/base/ready.sh"]
+            periodSeconds: 10
+            timeoutSeconds: 4
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "/etc/coturn/base/drain.sh"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/coturn/base
+              readOnly: true
+            - name: shared-secret
+              mountPath: /etc/coturn/shared
+              readOnly: true
+            - name: tls
+              mountPath: /etc/coturn/tls
+              readOnly: true
+            - name: runtime
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: coturn
+        - name: shared-secret
+          secret:
+            secretName: livekit-turn-config
+            defaultMode: 0440
+            items:
+              - key: shared-secret
+                path: shared-secret
+        - name: tls
+          secret:
+            secretName: turn-waddle-social-tls
+            defaultMode: 0440
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coturn
+  namespace: livekit
+spec:
+  selector:
+    app.kubernetes.io/name: coturn
+    app.kubernetes.io/instance: coturn
+  ports:
+    - name: turn-tls
+      port: 443
+      targetPort: turn-tls
+      protocol: TCP

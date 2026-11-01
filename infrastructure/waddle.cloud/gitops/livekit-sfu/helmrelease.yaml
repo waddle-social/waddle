@@ -33,6 +33,8 @@ spec:
       tag: v1.11.0
     apiKeys:
       existingSecret: livekit-sfu-api-keys
+    sharedTURN:
+      configSecretName: livekit-turn-config
     webhook:
       enabled: true
       urls:
@@ -44,17 +46,7 @@ spec:
         tcp_port: 30881
         udp_port: 30882
       turn:
-        enabled: true
-        domain: turn.waddle.social
-        udp_port: 30478
-        tls_port: 443
-        relay_range_start: 30000
-        relay_range_end: 40000
-        # See charts/livekit-sfu/values.yaml for the rationale of both
-        # keys; stated explicitly here because the restricted-peer relay
-        # policy is a deliberate per-deployment security decision.
-        ttl_seconds: 3600
-        allow_restricted_peer_cidrs: []
+        enabled: false
     nodePorts:
       rtc:
         enabled: true
@@ -63,8 +55,6 @@ spec:
       turnUdp:
         enabled: true
         udp: 30478
-    turn:
-      secretName: turn-waddle-social-tls
     resources:
       requests:
         cpu: 500m

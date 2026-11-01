@@ -11,7 +11,8 @@ spec:
     - name: infra-external-dns
   interval: 10m
   retryInterval: 1m
-  timeout: 15m
+  # coturn preStop waits for active allocations, bounded at four hours.
+  timeout: 4h15m
   path: ./
   prune: true
   wait: true
@@ -19,6 +20,10 @@ spec:
     kind: OCIRepository
     name: livekit-sfu
   healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: coturn
+      namespace: livekit
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
       name: livekit-sfu
