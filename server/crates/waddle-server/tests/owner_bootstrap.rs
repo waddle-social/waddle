@@ -15,6 +15,7 @@ use waddle_server::db::lineage::{
 use waddle_server::db::{
     Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationLedgerError,
 };
+use waddle_server::sm_persistence::bootstrap_portable_sm_owner_schema;
 
 static CATALOG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -1022,4 +1023,37 @@ async fn sqlite_store_owner_rotates_a_shared_boundary_once() {
             .is_err(),
         "TEMP shadow cannot hide changed durable lineage"
     );
+}
+
+#[tokio::test]
+async fn portable_sm_schema_owner_requires_a_schema_writer() {
+    let _serial = CATALOG_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {} TO {}",
+        fixture.schema, fixture.runtime_role
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("runtime may use but not create in owner schema");
+    assert!(
+        bootstrap_portable_sm_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot create the portable SM schema"
+    );
+    bootstrap_portable_sm_owner_schema(&fixture.owner)
+        .await
+        .expect("owner provisions portable SM schema");
+    bootstrap_portable_sm_owner_schema(&fixture.owner)
+        .await
+        .expect("owner bootstrap is repeatable");
+    assert!(
+        bootstrap_portable_sm_owner_schema(&fixture.runtime)
+            .await
+            .is_err(),
+        "restricted login cannot repair an existing SM schema"
+    );
+    fixture.cleanup().await;
 }

@@ -43,6 +43,7 @@ pub(crate) mod ingress_append;
 mod joined_sessions;
 pub(crate) mod promotion_inventory;
 mod schema;
+pub use schema::bootstrap_schema_owner as bootstrap_portable_sm_owner_schema;
 
 use codec::{
     decode_session, decode_session_principal, decode_unacked, decode_unacked_join_row,

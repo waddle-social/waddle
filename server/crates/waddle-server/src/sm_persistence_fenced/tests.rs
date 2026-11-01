@@ -2,6 +2,7 @@
 //! 3 Slice 4). Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is
 //! unset, mirroring `clustering::claims`'s own test style exactly.
 
+use super::implementation::bootstrap_schema_owner;
 use super::{
     async_trait, sm_session_entity, ClaimError, KeyedSnapshotOutcome, PersistedDetachedAppend,
 };
@@ -112,6 +113,111 @@ fn node_identity() -> NodeIdentity {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     )
+}
+
+#[tokio::test]
+async fn fenced_sm_owner_schema_rejects_sqlite_before_writes() {
+    let db = Database::in_memory("fenced-owner-sqlite")
+        .await
+        .expect("SQLite database");
+    assert!(matches!(
+        bootstrap_schema_owner(&db).await,
+        Err(SmPersistenceError::ClusterRequiresPostgres)
+    ));
+    let guard = db.guard().await.expect("SQLite connection");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'sm_sessions'",
+            (),
+        )
+        .await
+        .expect("inspect SQLite schema");
+    let row = rows.next().await.expect("query result").expect("count row");
+    let count: i64 = row.get(0).expect("count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn fenced_sm_owner_schema_requires_a_schema_writer() {
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&base_url)
+        .await
+        .expect("admin PostgreSQL pool");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("waddle_sm_owner_s_{suffix}");
+    let owner_role = format!("waddle_sm_owner_o_{suffix}");
+    let runtime_role = format!("waddle_sm_owner_r_{suffix}");
+    for role in [&owner_role, &runtime_role] {
+        sqlx::query(&format!(
+            "CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+        ))
+        .execute(&admin)
+        .await
+        .expect("test role");
+    }
+    sqlx::query(&format!(
+        "CREATE SCHEMA {schema} AUTHORIZATION {owner_role}"
+    ))
+    .execute(&admin)
+    .await
+    .expect("owner schema");
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema} TO {runtime_role}"))
+        .execute(&admin)
+        .await
+        .expect("runtime schema usage without CREATE");
+    let with_role = |role: &str| {
+        let mut url = url::Url::parse(&base_url).expect("PostgreSQL URL");
+        let retained: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "options" && key != "user")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+            .append_pair("user", role)
+            .append_pair("options", &format!("-c search_path={schema}"));
+        url.to_string()
+    };
+    let mut owner_config = DatabaseConfig::new(DatabaseDriver::Postgres, with_role(&owner_role));
+    owner_config.pool_size = 1;
+    let owner_db = Database::from_config("fenced-owner", &owner_config)
+        .await
+        .expect("owner database");
+    let mut runtime_config =
+        DatabaseConfig::new(DatabaseDriver::Postgres, with_role(&runtime_role));
+    runtime_config.pool_size = 1;
+    let runtime_db = Database::from_config("fenced-runtime", &runtime_config)
+        .await
+        .expect("runtime database");
+    let open = |db: Database| async move {
+        let claims: Arc<dyn ClaimStore> = Arc::new(PostgresClaimStore::new(db.clone()));
+        PostgresFencedSmPersistence::open(db, claims, SharedNodeIdentity::new(node_identity()))
+            .await
+    };
+    assert!(open(runtime_db.clone()).await.is_err());
+    open(owner_db.clone())
+        .await
+        .expect("owner initializes fenced SM schema");
+    open(owner_db.clone())
+        .await
+        .expect("owner bootstrap repeats");
+    assert!(open(runtime_db.clone()).await.is_err());
+    drop(owner_db);
+    drop(runtime_db);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop isolated schema");
+    for role in [&owner_role, &runtime_role] {
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&admin)
+            .await
+            .expect("drop test role");
+    }
+    admin.close().await;
 }
 
 /// Mirrors `clustering::claims::tests::seed_node` exactly (duplicated

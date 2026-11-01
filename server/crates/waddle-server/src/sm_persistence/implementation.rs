@@ -6,7 +6,6 @@ use super::incremental;
 use super::ingress_append;
 use super::joined_sessions;
 use super::promotion_inventory;
-use super::schema;
 use super::Arc;
 use super::AuthenticatedPrincipalRef;
 use super::FullJid;
@@ -129,7 +128,7 @@ impl DatabaseSmPersistence {
             db,
             stream_locks: Arc::new(StreamLockMap::new()),
         };
-        schema::initialize(&storage).await?;
+        super::bootstrap_portable_sm_owner_schema(&storage.db).await?;
         info!(driver = ?storage.db.driver(), "SM persistence storage initialized (XEP-0198)");
         Ok(storage)
     }
