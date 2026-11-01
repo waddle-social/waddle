@@ -755,9 +755,8 @@ async function leaveMujiCallPresence(
   s: { sid: string; selfNick?: string; selfFullJid?: string | null },
   policy: TeardownSendPolicy,
 ): Promise<void> {
-  const updateMujiPresence = raw.update_muji_presence;
   const selfNick = s.selfNick;
-  if (!selfNick || !updateMujiPresence) return;
+  if (!selfNick || !raw.update_muji_presence) return;
   try {
     // Guard the WIRE too, not just the local wipes: the server's Muji
     // handlers key on room + occupant, not sid, so a stale leave/
@@ -769,7 +768,7 @@ async function leaveMujiCallPresence(
     if (roomReoccupiedByNewerCall(roomJid, s.sid)) return;
     await boundedTeardownSend(
       () =>
-        updateMujiPresence(roomJid, selfNick, false, false, false, {
+        raw.update_muji_presence!(roomJid, selfNick, false, false, false, {
           handRaised: false,
           muted: false, // leaving clears all in-call state
         }),
