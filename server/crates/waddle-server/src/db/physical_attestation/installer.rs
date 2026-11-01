@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     identity_select, quote_identifier, read_preflight_snapshot, read_snapshot, verify_identity,
-    PhysicalAttestationConfig, PhysicalAttestationError, FUNCTION_NAME,
+    PhysicalAttestationConfig, PhysicalAttestationError, FUNCTION_NAME, LINEAGE_FORMAT,
 };
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
@@ -326,7 +326,7 @@ fn marker(config: &PhysicalAttestationConfig, operation_id: Uuid) -> String {
         config.runtime_login.as_str().to_owned(),
         config.definer_role.as_str().to_owned(),
         config.trusted_schema.0.clone(),
-        identity_select(config),
+        guarded_identity_select(config),
     ] {
         digest.update((part.len() as u64).to_be_bytes());
         digest.update(part.as_bytes());
@@ -334,6 +334,13 @@ fn marker(config: &PhysicalAttestationConfig, operation_id: Uuid) -> String {
     format!(
         "waddle-attestation-v1:{operation_id}:{}",
         hex::encode(digest.finalize())
+    )
+}
+
+fn guarded_identity_select(config: &PhysicalAttestationConfig) -> String {
+    format!(
+        "{} AND l.format = {LINEAGE_FORMAT}",
+        identity_select(config)
     )
 }
 
@@ -352,11 +359,12 @@ RETURNS TABLE (
     stored_system_identifier text, stored_database_oid text, stored_database_name text,
     stored_schema_oid text, stored_schema_name text,
     live_system_identifier text, live_database_oid text, live_database_name text,
-    live_schema_oid text, live_schema_name text
+    live_schema_oid text, live_schema_name text,
+    stored_lineage_format bigint
 )
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
 AS $waddle_attestation${}$waddle_attestation$"#,
-        identity_select(config)
+        guarded_identity_select(config)
     );
     sqlx::query(&sql).execute(&mut *connection).await?;
     for statement in [
@@ -382,12 +390,13 @@ async fn verify_function(
           AND p.pronargdefaults = 0 AND p.proargdefaults IS NULL AND p.provariadic = 0
           AND p.prosqlbody IS NULL AND p.probin IS NULL AND p.protrftypes IS NULL AND p.prosupport = 0
           AND p.proretset AND p.prorettype = 'pg_catalog.record'::pg_catalog.regtype
-          AND p.proallargtypes = pg_catalog.array_fill('pg_catalog.text'::pg_catalog.regtype::oid, ARRAY[12])
-          AND p.proargmodes = pg_catalog.array_fill('t'::"char", ARRAY[12])
+          AND p.proallargtypes = (pg_catalog.array_fill('pg_catalog.text'::pg_catalog.regtype::oid, ARRAY[12]) || ARRAY['pg_catalog.int8'::pg_catalog.regtype::oid])
+          AND p.proargmodes = pg_catalog.array_fill('t'::"char", ARRAY[13])
           AND p.proargnames = ARRAY['lineage_uuid', 'deployment_uuid',
             'stored_system_identifier', 'stored_database_oid', 'stored_database_name',
             'stored_schema_oid', 'stored_schema_name', 'live_system_identifier',
-            'live_database_oid', 'live_database_name', 'live_schema_oid', 'live_schema_name']::text[]
+            'live_database_oid', 'live_database_name', 'live_schema_oid', 'live_schema_name',
+            'stored_lineage_format']::text[]
           AND p.prosecdef AND p.provolatile = 'v' AND p.proparallel = 'u' AND NOT p.proleakproof AND NOT p.proisstrict
           AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
           AND p.prosrc = $4 AND pg_catalog.obj_description(p.oid, 'pg_proc') = $5
@@ -407,7 +416,7 @@ async fn verify_function(
         .bind(&config.trusted_schema.0)
         .bind(config.definer_role.as_str())
         .bind(config.runtime_login.as_str())
-        .bind(identity_select(config))
+        .bind(guarded_identity_select(config))
         .bind(marker)
         .bind(FUNCTION_NAME)
         .fetch_optional(connection).await?;
