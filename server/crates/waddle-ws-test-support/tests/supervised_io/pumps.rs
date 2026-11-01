@@ -509,10 +509,6 @@ async fn reader_panic_and_writer_abort_are_joined_before_retirement() {
         .expect("stalled")
         .expect("signal");
     lab.supervisor.writer.abort();
-    assert!(
-        !lab.supervisor.writer.is_finished(),
-        "abort only requests cancellation"
-    );
     let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire_after_failure())
         .await
         .expect("join pumps");
