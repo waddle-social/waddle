@@ -1,6 +1,7 @@
 # P2.1 archive-after-pin composition
 
-Status: investigation in progress, stacked on #2157. This slice is dark and
+Status: lock-order characterization complete; archive composition remains
+blocked on durable pin-success provenance. This slice is stacked on #2157 and
 does not activate P2.1 or change server startup, pools, migrations, or XMPP.
 
 ## Plan and gates
