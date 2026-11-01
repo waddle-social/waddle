@@ -402,11 +402,15 @@ async fn drain_ownerless_retirement(
         let mut state = create_test_websocket_state_with_clustering(
             crate::clustering::ClusteringHandles {
                 claim_store: Some(claims as Arc<_>),
-                node_identity: Some(SharedNodeIdentity::new(NodeIdentity::new(
-                    "drainer",
-                    "drainer-epoch",
-                ))),
-                ..crate::clustering::ClusteringHandles::default()
+                // Nested so neither update is empty: without `clustering`
+                // these two are the only fields, which trips needless_update.
+                ..crate::clustering::ClusteringHandles {
+                    node_identity: Some(SharedNodeIdentity::new(NodeIdentity::new(
+                        "drainer",
+                        "drainer-epoch",
+                    ))),
+                    ..crate::clustering::ClusteringHandles::default()
+                }
             },
             Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
         )
