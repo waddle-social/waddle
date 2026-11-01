@@ -65,8 +65,10 @@ This path change is defense in depth following security review, not a claim of a
 demonstrated exploit in the previous path or its negative reads. The bootstrap's
 restrictive mask is expressed as `S_IRWXG | S_IRWXO`; a compile-time assertion
 checks all six group/other bits and excludes owner bits, preserving the original
-0077 mask without repeating that numeric literal in C. No analyzer suppression or weaker permission
-mask is introduced. Hosted Sonar results for this unpublished change are pending.
+0077 mask without repeating that numeric literal in C. The two restrictive
+`umask` calls have line-level `NOSONAR` comments for Sonar's capability-setting
+false positives; the permission mask is unchanged. Hosted reanalysis must pass
+before this draft can merge.
 
 The fixed transient user service requests and reads back Type=exec, Restart=no,
 control-group termination, 5-second start/2-second stop/30-second runtime limits,

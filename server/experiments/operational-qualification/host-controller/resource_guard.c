@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
   if (argc != 1 || getuid() == 0 || getuid() != geteuid() ||
       getgid() != getegid())
     return 64;
-  (void)umask(S_IRWXG | S_IRWXO);
+  (void)umask(S_IRWXG | S_IRWXO); //NOSONAR: deny group/other file permissions.
   struct rlimit zero = {0, 0};
   if (chdir("/") != 0 || syscall(SYS_close_range, 3U, ~0U, 0U) != 0 ||
       prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) != 0 ||

@@ -243,7 +243,8 @@ pinned musl GCC 15.3.0 and passed GCC `-fanalyzer` with warnings as errors.
 Both images passed static PIE, no interpreter/NEEDED library, RELRO/NOW and
 non-executable stack inspection. Ruff check/format passed.
 The existing restrictive umask is expressed as `S_IRWXG | S_IRWXO` with identical
-permissions and no suppression; the hosted scanner result remains unverified.
+permissions. Its line-level `NOSONAR` comment suppresses Sonar's
+capability-setting false positive. Hosted reanalysis must pass before merge.
 The added fixtures cover 37/64 accepted roots and 65 rejected, known transient
 fragment creation, allowed and premature disappearance, retained fragments,
 replacement/mutation/owner/symlink/content bounds, spoofed properties and injected

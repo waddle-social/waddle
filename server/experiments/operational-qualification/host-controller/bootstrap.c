@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
     return 64;
   /* Deny every group/other permission on subsequently created
    * files/directories. */
-  (void)umask(S_IRWXG | S_IRWXO);
+  (void)umask(S_IRWXG | S_IRWXO); //NOSONAR: deny group/other file permissions.
   if (chdir("/") != 0)
     return 74;
   if (!((argc == 2 && strcmp(argv[1], "run") == 0) ||
