@@ -17,6 +17,8 @@ use super::lineage::{
 
 mod installer;
 pub use installer::{inspect_installation, install, InstallationStatus};
+mod typed_authority;
+pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 
 const FUNCTION_NAME: &str = "read_physical_identity";
 

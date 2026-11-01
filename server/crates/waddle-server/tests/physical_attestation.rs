@@ -10,10 +10,14 @@ use waddle_server::db::lineage::{
     self, AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseName, PgSchemaName,
 };
 use waddle_server::db::physical_attestation::{
-    attest_connection, attested_pool, inspect_installation, install, InstallationStatus,
-    PgRoleName, PhysicalAttestationConfig, PhysicalAttestationError,
+    attest_connection, attested_pool, inspect_installation, install, DarkIngressAuthority,
+    DarkIngressAuthorityError, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
+    PhysicalAttestationError, TransactionBounds,
 };
-use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
+use waddle_server::ingress::EffectReceiptKey;
+use waddle_server::ingress_substrate::EffectReceiptKind;
+use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 
 // Every installer edits pg_control_system's catalog ACL. Cargo test runs
 // cases in this binary concurrently; keep those DDL transactions distinct.
@@ -181,6 +185,425 @@ impl Fixture {
         }
         self.cluster_admin.close().await;
     }
+}
+
+async fn typed_authority_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, MessageKey) {
+    let url = url_with_schema(&fixture.base_url, &fixture.target);
+    let db = Database::from_config(
+        "typed authority schema",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url),
+    )
+    .await
+    .expect("open migration database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("apply actual migrations");
+    drop(db);
+
+    let key = MessageKey::from_storage(uuid::Uuid::new_v4());
+    let mut owner = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("connect schema owner");
+    sqlx::query(&format!(
+        "INSERT INTO {}.ingress_messages (message_key, digest_version, digest) VALUES ($1, 1, $2)",
+        fixture.target
+    ))
+    .bind(key.to_storage())
+    .bind([0_u8; 32].as_slice())
+    .execute(&mut owner)
+    .await
+    .expect("seed canonical message");
+    sqlx::query(&format!(
+        "INSERT INTO {}.ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ($1, 0, 1, $2, 1, $3)",
+        fixture.target
+    ))
+    .bind(key.to_storage())
+    .bind([1_u8; 32].as_slice())
+    .bind(Vec::<u8>::new())
+    .execute(&mut owner)
+    .await
+    .expect("seed receipt intent");
+    sqlx::raw_sql(include_str!(
+        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&mut owner)
+    .await
+    .expect("install laboratory-only guard");
+    for statement in [
+        format!(
+            "GRANT SELECT ON {}.ingress_protocol_epoch TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.ingress_effect_receipts TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut owner)
+            .await
+            .expect("grant restricted runtime");
+    }
+    drop(owner);
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install physical attestation");
+    (config, key)
+}
+
+fn typed_bounds() -> TransactionBounds {
+    TransactionBounds::new(
+        Duration::from_secs(5),
+        Duration::from_secs(3),
+        Duration::from_secs(4),
+    )
+    .expect("valid bounds")
+}
+
+fn typed_receipt_key() -> EffectReceiptKey {
+    EffectReceiptKey {
+        kind: EffectReceiptKind::from_storage(1),
+        semantic_identity_hash: [1_u8; 32],
+    }
+}
+
+async fn wait_for_blocked_application(admin: &PgPool, application: &str, blocker: i32) -> i32 {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiter: Option<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_catalog.pg_stat_activity \
+                 WHERE application_name = $1 AND $2 = ANY(pg_catalog.pg_blocking_pids(pid))",
+            )
+            .bind(application)
+            .bind(blocker)
+            .fetch_optional(admin)
+            .await
+            .expect("observe identified waiter");
+            if let Some(pid) = waiter {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("identified database waiter")
+}
+
+#[tokio::test]
+async fn typed_authority_waits_before_read_and_rejects_future_epoch() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, _) = typed_authority_fixture(&fixture).await;
+    let application = format!("typed_epoch_{}", uuid::Uuid::new_v4().simple());
+    let options = fixture
+        .runtime_options
+        .clone()
+        .application_name(&application)
+        .options([("default_transaction_isolation", "repeatable\\ read")]);
+    let authority = std::sync::Arc::new(
+        DarkIngressAuthority::postgres(options, config, 1, typed_bounds())
+            .expect("dark authority configuration"),
+    );
+    let mut transition = fixture.admin.begin().await.expect("owner transaction");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transition)
+        .await
+        .expect("owner isolation");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *transition)
+    .await
+    .expect("owner first lock");
+    sqlx::query(&format!(
+        "UPDATE {}.ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(fixture.lineage.lineage_uuid.0)
+    .execute(&mut *transition)
+    .await
+    .expect("advance epoch");
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *transition)
+        .await
+        .expect("owner PID");
+    let worker = {
+        let authority = authority.clone();
+        tokio::spawn(async move { authority.current_epoch().await })
+    };
+    wait_for_blocked_application(&fixture.admin, &application, blocker).await;
+    transition.commit().await.expect("commit transition");
+    assert_eq!(
+        worker.await.expect("worker").expect("current epoch"),
+        ProtocolEpoch::from_storage(1)
+    );
+
+    let mut transition = fixture.admin.begin().await.expect("second transition");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *transition)
+    .await
+    .expect("second owner first lock");
+    sqlx::query(&format!(
+        "UPDATE {}.ingress_protocol_epoch SET epoch = 2 WHERE id = 1",
+        fixture.target
+    ))
+    .execute(&mut *transition)
+    .await
+    .expect("future epoch");
+    transition.commit().await.expect("commit future epoch");
+    assert!(matches!(
+        authority.current_epoch().await,
+        Err(DarkIngressAuthorityError::UnsupportedEpoch)
+    ));
+    drop(authority);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn typed_receipt_holds_relation_without_singleton_row_lock() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, key) = typed_authority_fixture(&fixture).await;
+    let application = format!("typed_receipt_{}", uuid::Uuid::new_v4().simple());
+    let options = fixture
+        .runtime_options
+        .clone()
+        .application_name(&application);
+    let authority = std::sync::Arc::new(
+        DarkIngressAuthority::postgres(options, config, 1, typed_bounds())
+            .expect("dark authority configuration"),
+    );
+    let mut parent = fixture.admin.begin().await.expect("lock intent parent");
+    sqlx::query(&format!(
+        "SELECT 1 FROM {}.ingress_effect_intents WHERE message_key = $1 FOR UPDATE",
+        fixture.target
+    ))
+    .bind(key.to_storage())
+    .fetch_one(&mut *parent)
+    .await
+    .expect("hold intent row");
+    let parent_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *parent)
+        .await
+        .expect("parent PID");
+    let worker = {
+        let authority = authority.clone();
+        tokio::spawn(async move { authority.record_receipt(key, &typed_receipt_key()).await })
+    };
+    let writer = wait_for_blocked_application(&fixture.admin, &application, parent_pid).await;
+    let (share, row_share): (bool, bool) = sqlx::query_as(
+        "SELECT bool_or(mode = 'AccessShareLock'), bool_or(mode = 'RowShareLock') \
+         FROM pg_catalog.pg_locks WHERE pid = $1 AND relation = $2::regclass AND granted",
+    )
+    .bind(writer)
+    .bind(format!("{}.ingress_protocol_epoch", fixture.target))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect epoch relation locks");
+    assert!(share, "writer must hold the relation prelock");
+    assert!(!row_share, "writer must not request FOR SHARE on the epoch");
+    parent.commit().await.expect("release parent");
+    worker.await.expect("receipt task").expect("receipt commit");
+    authority
+        .record_receipt(key, &typed_receipt_key())
+        .await
+        .expect("receipt retry is idempotent");
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {}.ingress_effect_receipts WHERE message_key = $1",
+        fixture.target
+    ))
+    .bind(key.to_storage())
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read receipt");
+    assert_eq!(count, 1);
+    drop(authority);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn typed_authority_fails_closed_on_identity_epoch_and_lock_timeout() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, _) = typed_authority_fixture(&fixture).await;
+    let short_bounds = TransactionBounds::new(
+        Duration::from_secs(2),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+    )
+    .expect("short bounds");
+    let authority =
+        DarkIngressAuthority::postgres(fixture.runtime_options.clone(), config, 1, short_bounds)
+            .expect("dark authority configuration");
+    let mut owner = fixture.admin.begin().await.expect("owner transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *owner)
+    .await
+    .expect("block relation lock");
+    let blocked = tokio::time::timeout(Duration::from_secs(1), authority.current_epoch())
+        .await
+        .expect("relation lock timeout precedes the two-second acquisition deadline");
+    assert!(matches!(blocked, Err(DarkIngressAuthorityError::Timeout)));
+    owner.rollback().await.expect("release relation lock");
+    assert_eq!(
+        authority
+            .current_epoch()
+            .await
+            .expect("connection reusable"),
+        ProtocolEpoch::ZERO
+    );
+
+    let mut wrong = fixture.lineage.clone();
+    let wrong_schema = &mut wrong
+        .postgres_identity
+        .as_mut()
+        .expect("PostgreSQL identity")
+        .schema;
+    wrong_schema.oid = wrong_schema.oid.wrapping_add(1);
+    let mismatched = DarkIngressAuthority::postgres(
+        fixture.runtime_options.clone(),
+        fixture.with_lineage(wrong),
+        1,
+        TransactionBounds::new(
+            Duration::from_millis(500),
+            Duration::from_millis(100),
+            Duration::from_millis(250),
+        )
+        .expect("identity bounds"),
+    )
+    .expect("construct mismatched authority");
+    assert!(
+        mismatched.current_epoch().await.is_err(),
+        "a wrong expected schema OID must never lend a transaction"
+    );
+    drop(mismatched);
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}.ingress_protocol_epoch DISABLE TRIGGER ingress_protocol_epoch_guard_row",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("model missing epoch row");
+    sqlx::query(&format!(
+        "DELETE FROM {}.ingress_protocol_epoch WHERE id = 1",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove singleton epoch row");
+    assert!(matches!(
+        authority.current_epoch().await,
+        Err(DarkIngressAuthorityError::MissingEpoch)
+    ));
+    drop(authority);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn typed_sqlite_authority_uses_shared_foundation_and_immediate_transaction() {
+    let url = format!(
+        "sqlite:file:typed_authority_{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, &url);
+    config.pool_size = 1;
+    let db = Database::from_config("typed sqlite owner", &config)
+        .await
+        .expect("open shared memory database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("SQLite migrations");
+    let key = MessageKey::from_storage(uuid::Uuid::new_v4());
+    let conn = db.guard().await.expect("owner guard");
+    conn.execute(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest) VALUES (?, 1, ?)",
+        waddle_server::db_params![key.to_storage().to_string(), vec![0_u8; 32]],
+    )
+    .await
+    .expect("seed message");
+    conn.execute(
+        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, '0', 1, ?, 1, ?)",
+        waddle_server::db_params![key.to_storage().to_string(), vec![1_u8; 32], Vec::<u8>::new()],
+    )
+    .await
+    .expect("seed intent");
+    drop(conn);
+    let sqlite_bounds = TransactionBounds::new(
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .expect("SQLite bounds");
+    let authority = DarkIngressAuthority::sqlite(&url, sqlite_bounds)
+        .await
+        .expect("open shared SQLite authority");
+    assert_eq!(
+        authority.current_epoch().await.expect("epoch"),
+        ProtocolEpoch::ZERO
+    );
+    authority
+        .record_receipt(key, &typed_receipt_key())
+        .await
+        .expect("receipt");
+    authority
+        .record_receipt(key, &typed_receipt_key())
+        .await
+        .expect("idempotent receipt");
+    let conn = db.guard().await.expect("read guard");
+    let mut rows = conn
+        .query("SELECT count(*) FROM ingress_effect_receipts", ())
+        .await
+        .expect("receipt query");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("row read")
+        .expect("row")
+        .get(0)
+        .expect("count");
+    assert_eq!(count, 1);
+
+    let holder = db.begin_immediate().await.expect("reserve SQLite writer");
+    let blocked = tokio::time::timeout(Duration::from_secs(1), authority.current_epoch())
+        .await
+        .expect("immediate acquisition is bounded");
+    assert!(
+        blocked.is_err(),
+        "BEGIN IMMEDIATE must respect the existing writer"
+    );
+    holder.rollback().await.expect("release SQLite writer");
+    assert_eq!(
+        authority
+            .current_epoch()
+            .await
+            .expect("SQLite handle remains usable"),
+        ProtocolEpoch::ZERO
+    );
+
+    let absent = DarkIngressAuthority::sqlite("sqlite::memory:", typed_bounds())
+        .await
+        .expect("open empty private SQLite database");
+    assert!(
+        absent.current_epoch().await.is_err(),
+        "an absent foundation must not mint a transaction"
+    );
 }
 
 #[tokio::test]

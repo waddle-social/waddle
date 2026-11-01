@@ -6,8 +6,9 @@ an epoch. The installed V1009 trigger still takes the epoch row `FOR SHARE`.
 
 ## Boundary
 
-Build a private, non-cloneable transaction capability which is created only at
-the transaction boundary. PostgreSQL must select READ COMMITTED, establish
+The reusable dark service may be shared through `Arc`. Its private,
+non-cloneable transaction capability is created only inside an operation and
+cannot escape that operation. PostgreSQL must select READ COMMITTED, establish
 bounded transaction-local timeouts, and take `ACCESS SHARE` on the qualified
 epoch relation before application locks or transaction reads. A separate read
 then validates the supported live epoch and installs the epoch/xid proof. Bind
@@ -19,6 +20,10 @@ may receive a pool, connection, raw SQL executor, or caller-owned transaction.
 An arbitrary async callback is not by itself proof that the transaction contains
 only database awaits. Where conversion cannot be completed coherently, keep the
 new service unreachable from normal startup and state the remaining callers.
+The closed receipt operation is one isolated example, not a compositional UOW:
+atomic alias, message, stream-management, archive, and receipt writes still
+need a reviewed set of closed domain operations or another design that preserves
+their shared commit without exposing raw transactions or arbitrary async work.
 
 ## Migration and review
 
@@ -61,3 +66,5 @@ installation with an enforced migration lock order. Physical reconnect,
 commit-indeterminate authoritative lookup, and shared-pool starvation and
 capacity policy also remain unproven. A GUC, a pool wrapper, or the dark fixture
 alone cannot establish P2.1 completion.
+The transaction-local epoch and XID GUCs are consistency checks, not
+authentication against arbitrary SQL run with a runtime writer's credentials.

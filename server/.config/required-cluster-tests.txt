@@ -197,6 +197,10 @@ waddle-server::physical_attestation lost_commit_ack_resolves_by_fresh_exact_oper
 waddle-server::physical_attestation cancelled_lock_wait_is_indeterminate_and_same_id_retry_converges
 waddle-server::physical_attestation installer_direct_privilege_drift_aborts_before_install
 waddle-server::physical_attestation installer_lock_timeout_reports_indeterminate_without_mutation
+waddle-server::physical_attestation typed_authority_waits_before_read_and_rejects_future_epoch
+waddle-server::physical_attestation typed_receipt_holds_relation_without_singleton_row_lock
+waddle-server::physical_attestation typed_authority_fails_closed_on_identity_epoch_and_lock_timeout
+waddle-server::physical_attestation typed_sqlite_authority_uses_shared_foundation_and_immediate_transaction
 
 # P2.1 (#2116/#2046): pooled receipt and ordinary unit-of-work transactions
 # must read the committed epoch after waiting on an activation transition.
