@@ -81,5 +81,6 @@ under `server/AGENTS.md`.
 - The current dark regression covers the replay-gap/fresh-bind and delayed
   local cleanup boundary only. It does not prove accepted-but-unwritten
   obligation custody or cross-node activation.
-- Build and test execution was deferred pending coordination with the P2.1
-  agents and the shared Cargo target.
+- The ignored post-publication regression is still a characterization, not a
+  passing production-path test. See the draft PR for exact executed test and
+  review evidence on the current head.

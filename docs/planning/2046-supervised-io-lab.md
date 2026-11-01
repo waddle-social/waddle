@@ -1,10 +1,11 @@
 # P3.1 supervised I/O laboratory
 
-This is a dark, test-only characterization for #2046 / #2137, stacked on
-#2150. It neither creates a connection actor nor wires a transport into the
-server. It owns no `WsConnState`, authenticated session, endpoint, SM state,
-or durable obligation. No actor extraction, endpoint DDL, lane cutover, or
-activation is authorized here; DEC-3, P2, and the coupled P3 gates still apply.
+This is a dark, `test-support`-gated transport boundary for #2046 / #2137,
+stacked on #2150. It neither creates a connection actor nor wires a transport
+into the production WebSocket loop. It owns no `WsConnState`, authenticated
+session, endpoint, SM state, or durable obligation. No actor extraction,
+endpoint DDL, lane cutover, or activation is authorized here; DEC-3, P2, and
+the coupled P3 gates still apply.
 
 ## Existing boundary
 
@@ -29,8 +30,10 @@ inject a failure after lifecycle publication and does not itself observe
 ## Lab contract and observations
 
 The integration test in
-[`supervised_io`](../../server/crates/waddle-ws-test-support/tests/supervised_io.rs)
-uses real loopback WebSocket streams split into reader and writer halves. Each
+[`supervised_io`](../../server/crates/waddle-server/tests/supervised_io.rs)
+exercises the
+[`supervised_io` core](../../server/crates/waddle-server/src/server/routes/websocket/supervised_io.rs)
+with real loopback WebSocket streams split into reader and writer halves. Each
 half moves to one task; the lab supervisor retains both `JoinHandle`s. A
 controlled wrapper stalls before underlying `poll_ready` or after `start_send`
 at `poll_flush`. The peer can observe a WebSocket close or loss of the

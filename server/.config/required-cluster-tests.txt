@@ -185,3 +185,11 @@ waddle-server clustering::route_bridge::registration::owner::tests::source_lease
 waddle-server clustering::route_bridge::registration::owner_update::tests::delayed_remote_state_update_rejects_rotated_source_lease_before_mutation
 waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
 waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
+
+# P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
+# native loopback, bounded overload, exact completion and both-pump joins.
+waddle-server::supervised_io pumps::outbound_count_and_byte_overload_stops_before_retirement
+waddle-server::supervised_io pumps::stalled_shutdown_aborts_then_joins_before_peer_observes_drop
+waddle-server::supervised_io pumps::completion_keeps_its_exact_connection_reference_for_late_fencing
+waddle-server::supervised_io pumps::reader_panic_is_preserved_while_its_writer_is_stopped_and_joined
+waddle-server::supervised_io kameo_control::full_256_entry_kameo_mailbox_requires_an_independent_interrupt_path
