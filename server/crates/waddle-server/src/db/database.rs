@@ -209,9 +209,11 @@ pub struct Database {
     /// caller must go out of its way to read it, rather than have it leak
     /// into an incidental log/format call. Callers that log or embed this
     /// value in an error message MUST redact credentials first (DSNs
-    /// commonly carry a password in their userinfo component). Externally
-    /// supplied and physically attested pools use non-connectable sentinel
-    /// values here; callers must not use this accessor to reopen those pools.
+    /// commonly carry a password in their userinfo component). A physically
+    /// attested PostgreSQL handle stores an intentionally invalid PostgreSQL
+    /// marker here because its `PgConnectOptions` cannot be round-tripped;
+    /// externally supplied pools may store other synthetic labels. Treat this
+    /// accessor as a reconnect URL only for URL-backed handles.
     pub(in crate::db) database_url: String,
     /// Present only when the exact hook-bearing pool and its unforgeable
     /// writer capability were consumed together.
@@ -563,11 +565,11 @@ impl Database {
     }
 
     /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
-    /// FIX 4). Externally supplied and physically attested pools return a
-    /// non-connectable sentinel instead. See the field's own doc comment for
-    /// the redaction caveat — this MAY carry credentials in its userinfo
-    /// component; callers that log or embed it in a user-facing error MUST
-    /// redact first.
+    /// FIX 4). A physically attested PostgreSQL handle returns an intentionally
+    /// invalid PostgreSQL marker; externally supplied pools may return
+    /// synthetic labels. See the field's own doc comment for the redaction
+    /// caveat — this MAY carry credentials in its userinfo component; callers
+    /// that log or embed it in a user-facing error MUST redact first.
     pub fn database_url(&self) -> &str {
         &self.database_url
     }
