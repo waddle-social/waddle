@@ -389,3 +389,104 @@ async fn failed_resume_can_bind_and_enable_a_fresh_session_on_the_same_websocket
     assert_handled(&mut replacement, 1).await;
     replacement.close().await.expect("fresh session closes");
 }
+
+#[cfg(feature = "test-support")]
+mod seams {
+    use super::*;
+    use waddle_ws_test_support::FailedResumeSeam;
+
+    const ALICE_BARE: &str = "alice@localhost";
+    const ALICE_PHONE: &str = "alice@localhost/phone";
+
+    async fn wait_for(seam: &FailedResumeSeam, event: String) {
+        seam.wait_for_event(&event)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[tokio::test]
+    #[ignore = "unignore after every local and remote endpoint enqueue path is provisional-gated"]
+    async fn published_resume_gap_detaches_then_same_socket_rebind_survives_delayed_cleanup() {
+        let (server, seam) =
+            TestServer::start_with_failed_resume_seam(ACCOUNTS, ALICE_BARE, ALICE_PHONE);
+        let (mut owner, stream) = original(&server).await;
+        let stream_id = stream.as_str();
+        seam.arm_stream(stream_id);
+
+        let mut peer = authenticate(&server, 1).await;
+        peer.bind("observer").await.expect("peer binds");
+        let mut replacement = authenticate(&server, 0).await;
+        send(
+            &mut replacement,
+            Element::builder("resume", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), stream_id)
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )
+        .await;
+
+        wait_for(
+            &seam,
+            format!("published {stream_id} {ALICE_PHONE} lifecycle=running"),
+        )
+        .await;
+        seam.continue_finalization();
+        wait_for(
+            &seam,
+            format!("gap-injected {stream_id} {ALICE_PHONE} claimed-session"),
+        )
+        .await;
+        let failed = recv(&mut replacement).await;
+        assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+        assert!(failed
+            .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+            .is_some());
+        wait_for(
+            &seam,
+            format!("detached {stream_id} {ALICE_PHONE} lifecycle=detached"),
+        )
+        .await;
+        assert_replaced_transport_closes(&mut owner).await;
+
+        // The failed-resume socket remains the same `replacement` WebSocket.
+        replacement
+            .bind("phone")
+            .await
+            .expect("fresh bind after replay gap");
+        send(
+            &mut replacement,
+            Element::builder("enable", SM_NS)
+                .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+                .build(),
+        )
+        .await;
+        let enabled = recv(&mut replacement).await;
+        assert!(enabled.is("enabled", SM_NS));
+        assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
+        assert_ne!(enabled.attr("id"), Some(stream_id));
+        assert_handled(&mut replacement, 0).await;
+        ping(&mut replacement, "fresh-after-gap-ping").await;
+        assert_handled(&mut replacement, 1).await;
+
+        let fresh_jid: FullJid = replacement
+            .full_jid
+            .as_deref()
+            .expect("fresh binding JID")
+            .parse()
+            .expect("valid fresh binding JID");
+        send_message(&mut peer, fresh_jid.clone(), "before-delayed-cleanup").await;
+        receive_message(&mut replacement, "before-delayed-cleanup").await;
+
+        seam.release_stale_cleanup();
+        wait_for(
+            &seam,
+            format!("cleanup-finished {stream_id} {ALICE_PHONE} removed=false replacement=true"),
+        )
+        .await;
+        send_message(&mut peer, fresh_jid, "after-delayed-cleanup").await;
+        receive_message(&mut replacement, "after-delayed-cleanup").await;
+
+        replacement.close().await.expect("fresh session closes");
+        peer.close().await.expect("peer closes");
+    }
+}

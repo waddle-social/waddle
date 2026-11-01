@@ -32,6 +32,13 @@ const HOLD_BATCH_ACCOUNT_ENV: &str = "WADDLE_TEST_SEAM_HOLD_BATCH_ACCOUNT";
 const EVENTS_FILE_ENV: &str = "WADDLE_TEST_SEAM_EVENTS_FILE";
 /// `unavailable` fails every canonical read a detach drain makes.
 const DETACH_CANONICAL_READ_ENV: &str = "WADDLE_TEST_SEAM_DETACH_CANONICAL_READ";
+const FAILED_RESUME_ACCOUNT_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_ACCOUNT";
+const FAILED_RESUME_JID_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_JID";
+const FAILED_RESUME_ARM_FILE_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_ARM_FILE";
+const FAILED_RESUME_CONTINUE_FILE_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_CONTINUE_FILE";
+const FAILED_RESUME_CLEANUP_RELEASE_FILE_ENV: &str =
+    "WADDLE_TEST_SEAM_FAILED_RESUME_CLEANUP_RELEASE_FILE";
+const FAILED_RESUME_EVENTS_FILE_ENV: &str = "WADDLE_TEST_SEAM_FAILED_RESUME_EVENTS_FILE";
 
 /// Poll interval while a held batch waits for its release condition. The
 /// condition, not the interval, is the synchronisation.
@@ -136,6 +143,176 @@ static DETACH_CANONICAL_READ_OUTAGE: LazyLock<bool> =
             }
         },
     );
+
+/// Per-server file rendezvous for the same-socket failed-resume regression.
+/// `TestServer::start_with_failed_resume_seam` creates unique paths and passes
+/// them only to that spawned process; matching also requires the exact full
+/// JID and armed stream id.
+#[derive(Clone)]
+struct FailedResumeSeam {
+    account: BareJid,
+    jid: FullJid,
+    arm_file: PathBuf,
+    continue_file: PathBuf,
+    cleanup_release_file: PathBuf,
+    events: PathBuf,
+}
+
+static FAILED_RESUME_SEAM: LazyLock<Option<FailedResumeSeam>> = LazyLock::new(|| {
+    let account = std::env::var(FAILED_RESUME_ACCOUNT_ENV).ok()?;
+    let jid = std::env::var(FAILED_RESUME_JID_ENV).ok()?;
+    let arm_file = std::env::var_os(FAILED_RESUME_ARM_FILE_ENV).map(PathBuf::from)?;
+    let continue_file = std::env::var_os(FAILED_RESUME_CONTINUE_FILE_ENV).map(PathBuf::from)?;
+    let cleanup_release_file =
+        std::env::var_os(FAILED_RESUME_CLEANUP_RELEASE_FILE_ENV).map(PathBuf::from)?;
+    let events = std::env::var_os(FAILED_RESUME_EVENTS_FILE_ENV).map(PathBuf::from)?;
+    let account = match account.parse::<BareJid>() {
+        Ok(account) => account,
+        Err(error) => {
+            tracing::error!(%error, "invalid {FAILED_RESUME_ACCOUNT_ENV}; seam disarmed");
+            return None;
+        }
+    };
+    let jid = match jid.parse::<FullJid>() {
+        Ok(jid) if jid.to_bare() == account => jid,
+        Ok(_) => {
+            tracing::error!("{FAILED_RESUME_JID_ENV} does not belong to {FAILED_RESUME_ACCOUNT_ENV}; seam disarmed");
+            return None;
+        }
+        Err(error) => {
+            tracing::error!(%error, "invalid {FAILED_RESUME_JID_ENV}; seam disarmed");
+            return None;
+        }
+    };
+    Some(FailedResumeSeam {
+        account,
+        jid,
+        arm_file,
+        continue_file,
+        cleanup_release_file,
+        events,
+    })
+});
+
+impl FailedResumeSeam {
+    fn armed_stream(&self) -> Option<String> {
+        std::fs::read_to_string(&self.arm_file)
+            .ok()
+            .map(|stream_id| stream_id.trim().to_owned())
+            .filter(|stream_id| !stream_id.is_empty())
+    }
+
+    fn record(&self, event: &str, stream_id: &str, jid: &FullJid, details: &str) {
+        let line = format!("{event} {stream_id} {jid} {details}\n");
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.events)
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+        if let Err(error) = result {
+            tracing::error!(%error, path = %self.events.display(), "failed-resume seam event not recorded");
+        }
+    }
+}
+
+/// Pause at the exact post-publication/pre-finalization boundary and inject a
+/// replay gap into the already-claimed session. The test then resumes the
+/// ordinary `complete_claim_if_resumable` path, which must produce the real
+/// `ReplayWindowTruncated` finalization and binding rollback.
+pub(in crate::server::routes::websocket) async fn pause_published_resume_finalization(
+    state: &WebSocketState,
+    conn: &super::state::WsConnState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+) {
+    let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
+        return;
+    };
+    let Some(stream_id) = conn.pending_resume_stream_id.as_deref() else {
+        return;
+    };
+    if seam.account != jid.to_bare()
+        || seam.jid != *jid
+        || seam.armed_stream().as_deref() != Some(stream_id)
+    {
+        return;
+    }
+    let lifecycle_is_running = conn.socket_lifecycle.as_ref().is_some_and(|lifecycle| {
+        lifecycle.state() == waddle_xmpp::registry::SocketCleanupState::Running
+    });
+    let entry_is_published = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry_if_owner(jid, owner)
+        .is_some();
+    if !lifecycle_is_running || !entry_is_published {
+        seam.record(
+            "not-published",
+            stream_id,
+            jid,
+            "lifecycle-or-entry-missing",
+        );
+        return;
+    }
+    seam.record("published", stream_id, jid, "lifecycle=running");
+    while !seam.continue_file.exists() {
+        tokio::time::sleep(HOLD_POLL_INTERVAL).await;
+    }
+    let gap_through = conn.pending_resume_h.unwrap_or_default().wrapping_add(1);
+    match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .set_claimed_replay_gap_for_test(stream_id, gap_through)
+    {
+        Ok(true) => seam.record("gap-injected", stream_id, jid, "claimed-session"),
+        Ok(false) => seam.record("gap-not-injected", stream_id, jid, "claim-missing"),
+        Err(error) => seam.record("gap-not-injected", stream_id, jid, &error.to_string()),
+    }
+}
+
+/// Retain the failed binding's old owner token and run an owner-gated stale
+/// unregister only after the test releases it. This models cleanup arriving
+/// after a successor has published on the same physical socket; it must not
+/// remove the successor's registry entry.
+pub(in crate::server::routes::websocket) fn delay_failed_resume_cleanup(
+    state: &WebSocketState,
+    jid: &FullJid,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
+    stream_id: &str,
+) {
+    let Some(seam) = FAILED_RESUME_SEAM.as_ref() else {
+        return;
+    };
+    if seam.account != jid.to_bare()
+        || seam.jid != *jid
+        || seam.armed_stream().as_deref() != Some(stream_id)
+    {
+        return;
+    }
+    seam.record("detached", stream_id, jid, "lifecycle=detached");
+    let seam = seam.clone();
+    let registry = std::sync::Arc::clone(&state.deps.protocol.connection_registry);
+    let jid = jid.clone();
+    let owner = *owner;
+    let stream_id = stream_id.to_owned();
+    tokio::spawn(async move {
+        while !seam.cleanup_release_file.exists() {
+            tokio::time::sleep(HOLD_POLL_INTERVAL).await;
+        }
+        let removed = registry.unregister_if_owner(&jid, &owner).is_some();
+        let replacement_is_current = registry
+            .entry(&jid)
+            .is_some_and(|entry| entry.binding_id() != owner);
+        seam.record(
+            "cleanup-finished",
+            &stream_id,
+            &jid,
+            &format!("removed={removed} replacement={replacement_is_current}"),
+        );
+    });
+}
 
 impl HoldBatch {
     /// Append one event line. A failed write is logged; the suite then sees

@@ -177,7 +177,7 @@ async fn complete_pending_resume_claim(
                 replay_gap_through = ?detached.replay_gap_through,
                 "SM resume claim gained a replay gap before completion"
             );
-            reset_resume_attempt(state, conn, jid, Some(owner)).await;
+            reset_resume_attempt(state, conn, jid, Some(owner), Some(&stream_id)).await;
             resume_outcome = Some(super::observe::SmResumeOutcome::ReplayGap);
             SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "resource-constraint",
@@ -276,7 +276,7 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     }
     conn.pending_resume_stream_id = None;
     conn.pending_resume_h = None;
-    reset_resume_attempt(state, conn, jid, None).await;
+    reset_resume_attempt(state, conn, jid, None, None).await;
     conn.pending_finalized_resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
     SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
         "item-not-found",
@@ -289,6 +289,7 @@ async fn reset_resume_attempt(
     conn: &mut WsConnState,
     jid: &FullJid,
     owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
+    _failed_stream_id: Option<&str>,
 ) {
     if let Some(owner) = owner {
         let removed = state
@@ -313,6 +314,12 @@ async fn reset_resume_attempt(
     // fresh bind on this connection must not share it (#1703).
     if let Some(lifecycle) = conn.socket_lifecycle.take() {
         lifecycle.finish(waddle_xmpp::registry::SocketCleanupState::Detached);
+        #[cfg(feature = "test-support")]
+        if let (Some(owner), Some(stream_id)) = (owner, _failed_stream_id) {
+            super::super::characterization_seams::delay_failed_resume_cleanup(
+                state, jid, owner, stream_id,
+            );
+        }
         state
             .deps
             .protocol

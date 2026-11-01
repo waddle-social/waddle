@@ -763,6 +763,9 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         }
     }
 
+    #[cfg(feature = "test-support")]
+    super::characterization_seams::pause_published_resume_finalization(state, conn, &jid, &owner)
+        .await;
     let sm_report = finalize_sm_after_registry_registration(state, conn, &jid, &owner).await;
     #[cfg(test)]
     if let Some((reached, release)) = conn.post_sm_finalization_test_hook.take() {

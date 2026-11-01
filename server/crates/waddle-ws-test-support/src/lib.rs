@@ -87,8 +87,19 @@ pub struct TestServer {
     http_port: u16,
     port_file: std::path::PathBuf,
     upload_dir: std::path::PathBuf,
+    seam_dir: Option<std::path::PathBuf>,
     fixed_account_password: String,
     test_profile_publish_token: String,
+}
+
+/// File-backed rendezvous for one server process's failed-resume lifecycle
+/// characterization. The unique directory is owned and removed by its
+/// `TestServer`, so parallel tests cannot share control state.
+pub struct FailedResumeSeam {
+    arm_file: std::path::PathBuf,
+    continue_file: std::path::PathBuf,
+    cleanup_release_file: std::path::PathBuf,
+    events_file: std::path::PathBuf,
 }
 
 impl TestServer {
@@ -139,6 +150,50 @@ impl TestServer {
         extra_envs: &[(&str, &str)],
     ) -> Self {
         Self::spawn(extra_accounts, None, None, extra_envs)
+    }
+
+    /// Start a server with the opt-in failed-resume lifecycle seam scoped to
+    /// this process and the supplied exact account/resource.
+    pub fn start_with_failed_resume_seam(
+        extra_accounts: &[(&str, &str)],
+        bare_jid: &str,
+        full_jid: &str,
+    ) -> (Self, FailedResumeSeam) {
+        let directory = std::env::temp_dir().join(format!(
+            "waddle-failed-resume-seam-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create failed-resume seam directory");
+        let seam = FailedResumeSeam {
+            arm_file: directory.join("arm-stream"),
+            continue_file: directory.join("continue-finalization"),
+            cleanup_release_file: directory.join("release-cleanup"),
+            events_file: directory.join("events"),
+        };
+        let arm_file = seam.arm_file.to_string_lossy().into_owned();
+        let continue_file = seam.continue_file.to_string_lossy().into_owned();
+        let cleanup_release_file = seam.cleanup_release_file.to_string_lossy().into_owned();
+        let events_file = seam.events_file.to_string_lossy().into_owned();
+        let envs = [
+            ("WADDLE_TEST_SEAM_FAILED_RESUME_ACCOUNT", bare_jid),
+            ("WADDLE_TEST_SEAM_FAILED_RESUME_JID", full_jid),
+            ("WADDLE_TEST_SEAM_FAILED_RESUME_ARM_FILE", arm_file.as_str()),
+            (
+                "WADDLE_TEST_SEAM_FAILED_RESUME_CONTINUE_FILE",
+                continue_file.as_str(),
+            ),
+            (
+                "WADDLE_TEST_SEAM_FAILED_RESUME_CLEANUP_RELEASE_FILE",
+                cleanup_release_file.as_str(),
+            ),
+            (
+                "WADDLE_TEST_SEAM_FAILED_RESUME_EVENTS_FILE",
+                events_file.as_str(),
+            ),
+        ];
+        let mut server = Self::spawn(extra_accounts, None, None, &envs);
+        server.seam_dir = Some(directory);
+        (server, seam)
     }
 
     /// Combine persistent SQLite with extra `WADDLE_*` env vars. Used
@@ -293,6 +348,7 @@ impl TestServer {
             http_port,
             port_file,
             upload_dir,
+            seam_dir: None,
             fixed_account_password,
             test_profile_publish_token,
         }
@@ -356,6 +412,48 @@ impl Drop for TestServer {
         let _ = self.process.wait();
         let _ = std::fs::remove_file(&self.port_file);
         let _ = std::fs::remove_dir_all(&self.upload_dir);
+        if let Some(directory) = &self.seam_dir {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+impl FailedResumeSeam {
+    /// Arm exactly one claimed SM stream for the post-publication test gap.
+    pub fn arm_stream(&self, stream_id: &str) {
+        std::fs::write(&self.arm_file, stream_id).expect("arm failed-resume seam");
+    }
+
+    /// Wait for an exact event line written by the server process.
+    pub async fn wait_for_event(&self, expected: &str) -> Result<(), String> {
+        timeout(Duration::from_secs(20), async {
+            loop {
+                let events = std::fs::read_to_string(&self.events_file).unwrap_or_default();
+                if events.lines().any(|event| event == expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            let events = std::fs::read_to_string(&self.events_file).unwrap_or_default();
+            format!("timed out waiting for {expected:?}; events: {events:?}")
+        })?;
+        Ok(())
+    }
+
+    /// Let the server inject the claimed session's replay gap and continue
+    /// the normal XEP-0198 finalization path.
+    pub fn continue_finalization(&self) {
+        std::fs::write(&self.continue_file, "continue").expect("continue failed-resume seam");
+    }
+
+    /// Release the stale owner-gated cleanup after the replacement binding
+    /// has already exchanged traffic on the same physical WebSocket.
+    pub fn release_stale_cleanup(&self) {
+        std::fs::write(&self.cleanup_release_file, "release")
+            .expect("release stale failed-resume cleanup");
     }
 }
 
