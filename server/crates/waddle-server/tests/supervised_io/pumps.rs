@@ -20,6 +20,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 enum Stall {
     Never,
     Ready,
+    ReadyOnce,
     Flush,
 }
 
@@ -33,7 +34,9 @@ impl<S: Sink<Message, Error = Error> + Unpin> Sink<Message> for StallSink<S> {
     type Error = Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        if matches!(self.stall, Stall::Ready) {
+        if matches!(self.stall, Stall::Ready)
+            || matches!(self.stall, Stall::ReadyOnce) && self.blocked.is_some()
+        {
             if let Some(blocked) = self.blocked.take() {
                 let _ = blocked.send(());
             }
@@ -151,7 +154,7 @@ async fn force_detach_interrupts_stalls_and_joins_both_owners() {
         (
             Stall::Ready,
             WriteProgress::Admitted,
-            WriteProgress::Admitted,
+            WriteProgress::NotAttempted,
         ),
         (
             Stall::Flush,
@@ -190,7 +193,7 @@ async fn force_detach_interrupts_stalls_and_joins_both_owners() {
             OutboundExit::Stopped
         ));
         assert_eq!(first.progress(), expected_after_retire);
-        assert_eq!(tail.progress(), WriteProgress::Admitted);
+        assert_eq!(tail.progress(), WriteProgress::NotAttempted);
         peer_observes_drop(&mut peer).await;
     }
 }
@@ -300,13 +303,146 @@ async fn graceful_shutdown_writes_a_close_and_joins_both_owners() {
 }
 
 #[tokio::test]
+async fn graceful_shutdown_seals_admission_and_marks_abandoned_receipts_not_attempted() {
+    let (socket, mut peer) = socket_pair().await;
+    let mut lab = start_lab(socket, Stall::ReadyOnce, (3, 16), (2, 8));
+    let first = lab.write(Message::binary(vec![1])).expect("first admitted");
+    timeout(TEST_TIMEOUT, &mut lab.blocked)
+        .await
+        .expect("first write waits before attempt")
+        .expect("stalled signal");
+    let tail = lab
+        .write(Message::binary(vec![2]))
+        .expect("second admitted behind first");
+
+    lab.supervisor.begin_graceful_shutdown();
+    assert!(matches!(
+        lab.write(Message::binary(vec![3])),
+        Err(AdmissionError::Shutdown)
+    ));
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor.retire(RetirementMode::Graceful),
+    )
+    .await
+    .expect("close and join pumps");
+
+    assert!(matches!(
+        joined.inbound.expect("reader joined"),
+        InboundExit::Shutdown
+    ));
+    assert!(matches!(
+        joined.outbound.expect("writer joined"),
+        OutboundExit::ShutdownClose
+    ));
+    assert_eq!(first.progress(), WriteProgress::NotAttempted);
+    assert_eq!(tail.progress(), WriteProgress::NotAttempted);
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, peer.next())
+            .await
+            .expect("close frame"),
+        Some(Ok(Message::Close(_)))
+    ));
+}
+
+#[tokio::test]
+async fn peer_close_flushes_the_queued_reply_before_bounded_retirement() {
+    let (socket, mut peer) = socket_pair().await;
+    let lab = start_lab(socket, Stall::Never, (2, 8), (2, 8));
+    peer.send(Message::Close(None))
+        .await
+        .expect("peer sends close");
+
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor.retire_after_failure(TEST_TIMEOUT),
+    )
+    .await
+    .expect("both pumps retire within deadline");
+    assert!(matches!(
+        joined.inbound.expect("reader joined"),
+        InboundExit::PeerClosed
+    ));
+    assert!(matches!(
+        joined.outbound.expect("writer joined"),
+        OutboundExit::PeerClosedReplyFlushed
+    ));
+    assert!(matches!(
+        timeout(TEST_TIMEOUT, peer.next())
+            .await
+            .expect("server close"),
+        Some(Ok(Message::Close(_)))
+    ));
+}
+
+#[tokio::test]
+async fn stalled_peer_close_reply_is_aborted_and_joined_at_the_deadline() {
+    let (socket, mut peer) = socket_pair().await;
+    let mut lab = start_lab(socket, Stall::Flush, (2, 8), (2, 8));
+    peer.send(Message::Close(None))
+        .await
+        .expect("peer sends close");
+    timeout(TEST_TIMEOUT, &mut lab.blocked)
+        .await
+        .expect("peer-close reply flush blocks")
+        .expect("stalled signal");
+
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor
+            .retire_after_failure(Duration::from_millis(50)),
+    )
+    .await
+    .expect("deadline aborts and joins stalled writer");
+    assert!(matches!(
+        joined.inbound.expect("reader joined"),
+        InboundExit::PeerClosed
+    ));
+    match joined.outbound {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(OutboundExit::Stopped) => {}
+        other => panic!("stalled reply must stop at the deadline, got {other:?}"),
+    }
+    peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test]
+async fn forced_retirement_interrupts_a_stalled_peer_close_reply() {
+    let (socket, mut peer) = socket_pair().await;
+    let mut lab = start_lab(socket, Stall::Flush, (2, 8), (2, 8));
+    peer.send(Message::Close(None))
+        .await
+        .expect("peer sends close");
+    timeout(TEST_TIMEOUT, &mut lab.blocked)
+        .await
+        .expect("peer-close reply flush blocks")
+        .expect("stalled signal");
+
+    let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire(RetirementMode::Forced))
+        .await
+        .expect("forced retirement interrupts reply flush and joins pumps");
+    assert!(matches!(
+        joined.inbound.expect("reader joined"),
+        InboundExit::PeerClosed
+    ));
+    assert!(matches!(
+        joined.outbound.expect("writer joined"),
+        OutboundExit::Stopped
+    ));
+    peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test]
 async fn inbound_and_outbound_aborts_are_joined_before_retirement() {
     let (socket, mut peer) = socket_pair().await;
     let lab = start_lab(socket, Stall::Never, (2, 8), (2, 8));
     lab.supervisor.abort_inbound_for_test();
-    let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire_after_failure())
-        .await
-        .expect("join both tasks after inbound abort");
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor.retire_after_failure(TEST_TIMEOUT),
+    )
+    .await
+    .expect("join both tasks after inbound abort");
     assert!(joined
         .inbound
         .expect_err("inbound abort is observed")
@@ -325,9 +461,12 @@ async fn inbound_and_outbound_aborts_are_joined_before_retirement() {
         .expect("stalled")
         .expect("signal");
     lab.supervisor.abort_outbound_for_test();
-    let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire_after_failure())
-        .await
-        .expect("join both tasks after outbound abort");
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor.retire_after_failure(TEST_TIMEOUT),
+    )
+    .await
+    .expect("join both tasks after outbound abort");
     assert!(joined
         .outbound
         .expect_err("outbound abort is observed")
@@ -336,7 +475,7 @@ async fn inbound_and_outbound_aborts_are_joined_before_retirement() {
         joined.inbound.expect("reader joined"),
         InboundExit::Stopped
     ));
-    assert_eq!(admitted.progress(), WriteProgress::Admitted);
+    assert_eq!(admitted.progress(), WriteProgress::NotAttempted);
     peer_observes_drop(&mut peer).await;
 }
 
@@ -458,9 +597,12 @@ async fn dropping_the_producer_is_not_a_substitute_for_joining_both_pumps() {
         !lab.supervisor.inbound_finished(),
         "reader still owns its half"
     );
-    let joined = timeout(TEST_TIMEOUT, lab.supervisor.retire_after_failure())
-        .await
-        .expect("join pumps");
+    let joined = timeout(
+        TEST_TIMEOUT,
+        lab.supervisor.retire_after_failure(TEST_TIMEOUT),
+    )
+    .await
+    .expect("join pumps");
     assert!(matches!(
         joined.outbound.expect("writer joined"),
         OutboundExit::QueueClosed
@@ -504,7 +646,7 @@ async fn reader_panic_is_preserved_while_its_writer_is_stopped_and_joined() {
         Message::len,
         Message::is_close,
     );
-    let joined = timeout(TEST_TIMEOUT, supervisor.retire_after_failure())
+    let joined = timeout(TEST_TIMEOUT, supervisor.retire_after_failure(TEST_TIMEOUT))
         .await
         .expect("join after task panic");
     assert!(joined.inbound.expect_err("panic is observed").is_panic());

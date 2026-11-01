@@ -21,6 +21,7 @@ const WRITE_ADMITTED: u8 = 0;
 const WRITE_ATTEMPTED: u8 = 1;
 const WRITE_COMPLETED: u8 = 2;
 const WRITE_UNCERTAIN: u8 = 3;
+const WRITE_NOT_ATTEMPTED: u8 = 4;
 
 /// Count and total byte bounds for one direction of a transport queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +133,7 @@ pub enum AdmissionError {
     Overloaded,
     Closed,
     Stopped,
+    Shutdown,
 }
 
 /// One admitted queue item. Its permits remain held until this value drops.
@@ -224,6 +226,7 @@ impl<T> BoundedSender<T> {
                 Err(AdmissionError::Closed)
             }
             Err(AdmissionError::Stopped) => Err(AdmissionError::Stopped),
+            Err(AdmissionError::Shutdown) => Err(AdmissionError::Shutdown),
         }
     }
 }
@@ -235,6 +238,7 @@ pub enum WriteProgress {
     Attempted,
     Completed,
     Uncertain,
+    NotAttempted,
 }
 
 /// Receipt for one outbound item. Completion means the local sink flush
@@ -253,28 +257,50 @@ impl WriteReceipt {
             WRITE_ADMITTED => WriteProgress::Admitted,
             WRITE_ATTEMPTED => WriteProgress::Attempted,
             WRITE_COMPLETED => WriteProgress::Completed,
+            WRITE_NOT_ATTEMPTED => WriteProgress::NotAttempted,
             _ => WriteProgress::Uncertain,
         }
     }
 }
 
 struct WriteRequest<T> {
-    value: T,
+    value: Option<T>,
     receipt: WriteReceipt,
+}
+
+impl<T> Drop for WriteRequest<T> {
+    fn drop(&mut self) {
+        if self.value.is_some() {
+            let _ = self.receipt.0.compare_exchange(
+                WRITE_ADMITTED,
+                WRITE_NOT_ATTEMPTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
 }
 
 /// Bounded outbound queue whose sends return their local progress receipt.
 pub struct WriteSender<T> {
     sender: BoundedSender<WriteRequest<T>>,
+    admission_open: Arc<Mutex<bool>>,
 }
 
 impl<T> WriteSender<T> {
     /// Admit one outbound value under the queue's count and byte bounds.
     pub fn try_send(&self, value: T, byte_len: usize) -> Result<WriteReceipt, AdmissionError> {
+        let admission_open = match self.admission_open.lock() {
+            Ok(admission_open) => admission_open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !*admission_open {
+            return Err(AdmissionError::Shutdown);
+        }
         let receipt = WriteReceipt::new();
         self.sender.try_send(
             WriteRequest {
-                value,
+                value: Some(value),
                 receipt: receipt.clone(),
             },
             byte_len,
@@ -298,6 +324,7 @@ pub enum InboundExit<E> {
 pub enum OutboundExit<E> {
     Stopped,
     ShutdownClose,
+    PeerClosedReplyFlushed,
     QueueClosed,
     IoFailure(E),
 }
@@ -335,7 +362,9 @@ impl<ReadError, WriteError> Joined<ReadError, WriteError> {
 pub struct IoSupervisor<ReadError, WriteError> {
     connection_ref: ConnectionRef,
     stop: StopSignal,
+    force_stop: CancellationToken,
     shutdown: CancellationToken,
+    admission_open: Arc<Mutex<bool>>,
     inbound: TaskOwner<InboundExit<ReadError>>,
     outbound: TaskOwner<OutboundExit<WriteError>>,
 }
@@ -351,19 +380,25 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
         self.stop.reason()
     }
 
-    /// Whether the shared force-stop signal is set.
+    /// Whether the shared transport stop signal is set.
     pub fn is_stopped(&self) -> bool {
         self.stop.is_cancelled()
     }
 
-    /// Wait for the shared force-stop signal.
+    /// Wait for the shared transport stop signal.
     pub async fn stopped(&self) {
         self.stop.cancelled().await;
     }
 
-    /// Begin graceful shutdown. The caller still needs to retire and join both
-    /// tasks, optionally with a deadline.
+    /// Begin graceful shutdown. This seals outbound admission before waking the
+    /// writer. Admitted but abandoned requests report `NotAttempted`.
     pub fn begin_graceful_shutdown(&self) {
+        let mut admission_open = match self.admission_open.lock() {
+            Ok(admission_open) => admission_open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *admission_open = false;
+        drop(admission_open);
         self.shutdown.cancel();
     }
 
@@ -392,8 +427,11 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     /// Stop both pumps and join them, preserving each task's independent result.
     pub async fn retire(mut self, mode: RetirementMode) -> Joined<ReadError, WriteError> {
         match mode {
-            RetirementMode::Graceful => self.shutdown.cancel(),
-            RetirementMode::Forced => self.stop.cancel(StopReason::Requested),
+            RetirementMode::Graceful => self.begin_graceful_shutdown(),
+            RetirementMode::Forced => {
+                self.force_stop.cancel();
+                self.stop.cancel(StopReason::Requested);
+            }
         }
         let (inbound, outbound) = tokio::join!(self.inbound.join(), self.outbound.join());
         self.joined(inbound, outbound)
@@ -420,6 +458,7 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
         }
 
         if inbound.is_none() || outbound.is_none() {
+            self.force_stop.cancel();
             self.stop.cancel(StopReason::ShutdownDeadline);
         }
         let inbound = match inbound {
@@ -433,28 +472,45 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
         self.joined(inbound, outbound)
     }
 
-    /// Observe one pump's termination, force-stop its peer, and join both.
-    pub async fn retire_after_failure(mut self) -> Joined<ReadError, WriteError> {
-        enum First<ReadError, WriteError> {
-            Inbound(Result<InboundExit<ReadError>, JoinError>),
-            Outbound(Result<OutboundExit<WriteError>, JoinError>),
+    /// Observe one pump's termination, stop its peer, and join both within the
+    /// supplied bound. Peer-close reply flushing is allowed to complete until
+    /// the deadline, after which the remaining task is aborted and joined.
+    pub async fn retire_after_failure(
+        mut self,
+        deadline: Duration,
+    ) -> Joined<ReadError, WriteError> {
+        let deadline = tokio::time::sleep(deadline);
+        tokio::pin!(deadline);
+        let mut inbound = None;
+        let mut outbound = None;
+
+        while inbound.is_none() || outbound.is_none() {
+            tokio::select! {
+                result = self.inbound.join(), if inbound.is_none() => {
+                    inbound = Some(result);
+                    self.stop.cancel(StopReason::PumpExited);
+                }
+                result = self.outbound.join(), if outbound.is_none() => {
+                    outbound = Some(result);
+                    self.stop.cancel(StopReason::PumpExited);
+                }
+                _ = &mut deadline => break,
+            }
         }
 
-        let first = tokio::select! {
-            result = self.inbound.join() => First::Inbound(result),
-            result = self.outbound.join() => First::Outbound(result),
-        };
-        self.stop.cancel(StopReason::PumpExited);
-        match first {
-            First::Inbound(inbound) => {
-                let outbound = self.outbound.join().await;
-                self.joined(inbound, outbound)
-            }
-            First::Outbound(outbound) => {
-                let inbound = self.inbound.join().await;
-                self.joined(inbound, outbound)
-            }
+        if inbound.is_none() || outbound.is_none() {
+            self.force_stop.cancel();
+            self.stop.cancel(StopReason::ShutdownDeadline);
         }
+        let inbound = match inbound {
+            Some(result) => result,
+            None => self.inbound.abort_and_join().await,
+        };
+        let outbound = match outbound {
+            Some(result) => result,
+            None => self.outbound.abort_and_join().await,
+        };
+        self.joined(inbound, outbound)
     }
 
     fn joined(
@@ -544,7 +600,10 @@ where
     IsClose: Fn(&M) -> bool + Send + 'static,
 {
     let stop = StopSignal::new();
+    let force_stop = CancellationToken::new();
     let shutdown = CancellationToken::new();
+    let peer_close = CancellationToken::new();
+    let admission_open = Arc::new(Mutex::new(true));
     let (inbound, inbound_rx) = bounded_channel(
         limits.inbound,
         stop.clone(),
@@ -560,12 +619,14 @@ where
 
     let reader_stop = stop.clone();
     let reader_shutdown = shutdown.clone();
+    let reader_peer_close = peer_close.clone();
     let inbound_task = tokio::spawn(async move {
         run_reader(
             reader,
             inbound,
             reader_stop,
             reader_shutdown,
+            reader_peer_close,
             frame_size,
             is_close,
         )
@@ -573,13 +634,17 @@ where
     });
 
     let writer_stop = stop.clone();
+    let writer_force_stop = force_stop.clone();
     let writer_shutdown = shutdown.clone();
+    let writer_peer_close = peer_close;
     let outbound_task = tokio::spawn(async move {
         run_writer(
             writer,
             outbound_rx,
             writer_stop,
+            writer_force_stop,
             writer_shutdown,
+            writer_peer_close,
             Some(shutdown_frame),
         )
         .await
@@ -589,12 +654,15 @@ where
         IoSupervisor {
             connection_ref,
             stop,
+            force_stop,
             shutdown,
+            admission_open: admission_open.clone(),
             inbound: TaskOwner::new(inbound_task),
             outbound: TaskOwner::new(outbound_task),
         },
         WriteSender {
             sender: outbound_queue,
+            admission_open,
         },
         inbound_rx,
     )
@@ -618,6 +686,7 @@ async fn run_reader<R, M, E, Size, IsClose>(
     inbound: BoundedSender<M>,
     stop: StopSignal,
     shutdown: CancellationToken,
+    peer_close: CancellationToken,
     frame_size: Size,
     is_close: IsClose,
 ) -> InboundExit<E>
@@ -635,6 +704,7 @@ where
         };
         match frame {
             Some(Ok(frame)) if is_close(&frame) => {
+                peer_close.cancel();
                 stop.cancel(StopReason::PeerClosed);
                 return InboundExit::PeerClosed;
             }
@@ -643,7 +713,9 @@ where
                 match inbound.try_send(frame, byte_len) {
                     Ok(()) => {}
                     Err(AdmissionError::Overloaded) => return InboundExit::Overloaded,
-                    Err(AdmissionError::Closed | AdmissionError::Stopped) => {
+                    Err(
+                        AdmissionError::Closed | AdmissionError::Stopped | AdmissionError::Shutdown,
+                    ) => {
                         return InboundExit::Stopped;
                     }
                 }
@@ -664,7 +736,9 @@ async fn run_writer<W, M, E>(
     mut writer: W,
     mut outbound: mpsc::Receiver<QueueItem<WriteRequest<M>>>,
     stop: StopSignal,
+    force_stop: CancellationToken,
     shutdown: CancellationToken,
+    peer_close: CancellationToken,
     mut shutdown_frame: Option<M>,
 ) -> OutboundExit<E>
 where
@@ -673,6 +747,10 @@ where
     loop {
         let work = tokio::select! {
             biased;
+            _ = force_stop.cancelled() => return OutboundExit::Stopped,
+            _ = peer_close.cancelled() => {
+                return flush_peer_close_reply(&mut writer, &force_stop).await;
+            }
             _ = stop.cancelled() => return OutboundExit::Stopped,
             _ = shutdown.cancelled() => {
                 let Some(frame) = shutdown_frame.take() else {
@@ -689,9 +767,21 @@ where
             }
         };
 
-        match send_queued(&mut writer, work, &stop, &shutdown).await {
+        match send_queued(
+            &mut writer,
+            work,
+            &stop,
+            &force_stop,
+            &shutdown,
+            &peer_close,
+        )
+        .await
+        {
             SendOutcome::Sent => {}
             SendOutcome::Stopped => return OutboundExit::Stopped,
+            SendOutcome::PeerClosed => {
+                return flush_peer_close_reply(&mut writer, &force_stop).await;
+            }
             SendOutcome::Shutdown => {
                 let Some(frame) = shutdown_frame.take() else {
                     return OutboundExit::Stopped;
@@ -709,6 +799,7 @@ where
 enum SendOutcome<E> {
     Sent,
     Stopped,
+    PeerClosed,
     Shutdown,
     IoFailure(E),
 }
@@ -717,14 +808,19 @@ async fn send_queued<W, M, E>(
     writer: &mut W,
     work: QueueItem<WriteRequest<M>>,
     stop: &StopSignal,
+    force_stop: &CancellationToken,
     shutdown: &CancellationToken,
+    peer_close: &CancellationToken,
 ) -> SendOutcome<E>
 where
     W: Sink<M, Error = E> + Unpin,
 {
-    let mut progress = InFlightWrite::new(work.value.receipt);
+    let mut request = work.value;
+    let mut progress = InFlightWrite::new(request.receipt.clone());
     let ready = tokio::select! {
         biased;
+        _ = force_stop.cancelled() => return SendOutcome::Stopped,
+        _ = peer_close.cancelled() => return SendOutcome::PeerClosed,
         _ = stop.cancelled() => return SendOutcome::Stopped,
         _ = shutdown.cancelled() => return SendOutcome::Shutdown,
         ready = poll_fn(|context| Pin::new(&mut *writer).poll_ready(context)) => ready,
@@ -734,12 +830,18 @@ where
     }
 
     progress.attempted();
-    if let Err(error) = Pin::new(&mut *writer).start_send(work.value.value) {
+    let value = request
+        .value
+        .take()
+        .expect("write request retains its value until first attempt");
+    if let Err(error) = Pin::new(&mut *writer).start_send(value) {
         return SendOutcome::IoFailure(error);
     }
 
     let flushed = tokio::select! {
         biased;
+        _ = force_stop.cancelled() => return SendOutcome::Stopped,
+        _ = peer_close.cancelled() => return SendOutcome::PeerClosed,
         _ = stop.cancelled() => return SendOutcome::Stopped,
         _ = shutdown.cancelled() => return SendOutcome::Shutdown,
         flushed = poll_fn(|context| Pin::new(&mut *writer).poll_flush(context)) => flushed,
@@ -750,6 +852,24 @@ where
             SendOutcome::Sent
         }
         Err(error) => SendOutcome::IoFailure(error),
+    }
+}
+
+async fn flush_peer_close_reply<W, M, E>(
+    writer: &mut W,
+    force_stop: &CancellationToken,
+) -> OutboundExit<E>
+where
+    W: Sink<M, Error = E> + Unpin,
+{
+    let result = tokio::select! {
+        biased;
+        _ = force_stop.cancelled() => return OutboundExit::Stopped,
+        result = writer.flush() => result,
+    };
+    match result {
+        Ok(()) => OutboundExit::PeerClosedReplyFlushed,
+        Err(error) => OutboundExit::IoFailure(error),
     }
 }
 
