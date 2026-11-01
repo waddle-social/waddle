@@ -1558,15 +1558,7 @@ fn dialect_sql(
 fn receipt_schema<'transaction, 'database>(
     transaction: &'transaction IngressUowTransaction<'database>,
 ) -> Option<&'transaction str> {
-    #[cfg(feature = "test-support")]
-    {
-        transaction.receipt_schema()
-    }
-    #[cfg(not(feature = "test-support"))]
-    {
-        let _ = transaction;
-        None
-    }
+    transaction.receipt_schema()
 }
 
 async fn lookup_message_key(

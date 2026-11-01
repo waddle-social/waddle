@@ -1,8 +1,8 @@
 //! Implementation behind the parent module facade.
 
+use super::backend::{PoolAdmission, PoolLane};
 use super::lineage;
 use super::migrations;
-#[cfg(feature = "test-support")]
 use super::physical_attestation::{
     AttestedPgPool, AttestedPostgresWriterCapability, PhysicalAttestationError,
 };
@@ -38,9 +38,8 @@ pub enum DatabaseError {
     #[error(transparent)]
     Lineage(#[from] lineage::LineageError),
 
-    /// Fail-closed refusal when a dark writer capability is detached from
+    /// Fail-closed refusal when a writer capability is detached from
     /// its physically attested PostgreSQL pool or connection.
-    #[cfg(feature = "test-support")]
     #[error(transparent)]
     PhysicalAttestation(#[from] PhysicalAttestationError),
 
@@ -84,6 +83,14 @@ pub enum DatabaseError {
     /// time instead.
     #[error("{which} pool size must be at least 1 (got 0)")]
     PoolSizeZero { which: &'static str },
+
+    #[error("combined main and ingress pool size exceeds the supported range")]
+    PoolSizeOverflow,
+
+    #[error(
+        "attested PostgreSQL pool has capacity {actual}, but its lane budgets require {expected}"
+    )]
+    AttestedPoolLaneCapacityMismatch { expected: u32, actual: u32 },
 }
 
 /// Default main-pool connection cap, preserving the behavior that was
@@ -177,10 +184,17 @@ pub(crate) enum SqlitePoolStorage {
 #[derive(Clone, kameo::Reply)]
 pub struct Database {
     pub(in crate::db) backend: DatabaseBackend,
+    /// Admission for this logical lane over `backend`.
+    pub(in crate::db) admission: PoolAdmission,
+    /// Optional reserved ingress lane over the same physical pool. Only the
+    /// main handle stores this; `ingress_lane` returns a clone whose active
+    /// admission is this separate bounded semaphore.
+    pub(in crate::db) ingress_admission: Option<PoolAdmission>,
     /// The dedicated control-plane pool (ADR-0017 element 4/12), present
     /// only when [`DatabaseConfig::control_plane_pool`] was set. Hosts only
     /// node/claim liveness statements — see [`Database::control_plane_guard`].
     pub(in crate::db) control_plane_backend: Option<DatabaseBackend>,
+    pub(in crate::db) control_plane_admission: Option<PoolAdmission>,
     pub(in crate::db) name: String,
     pub(in crate::db) driver: DatabaseDriver,
     /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
@@ -198,8 +212,7 @@ pub struct Database {
     /// commonly carry a password in their userinfo component).
     pub(in crate::db) database_url: String,
     /// Present only when the exact hook-bearing pool and its unforgeable
-    /// dark writer capability were consumed together.
-    #[cfg(feature = "test-support")]
+    /// writer capability were consumed together.
     pub(in crate::db) attested_pg_writer: Option<AttestedPostgresWriterCapability>,
 }
 
@@ -219,6 +232,12 @@ impl Database {
     pub(crate) async fn detached_postgres_startup_connection(
         &self,
     ) -> Result<sqlx::PgConnection, DatabaseError> {
+        if self.ingress_admission.is_some() {
+            return Err(DatabaseError::QueryFailed(
+                "detached startup connections are unavailable after reserved pool lanes are created"
+                    .to_owned(),
+            ));
+        }
         match &self.backend {
             DatabaseBackend::Postgres(pool) => Ok(pool.acquire().await?.detach()),
             DatabaseBackend::Sqlite(_) => Err(DatabaseError::QueryFailed(
@@ -235,8 +254,14 @@ impl Database {
         storage: SqlitePoolStorage,
     ) -> Self {
         Self {
+            admission: PoolAdmission::unbounded(
+                pool.options().get_acquire_timeout(),
+                PoolLane::External,
+            ),
+            ingress_admission: None,
             backend: DatabaseBackend::Sqlite(pool),
             control_plane_backend: None,
+            control_plane_admission: None,
             name: name.to_string(),
             driver: DatabaseDriver::Sqlite,
             database_url: if storage == SqlitePoolStorage::InMemory {
@@ -244,7 +269,6 @@ impl Database {
             } else {
                 "sqlite:external-pool".to_string()
             },
-            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         }
     }
@@ -252,12 +276,17 @@ impl Database {
     /// Wrap a physical external PostgreSQL pool without retaining its DSN.
     pub(crate) fn from_postgres_pool(name: &str, pool: PgPool) -> Self {
         Self {
+            admission: PoolAdmission::unbounded(
+                pool.options().get_acquire_timeout(),
+                PoolLane::External,
+            ),
+            ingress_admission: None,
             backend: DatabaseBackend::Postgres(pool),
             control_plane_backend: None,
+            control_plane_admission: None,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             database_url: "postgres:external-pool".to_string(),
-            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         }
     }
@@ -267,23 +296,67 @@ impl Database {
     /// wrapper as one value, so it cannot bind a token to another pool.
     #[cfg(feature = "test-support")]
     pub(crate) fn from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Self {
-        let (pool, attested_pg_writer) = pool.into_parts();
-        Self {
-            backend: DatabaseBackend::Postgres(pool),
-            control_plane_backend: None,
-            name: name.to_string(),
-            driver: DatabaseDriver::Postgres,
-            database_url: "postgres:attested-external-pool".to_string(),
-            attested_pg_writer: Some(attested_pg_writer),
-        }
+        let main_budget = pool.max_connections();
+        Self::from_attested_postgres_pool_with_budgets(name, pool, main_budget, None)
+            .expect("the attested pool's default main budget matches its own capacity")
     }
 
-    #[cfg(feature = "test-support")]
+    pub(crate) async fn from_attested_postgres_pool_with_ingress(
+        name: &str,
+        pool: AttestedPgPool,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pool_with_budgets(
+            name,
+            pool,
+            main_budget,
+            Some(ingress_budget),
+        )
+    }
+
+    fn from_attested_postgres_pool_with_budgets(
+        name: &str,
+        pool: AttestedPgPool,
+        main_budget: u32,
+        ingress_budget: Option<u32>,
+    ) -> Result<Self, DatabaseError> {
+        if main_budget == 0 {
+            return Err(DatabaseError::PoolSizeZero { which: "main" });
+        }
+        if ingress_budget == Some(0) {
+            return Err(DatabaseError::PoolSizeZero { which: "ingress" });
+        }
+        let expected = match ingress_budget {
+            Some(ingress) => main_budget
+                .checked_add(ingress)
+                .ok_or(DatabaseError::PoolSizeOverflow)?,
+            None => main_budget,
+        };
+        let (pool, attested_pg_writer, database_url) = pool.into_parts()?;
+        let actual = pool.options().get_max_connections();
+        if actual != expected {
+            return Err(DatabaseError::AttestedPoolLaneCapacityMismatch { expected, actual });
+        }
+        let acquire_timeout = pool.options().get_acquire_timeout();
+        Ok(Self {
+            admission: PoolAdmission::new(main_budget, acquire_timeout, PoolLane::Main),
+            ingress_admission: ingress_budget
+                .map(|size| PoolAdmission::new(size, acquire_timeout, PoolLane::Ingress)),
+            backend: DatabaseBackend::Postgres(pool),
+            control_plane_backend: None,
+            control_plane_admission: None,
+            name: name.to_string(),
+            driver: DatabaseDriver::Postgres,
+            database_url,
+            attested_pg_writer: Some(attested_pg_writer),
+        })
+    }
+
     pub(crate) fn attested_pg_writer_capability(&self) -> Option<AttestedPostgresWriterCapability> {
         self.attested_pg_writer.clone()
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn verify_attested_pg_writer_capability(
         &self,
         capability: &AttestedPostgresWriterCapability,
@@ -333,7 +406,6 @@ impl Database {
                 });
             }
         }
-
         debug!(driver = ?config.driver, "Opening database");
         let backend = connect_backend(
             config.driver,
@@ -355,6 +427,13 @@ impl Database {
             ),
             None => None,
         };
+        let control_plane_admission = config.control_plane_pool.map(|pool| {
+            PoolAdmission::new(
+                pool.size,
+                CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT,
+                PoolLane::ControlPlane,
+            )
+        });
 
         info!(
             name = %name,
@@ -366,17 +445,42 @@ impl Database {
 
         Ok(Self {
             backend,
+            admission: PoolAdmission::unbounded(config.acquire_timeout, PoolLane::Main),
+            ingress_admission: None,
             control_plane_backend,
+            control_plane_admission,
             name: name.to_string(),
             driver: config.driver,
             database_url: config.database_url.clone(),
-            #[cfg(feature = "test-support")]
             attested_pg_writer: None,
         })
     }
 
+    /// Clone this logical database onto its reserved ingress admission lane.
+    /// Both handles retain the same private physical backend and attestation
+    /// binding, while admission permits remain disjoint.
+    pub(crate) fn ingress_lane(&self) -> Self {
+        let Some(admission) = &self.ingress_admission else {
+            return self.clone();
+        };
+        let mut ingress = self.clone();
+        ingress.admission = admission.clone();
+        ingress
+    }
+
+    pub(crate) fn is_ingress_lane(&self) -> bool {
+        self.admission.lane() == PoolLane::Ingress
+    }
+
+    pub(crate) fn ingress_pool_size(&self) -> Option<u32> {
+        self.ingress_admission.as_ref()?.limit()
+    }
+
     pub async fn guard(&self) -> Result<ConnectionGuard, DatabaseError> {
-        Ok(ConnectionGuard::new(self.backend.clone()))
+        Ok(ConnectionGuard::new(
+            self.backend.clone(),
+            self.admission.clone(),
+        ))
     }
 
     /// A `ConnectionGuard` against the dedicated control-plane pool (ADR-0017
@@ -390,7 +494,12 @@ impl Database {
     /// `Database` was opened without a control-plane pool.
     pub async fn control_plane_guard(&self) -> Result<ConnectionGuard, DatabaseError> {
         match &self.control_plane_backend {
-            Some(backend) => Ok(ConnectionGuard::new(backend.clone())),
+            Some(backend) => Ok(ConnectionGuard::new(
+                backend.clone(),
+                self.control_plane_admission
+                    .clone()
+                    .expect("control plane backend and admission are constructed together"),
+            )),
             None => Err(DatabaseError::ControlPlanePoolUnavailable),
         }
     }
@@ -404,7 +513,9 @@ impl Database {
     /// state" — to hold across multiple writes that must commit together
     /// or not at all.
     pub async fn begin(&self) -> Result<Transaction<'_>, DatabaseError> {
-        Transaction::begin(&self.backend).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        Transaction::begin(&self.backend, permit, acquisition_deadline).await
     }
 
     /// Begin a transaction that acquires the database write lock
@@ -412,7 +523,9 @@ impl Database {
     /// a read, to avoid SQLite deadlocks when two connections both
     /// start as readers and then try to upgrade to writers.
     pub async fn begin_immediate(&self) -> Result<Transaction<'_>, DatabaseError> {
-        Transaction::begin_immediate(&self.backend).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let permit = self.admission.acquire_until(acquisition_deadline).await?;
+        Transaction::begin_immediate(&self.backend, permit, acquisition_deadline).await
     }
 
     pub fn name(&self) -> &str {

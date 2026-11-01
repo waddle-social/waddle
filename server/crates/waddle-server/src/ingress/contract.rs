@@ -35,6 +35,8 @@ pub enum IngressStartupError {
     NodeIdentityMissing,
     #[error("failed to open the dedicated ingress pool")]
     Pool(#[source] DatabaseError),
+    #[error("an attested PostgreSQL ingress lane is required for this constructor")]
+    AttestedIngressPoolRequired,
     #[error(transparent)]
     UnitOfWork(#[from] IngressUowError),
 }
@@ -154,6 +156,13 @@ impl IngressAuthority {
         #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
     ) -> Result<Self, IngressStartupError> {
         config.validate()?;
+        // This legacy constructor rebuilds PostgreSQL pools from the retained
+        // DSN, so it must never detach an attested pool's identity from its
+        // checkout hooks. Shared attested pools use the reserved-lane
+        // constructor below.
+        if database.attested_pg_writer_capability().is_some() {
+            return Err(IngressStartupError::AttestedIngressPoolRequired);
+        }
         // SQLite is a single-writer database: the authority shares the global
         // handle (which also keeps a private in-memory database reachable).
         // PostgreSQL gets a dedicated, bounded pool so ingress transactions
@@ -169,6 +178,50 @@ impl IngressAuthority {
                     .map_err(IngressStartupError::Pool)?
             }
         };
+        Self::finish_startup(
+            config,
+            database,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await
+    }
+
+    /// Construct ingress over the reserved lane of a hook-bearing PostgreSQL
+    /// pool. This remains an assembly API until startup can pass trusted owner
+    /// identity configuration into `attested_pool`; it never opens or retargets
+    /// a pool itself.
+    pub async fn try_new_with_attested_database(
+        config: IngressConfig,
+        database: Database,
+        lineage: LineageConfig,
+        #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
+    ) -> Result<Self, IngressStartupError> {
+        config.validate()?;
+        if database.driver() != DatabaseDriver::Postgres
+            || !database.is_ingress_lane()
+            || database.ingress_pool_size() != Some(config.pool_size)
+            || database.attested_pg_writer_capability().is_none()
+        {
+            return Err(IngressStartupError::AttestedIngressPoolRequired);
+        }
+        Self::finish_startup(
+            config,
+            database,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )
+        .await
+    }
+
+    async fn finish_startup(
+        config: IngressConfig,
+        database: Database,
+        lineage: LineageConfig,
+        #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
+    ) -> Result<Self, IngressStartupError> {
         // A canonical node identity is present exactly when clustering is
         // enabled: claim fences are then asserted inside every transaction.
         // Single-node deployments (SQLite, or PostgreSQL without clustering)

@@ -12,6 +12,76 @@ use sqlx::Row as SqlxRow;
 
 use super::{DatabaseError, IntoParams, Row, Rows, Value};
 
+/// A logical admission lane over a shared SQLx pool.
+///
+/// The underlying pool may have capacity for several lanes, while each
+/// `Database` handle limits its own callers to the lane's budget. A permit is
+/// held while a transaction owns its connection and while a guard operation
+/// checks out a connection. This preserves reserved ingress capacity without
+/// creating a second physical pool.
+#[derive(Clone)]
+pub(super) struct PoolAdmission {
+    permits: Arc<tokio::sync::Semaphore>,
+    acquire_timeout: Duration,
+    lane: PoolLane,
+    limit: Option<u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PoolLane {
+    Main,
+    Ingress,
+    ControlPlane,
+    External,
+}
+
+impl PoolAdmission {
+    pub(super) fn new(limit: u32, acquire_timeout: Duration, lane: PoolLane) -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(limit as usize)),
+            acquire_timeout,
+            lane,
+            limit: Some(limit),
+        }
+    }
+
+    /// Admission is unnecessary when a pool has no reserved logical lanes;
+    /// SQLx remains the single authority for its physical connection cap.
+    pub(super) fn unbounded(acquire_timeout: Duration, lane: PoolLane) -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(
+                tokio::sync::Semaphore::MAX_PERMITS,
+            )),
+            acquire_timeout,
+            lane,
+            limit: None,
+        }
+    }
+
+    pub(super) fn lane(&self) -> PoolLane {
+        self.lane
+    }
+
+    pub(super) fn limit(&self) -> Option<u32> {
+        self.limit
+    }
+
+    pub(super) fn acquisition_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.acquire_timeout
+    }
+
+    pub(super) async fn acquire_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, DatabaseError> {
+        match tokio::time::timeout_at(deadline, Arc::clone(&self.permits).acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) => Err(DatabaseError::Internal(sqlx::Error::PoolClosed)),
+            Err(_) => Err(DatabaseError::Internal(sqlx::Error::PoolTimedOut)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseDriver {
     Sqlite,
@@ -187,6 +257,7 @@ impl DatabaseBackend {
         &self,
         sql: &str,
         params: Vec<Value>,
+        acquisition_deadline: tokio::time::Instant,
     ) -> Result<ExecutionResult, DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
@@ -201,12 +272,15 @@ impl DatabaseBackend {
                 })
             }
             DatabaseBackend::Postgres(pool) => {
+                let mut connection = tokio::time::timeout_at(acquisition_deadline, pool.acquire())
+                    .await
+                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
                 let sql = rewrite_positional_for_postgres(sql);
                 let mut query = sqlx::query(&sql);
                 for value in params {
                     query = bind_postgres(query, value);
                 }
-                let result = query.execute(pool).await?;
+                let result = query.execute(&mut *connection).await?;
                 Ok(ExecutionResult {
                     rows_affected: result.rows_affected(),
                     last_insert_rowid: None,
@@ -215,7 +289,11 @@ impl DatabaseBackend {
         }
     }
 
-    async fn execute_batch(&self, sql: &str) -> Result<(), DatabaseError> {
+    async fn execute_batch(
+        &self,
+        sql: &str,
+        acquisition_deadline: tokio::time::Instant,
+    ) -> Result<(), DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
@@ -225,7 +303,9 @@ impl DatabaseBackend {
                 tx.commit().await?;
             }
             DatabaseBackend::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
+                let mut tx = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                    .await
+                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
                 for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
                     sqlx::query(statement).execute(&mut *tx).await?;
                 }
@@ -235,7 +315,12 @@ impl DatabaseBackend {
         Ok(())
     }
 
-    async fn query(&self, sql: &str, params: Vec<Value>) -> Result<Rows, DatabaseError> {
+    async fn query(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        acquisition_deadline: tokio::time::Instant,
+    ) -> Result<Rows, DatabaseError> {
         match self {
             DatabaseBackend::Sqlite(pool) => {
                 let mut query = sqlx::query(sql);
@@ -246,12 +331,15 @@ impl DatabaseBackend {
                 sqlite_rows_to_rows(fetched)
             }
             DatabaseBackend::Postgres(pool) => {
+                let mut connection = tokio::time::timeout_at(acquisition_deadline, pool.acquire())
+                    .await
+                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
                 let sql = rewrite_positional_for_postgres(sql);
                 let mut query = sqlx::query(&sql);
                 for value in params {
                     query = bind_postgres(query, value);
                 }
-                let fetched: Vec<PgRow> = query.fetch_all(pool).await?;
+                let fetched: Vec<PgRow> = query.fetch_all(&mut *connection).await?;
                 postgres_rows_to_rows(fetched)
             }
         }
@@ -493,19 +581,26 @@ fn postgres_value_from_row(row: &PgRow, idx: usize) -> Result<Value, DatabaseErr
 #[derive(Clone)]
 pub struct ConnectionGuard {
     backend: DatabaseBackend,
+    admission: PoolAdmission,
     last_insert_rowid: Arc<AtomicI64>,
 }
 
 impl ConnectionGuard {
-    pub(super) fn new(backend: DatabaseBackend) -> Self {
+    pub(super) fn new(backend: DatabaseBackend, admission: PoolAdmission) -> Self {
         Self {
             backend,
+            admission,
             last_insert_rowid: Arc::new(AtomicI64::new(0)),
         }
     }
 
     pub async fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, DatabaseError> {
-        let result = self.backend.execute(sql, params.into_params()).await?;
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
+        let result = self
+            .backend
+            .execute(sql, params.into_params(), acquisition_deadline)
+            .await?;
         if let Some(rowid) = result.last_insert_rowid {
             self.last_insert_rowid.store(rowid, Ordering::Relaxed);
         }
@@ -513,11 +608,17 @@ impl ConnectionGuard {
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<(), DatabaseError> {
-        self.backend.execute_batch(sql).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
+        self.backend.execute_batch(sql, acquisition_deadline).await
     }
 
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> Result<Rows, DatabaseError> {
-        self.backend.query(sql, params.into_params()).await
+        let acquisition_deadline = self.admission.acquisition_deadline();
+        let _permit = self.admission.acquire_until(acquisition_deadline).await?;
+        self.backend
+            .query(sql, params.into_params(), acquisition_deadline)
+            .await
     }
 }
 
@@ -528,6 +629,7 @@ impl ConnectionGuard {
 /// roll back.
 pub struct Transaction<'a> {
     inner: TransactionInner<'a>,
+    _admission_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 enum TransactionInner<'a> {
@@ -567,12 +669,24 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    pub(super) async fn begin(backend: &'a DatabaseBackend) -> Result<Self, DatabaseError> {
+    pub(super) async fn begin(
+        backend: &'a DatabaseBackend,
+        admission_permit: tokio::sync::OwnedSemaphorePermit,
+        acquisition_deadline: tokio::time::Instant,
+    ) -> Result<Self, DatabaseError> {
         let inner = match backend {
             DatabaseBackend::Sqlite(pool) => TransactionInner::Sqlite(pool.begin().await?),
-            DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
+            DatabaseBackend::Postgres(pool) => {
+                let transaction = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                    .await
+                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
+                TransactionInner::Postgres(transaction)
+            }
         };
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _admission_permit: admission_permit,
+        })
     }
 
     /// Begin a transaction that acquires the database write lock
@@ -592,14 +706,24 @@ impl<'a> Transaction<'a> {
     /// `claim_token` interlock checked in phase 3's UPDATE.
     pub(super) async fn begin_immediate(
         backend: &'a DatabaseBackend,
+        admission_permit: tokio::sync::OwnedSemaphorePermit,
+        acquisition_deadline: tokio::time::Instant,
     ) -> Result<Self, DatabaseError> {
         let inner = match backend {
             DatabaseBackend::Sqlite(pool) => {
                 TransactionInner::Sqlite(begin_sqlite_immediate(pool.clone()).await?)
             }
-            DatabaseBackend::Postgres(pool) => TransactionInner::Postgres(pool.begin().await?),
+            DatabaseBackend::Postgres(pool) => {
+                let transaction = tokio::time::timeout_at(acquisition_deadline, pool.begin())
+                    .await
+                    .map_err(|_| DatabaseError::Internal(sqlx::Error::PoolTimedOut))??;
+                TransactionInner::Postgres(transaction)
+            }
         };
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _admission_permit: admission_permit,
+        })
     }
 
     /// Reach the raw Postgres connection for repositories that compose

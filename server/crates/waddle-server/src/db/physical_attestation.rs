@@ -1,24 +1,23 @@
-//! Dark P2.1 PostgreSQL physical-connection attestation capability.
+//! PostgreSQL physical-connection attestation capability.
 //!
-//! Normal startup does not call this module. The installer and pool hook are
-//! exercised against disposable PostgreSQL before they become authority.
+//! The hook-bearing pool can be attached only through the private `Database`
+//! constructor. Normal startup still uses its existing pool until trusted
+//! owner-to-runtime identity configuration is wired.
 
 use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{PgConnection, Row};
+use sqlx::{ConnectOptions, PgConnection, Row};
 use thiserror::Error;
 
-#[cfg(feature = "test-support")]
 use super::lineage::LineageError;
 use super::lineage::LINEAGE_FORMAT;
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
 };
-#[cfg(feature = "test-support")]
 use super::DatabaseError;
 
 mod installer;
@@ -40,6 +39,8 @@ pub enum PhysicalAttestationError {
     WrongInstallerLogin,
     #[error("physical attestation capability belongs to a different PostgreSQL pool")]
     WrongPool,
+    #[error("cannot bind an attested pool while a raw checkout is still active")]
+    ActivePoolLease,
     #[error("physical attestation capability requires PostgreSQL")]
     PostgresRequired,
     #[error("physical connection identity differs at {field}")]
@@ -100,36 +101,30 @@ pub struct PhysicalAttestationConfig {
 /// server session across checkout and transaction start; transaction- and
 /// statement-pooling proxies are unsupported unless session pinning is
 /// independently guaranteed.
-#[derive(Clone)]
 pub struct AttestedPgPool {
     pool: PgPool,
-    #[cfg(feature = "test-support")]
     writer_capability: AttestedPostgresWriterCapability,
+    database_url: String,
 }
 
-/// Opaque authority for dark PostgreSQL ingress writers. It is created only
+/// Opaque authority for PostgreSQL ingress writers. It is created only
 /// together with the hook-bearing pool and carries the full physical identity
 /// and lineage expected by the trusted SECURITY DEFINER attestor.
-#[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub(crate) struct AttestedPostgresWriterCapability {
     binding: std::sync::Arc<()>,
     config: PhysicalAttestationConfig,
 }
 
-#[cfg(feature = "test-support")]
 impl AttestedPostgresWriterCapability {
-    #[cfg(feature = "test-support")]
     pub(crate) fn identity(&self) -> &PgIdentity {
         self.config.postgres()
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.binding, &other.binding)
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) async fn attest_transaction(
         &self,
         transaction: &mut super::Transaction<'_>,
@@ -142,7 +137,6 @@ impl AttestedPostgresWriterCapability {
             .map_err(DatabaseError::from)
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn attested_lineage_for_deployment(
         &self,
         configured: Option<DeploymentUuid>,
@@ -161,9 +155,17 @@ impl AttestedPostgresWriterCapability {
 }
 
 impl AttestedPgPool {
-    /// Acquire through the same hook-bearing SQLx pool that carries this
-    /// wrapper's capability.
-    pub async fn acquire(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
+    /// Acquire a session internally without exposing a production raw-pool
+    /// checkout API. The capability-bearing wrapper stays within this crate.
+    pub(crate) async fn acquire(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
+        self.pool.acquire().await
+    }
+
+    /// Raw checkout for integration tests that characterize connection hooks.
+    /// A checked-out connection must be dropped before the wrapper can be
+    /// consumed into a `Database`; `into_parts` fails while any lease remains.
+    #[cfg(feature = "test-support")]
+    pub async fn acquire_for_test(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
         self.pool.acquire().await
     }
 
@@ -176,8 +178,17 @@ impl AttestedPgPool {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn into_parts(self) -> (PgPool, AttestedPostgresWriterCapability) {
-        (self.pool, self.writer_capability)
+    pub(crate) fn max_connections(&self) -> u32 {
+        self.pool.options().get_max_connections()
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> Result<(PgPool, AttestedPostgresWriterCapability, String), PhysicalAttestationError> {
+        if self.pool.size() as usize != self.pool.num_idle() {
+            return Err(PhysicalAttestationError::ActivePoolLease);
+        }
+        Ok((self.pool, self.writer_capability, self.database_url))
     }
 }
 
@@ -432,6 +443,7 @@ pub fn attested_pool(
     }
     let on_connect = config.clone();
     let before_acquire = config.clone();
+    let database_url = options.to_url_lossy().to_string();
     let pool = PgPoolOptions::new()
         .min_connections(0)
         .max_connections(max_connections)
@@ -462,10 +474,10 @@ pub fn attested_pool(
         .connect_lazy_with(options);
     Ok(AttestedPgPool {
         pool,
-        #[cfg(feature = "test-support")]
         writer_capability: AttestedPostgresWriterCapability {
             binding: std::sync::Arc::new(()),
             config,
         },
+        database_url,
     })
 }

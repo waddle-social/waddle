@@ -23,7 +23,6 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
-#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
@@ -104,7 +103,6 @@ pub enum IngressSubstrateError {
     EpochChangedDuringPreparation,
     #[error("the ingress relation prelock requires READ COMMITTED isolation")]
     ReadCommittedRequired,
-    #[cfg(feature = "test-support")]
     #[error("the pooled receipt COMMIT outcome is indeterminate")]
     ReceiptCommitIndeterminate,
 }
@@ -267,9 +265,8 @@ impl PostgresIngressSubstrate {
         self.begin_inner().await
     }
 
-    /// Start a disposable dark writer using the full-identity capability
-    /// retained by its physically attested pool. This path is not wired into
-    /// runtime startup.
+    /// Start a writer using the full-identity capability retained by its
+    /// physically attested pool.
     #[cfg(feature = "test-support")]
     pub(crate) async fn begin_with_attested_pg_writer(
         &self,
@@ -1234,14 +1231,13 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
     })
 }
 
-/// Prepare a dark writer from the physical attestor's complete identity.
+/// Prepare a writer from the physical attestor's complete identity.
 ///
 /// The schema-qualified epoch relation lock is the first SQL operation after
 /// transaction isolation and timeout setup. Only then does the writer run
 /// the trusted physical attestor on this same transaction connection, before
 /// reading the epoch or taking application locks. This path never derives
 /// identity from the active search path or DSN.
-#[cfg(feature = "test-support")]
 pub(crate) async fn prepare_attested_receipt_transaction(
     tx: &mut Transaction<'_>,
     capability: &AttestedPostgresWriterCapability,
@@ -1354,16 +1350,14 @@ pub(crate) async fn prepare_attested_receipt_transaction(
     })
 }
 
-/// Receipt-only evidence that the transaction was prepared on the attested
-/// PostgreSQL connection before application locks or writes. The type stays
-/// private to the crate and is stored inside the owning UoW transaction.
-#[cfg(feature = "test-support")]
+/// Evidence that the transaction was prepared on the attested PostgreSQL
+/// connection before application locks or writes. The type stays private to
+/// the crate and is stored inside the owning UoW transaction.
 pub(crate) struct PreparedAttestedReceiptWriter {
     protocol_epoch: ProtocolEpoch,
     schema: String,
 }
 
-#[cfg(feature = "test-support")]
 impl PreparedAttestedReceiptWriter {
     pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
         self.protocol_epoch
@@ -1374,7 +1368,6 @@ impl PreparedAttestedReceiptWriter {
     }
 }
 
-#[cfg(feature = "test-support")]
 async fn read_epoch_in_relation(
     tx: &mut Transaction<'_>,
     relation: &str,

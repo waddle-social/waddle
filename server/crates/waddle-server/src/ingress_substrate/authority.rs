@@ -6,12 +6,9 @@ use super::{
     IngressSubstrateError, MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid,
     WireHandledCount,
 };
-#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
-#[cfg(feature = "test-support")]
 use crate::db::DatabaseError;
 use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
-#[cfg(feature = "test-support")]
 use crate::ingress_substrate::prepare_attested_receipt_transaction;
 use xmpp_parsers::message::Message;
 
@@ -858,7 +855,6 @@ pub async fn record_receipt_pooled(
     kind: EffectReceiptKind,
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
-    #[cfg(feature = "test-support")]
     if let Some(capability) = db.attested_pg_writer_capability() {
         return record_receipt_pooled_attested(db, &capability, key, kind, hash).await;
     }
@@ -880,7 +876,6 @@ pub async fn record_receipt_pooled(
     tx.commit().await.map_err(discard_database_error)
 }
 
-#[cfg(feature = "test-support")]
 async fn record_receipt_pooled_attested(
     db: &Database,
     capability: &AttestedPostgresWriterCapability,
@@ -910,7 +905,10 @@ async fn record_receipt_pooled_attested(
     record_receipt_in_prepared_transaction(&mut tx, key, kind, hash, Some(prepared.schema()))
         .await?;
     let commit = tx.commit().await;
+    #[cfg(feature = "test-support")]
     let acknowledgement_lost = take_pooled_receipt_commit_ack_loss();
+    #[cfg(not(feature = "test-support"))]
+    let acknowledgement_lost = false;
     if commit.is_ok() && !acknowledgement_lost {
         return Ok(());
     }
@@ -924,7 +922,6 @@ async fn record_receipt_pooled_attested(
     }
 }
 
-#[cfg(feature = "test-support")]
 async fn exact_receipt_exists_after_commit_error(
     db: &Database,
     capability: &AttestedPostgresWriterCapability,
@@ -954,7 +951,6 @@ async fn exact_receipt_exists_after_commit_error(
     exact_receipt_exists(&mut tx, key, kind, hash, prepared.schema()).await
 }
 
-#[cfg(feature = "test-support")]
 async fn exact_receipt_exists(
     tx: &mut Transaction<'_>,
     key: MessageKey,

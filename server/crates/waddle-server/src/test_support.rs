@@ -67,6 +67,27 @@ pub fn database_from_attested_postgres_pool(name: &str, pool: AttestedPgPool) ->
     Database::from_attested_postgres_pool(name, pool)
 }
 
+/// Wrap a physically attested pool in separate ordinary and ingress lanes.
+#[cfg(feature = "test-support")]
+pub async fn database_pool_from_attested_postgres_pool(
+    name: &str,
+    pool: AttestedPgPool,
+    main_budget: u32,
+    ingress_budget: u32,
+) -> Result<DatabasePool, crate::db::DatabaseError> {
+    DatabasePool::from_attested_postgres_pool(name, pool, main_budget, ingress_budget).await
+}
+
+/// Characterize that startup-only detached sessions are closed after a
+/// reserved shared-pool lane has been created.
+#[cfg(feature = "test-support")]
+pub async fn detached_startup_connection_is_available(database: &Database) -> bool {
+    database
+        .detached_postgres_startup_connection()
+        .await
+        .is_ok()
+}
+
 /// Wrap an ordinary PostgreSQL pool without attaching any physical writer
 /// authority. This supports wrong-pool identity checks in dark tests.
 #[cfg(feature = "test-support")]

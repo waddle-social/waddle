@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use kameo::message::Context;
 use kameo::Actor;
-use sqlx::query;
 
 use super::{Database, DatabaseError};
 
@@ -99,101 +98,52 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
     ) -> Self::Reply {
         self.touch();
 
-        match &self.db.backend {
-            super::DatabaseBackend::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
+        let auth_context_version = i64::try_from(msg.auth_context_version)
+            .map_err(|_| DatabaseError::QueryFailed("auth context version overflow".to_string()))?;
+        let principal_auth_epoch = i64::try_from(msg.principal_auth_epoch)
+            .map_err(|_| DatabaseError::QueryFailed("principal auth epoch overflow".to_string()))?;
+        let mut tx = self.db.begin().await?;
+        tx.execute(
+            r#"
+            INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            "#,
+            crate::db_params![
+                &msg.user_jid,
+                &msg.username,
+                &msg.xmpp_localpart,
+                msg.localpart_key.as_ref().map(|key| key.as_str()),
+                &msg.created_at,
+                &msg.created_at
+            ],
+        )
+        .await?;
 
-                query(
-                    r#"
-                    INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
-                    "#,
-                )
-                .bind(&msg.user_jid)
-                .bind(&msg.username)
-                .bind(&msg.xmpp_localpart)
-                .bind(msg.localpart_key.as_ref().map(|key| key.as_str()))
-                .bind(msg.created_at.clone())
-                .bind(msg.created_at.clone())
-                .execute(&mut *tx)
-                .await?;
+        // The column is TEXT on both engines (index-served principal
+        // resolution with one shared SQL string); bind the string form.
+        tx.execute(
+            r#"
+            INSERT INTO sessions (
+                id, user_jid, token_hash, auth_context_id, auth_context_version,
+                principal_auth_epoch, expires_at, created_at, last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            crate::db_params![
+                &msg.session_id,
+                &msg.user_jid,
+                &msg.token_hash,
+                msg.auth_context_id.to_string(),
+                auth_context_version,
+                principal_auth_epoch,
+                msg.expires_at.clone(),
+                &msg.created_at,
+                &msg.last_used_at
+            ],
+        )
+        .await?;
 
-                query(
-                    r#"
-                    INSERT INTO sessions (
-                        id, user_jid, token_hash, auth_context_id, auth_context_version,
-                        principal_auth_epoch, expires_at, created_at, last_used_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    "#,
-                )
-                .bind(&msg.session_id)
-                .bind(&msg.user_jid)
-                .bind(&msg.token_hash)
-                .bind(msg.auth_context_id.to_string())
-                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
-                    DatabaseError::QueryFailed("auth context version overflow".to_string())
-                })?)
-                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
-                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
-                })?)
-                .bind(&msg.expires_at)
-                .bind(&msg.created_at)
-                .bind(&msg.last_used_at)
-                .execute(&mut *tx)
-                .await?;
-
-                tx.commit().await?;
-            }
-            super::DatabaseBackend::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-
-                query(
-                    r#"
-                    INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT DO NOTHING
-                    "#,
-                )
-                .bind(&msg.user_jid)
-                .bind(&msg.username)
-                .bind(&msg.xmpp_localpart)
-                .bind(msg.localpart_key.as_ref().map(|key| key.as_str()))
-                .bind(msg.created_at.clone())
-                .bind(msg.created_at.clone())
-                .execute(&mut *tx)
-                .await?;
-
-                query(
-                    r#"
-                    INSERT INTO sessions (
-                        id, user_jid, token_hash, auth_context_id, auth_context_version,
-                        principal_auth_epoch, expires_at, created_at, last_used_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    "#,
-                )
-                .bind(&msg.session_id)
-                .bind(&msg.user_jid)
-                .bind(&msg.token_hash)
-                // The column is TEXT on both engines (index-served principal
-                // resolution with one shared SQL string); bind the string
-                // form — Postgres will not assignment-cast a uuid parameter.
-                .bind(msg.auth_context_id.to_string())
-                .bind(i64::try_from(msg.auth_context_version).map_err(|_| {
-                    DatabaseError::QueryFailed("auth context version overflow".to_string())
-                })?)
-                .bind(i64::try_from(msg.principal_auth_epoch).map_err(|_| {
-                    DatabaseError::QueryFailed("principal auth epoch overflow".to_string())
-                })?)
-                .bind(&msg.expires_at)
-                .bind(&msg.created_at)
-                .bind(&msg.last_used_at)
-                .execute(&mut *tx)
-                .await?;
-
-                tx.commit().await?;
-            }
-        }
+        tx.commit().await?;
 
         Ok(())
     }

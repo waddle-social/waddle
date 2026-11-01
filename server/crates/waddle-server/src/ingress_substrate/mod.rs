@@ -66,7 +66,6 @@ pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
 use substrate::lock_message_for_child;
-#[cfg(feature = "test-support")]
 pub(crate) use substrate::prepare_attested_receipt_transaction;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
@@ -85,7 +84,6 @@ pub use substrate::DatabaseTimeoutKind;
 pub use substrate::IngressSubstrateError;
 pub use substrate::MessageWriteOutcome;
 pub use substrate::PostgresIngressSubstrate;
-#[cfg(feature = "test-support")]
 pub(crate) use substrate::PreparedAttestedReceiptWriter;
 pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;

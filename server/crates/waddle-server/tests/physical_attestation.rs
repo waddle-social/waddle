@@ -1,6 +1,7 @@
 //! Real PostgreSQL checks for the dark P2.1 physical-connection gate.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::{PgConnectOptions, PgPool};
@@ -804,13 +805,15 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
     )
     .await
     .expect("install attestation");
-    let pool = attested_pool(
-        fixture.runtime_options.clone(),
-        config,
-        1,
-        Duration::from_secs(3),
-    )
-    .expect("attested pool");
+    let pool = Arc::new(
+        attested_pool(
+            fixture.runtime_options.clone(),
+            config,
+            1,
+            Duration::from_secs(3),
+        )
+        .expect("attested pool"),
+    );
 
     let mut blocker = PgConnection::connect_with(&fixture.admin_options)
         .await
@@ -828,8 +831,8 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
     .expect("block attestation read");
 
     let acquiring = {
-        let pool = pool.clone();
-        tokio::spawn(async move { pool.acquire().await.map(|_| ()) })
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move { pool.acquire_for_test().await.map(|_| ()) })
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -864,7 +867,7 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
         .expect("release attestation read");
     drop(blocker);
     let member = pool
-        .acquire()
+        .acquire_for_test()
         .await
         .expect("replacement passes attestation");
     drop(member);
@@ -892,7 +895,10 @@ async fn poisoned_idle_session_is_discarded_before_checkout() {
     )
     .expect("attested pool");
 
-    let mut first = pool.acquire().await.expect("first attested checkout");
+    let mut first = pool
+        .acquire_for_test()
+        .await
+        .expect("first attested checkout");
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
         .fetch_one(&mut *first)
         .await
@@ -904,7 +910,7 @@ async fn poisoned_idle_session_is_discarded_before_checkout() {
     drop(first);
 
     let mut second = pool
-        .acquire()
+        .acquire_for_test()
         .await
         .expect("replacement after search path poison");
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
@@ -938,7 +944,10 @@ async fn poisoned_idle_session_is_discarded_before_checkout() {
         .expect("poison session role");
     drop(second);
 
-    let mut third = pool.acquire().await.expect("replacement after role poison");
+    let mut third = pool
+        .acquire_for_test()
+        .await
+        .expect("replacement after role poison");
     let third_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
         .fetch_one(&mut *third)
         .await
@@ -983,7 +992,10 @@ async fn raw_repeatable_read_snapshot_cannot_attest_stale_lineage() {
         Duration::from_millis(500),
     )
     .expect("attested pool");
-    let mut member = pool.acquire().await.expect("initial attested checkout");
+    let mut member = pool
+        .acquire_for_test()
+        .await
+        .expect("initial attested checkout");
     let pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
         .fetch_one(&mut *member)
         .await
@@ -1031,7 +1043,7 @@ async fn raw_repeatable_read_snapshot_cannot_attest_stale_lineage() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
-        pool.acquire().await.is_err(),
+        pool.acquire_for_test().await.is_err(),
         "old snapshot must not attest after committed lineage change"
     );
 
@@ -1043,7 +1055,10 @@ async fn raw_repeatable_read_snapshot_cannot_attest_stale_lineage() {
     .execute(&fixture.admin)
     .await
     .expect("restore fixture lineage");
-    let replacement_member = pool.acquire().await.expect("restored lineage attests");
+    let replacement_member = pool
+        .acquire_for_test()
+        .await
+        .expect("restored lineage attests");
     drop(replacement_member);
     pool.close().await;
     fixture.cleanup().await;
@@ -1164,6 +1179,28 @@ async fn wait_for_blocking_pid(observer: &PgPool, waiter: i32, blocker: i32) {
     .expect("identify row-share lock wait");
 }
 
+#[cfg(feature = "test-support")]
+async fn wait_for_active_query(observer: &PgPool, marker: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let active: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE pid <> pg_catalog.pg_backend_pid() AND state = 'active' AND query LIKE $1)",
+            )
+            .bind(format!("%{marker}%"))
+            .fetch_one(observer)
+            .await
+            .expect("inspect active admission query");
+            if active {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("guard query acquired its main-lane permit");
+}
+
 #[tokio::test]
 async fn committed_function_attests_every_physical_connection_and_replacement() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
@@ -1209,12 +1246,18 @@ async fn committed_function_attests_every_physical_connection_and_replacement() 
         Duration::from_secs(2),
     )
     .expect("pool configuration");
-    let mut first = pool.acquire().await.expect("first attested connection");
+    let mut first = pool
+        .acquire_for_test()
+        .await
+        .expect("first attested connection");
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *first)
         .await
         .expect("first backend PID");
-    let mut second = pool.acquire().await.expect("expanded attested connection");
+    let mut second = pool
+        .acquire_for_test()
+        .await
+        .expect("expanded attested connection");
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *second)
         .await
@@ -1232,7 +1275,7 @@ async fn committed_function_attests_every_physical_connection_and_replacement() 
         .expect("terminate one backend");
     assert!(terminated);
     let mut replacement = pool
-        .acquire()
+        .acquire_for_test()
         .await
         .expect("replacement attested connection");
     let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -1284,7 +1327,7 @@ async fn wrong_identity_revoked_grant_and_spoofed_schema_never_lend_a_connection
     )
     .expect("wrong-lineage pool is constructible");
     assert!(
-        denied.acquire().await.is_err(),
+        denied.acquire_for_test().await.is_err(),
         "wrong lineage cannot be lent"
     );
     denied.close().await;
@@ -1330,7 +1373,7 @@ async fn wrong_identity_revoked_grant_and_spoofed_schema_never_lend_a_connection
     let spoofed = attested_pool(spoof_options, config.clone(), 1, Duration::from_millis(350))
         .expect("spoof pool is constructible");
     assert!(
-        spoofed.acquire().await.is_err(),
+        spoofed.acquire_for_test().await.is_err(),
         "spoofed search_path cannot be lent"
     );
     spoofed.close().await;
@@ -1354,7 +1397,7 @@ async fn wrong_identity_revoked_grant_and_spoofed_schema_never_lend_a_connection
     )
     .expect("revoked pool is constructible");
     assert!(
-        revoked.acquire().await.is_err(),
+        revoked.acquire_for_test().await.is_err(),
         "revoked function cannot be lent"
     );
     revoked.close().await;
@@ -1794,12 +1837,14 @@ RETURNS TABLE (
     stored_system_identifier text, stored_database_oid text, stored_database_name text,
     stored_schema_oid text, stored_schema_name text,
     live_system_identifier text, live_database_oid text, live_database_name text,
-    live_schema_oid text, live_schema_name text
+    live_schema_oid text, live_schema_name text,
+    stored_lineage_format bigint
 )
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp
 AS $malicious$ INSERT INTO {}.invocation_probe VALUES (1)
 RETURNING 'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text,
-          'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text $malicious$"#,
+          'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text, 'x'::text,
+          1::bigint $malicious$"#,
         fixture.trusted, fixture.trusted
     );
     sqlx::query(&malicious)
@@ -2255,7 +2300,10 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
         Duration::from_secs(2),
     )
     .expect("attested runtime pool");
-    let mut connection = pool.acquire().await.expect("attested runtime connection");
+    let mut connection = pool
+        .acquire_for_test()
+        .await
+        .expect("attested runtime connection");
     let system_identifier_privilege: bool = sqlx::query_scalar(
         "SELECT pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_control_system()', 'EXECUTE')",
     )
@@ -2290,7 +2338,7 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
     .await
     .expect("resolve temporary relation shadow");
     assert!(shadow_schema.starts_with("pg_temp_"));
-    drop(connection);
+    connection.return_to_pool().await;
 
     let database = waddle_server::test_support::database_from_attested_postgres_pool(
         "full-identity-writer",
@@ -2686,7 +2734,7 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
         Duration::from_secs(2),
     )
     .expect("role-poisoning pool");
-    let mut role_connection = role_pool.acquire().await.expect("runtime session");
+    let mut role_connection = role_pool.acquire_for_test().await.expect("runtime session");
     sqlx::query(&format!("SET ROLE {}", fixture.outsider))
         .execute(&mut *role_connection)
         .await
@@ -2697,7 +2745,7 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
             .is_err(),
         "physical attestor refuses the role-poisoned connection"
     );
-    drop(role_connection);
+    role_connection.return_to_pool().await;
     let role_database = waddle_server::test_support::database_from_attested_postgres_pool(
         "wrong-effective-role",
         role_pool,
@@ -2761,6 +2809,174 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn attested_shared_pool_keeps_main_and_ingress_admission_disjoint() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (_boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        3,
+        Duration::from_millis(200),
+    )
+    .expect("attested shared runtime pool");
+    let database_pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "attested-shared-admission",
+        pool,
+        2,
+        1,
+    )
+    .await
+    .expect("exact main and ingress lane budgets");
+    let ingress = database_pool.ingress();
+    assert!(!database_pool.global().has_control_plane_pool());
+    assert!(
+        database_pool.global().control_plane_guard().await.is_err(),
+        "attested constructor must not open an un-attested control pool"
+    );
+    let lineage = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+
+    let main_tx_one = database_pool
+        .global()
+        .begin()
+        .await
+        .expect("first main lane transaction");
+    let main_tx_two = database_pool
+        .global()
+        .begin()
+        .await
+        .expect("second main lane transaction");
+    let global_uow = waddle_server::ingress_uow::IngressUnitOfWork::open(
+        database_pool.global().clone(),
+        lineage.clone(),
+    )
+    .expect("direct UoW keeps the supplied main admission lane");
+    assert!(
+        global_uow
+            .begin_with_timeouts(Duration::from_millis(200), Duration::from_millis(500))
+            .await
+            .is_err(),
+        "a direct UoW cannot borrow the reserved ingress lane from a main handle"
+    );
+    let unit_of_work =
+        waddle_server::ingress_uow::IngressUnitOfWork::open(ingress.clone(), lineage.clone())
+            .expect("open ingress UoW over the attested ingress lane");
+    let ingress_tx = unit_of_work
+        .begin_with_timeouts(Duration::from_millis(200), Duration::from_millis(500))
+        .await
+        .expect("ingress remains admissible while main lane is full");
+    ingress_tx
+        .commit()
+        .await
+        .expect("release the ingress lane while main remains saturated");
+
+    let legacy_authority = waddle_server::ingress::IngressAuthority::try_new(
+        waddle_server::config::IngressConfig {
+            pool_size: 1,
+            retry_attempts: 1,
+        },
+        database_pool.global().clone(),
+        lineage.clone(),
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await;
+    assert!(matches!(
+        legacy_authority,
+        Err(waddle_server::ingress::IngressStartupError::AttestedIngressPoolRequired)
+    ));
+
+    let actor_result = database_pool
+        .global_actor()
+        .ask(waddle_server::db::actor::DbQuery {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+        })
+        .await;
+    assert!(
+        actor_result.is_err(),
+        "DbActor must use the main admission lane"
+    );
+    let wrong_lane_authority =
+        waddle_server::ingress::IngressAuthority::try_new_with_attested_database(
+            waddle_server::config::IngressConfig {
+                pool_size: 1,
+                retry_attempts: 1,
+            },
+            database_pool.global().clone(),
+            LineageConfig {
+                deployment_uuid: Some(fixture.lineage.deployment_uuid),
+                action: None,
+            },
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await;
+    assert!(matches!(
+        wrong_lane_authority,
+        Err(waddle_server::ingress::IngressStartupError::AttestedIngressPoolRequired)
+    ));
+    assert!(
+        !waddle_server::test_support::detached_startup_connection_is_available(&ingress).await,
+        "startup-only detached checkout is closed after reserved lanes exist"
+    );
+
+    drop(main_tx_one);
+    let marker = format!("admission_{}", uuid::Uuid::new_v4().simple());
+    let guard = database_pool.global().guard().await.expect("main guard");
+    let slow_guard = guard.clone();
+    let query = format!("SELECT pg_sleep(1) /* {marker} */");
+    let slow_query = tokio::spawn(async move { slow_guard.query(&query, ()).await });
+    wait_for_active_query(&fixture.admin, &marker).await;
+
+    assert!(
+        guard.query("SELECT 1", ()).await.is_err(),
+        "a cloned guard must wait for and obey the same main lane cap"
+    );
+    let actor_result = database_pool
+        .global_actor()
+        .ask(waddle_server::db::actor::DbQuery {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+        })
+        .await;
+    assert!(
+        actor_result.is_err(),
+        "DbActor cannot bypass the main lane cap"
+    );
+
+    drop(main_tx_two);
+    slow_query
+        .await
+        .expect("join slow guard query")
+        .expect("slow guard query finishes");
+    let authority = waddle_server::ingress::IngressAuthority::try_new_with_attested_database(
+        waddle_server::config::IngressConfig {
+            pool_size: 1,
+            retry_attempts: 1,
+        },
+        ingress.clone(),
+        LineageConfig {
+            deployment_uuid: Some(fixture.lineage.deployment_uuid),
+            action: None,
+        },
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await
+    .expect("authority accepts only the attested ingress lane");
+    assert!(authority.drain_and_join(Duration::from_secs(1)).await);
+    drop(unit_of_work);
+    drop(database_pool);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_outcomes() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
@@ -2800,8 +3016,10 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
         Duration::from_secs(3),
     )
     .expect("one-slot attested receipt pool");
-    let observer_pool = pool.clone();
-    let mut connection = pool.acquire().await.expect("attested runtime checkout");
+    let mut connection = pool
+        .acquire_for_test()
+        .await
+        .expect("attested runtime checkout");
     sqlx::query(
         "CREATE TEMP TABLE ingress_effect_receipts \
          (message_key UUID, kind INTEGER, semantic_identity_hash BYTEA)",
@@ -2816,7 +3034,7 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
     .execute(&mut *connection)
     .await
     .expect("create persistent temporary message shadow");
-    drop(connection);
+    connection.return_to_pool().await;
 
     let database = waddle_server::test_support::database_from_attested_postgres_pool(
         "attested-receipt-writer",
@@ -2882,20 +3100,24 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
     .await
     .expect("read target receipt");
     assert_eq!(target_receipt_count, 1, "same key is idempotent");
-    let mut shadow_observer = observer_pool
-        .acquire()
-        .await
-        .expect("reacquire one-slot attested observer");
-    let (shadow_receipts, shadow_messages): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM pg_temp.ingress_effect_receipts), \
+    let shadow_observer = database.guard().await.expect("attested shadow observer");
+    let mut shadow_rows = shadow_observer
+        .query(
+            "SELECT (SELECT count(*) FROM pg_temp.ingress_effect_receipts), \
                 (SELECT count(*) FROM pg_temp.ingress_messages)",
-    )
-    .fetch_one(&mut *shadow_observer)
-    .await
-    .expect("inspect persistent temporary shadows");
+            (),
+        )
+        .await
+        .expect("inspect persistent temporary shadows");
+    let shadow_row = shadow_rows
+        .next()
+        .await
+        .expect("read shadow counts")
+        .expect("shadow count row");
+    let shadow_receipts: i64 = shadow_row.get(0).expect("receipt shadow count");
+    let shadow_messages: i64 = shadow_row.get(1).expect("message shadow count");
     assert_eq!(shadow_receipts, 0, "receipt SQL bypasses TEMP shadow");
     assert_eq!(shadow_messages, 0, "message SQL bypasses TEMP shadow");
-    drop(shadow_observer);
 
     let failed_key = MessageKey::from_storage(uuid::Uuid::new_v4());
     let failed_hash = [9_u8; 32];
@@ -2999,7 +3221,6 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
         .expect("drop deferred receipt function");
 
     drop(database);
-    drop(observer_pool);
     writer_admin.close().await;
     fixture.cleanup().await;
 }
