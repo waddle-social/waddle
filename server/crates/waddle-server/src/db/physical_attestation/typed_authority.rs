@@ -6,12 +6,15 @@
 
 use std::time::Duration;
 
-use sqlx::postgres::{PgConnectOptions, PgPool};
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, PgConnection, Postgres, Row, Transaction};
 use thiserror::Error;
 use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 
-use super::{attested_pool, quote_identifier, PhysicalAttestationConfig, PhysicalAttestationError};
+use super::{
+    attested_pool, quote_identifier, AttestedPgPool, PhysicalAttestationConfig,
+    PhysicalAttestationError,
+};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError};
 use crate::ingress::EffectReceiptKey;
 use crate::ingress_substrate::supported_protocol_epoch;
@@ -73,7 +76,7 @@ pub enum DarkIngressAuthorityError {
 
 enum Backend {
     Postgres {
-        pool: PgPool,
+        pool: AttestedPgPool,
         schema: String,
         schema_oid: u32,
     },
@@ -237,7 +240,7 @@ impl DarkIngressAuthority {
 
     async fn acquire_postgres(
         &self,
-        pool: &PgPool,
+        pool: &AttestedPgPool,
     ) -> Result<sqlx::pool::PoolConnection<Postgres>, DarkIngressAuthorityError> {
         tokio::time::timeout(self.bounds.acquisition, pool.acquire())
             .await
