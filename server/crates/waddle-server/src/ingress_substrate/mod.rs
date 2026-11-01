@@ -18,11 +18,14 @@ pub(crate) use retention::{
 };
 #[cfg(test)]
 mod authority_tests;
+#[cfg(feature = "test-support")]
+pub(crate) use authority::with_pooled_receipt_commit_ack_lost;
 pub use authority::{
     advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
     receipts_complete, record_receipt, record_receipt_pooled, record_room_canonical_envelope,
     EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
+pub(crate) use authority::{receipts_complete_in_schema, record_receipt_in_prepared_transaction};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -56,8 +59,6 @@ mod tests;
 
 mod substrate;
 pub(crate) use substrate::acquire_epoch_lock_first;
-#[cfg(feature = "test-support")]
-pub(crate) use substrate::acquire_epoch_lock_first_with_capability;
 use substrate::decode_stored_alias;
 use substrate::dialect_sql;
 use substrate::discard_database_error;
@@ -65,6 +66,9 @@ pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
 use substrate::lock_message_for_child;
+#[cfg(feature = "test-support")]
+pub(crate) use substrate::prepare_attested_receipt_transaction;
+pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
 pub use substrate::record_message;
 pub use substrate::resolve_and_record_alias;
@@ -81,6 +85,8 @@ pub use substrate::DatabaseTimeoutKind;
 pub use substrate::IngressSubstrateError;
 pub use substrate::MessageWriteOutcome;
 pub use substrate::PostgresIngressSubstrate;
+#[cfg(feature = "test-support")]
+pub(crate) use substrate::PreparedAttestedReceiptWriter;
 pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;

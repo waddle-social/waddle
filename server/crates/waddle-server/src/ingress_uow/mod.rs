@@ -75,7 +75,8 @@ use crate::ingress_substrate::{
 };
 #[cfg(feature = "test-support")]
 use crate::ingress_substrate::{
-    acquire_epoch_lock_first_with_capability, tighten_local_transaction_timeouts,
+    prepare_attested_receipt_transaction, tighten_local_transaction_timeouts,
+    PreparedAttestedReceiptWriter,
 };
 #[cfg(feature = "clustering")]
 use uuid::Uuid;
@@ -239,11 +240,13 @@ impl IngressUnitOfWork {
             return Err(IngressUowError::TransactionBoundsUnproven);
         }
         #[cfg(feature = "test-support")]
-        let protocol_epoch = match &self.attested_pg_writer {
+        let (protocol_epoch, prepared_receipt_writer) = match &self.attested_pg_writer {
             Some(capability) => {
-                acquire_epoch_lock_first_with_capability(&mut transaction, capability).await?
+                let prepared =
+                    prepare_attested_receipt_transaction(&mut transaction, capability).await?;
+                (prepared.protocol_epoch(), Some(prepared))
             }
-            None => acquire_epoch_lock_first(&mut transaction).await?,
+            None => (acquire_epoch_lock_first(&mut transaction).await?, None),
         };
         #[cfg(not(feature = "test-support"))]
         let protocol_epoch = acquire_epoch_lock_first(&mut transaction).await?;
@@ -309,6 +312,8 @@ impl IngressUnitOfWork {
             transaction,
             protocol_epoch,
             lineage,
+            #[cfg(feature = "test-support")]
+            prepared_receipt_writer,
             #[cfg(feature = "clustering")]
             identity: Uuid::new_v4(),
             fencing: self.fencing.clone(),
@@ -346,6 +351,11 @@ pub struct IngressUowTransaction<'a> {
     transaction: Transaction<'a>,
     protocol_epoch: ProtocolEpoch,
     lineage: IngressLineage,
+    /// Receipt-specific evidence captured while this transaction still has
+    /// only its epoch relation prelock; receipt operations must never re-prelock
+    /// after an application row lock has been acquired.
+    #[cfg(feature = "test-support")]
+    prepared_receipt_writer: Option<PreparedAttestedReceiptWriter>,
     /// Private capability identity that binds an in-transaction claim fence
     /// to this exact transaction, not merely another transaction sharing the
     /// same pool lifetime.
@@ -376,6 +386,13 @@ impl<'a> IngressUowTransaction<'a> {
     /// The lineage attestation verified on this same transaction.
     pub fn lineage(&self) -> &IngressLineage {
         &self.lineage
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn receipt_schema(&self) -> Option<&str> {
+        self.prepared_receipt_writer
+            .as_ref()
+            .map(PreparedAttestedReceiptWriter::schema)
     }
 
     pub(crate) fn room_observers_enabled(&self) -> bool {

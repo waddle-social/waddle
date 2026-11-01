@@ -828,15 +828,24 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?",
-            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?",
-        );
+        let driver = transaction.transaction_mut().driver();
+        let schema = receipt_schema(transaction);
+        let sql = if driver == DatabaseDriver::Postgres {
+            match schema {
+                Some(schema) => format!(
+                    "SELECT 1 FROM {}.ingress_effect_receipts WHERE message_key = ?::uuid \
+                     AND kind = ? AND semantic_identity_hash = ?",
+                    ingress_substrate::quote_postgres_identifier(schema)
+                ),
+                None => "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?".to_owned(),
+            }
+        } else {
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?".to_owned()
+        };
         let mut rows = transaction
             .transaction_mut()
             .query(
-                sql,
+                &sql,
                 crate::db_params![
                     message_key.to_storage().to_string(),
                     kind.to_storage(),
@@ -853,18 +862,41 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_receipt(transaction.transaction_mut(), message_key, kind, hash)
+        let schema = receipt_schema(transaction).map(str::to_owned);
+        if let Some(schema) = schema {
+            ingress_substrate::record_receipt_in_prepared_transaction(
+                transaction.transaction_mut(),
+                message_key,
+                kind,
+                hash,
+                Some(&schema),
+            )
+            .await?;
+            Ok(())
+        } else {
+            ingress_substrate::record_receipt(
+                transaction.transaction_mut(),
+                message_key,
+                kind,
+                hash,
+            )
             .await
             .map_err(Into::into)
+        }
     }
 
     pub async fn receipts_complete(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        Self::receipts_complete_on_transaction(transaction.transaction_mut(), message_key)
-            .await
-            .map_err(Into::into)
+        let schema = receipt_schema(transaction).map(str::to_owned);
+        ingress_substrate::receipts_complete_in_schema(
+            transaction.transaction_mut(),
+            message_key,
+            schema.as_deref(),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(crate) async fn receipts_complete_on_transaction(
@@ -881,14 +913,27 @@ impl EffectReceiptRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid",
-            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?",
-        );
+        let driver = transaction.transaction_mut().driver();
+        let schema = receipt_schema(transaction);
+        let sql = if driver == DatabaseDriver::Postgres {
+            match schema {
+                Some(schema) => format!(
+                    "SELECT kind, semantic_identity_hash FROM {}.ingress_effect_receipts \
+                     WHERE message_key = ?::uuid",
+                    ingress_substrate::quote_postgres_identifier(schema)
+                ),
+                None => "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid".to_owned(),
+            }
+        } else {
+            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?"
+                .to_owned()
+        };
         let mut rows = transaction
             .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -1507,6 +1552,20 @@ fn dialect_sql(
     match transaction.transaction_mut().driver() {
         DatabaseDriver::Postgres => postgres,
         DatabaseDriver::Sqlite => sqlite,
+    }
+}
+
+fn receipt_schema<'transaction, 'database>(
+    transaction: &'transaction IngressUowTransaction<'database>,
+) -> Option<&'transaction str> {
+    #[cfg(feature = "test-support")]
+    {
+        transaction.receipt_schema()
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        let _ = transaction;
+        None
     }
 }
 

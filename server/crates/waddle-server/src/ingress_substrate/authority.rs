@@ -1,3 +1,4 @@
+use super::quote_postgres_identifier;
 use super::substrate::acquire_supported_epoch_lock_first;
 use super::{
     acquire_epoch_lock_first, decode_stored_alias, dialect_sql, discard_database_error,
@@ -5,8 +6,35 @@ use super::{
     IngressSubstrateError, MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid,
     WireHandledCount,
 };
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
+#[cfg(feature = "test-support")]
+use crate::db::DatabaseError;
 use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
+#[cfg(feature = "test-support")]
+use crate::ingress_substrate::prepare_attested_receipt_transaction;
 use xmpp_parsers::message::Message;
+
+#[cfg(feature = "test-support")]
+tokio::task_local! {
+    static LOSE_POOLED_RECEIPT_COMMIT_ACK: std::cell::Cell<bool>;
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn with_pooled_receipt_commit_ack_lost<T>(
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    LOSE_POOLED_RECEIPT_COMMIT_ACK
+        .scope(std::cell::Cell::new(true), future)
+        .await
+}
+
+#[cfg(feature = "test-support")]
+fn take_pooled_receipt_commit_ack_loss() -> bool {
+    LOSE_POOLED_RECEIPT_COMMIT_ACK
+        .try_with(|lost| lost.replace(false))
+        .unwrap_or(false)
+}
 
 /// Archive-only room metadata, never exposed through the live message accessor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -732,10 +760,41 @@ pub async fn record_receipt(
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
     acquire_supported_epoch_lock_first(tx).await?;
+    record_receipt_in_prepared_transaction(tx, key, kind, hash, None).await
+}
+
+/// Insert a receipt after the caller has already acquired the epoch lock.
+/// UoW receipts use this so a receipt written after application row locks
+/// never issues another epoch prelock. A schema is supplied only from the
+/// opaque attested preparation carried by the same UoW transaction.
+pub(crate) async fn record_receipt_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    key: MessageKey,
+    kind: EffectReceiptKind,
+    hash: &[u8; 32],
+    attested_schema: Option<&str>,
+) -> Result<(), IngressSubstrateError> {
     const POSTGRES: &str = "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?::uuid, ?, ?) ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING";
     const SQLITE: &str = "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, ?, ?) ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING";
+    let qualified_postgres;
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
+        match attested_schema {
+            Some(schema) => {
+                qualified_postgres = format!(
+                    "INSERT INTO {}.ingress_effect_receipts \
+                     (message_key, kind, semantic_identity_hash) VALUES (?::uuid, ?, ?) \
+                     ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING",
+                    quote_postgres_identifier(schema)
+                );
+                qualified_postgres.as_str()
+            }
+            None => POSTGRES,
+        }
+    } else {
+        SQLITE
+    };
     tx.execute(
-        dialect_sql(tx.driver(), POSTGRES, SQLITE),
+        sql,
         crate::db_params![
             key.to_storage().to_string(),
             kind.to_storage(),
@@ -753,13 +812,36 @@ pub async fn receipts_complete(
     tx: &mut Transaction<'_>,
     key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
+    receipts_complete_in_schema(tx, key, None).await
+}
+
+pub(crate) async fn receipts_complete_in_schema(
+    tx: &mut Transaction<'_>,
+    key: MessageKey,
+    attested_schema: Option<&str>,
+) -> Result<bool, IngressSubstrateError> {
     const POSTGRES: &str = "SELECT NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = ?::uuid AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))";
     const SQLITE: &str = "SELECT NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = ? AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))";
+    let qualified_postgres;
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
+        match attested_schema {
+            Some(schema) => {
+                let schema = quote_postgres_identifier(schema);
+                qualified_postgres = format!(
+                    "SELECT NOT EXISTS (SELECT 1 FROM {schema}.ingress_effect_intents i \
+                     WHERE i.message_key = ?::uuid AND NOT EXISTS (SELECT 1 \
+                     FROM {schema}.ingress_effect_receipts r WHERE r.message_key = i.message_key \
+                     AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))"
+                );
+                qualified_postgres.as_str()
+            }
+            None => POSTGRES,
+        }
+    } else {
+        SQLITE
+    };
     let mut rows = tx
-        .query(
-            dialect_sql(tx.driver(), POSTGRES, SQLITE),
-            crate::db_params![key.to_storage().to_string()],
-        )
+        .query(sql, crate::db_params![key.to_storage().to_string()])
         .await
         .map_err(discard_database_error)?;
     rows.next()
@@ -776,6 +858,11 @@ pub async fn record_receipt_pooled(
     kind: EffectReceiptKind,
     hash: &[u8; 32],
 ) -> Result<(), IngressSubstrateError> {
+    #[cfg(feature = "test-support")]
+    if let Some(capability) = db.attested_pg_writer_capability() {
+        return record_receipt_pooled_attested(db, &capability, key, kind, hash).await;
+    }
+
     let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
     if tx.driver() == DatabaseDriver::Postgres {
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -791,6 +878,112 @@ pub async fn record_receipt_pooled(
     }
     record_receipt(&mut tx, key, kind, hash).await?;
     tx.commit().await.map_err(discard_database_error)
+}
+
+#[cfg(feature = "test-support")]
+async fn record_receipt_pooled_attested(
+    db: &Database,
+    capability: &AttestedPostgresWriterCapability,
+    key: MessageKey,
+    kind: EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<(), IngressSubstrateError> {
+    db.verify_attested_pg_writer_capability(capability)
+        .map_err(DatabaseError::from)
+        .map_err(discard_database_error)?;
+    let mut tx = db.begin_immediate().await.map_err(discard_database_error)?;
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await
+        .map_err(discard_database_error)?;
+    if !super::tighten_local_transaction_timeouts(&mut tx)
+        .await
+        .map_err(discard_database_error)?
+    {
+        return Err(IngressSubstrateError::Database {
+            retry_class: crate::ingress_uow::DbRetryClass::NotRetryable,
+        });
+    }
+    let prepared = prepare_attested_receipt_transaction(&mut tx, capability).await?;
+    if prepared.protocol_epoch() > supported_protocol_epoch() {
+        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+    }
+    record_receipt_in_prepared_transaction(&mut tx, key, kind, hash, Some(prepared.schema()))
+        .await?;
+    let commit = tx.commit().await;
+    let acknowledgement_lost = take_pooled_receipt_commit_ack_loss();
+    if commit.is_ok() && !acknowledgement_lost {
+        return Ok(());
+    }
+    if exact_receipt_exists_after_commit_error(db, capability, key, kind, hash)
+        .await
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(IngressSubstrateError::ReceiptCommitIndeterminate)
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn exact_receipt_exists_after_commit_error(
+    db: &Database,
+    capability: &AttestedPostgresWriterCapability,
+    key: MessageKey,
+    kind: EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<bool, IngressSubstrateError> {
+    let mut tx = db.begin().await.map_err(discard_database_error)?;
+    db.verify_attested_pg_writer_capability(capability)
+        .map_err(DatabaseError::from)
+        .map_err(discard_database_error)?;
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await
+        .map_err(discard_database_error)?;
+    if !super::tighten_local_transaction_timeouts(&mut tx)
+        .await
+        .map_err(discard_database_error)?
+    {
+        return Err(IngressSubstrateError::Database {
+            retry_class: crate::ingress_uow::DbRetryClass::NotRetryable,
+        });
+    }
+    let prepared = prepare_attested_receipt_transaction(&mut tx, capability).await?;
+    if prepared.protocol_epoch() > supported_protocol_epoch() {
+        return Err(IngressSubstrateError::UnsupportedLiveEpoch);
+    }
+    exact_receipt_exists(&mut tx, key, kind, hash, prepared.schema()).await
+}
+
+#[cfg(feature = "test-support")]
+async fn exact_receipt_exists(
+    tx: &mut Transaction<'_>,
+    key: MessageKey,
+    kind: EffectReceiptKind,
+    hash: &[u8; 32],
+    attested_schema: &str,
+) -> Result<bool, IngressSubstrateError> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM {}.ingress_effect_receipts \
+         WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?)",
+        quote_postgres_identifier(attested_schema)
+    );
+    let mut rows = tx
+        .query(
+            &sql,
+            crate::db_params![
+                key.to_storage().to_string(),
+                kind.to_storage(),
+                hash.to_vec()
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    rows.next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::InvalidStoredStream)?
+        .get(0)
+        .map_err(discard_database_error)
 }
 
 /// The canonical lock makes envelope completion and concurrent retries atomic.
