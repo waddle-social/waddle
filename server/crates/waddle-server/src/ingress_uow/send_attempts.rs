@@ -145,9 +145,13 @@ impl SendAttemptRepository {
     ) -> Result<Option<SendAttemptStatus>, IngressUowError> {
         lock(tx, obligation).await?;
         let (key, clock) = dialect(tx);
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let attempts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
+        );
+        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM {attempts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = transaction
             .query(
                 &sql,
                 crate::db_params![
@@ -240,10 +244,23 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
         lock(tx, obligation).await?;
-        let mut rows = tx.transaction_mut().query(
-            "SELECT 1 FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
-            crate::db_params![obligation.message.to_storage().to_string(), obligation.receipt.kind.to_storage(), obligation.receipt.semantic_identity_hash.to_vec(), obligation.recipient.to_string()]
-        ).await?;
+        let (transaction, prepared) = tx.prepared_parts();
+        let appends = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SmAppends,
+        );
+        let sql = format!("SELECT 1 FROM {appends} WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?");
+        let mut rows = transaction
+            .query(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
         Ok(rows.next().await?.is_some())
     }
 

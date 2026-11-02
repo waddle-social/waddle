@@ -26,13 +26,20 @@ need a reviewed set of closed domain operations or another design that preserves
 their shared commit without exposing raw transactions or arbitrary async work.
 
 The prepared PostgreSQL UOW now carries its attested schema through a direct
-message's archive and inbox acceptance path, including intent reconciliation,
+message's archive, inbox and exact-resource no-store acceptance paths, including intent reconciliation,
 archive sequence and row, inbox projection and delivery marker, archive
 dispatch, SM claim and delivery-progress statements. MAM's cross-crate
 adapters take the schema from the prepared UOW; raw PostgreSQL and SQLite use
 their existing paths. The factory and repositories still expose legacy
-transactions. Other message shapes, including no-store terminalization, and
-post-commit and recovery paths still require conversion. This does not make
+transactions. Other message shapes, and post-commit and recovery paths, still
+require conversion. Some shared post-commit reads use the prepared schema, but
+their sibling writes remain on the legacy path; the attested UOW stays dark
+until those operations are closed. Optional pending-table detection during no-store retention
+is limited to the attested schema; it does not prove a separate store's location.
+The catalog probe does not fence concurrent creation of the pending table after
+an absent result. Production activation therefore requires owner bootstrap and
+co-location to be settled, with concurrent owner DDL quiesced or otherwise fenced.
+This does not make
 the service closed, connect normal startup to the attested pool, or establish
 production authority.
 

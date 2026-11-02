@@ -503,8 +503,10 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
         proven_terminal_at: DateTime<Utc>,
     ) -> Result<TerminalizeOutcome, IngressUowError> {
-        ingress_substrate::terminalize_message(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::terminalize_message_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             proven_terminal_at,
         )

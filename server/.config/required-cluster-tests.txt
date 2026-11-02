@@ -266,3 +266,7 @@ waddle-server ingress_uow::canonical_qualified_tests::principal::sqlite_principa
 # A real direct-message acceptance must keep canonical, SM, archive, inbox,
 # dispatch and receipt writes on the same attested schema and transaction.
 waddle-server ingress_uow::canonical_qualified_tests::acceptance::attested_direct_acceptance_targets_one_schema_and_rolls_back
+
+# No-store acceptance must keep custody, policy receipts and retention proof
+# inside the same attested transaction, even with hostile schema shadows.
+waddle-server ingress_uow::canonical_qualified_tests::no_store::attested_no_store_acceptance_qualifies_terminalization_and_rolls_back

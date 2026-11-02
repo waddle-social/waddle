@@ -810,17 +810,32 @@ pub async fn terminalize_message(
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
 ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, message_key).await? {
+    terminalize_message_in_prepared_transaction(tx, None, message_key, proven_terminal_at).await
+}
+
+pub(crate) async fn terminalize_message_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    proven_terminal_at: DateTime<Utc>,
+) -> Result<TerminalizeOutcome, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(TerminalizeOutcome::MessageVanished);
     }
+    let sql = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Messages,
+        (
+            "UPDATE ",
+            " SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid AND terminal_at IS NULL",
+        ),
+        TERMINALIZE_MESSAGE_SQLITE,
+    );
     let changed = tx
         .execute(
-            dialect_sql(
-                tx.driver(),
-                TERMINALIZE_MESSAGE_POSTGRES,
-                TERMINALIZE_MESSAGE_SQLITE,
-            ),
+            &sql,
             crate::db_params![
                 proven_terminal_at.to_rfc3339(),
                 message_key.to_storage().to_string(),
@@ -829,10 +844,16 @@ pub async fn terminalize_message(
         .await
         .map_err(discard_database_error)?;
     if changed == 1 {
-        refresh_retention(tx, message_key, proven_terminal_at).await?;
+        super::retention::refresh_retention_in_prepared_transaction(
+            tx,
+            prepared,
+            message_key,
+            proven_terminal_at,
+        )
+        .await?;
         return Ok(TerminalizeOutcome::Terminalized);
     }
-    if message_exists(tx, message_key).await? {
+    if message_exists_in_prepared_transaction(tx, prepared, message_key).await? {
         Ok(TerminalizeOutcome::AlreadyTerminal)
     } else {
         Ok(TerminalizeOutcome::MessageVanished)
@@ -1530,6 +1551,11 @@ pub(crate) enum PreparedIngressRelation {
     Effects,
     Deliveries,
     DeliveryReceipts,
+    EffectReceipts,
+    EffectDescendants,
+    SendAttempts,
+    SmAppends,
+    PendingDelivery,
     #[cfg(feature = "clustering")]
     Claims,
     InboxEntries,
@@ -1552,6 +1578,11 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::Effects => "ingress_effect_intents",
         PreparedIngressRelation::Deliveries => "ingress_deliveries",
         PreparedIngressRelation::DeliveryReceipts => "ingress_delivery_receipts",
+        PreparedIngressRelation::EffectReceipts => "ingress_effect_receipts",
+        PreparedIngressRelation::EffectDescendants => "ingress_effect_descendants",
+        PreparedIngressRelation::SendAttempts => "ingress_send_attempts",
+        PreparedIngressRelation::SmAppends => "sm_ingress_appends",
+        PreparedIngressRelation::PendingDelivery => "pending_delivery",
         #[cfg(feature = "clustering")]
         PreparedIngressRelation::Claims => "clustering_claims",
         PreparedIngressRelation::InboxEntries => "inbox_entries",
@@ -1831,13 +1862,6 @@ pub(in crate::ingress_substrate) async fn stored_child_message_key(
         .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
 }
 
-pub(in crate::ingress_substrate) async fn lock_message_for_child(
-    tx: &mut Transaction<'_>,
-    message_key: MessageKey,
-) -> Result<bool, IngressSubstrateError> {
-    lock_message_for_child_in_prepared_transaction(tx, None, message_key).await
-}
-
 pub(in crate::ingress_substrate) async fn lock_message_for_child_in_prepared_transaction(
     tx: &mut Transaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
@@ -1867,13 +1891,29 @@ pub(in crate::ingress_substrate) async fn lock_message_for_child_in_prepared_tra
     Ok(rows.next().await.map_err(discard_database_error)?.is_some())
 }
 
+#[cfg(test)]
 pub(in crate::ingress_substrate) async fn message_exists(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
+    message_exists_in_prepared_transaction(tx, None, message_key).await
+}
+
+async fn message_exists_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+) -> Result<bool, IngressSubstrateError> {
+    let sql = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Messages,
+        ("SELECT 1 FROM ", " WHERE message_key = ?::uuid"),
+        MESSAGE_EXISTS_SQLITE,
+    );
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), MESSAGE_EXISTS_POSTGRES, MESSAGE_EXISTS_SQLITE),
+            &sql,
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
@@ -2160,11 +2200,6 @@ pub(in crate::ingress_substrate) const INSERT_DELIVERY_SQLITE: &str = r#"
             "#;
 pub(in crate::ingress_substrate) const READ_DELIVERY_SQLITE: &str =
     r#"SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?"#;
-pub(in crate::ingress_substrate) const TERMINALIZE_MESSAGE_POSTGRES: &str = r#"
-            UPDATE ingress_messages
-            SET terminal_at = ?::timestamptz
-            WHERE message_key = ?::uuid AND terminal_at IS NULL
-            "#;
 pub(in crate::ingress_substrate) const TERMINALIZE_MESSAGE_SQLITE: &str = r#"
             UPDATE ingress_messages
             SET terminal_at = ?
@@ -2287,8 +2322,6 @@ pub(in crate::ingress_substrate) const LOCK_MESSAGE_POSTGRES: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"#;
 pub(in crate::ingress_substrate) const LOCK_MESSAGE_SQLITE: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ? "#;
-pub(in crate::ingress_substrate) const MESSAGE_EXISTS_POSTGRES: &str =
-    r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid"#;
 pub(in crate::ingress_substrate) const MESSAGE_EXISTS_SQLITE: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ?"#;
 // Eligibility is shared with the CNPG query; see the retention predicate in

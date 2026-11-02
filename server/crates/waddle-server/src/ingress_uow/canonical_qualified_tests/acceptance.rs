@@ -34,7 +34,7 @@ use waddle_xmpp::ownership::{
     ClaimEpoch, ClaimStore, EntityType, NodeIdentity, SharedNodeIdentity,
 };
 
-fn submission(
+pub(super) fn submission(
     principal: &AuthenticatedPrincipalRef,
     stream: &SmSessionId,
     sm: SmIngressId,
