@@ -145,6 +145,11 @@ impl SmInboundCompletionTracker {
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
+
+    /// Whether this exact reservation still belongs to the active connection.
+    pub(crate) fn is_pending(&self, sequence: OrderedRelayInboundSequence) -> bool {
+        self.pending.contains(&sequence.0)
+    }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
