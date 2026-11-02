@@ -28,6 +28,9 @@ use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 // cases in this binary concurrently; keep those DDL transactions distinct.
 static CATALOG_GRANT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(feature = "test-support")]
+const CANDIDATE_GUARD: &str = include_str!("fixtures/ingress_epoch_relation_guard_candidate.sql");
+
 struct Fixture {
     cluster_admin: PgPool,
     admin: PgPool,
@@ -259,6 +262,104 @@ async fn typed_authority_fixture(fixture: &Fixture) -> (PhysicalAttestationConfi
     .await
     .expect("install physical attestation");
     (config, key)
+}
+
+#[cfg(feature = "test-support")]
+async fn prepare_v1009_application_fixture(fixture: &Fixture) -> PhysicalAttestationConfig {
+    prepare_application_fixture(fixture, false).await
+}
+
+#[cfg(feature = "test-support")]
+async fn prepare_candidate_application_fixture(fixture: &Fixture) -> PhysicalAttestationConfig {
+    prepare_application_fixture(fixture, true).await
+}
+
+#[cfg(feature = "test-support")]
+async fn prepare_application_fixture(
+    fixture: &Fixture,
+    install_candidate: bool,
+) -> PhysicalAttestationConfig {
+    let url = url_with_schema(&fixture.base_url, &fixture.target);
+    let db = Database::from_config(
+        "restricted-role application fixture",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, url),
+    )
+    .await
+    .expect("open V1009 migration database");
+    MigrationRunner::single()
+        .run(&db)
+        .await
+        .expect("apply the actual migration catalog");
+    drop(db);
+
+    let mut owner = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("connect isolated application-fixture owner");
+    if install_candidate {
+        sqlx::raw_sql(CANDIDATE_GUARD)
+            .execute(&mut owner)
+            .await
+            .expect("install only the unregistered candidate in this fixture");
+    }
+    let guard_definition: String =
+        sqlx::query_scalar("SELECT pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure($1))")
+            .bind(format!(
+                "\"{}\".waddle_ingress_epoch_guard()",
+                fixture.target
+            ))
+            .fetch_one(&mut owner)
+            .await
+            .expect("read fixture guard definition");
+    if install_candidate {
+        assert!(guard_definition.contains("epoch ACCESS SHARE prelock"));
+    } else {
+        assert!(guard_definition.contains("FOR SHARE"));
+        assert!(
+            !guard_definition.contains("epoch ACCESS SHARE prelock"),
+            "V1009 fixture must not replace the installed guard with the candidate"
+        );
+    }
+    drop(owner);
+
+    for statement in [
+        format!(
+            "GRANT SELECT ON {}.ingress_protocol_epoch TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE ON {}.ingress_messages TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.ingress_effect_intents TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.ingress_effect_receipts TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.ingress_deliveries TO {}",
+            fixture.target, fixture.runtime
+        ),
+        format!(
+            "GRANT SELECT, INSERT ON {}.ingress_effect_descendants TO {}",
+            fixture.target, fixture.runtime
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("grant only application DML needed by the UoW fixture");
+    }
+
+    install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install physical attestation for restricted-role fixture")
 }
 
 fn typed_bounds() -> TransactionBounds {
@@ -3468,6 +3569,356 @@ async fn attested_pool_rejects_temp_privilege_drift_on_fresh_and_reused_sessions
     recovered_session.return_to_pool().await;
     warm_pool.close().await;
     fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn actual_v1009_restricted_role_uow_receipt_and_descendant_compatibility() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let config = prepare_v1009_application_fixture(&fixture).await;
+    run_restricted_role_application_compatibility(fixture, config, "v1009").await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn candidate_guard_restricted_role_uow_receipt_and_descendant_compatibility() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let config = prepare_candidate_application_fixture(&fixture).await;
+    run_restricted_role_application_compatibility(fixture, config, "candidate").await;
+}
+
+#[cfg(feature = "test-support")]
+async fn run_restricted_role_application_compatibility(
+    fixture: Fixture,
+    config: PhysicalAttestationConfig,
+    application_label: &str,
+) {
+    let writer_application = format!(
+        "{application_label}_writer_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let runtime_options = fixture
+        .runtime_options
+        .clone()
+        .application_name(&writer_application);
+    let attested = attested_pool(runtime_options, config, 2, Duration::from_secs(3))
+        .expect("two physical slots for the shared main and ingress lanes");
+    let database_pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "restricted-role-compat",
+        attested,
+        1,
+        1,
+    )
+    .await
+    .expect("assemble attested shared DatabasePool");
+    let ingress_database = database_pool.ingress();
+    let lineage = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let uow = waddle_server::ingress_uow::IngressUnitOfWork::open(
+        ingress_database.clone(),
+        lineage.clone(),
+    )
+    .expect("open attested ingress UoW");
+
+    // The UoW reads the epoch singleton FOR SHARE before any application
+    // write. Prove the SELECT-only role fails at that real boundary.
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("restricted runtime login");
+    let share_error = sqlx::query(&format!(
+        "SELECT epoch FROM \"{}\".ingress_protocol_epoch WHERE id = 1 FOR SHARE",
+        fixture.target
+    ))
+    .fetch_one(&mut runtime)
+    .await
+    .expect_err("SELECT-only role cannot take the epoch row lock");
+    assert!(matches!(
+        &share_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    let select_only = uow.begin().await;
+    assert!(
+        select_only.is_err(),
+        "actual attested UoW must fail with SELECT-only epoch access"
+    );
+    drop(select_only);
+
+    let messages_before: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"{}\".ingress_messages",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read pre-write message count");
+    assert_eq!(
+        messages_before, 0,
+        "failed begin performs no application DML"
+    );
+
+    sqlx::query(&format!(
+        "GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant only UPDATE(id) needed by SELECT FOR SHARE");
+    let relation = format!("\"{}\".ingress_protocol_epoch", fixture.target);
+    let (can_update_id, can_update_epoch): (bool, bool) = sqlx::query_as(
+        "SELECT pg_catalog.has_column_privilege(current_user, $1, 'id', 'UPDATE'), \
+                pg_catalog.has_column_privilege(current_user, $1, 'epoch', 'UPDATE')",
+    )
+    .bind(&relation)
+    .fetch_one(&mut runtime)
+    .await
+    .expect("inspect exact epoch-column grants");
+    assert!(can_update_id, "runtime has only the id-column UPDATE grant");
+    assert!(!can_update_epoch, "runtime cannot update the epoch column");
+    sqlx::query(&format!(
+        "UPDATE \"{}\".ingress_protocol_epoch SET id = id WHERE false",
+        fixture.target
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect("id-only UPDATE privilege is usable without changing the row");
+    let epoch_update_error = sqlx::query(&format!(
+        "UPDATE \"{}\".ingress_protocol_epoch SET epoch = epoch WHERE false",
+        fixture.target
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect_err("runtime cannot update the epoch column");
+    assert!(matches!(
+        &epoch_update_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    assert_epoch_id_update_refused(&fixture, &mut runtime, application_label, 0).await;
+
+    let create_error = sqlx::query(&format!(
+        "CREATE TABLE \"{}\".runtime_forbidden (id INTEGER)",
+        fixture.target
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect_err("runtime cannot CREATE in the target schema");
+    assert!(matches!(
+        &create_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    let temp_error = sqlx::query("CREATE TEMP TABLE runtime_forbidden_temp (id INTEGER)")
+        .execute(&mut runtime)
+        .await
+        .expect_err("runtime cannot create TEMP objects");
+    assert!(matches!(
+        &temp_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    let truncate_error = sqlx::query(&format!("TRUNCATE \"{}\".ingress_messages", fixture.target))
+        .execute(&mut runtime)
+        .await
+        .expect_err("runtime cannot TRUNCATE protected data");
+    assert!(matches!(
+        &truncate_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    for role in [&fixture.definer, &fixture.installer] {
+        assert!(
+            sqlx::query(&format!("SET ROLE {role}"))
+                .execute(&mut runtime)
+                .await
+                .is_err(),
+            "runtime cannot SET ROLE {role}"
+        );
+    }
+    let disable_trigger_error = sqlx::query(&format!(
+        "ALTER TABLE \"{}\".ingress_messages DISABLE TRIGGER ALL",
+        fixture.target
+    ))
+    .execute(&mut runtime)
+    .await
+    .expect_err("runtime cannot disable protected-table triggers");
+    assert!(matches!(
+        &disable_trigger_error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("42501")
+    ));
+    drop(runtime);
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let first_key = MessageKey::new();
+    let first_intent = restricted_role_route_intent();
+    let first_database = ingress_database.clone();
+    let first_lineage = lineage.clone();
+    let first_write = tokio::spawn(async move {
+        waddle_server::test_support::attested_uow_receipt_and_descendant_write(
+            &first_database,
+            first_lineage,
+            first_key,
+            waddle_xmpp::ingress::SemanticDigest::from_storage(1, [11_u8; 32])
+                .expect("first canonical digest"),
+            first_intent,
+            uuid::Uuid::new_v4(),
+            Some((ready_tx, release_rx)),
+        )
+        .await
+    });
+    let writer_pid = tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .expect("first UoW reaches the application-write barrier")
+        .expect("first UoW has written and holds its epoch lock");
+
+    // An AX-first owner transition queues behind the real UoW's ACCESS SHARE
+    // relation lock on the epoch table. Release the writer only after
+    // PostgreSQL reports that exact wait.
+    let transition_application = format!("v1009_transition_{}", uuid::Uuid::new_v4().simple());
+    let transition_options = fixture
+        .admin_options
+        .clone()
+        .application_name(&transition_application);
+    let transition_target = fixture.target.clone();
+    let lineage_uuid = fixture.lineage.lineage_uuid.0;
+    let transition = tokio::spawn(async move {
+        let mut connection = PgConnection::connect_with(&transition_options).await?;
+        sqlx::query("BEGIN ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query(&format!(
+            "LOCK TABLE ONLY \"{}\".ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+            transition_target
+        ))
+        .execute(&mut connection)
+        .await?;
+        sqlx::query(&format!(
+            "UPDATE \"{}\".ingress_protocol_epoch \
+             SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1",
+            transition_target
+        ))
+        .bind(lineage_uuid)
+        .execute(&mut connection)
+        .await?;
+        sqlx::query("COMMIT").execute(&mut connection).await?;
+        Ok::<(), sqlx::Error>(())
+    });
+    wait_for_blocked_application(&fixture.admin, &transition_application, writer_pid).await;
+    release_tx.send(()).expect("release epoch-zero UoW");
+    let first_epoch = tokio::time::timeout(Duration::from_secs(5), first_write)
+        .await
+        .expect("epoch-zero UoW completes after the barrier is released")
+        .expect("epoch-zero writer task")
+        .expect("UoW commit");
+    assert_eq!(first_epoch, ProtocolEpoch::ZERO);
+    tokio::time::timeout(Duration::from_secs(5), transition)
+        .await
+        .expect("owner transition completes after the writer releases its lock")
+        .expect("owner transition task")
+        .expect("AX-first epoch transition");
+
+    let second_key = MessageKey::new();
+    let second_database = ingress_database.clone();
+    let epoch_one = waddle_server::test_support::attested_uow_receipt_and_descendant_write(
+        &second_database,
+        lineage,
+        second_key,
+        waddle_xmpp::ingress::SemanticDigest::from_storage(1, [12_u8; 32])
+            .expect("second canonical digest"),
+        restricted_role_route_intent(),
+        uuid::Uuid::new_v4(),
+        None,
+    )
+    .await
+    .expect("actual UoW receipt and descendant write at epoch one");
+    assert_eq!(epoch_one, ProtocolEpoch::from_storage(1));
+
+    let mut runtime_epoch_one = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("restricted runtime login after transition");
+    assert_epoch_id_update_refused(&fixture, &mut runtime_epoch_one, application_label, 1).await;
+    drop(runtime_epoch_one);
+
+    let epoch: i64 = sqlx::query_scalar(&format!(
+        "SELECT epoch FROM \"{}\".ingress_protocol_epoch WHERE id = 1",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read final live epoch");
+    assert_eq!(epoch, 1);
+    for table in [
+        "ingress_messages",
+        "ingress_effect_intents",
+        "ingress_effect_receipts",
+        "ingress_deliveries",
+        "ingress_effect_descendants",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM \"{}\".{table}",
+            fixture.target
+        ))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("schema-qualified application write count");
+        assert_eq!(count, 2, "each supported UoW wrote {table}");
+    }
+
+    drop(uow);
+    drop(ingress_database);
+    drop(database_pool);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_epoch_id_update_refused(
+    fixture: &Fixture,
+    runtime: &mut PgConnection,
+    application_label: &str,
+    expected_epoch: i64,
+) {
+    let error = sqlx::query(&format!(
+        "UPDATE \"{}\".ingress_protocol_epoch SET id = id WHERE id = 1",
+        fixture.target
+    ))
+    .execute(runtime)
+    .await
+    .expect_err("the epoch row trigger refuses an id-only update");
+    assert!(matches!(
+        &error,
+        sqlx::Error::Database(database_error) if database_error.code().as_deref() == Some("P0001")
+    ));
+    let message = error.to_string();
+    if application_label == "candidate" {
+        assert!(message.contains("ACCESS EXCLUSIVE first"), "{message}");
+    } else {
+        assert!(
+            message.contains("must advance exactly one step"),
+            "{message}"
+        );
+    }
+
+    let row: (i32, i64) = sqlx::query_as(&format!(
+        "SELECT id, epoch FROM \"{}\".ingress_protocol_epoch WHERE id = 1",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read epoch singleton after rejected id update");
+    assert_eq!(row, (1, expected_epoch));
+}
+
+#[cfg(feature = "test-support")]
+fn restricted_role_route_intent() -> waddle_xmpp::ingress::IngressEffectIntent {
+    waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+        prepared: None,
+        recipient: "restricted@example.test"
+            .parse()
+            .expect("valid recipient JID"),
+        fanout: Vec::new(),
+        route_identity: waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(0),
+    }
 }
 
 #[cfg(feature = "test-support")]

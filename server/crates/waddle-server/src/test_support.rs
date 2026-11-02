@@ -204,6 +204,63 @@ pub async fn attested_uow_receipt_write(
     Ok((present, complete, keys.len()))
 }
 
+/// Record one canonical direct-effect receipt and scheduler descendant through
+/// the same physically attested UoW transaction. An optional barrier exposes
+/// only the backend PID and keeps that repository transaction open for an
+/// owner-transition lock-order test.
+#[cfg(feature = "test-support")]
+pub async fn attested_uow_receipt_and_descendant_write(
+    database: &Database,
+    lineage: LineageConfig,
+    key: waddle_xmpp::ingress::MessageKey,
+    digest: waddle_xmpp::ingress::SemanticDigest,
+    intent: waddle_xmpp::ingress::IngressEffectIntent,
+    descendant: uuid::Uuid,
+    barrier: Option<(
+        tokio::sync::oneshot::Sender<i32>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> Result<waddle_xmpp::ingress::ProtocolEpoch, IngressUowError> {
+    use crate::ingress_uow::{
+        CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
+    };
+
+    let unit_of_work = IngressUnitOfWork::open(database.clone(), lineage)?;
+    let mut transaction = unit_of_work.begin().await?;
+    let epoch = transaction.protocol_epoch();
+    CanonicalMessageRepository::record_message(&mut transaction, key, &digest, None).await?;
+    EffectIntentRepository::reconcile(&mut transaction, key, std::slice::from_ref(&intent), false)
+        .await?;
+    let receipt = crate::ingress::receipt_key(&intent)?;
+    EffectReceiptRepository::record_receipt(
+        &mut transaction,
+        key,
+        receipt.kind,
+        &receipt.semantic_identity_hash,
+    )
+    .await?;
+    EffectDescendantRepository::attach(&mut transaction, key, &intent.semantic_key(), descendant)
+        .await?;
+
+    if let Some((ready, release)) = barrier {
+        let mut rows = transaction
+            .transaction_mut()
+            .query("SELECT pg_catalog.pg_backend_pid()", ())
+            .await?;
+        let pid = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::EpochProofMissing)?
+            .get::<i32>(0)?;
+        drop(rows);
+        let _ = ready.send(pid);
+        let _ = release.await;
+    }
+
+    transaction.commit().await?;
+    Ok(epoch)
+}
+
 /// Simulate a lost successful COMMIT acknowledgement while retaining the
 /// actual commit, then exercise the pooled receipt path's exact-key readback.
 #[cfg(feature = "test-support")]
