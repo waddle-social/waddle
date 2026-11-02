@@ -12,11 +12,11 @@ struct OutboundQueue {
 
 /// Admission state for one published socket binding.
 ///
-/// Production constructors currently create [`Self::Active`] entries. The
-/// other states provide the typed sink boundary for a later lifecycle cutover;
-/// this type does not expose a public transition API. Existing Active handles
-/// remain Active when the registry replaces an entry, so this is not yet a
-/// replacement-sealing or final admission guarantee.
+/// Production registration constructors create [`Self::Active`] entries.
+/// The provisional constructor and exact-binding transitions are a dark
+/// foundation for a later lifecycle cutover. Registry replacement does not
+/// currently seal existing Active handles, so this is not a replacement-
+/// sealing or final admission guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingAdmissionState {
     Provisional,
@@ -105,17 +105,33 @@ impl BindingAdmission {
         self.owner == owner && self.binding_ref.as_ref() == binding_ref
     }
 
+    fn activate(&mut self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        if !self.matches(owner, Some(binding_ref)) {
+            return false;
+        }
+        match self.state {
+            BindingAdmissionState::Provisional | BindingAdmissionState::Active => {
+                self.state = BindingAdmissionState::Active;
+                true
+            }
+            BindingAdmissionState::Sealed => false,
+        }
+    }
+
+    fn seal(&mut self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        if !self.matches(owner, Some(binding_ref)) {
+            return false;
+        }
+        self.state = BindingAdmissionState::Sealed;
+        true
+    }
+
     fn rejection(&self) -> Option<EndpointEnqueueRejection> {
         match self.state {
             BindingAdmissionState::Provisional => Some(EndpointEnqueueRejection::Provisional),
             BindingAdmissionState::Active => None,
             BindingAdmissionState::Sealed => Some(EndpointEnqueueRejection::Sealed),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_state_for_test(&mut self, state: BindingAdmissionState) {
-        self.state = state;
     }
 }
 
@@ -126,19 +142,29 @@ pub(super) struct BindingOutboundEndpoint {
 }
 
 impl BindingOutboundEndpoint {
-    pub(super) fn bind(
-        socket: SocketOutboundEndpoint,
-        owner: LocalConnectionBindingId,
-        binding_ref: Option<BindingRef>,
-    ) -> Self {
-        socket.bind(owner, binding_ref, BindingAdmissionState::Active)
-    }
-
     pub(super) fn try_send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
         match self.with_active(|sink| sink.try_send(outbound)) {
             Ok(outcome) => outcome,
             Err(rejection) => EndpointEnqueueOutcome::ProvenNotEnqueued(rejection),
         }
+    }
+
+    pub(super) fn activate(
+        &self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> bool {
+        self.admission
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .activate(owner, binding_ref)
+    }
+
+    pub(super) fn seal(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        self.admission
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .seal(owner, binding_ref)
     }
 
     pub(super) async fn send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
@@ -242,14 +268,6 @@ impl BindingOutboundEndpoint {
     #[cfg(feature = "test-utils")]
     pub(super) fn max_capacity(&self) -> usize {
         self.queue.sender.max_capacity()
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_state_for_test(&self, state: BindingAdmissionState) {
-        self.admission
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .set_state_for_test(state);
     }
 }
 

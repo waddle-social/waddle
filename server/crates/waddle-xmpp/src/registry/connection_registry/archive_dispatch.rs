@@ -116,6 +116,7 @@ mod tests {
     use super::EndpointEnqueueRejection;
     use super::*;
     use crate::ingress::MessageKey;
+    use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
     use crate::registry::{BroadcastOutcome, ConnectionRegistry};
     use crate::stream_management::{
         ArchiveDispatchPosition, SmIngressReceiptKind, SmRelayedAppendObligation,
@@ -143,6 +144,34 @@ mod tests {
                 dispatch_stream: None,
             },
         )
+    }
+
+    #[test]
+    fn sealed_binding_refusal_does_not_advance_archive_frontier() {
+        let resource: jid::FullJid = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
+        let (endpoint, mut receiver) = super::super::SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(endpoint, binding_ref.clone());
+        let owner = entry.binding_id();
+
+        assert!(entry.seal_binding(owner, &binding_ref));
+        assert_eq!(
+            entry.try_send_archive_ordered(copy(&resource, MessageKey::new(), 1)),
+            Err(EndpointEnqueueRejection::Sealed)
+        );
+        assert!(
+            entry
+                .archive_dispatch
+                .lock()
+                .expect("archive dispatch mutex is not poisoned")
+                .archives
+                .is_empty(),
+            "refused enqueue must not publish an archive frontier"
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

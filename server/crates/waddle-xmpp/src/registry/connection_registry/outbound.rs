@@ -398,6 +398,23 @@ impl ConnectionEntry {
             endpoint.into(),
             binding_ref.connection_ref().clone(),
             Some(binding_ref),
+            super::BindingAdmissionState::Active,
+        )
+    }
+
+    /// Create a non-admitting local binding candidate for the dark P3.1
+    /// admission transition. Production registration still uses
+    /// [`Self::new_for_binding`]; this constructor does not publish the entry
+    /// or authorize any delivery by itself.
+    pub fn new_provisional_for_binding(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+    ) -> Self {
+        Self::new_entry(
+            endpoint.into(),
+            binding_ref.connection_ref().clone(),
+            Some(binding_ref),
+            super::BindingAdmissionState::Provisional,
         )
     }
 
@@ -405,10 +422,11 @@ impl ConnectionEntry {
         endpoint: SocketOutboundEndpoint,
         connection_ref: ConnectionRef,
         binding_ref: Option<BindingRef>,
+        admission_state: super::BindingAdmissionState,
     ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         let binding_id = LocalConnectionBindingId::fresh();
-        let endpoint = BindingOutboundEndpoint::bind(endpoint, binding_id, binding_ref.clone());
+        let endpoint = endpoint.bind(binding_id, binding_ref.clone(), admission_state);
         Self {
             binding_id,
             connection_ref,
@@ -466,9 +484,36 @@ impl ConnectionEntry {
         endpoint: impl Into<SocketOutboundEndpoint>,
         connection_ref: ConnectionRef,
     ) -> Self {
-        let mut entry = Self::new_entry(endpoint.into(), connection_ref, None);
+        let mut entry = Self::new_entry(
+            endpoint.into(),
+            connection_ref,
+            None,
+            super::BindingAdmissionState::Active,
+        );
         entry.hosting = ConnectionHosting::Remote;
         entry
+    }
+
+    /// Atomically activate this exact local binding candidate. Returns true
+    /// when the supplied local owner and physical binding attempt identify
+    /// this entry and it is active (or was just activated). A sealed binding
+    /// cannot be reactivated. This dark primitive is not wired into
+    /// registration or remote publication.
+    pub fn activate_binding(
+        &self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> bool {
+        self.endpoint.activate(owner, binding_ref)
+    }
+
+    /// Atomically seal this exact local binding against future queue
+    /// acceptance. Enqueue and reserved-permit commits hold the same admission
+    /// lock, so a commit is ordered wholly before or after this transition.
+    /// Returns false for an owner or binding-attempt mismatch. This dark
+    /// primitive is not wired into registration or cleanup.
+    pub fn seal_binding(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
+        self.endpoint.seal(owner, binding_ref)
     }
 
     /// Immutable physical transport identity carried by this registry entry.
