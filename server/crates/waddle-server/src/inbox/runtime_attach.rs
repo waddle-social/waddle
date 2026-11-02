@@ -98,7 +98,7 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
             .query(
                 "SELECT name FROM sqlite_temp_master WHERE type IN ('table', 'view') \
                  AND name COLLATE NOCASE IN ('inbox_entries', 'groupchat_notification_recovery', \
-                     'ingress_effect_intents', 'ingress_effect_receipts')",
+                     'ingress_effect_intents', 'ingress_effect_receipts', 'ingress_messages')",
                 (),
             )
             .await?;

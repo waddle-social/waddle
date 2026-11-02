@@ -1278,6 +1278,10 @@ async fn inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair()
             "CREATE TEMP VIEW Ingress_Effect_Receipts AS SELECT 1 AS shadow",
             "DROP VIEW temp.ingress_effect_receipts",
         ),
+        (
+            "CREATE TEMP TABLE Ingress_Messages (message_key TEXT, terminal_at TEXT)",
+            "DROP TABLE temp.ingress_messages",
+        ),
     ] {
         let guard = db.guard().await.expect("SQLite connection");
         guard

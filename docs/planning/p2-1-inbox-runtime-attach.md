@@ -16,8 +16,8 @@ operation require separate deadlines. It checks the required relation columns,
 ordered primary keys, the `last_updated` width, recovery message-key nullability,
 and the presence of valid, ready named indexes on the expected tables. SQLite
 checks the corresponding local schema and refuses a temporary shadow of either
-inbox relation or the intent/receipt ledger relations used by recovery on the
-connection used for the check.
+inbox relation or the intent, receipt, and message ledger relations used by
+recovery on the connection used for the check.
 
 These checks describe one snapshot. They do not verify index definitions, prove
 that a multi-statement owner job completed, establish the provenance of an
