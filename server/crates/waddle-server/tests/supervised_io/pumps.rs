@@ -10,11 +10,11 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::supervised_io::{
-    spawn_supervised_io, AdmissionError, InboundExit, Limits, OutboundExit, QueueItem,
-    RetirementMode, ShutdownProtocol, StopReason, TransportLimits, WriteProgress, WriteReceipt,
-    WriteSender,
+    spawn_io_custodian, spawn_supervised_io, AdmissionError, CustodianState, InboundExit, Limits,
+    OutboundExit, QueueItem, RetirementMode, ShutdownProtocol, StopReason, TransportLimits,
+    WriteProgress, WriteReceipt, WriteSender,
 };
-use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
+use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -126,6 +126,38 @@ impl<S: Sink<Message, Error = Error> + Unpin> Sink<Message> for CloseRaceWriter<
             }
         }
         result
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+struct BarrierFlushWriter<S> {
+    inner: S,
+    flush_entered: Option<oneshot::Sender<()>>,
+    gate: Arc<PollGate>,
+}
+
+impl<S: Sink<Message, Error = Error> + Unpin> Sink<Message> for BarrierFlushWriter<S> {
+    type Error = Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.inner).poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Error> {
+        Pin::new(&mut self.inner).start_send(item)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if let Some(flush_entered) = self.flush_entered.take() {
+            let _ = flush_entered.send(());
+            self.gate.wait();
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -888,6 +920,168 @@ async fn completion_keeps_its_exact_connection_reference_for_late_fencing() {
     let replacement = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
     assert!(joined.is_for(&old_connection_ref));
     assert!(!joined.is_for(&replacement));
+    peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test]
+async fn independent_custodian_joins_after_cancelled_waiter_and_concurrent_stop() {
+    let (socket, mut peer) = socket_pair().await;
+    let mut lab = start_lab(socket, Stall::Flush, (2, 8), (2, 8));
+    let attempted = lab.write(Message::binary(vec![1, 2])).expect("admit");
+    timeout(TEST_TIMEOUT, &mut lab.blocked)
+        .await
+        .expect("writer reaches stalled flush")
+        .expect("stalled signal");
+    assert_eq!(attempted.progress(), WriteProgress::Attempted);
+
+    let connection_ref = lab.supervisor.connection_ref().clone();
+    let successor = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let (supervisor, _outbound, _inbound, _blocked) =
+        (lab.supervisor, lab.outbound, lab.inbound, lab.blocked);
+    let custodian = std::sync::Arc::new(spawn_io_custodian(supervisor, Duration::from_millis(250)));
+    let observer = custodian.observer();
+    let waiting_observer = observer.clone();
+    let waiter = tokio::spawn(async move { waiting_observer.wait_until_joined().await });
+    waiter.abort();
+    assert!(waiter.await.expect_err("waiter is canceled").is_cancelled());
+
+    let first_stop = std::sync::Arc::clone(&custodian);
+    let second_stop = std::sync::Arc::clone(&custodian);
+    let (first, second) = tokio::join!(
+        tokio::spawn(async move { first_stop.request_stop(StopReason::LeaseLost) }),
+        tokio::spawn(async move { second_stop.request_stop(StopReason::Requested) }),
+    );
+    first.expect("first stop request");
+    second.expect("concurrent stop request");
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("independent custodian completes joins"),
+        CustodianState::Joined
+    );
+    assert!(matches!(
+        custodian.stop_reason(),
+        Some(StopReason::LeaseLost | StopReason::Requested)
+    ));
+    assert!(observer.is_for(&connection_ref));
+    assert!(!observer.is_for(&successor));
+    assert_eq!(attempted.progress(), WriteProgress::Uncertain);
+
+    let first_binding = BindingRef::fresh(connection_ref.clone());
+    let second_binding = BindingRef::fresh(connection_ref.clone());
+    assert_eq!(
+        first_binding.connection_ref(),
+        second_binding.connection_ref()
+    );
+    assert_ne!(first_binding, second_binding);
+    peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn cleanup_pending_remains_visible_until_a_stalled_pump_is_joined() {
+    let (socket, mut peer) = socket_pair().await;
+    let (writer, reader) = socket.split();
+    let gate = Arc::new(PollGate::default());
+    let _release_gate_on_drop = ReleaseGatesOnDrop([gate.clone(), Arc::new(PollGate::default())]);
+    let (flush_entered_tx, flush_entered) = oneshot::channel();
+    let writer = BarrierFlushWriter {
+        inner: writer,
+        flush_entered: Some(flush_entered_tx),
+        gate: gate.clone(),
+    };
+    let (supervisor, outbound, _inbound) = spawn_supervised_io(
+        ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        reader,
+        writer,
+        TransportLimits::new(
+            Limits::new(2, 8).expect("inbound limits"),
+            Limits::new(2, 8).expect("outbound limits"),
+        ),
+        ShutdownProtocol::new(Message::Close(None), |error: &Error| {
+            matches!(error, Error::Protocol(ProtocolError::SendAfterClosing))
+        }),
+        Message::len,
+        Message::is_close,
+    );
+    let attempted = outbound
+        .try_send(Message::binary(vec![1]), 1)
+        .expect("admit outbound frame");
+    timeout(TEST_TIMEOUT, flush_entered)
+        .await
+        .expect("writer is blocked in its poll")
+        .expect("flush-entry signal");
+
+    let custodian = spawn_io_custodian(supervisor, Duration::from_millis(25));
+    let observer = custodian.observer();
+    custodian.request_stop(StopReason::LeaseLost);
+    timeout(TEST_TIMEOUT, async {
+        while observer.state() != CustodianState::CleanupPending {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("deadline publishes cleanup pending while the task has not yielded");
+    assert_eq!(observer.state(), CustodianState::CleanupPending);
+    assert_eq!(attempted.progress(), WriteProgress::Attempted);
+
+    gate.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("join follows the actual pump completion"),
+        CustodianState::Joined
+    );
+    assert_eq!(attempted.progress(), WriteProgress::Uncertain);
+    peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test]
+async fn independent_custodian_joins_peer_after_a_pump_panic() {
+    let reader = futures::stream::poll_fn(|_| -> Poll<Option<Result<Message, Error>>> {
+        panic!("injected reader panic")
+    });
+    let (supervisor, _outbound, _inbound) = spawn_supervised_io(
+        ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        reader,
+        futures::sink::drain::<Message>(),
+        TransportLimits::new(
+            Limits::new(2, 8).expect("inbound limits"),
+            Limits::new(2, 8).expect("outbound limits"),
+        ),
+        ShutdownProtocol::new(Message::Close(None), |_: &std::convert::Infallible| false),
+        Message::len,
+        Message::is_close,
+    );
+    let custodian = spawn_io_custodian(supervisor, TEST_TIMEOUT);
+    let observer = custodian.observer();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("custodian joins both handles after panic"),
+        CustodianState::Joined
+    );
+}
+
+#[tokio::test]
+async fn independent_custodian_joins_peer_after_a_pump_abort() {
+    let (socket, mut peer) = socket_pair().await;
+    let Lab {
+        supervisor,
+        outbound: _outbound,
+        inbound: _inbound,
+        blocked: _blocked,
+    } = start_lab(socket, Stall::Never, (2, 8), (2, 8));
+    supervisor.abort_inbound_for_test();
+
+    let custodian = spawn_io_custodian(supervisor, TEST_TIMEOUT);
+    let observer = custodian.observer();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("custodian joins both handles after abort"),
+        CustodianState::Joined
+    );
     peer_observes_drop(&mut peer).await;
 }
 

@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
@@ -96,6 +96,7 @@ pub enum StopReason {
     OutboundIoFailure,
     PumpExited,
     ShutdownDeadline,
+    LeaseLost,
 }
 
 /// Shared, first-wins cancellation signal with a typed reason.
@@ -391,6 +392,216 @@ pub struct IoSupervisor<ReadError, WriteError> {
     admission_open: Arc<Mutex<bool>>,
     inbound: TaskOwner<InboundExit<ReadError>>,
     outbound: TaskOwner<OutboundExit<WriteError>>,
+}
+
+/// Lifecycle state published by the independent physical-connection custodian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustodianState {
+    /// The custodian owns both pump handles and has not begun retirement.
+    Running,
+    /// Stop was requested or one pump ended; the custodian is joining both.
+    Stopping,
+    /// The retirement deadline expired and at least one pump still needs a
+    /// confirmed join. This state never claims the socket has terminated.
+    CleanupPending,
+    /// Both pump JoinHandles returned, including cancellation or panic results.
+    Joined,
+}
+
+/// Control handle for a custodian that owns a physical connection's two pumps.
+///
+/// The custodian runs independently of any Kameo actor and remains responsible
+/// for both JoinHandles when a caller drops this handle. Dropping the last
+/// handle requests stop; a canceled waiter does not cancel the custodian.
+pub struct IoCustodianHandle {
+    client: Arc<CustodianClient>,
+}
+
+struct CustodianClient {
+    connection_ref: ConnectionRef,
+    stop: StopSignal,
+    force_stop: CancellationToken,
+    admission_open: Arc<Mutex<bool>>,
+    state: watch::Receiver<CustodianState>,
+}
+
+/// Observation-only view of custodian state that does not keep control alive.
+#[derive(Clone)]
+pub struct IoCustodianObserver {
+    connection_ref: ConnectionRef,
+    state: watch::Receiver<CustodianState>,
+}
+
+impl IoCustodianHandle {
+    /// Exact physical connection reference captured by the pump owner.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.client.connection_ref
+    }
+
+    /// Whether this custodian belongs to the supplied physical transport.
+    pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
+        &self.client.connection_ref == connection_ref
+    }
+
+    /// Current lifecycle state. `Joined` is published only after both pump
+    /// JoinHandles have returned.
+    pub fn state(&self) -> CustodianState {
+        *self.client.state.borrow()
+    }
+
+    /// First reason that stopped the pumps, when one has been recorded.
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        self.client.stop.reason()
+    }
+
+    /// Request an out-of-band stop without sending through an application data
+    /// mailbox. This is suitable for stop and node-lease-loss paths.
+    pub fn request_stop(&self, reason: StopReason) {
+        if self.state() == CustodianState::Joined {
+            return;
+        }
+        let mut admission_open = match self.client.admission_open.lock() {
+            Ok(admission_open) => admission_open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *admission_open = false;
+        drop(admission_open);
+        self.client.stop.cancel(reason);
+        self.client.force_stop.cancel();
+    }
+
+    /// Create an observation-only handle that can outlive this controller.
+    pub fn observer(&self) -> IoCustodianObserver {
+        IoCustodianObserver {
+            connection_ref: self.client.connection_ref.clone(),
+            state: self.client.state.clone(),
+        }
+    }
+
+    /// Wait until both pump handles have returned. Canceling this future only
+    /// cancels the waiter; the independent custodian keeps joining the pumps.
+    pub async fn wait_until_joined(&self) -> CustodianState {
+        self.observer().wait_until_joined().await
+    }
+}
+
+impl Drop for IoCustodianHandle {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.client) == 1 && self.state() != CustodianState::Joined {
+            self.request_stop(StopReason::Requested);
+        }
+    }
+}
+
+impl IoCustodianObserver {
+    /// Exact physical connection reference captured by the pump owner.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    /// Whether this observation belongs to the supplied physical transport.
+    pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
+        &self.connection_ref == connection_ref
+    }
+
+    /// Current lifecycle state. `Joined` is published only after both pump
+    /// JoinHandles have returned.
+    pub fn state(&self) -> CustodianState {
+        *self.state.borrow()
+    }
+
+    /// Wait until both pump handles have returned. If the custodian task itself
+    /// exits unexpectedly, the last published state is returned instead of
+    /// claiming that physical termination was joined.
+    pub async fn wait_until_joined(&self) -> CustodianState {
+        let mut state = self.state.clone();
+        loop {
+            let current = *state.borrow_and_update();
+            if current == CustodianState::Joined {
+                return current;
+            }
+            if state.changed().await.is_err() {
+                return *state.borrow();
+            }
+        }
+    }
+}
+
+/// Move both real pump handles into an independent lifecycle custodian.
+///
+/// The retirement deadline starts only after a stop request or a pump exit.
+/// If a pump remains unfinished at that deadline, the state becomes
+/// `CleanupPending`, the remaining pump is aborted, and the custodian keeps
+/// waiting for both JoinHandles before it can publish `Joined`.
+pub fn spawn_io_custodian<ReadError, WriteError>(
+    mut supervisor: IoSupervisor<ReadError, WriteError>,
+    retirement_deadline: Duration,
+) -> IoCustodianHandle
+where
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+{
+    let connection_ref = supervisor.connection_ref.clone();
+    let stop = supervisor.stop.clone();
+    let force_stop = supervisor.force_stop.clone();
+    let admission_open = supervisor.admission_open.clone();
+    let (state_tx, state_rx) = watch::channel(CustodianState::Running);
+
+    tokio::spawn(async move {
+        let mut inbound = None;
+        let mut outbound = None;
+
+        tokio::select! {
+            result = supervisor.inbound.join() => inbound = Some(result),
+            result = supervisor.outbound.join() => outbound = Some(result),
+            _ = supervisor.stop.cancelled() => {}
+        }
+
+        state_tx.send_replace(CustodianState::Stopping);
+        supervisor.stop.cancel(StopReason::PumpExited);
+
+        let deadline = tokio::time::sleep(retirement_deadline);
+        tokio::pin!(deadline);
+        while inbound.is_none() || outbound.is_none() {
+            tokio::select! {
+                result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
+                result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
+                _ = &mut deadline => break,
+            }
+        }
+
+        if inbound.is_none() || outbound.is_none() {
+            state_tx.send_replace(CustodianState::CleanupPending);
+            supervisor.stop.cancel(StopReason::ShutdownDeadline);
+            supervisor.force_stop.cancel();
+        }
+        if inbound.is_none() {
+            supervisor.inbound.abort();
+        }
+        if outbound.is_none() {
+            supervisor.outbound.abort();
+        }
+        let inbound = match inbound {
+            Some(result) => result,
+            None => supervisor.inbound.join().await,
+        };
+        let outbound = match outbound {
+            Some(result) => result,
+            None => supervisor.outbound.join().await,
+        };
+        drop(supervisor.joined(inbound, outbound));
+        state_tx.send_replace(CustodianState::Joined);
+    });
+
+    IoCustodianHandle {
+        client: Arc::new(CustodianClient {
+            connection_ref,
+            stop,
+            force_stop,
+            admission_open,
+            state: state_rx,
+        }),
+    }
 }
 
 impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
