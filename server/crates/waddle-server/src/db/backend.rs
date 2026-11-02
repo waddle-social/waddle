@@ -532,7 +532,7 @@ impl DatabaseBackend {
     }
 }
 
-fn rewrite_positional_for_postgres(sql: &str) -> String {
+pub(crate) fn rewrite_positional_for_postgres(sql: &str) -> String {
     let mut counter = 1usize;
     let mut rewritten = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
@@ -648,7 +648,7 @@ fn bind_sqlite<'q>(
     }
 }
 
-fn bind_postgres<'q>(
+pub(crate) fn bind_postgres<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     value: Value,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {

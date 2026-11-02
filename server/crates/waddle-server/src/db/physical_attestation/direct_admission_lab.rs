@@ -1,7 +1,7 @@
 //! Closed, unwired experiment. `FixtureConnection` is synthetic and cannot
 //! authorize a real connection or enqueue. No runtime writer calls this lab.
 
-use crate::ingress_uow::STARTED_GRACE_MS;
+use crate::ingress_uow::{start_fresh_postgres, start_fresh_sqlite, SendLease};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Postgres, Row, Transaction};
@@ -107,6 +107,31 @@ pub struct DirectAdmission {
     pub connection: FixtureConnection,
 }
 
+impl DirectAdmission {
+    /// Construct a fixture record from a real claim capability. Neither this
+    /// value nor the synthetic connection witness grants enqueue authority.
+    pub fn for_lease(
+        pin: AdmissionPin,
+        lease: &SendLease,
+        connection: FixtureConnection,
+    ) -> Result<Self, DirectAdmissionLabError> {
+        let obligation = lease.obligation();
+        if pin.key.message_key != obligation.message
+            || pin.key.kind.to_storage() != obligation.receipt.kind.to_storage()
+            || pin.key.semantic_identity_hash != obligation.receipt.semantic_identity_hash
+            || pin.key.resource != obligation.recipient
+        {
+            return Err(DirectAdmissionLabError::Rejected);
+        }
+        Ok(Self {
+            pin,
+            owner: lease.owner().clone(),
+            attempt_token: lease.token(),
+            connection,
+        })
+    }
+}
+
 /// Bounds can tighten, but never exceed, the laboratory's hard global limits.
 #[derive(Debug, Clone, Copy)]
 pub struct DirectAdmissionLimits {
@@ -144,6 +169,8 @@ pub enum DirectAdmissionLabError {
     Conflict,
     #[error("the laboratory admission capacity is exhausted")]
     Capacity,
+    #[error("the canonical parent is missing; admission reconciliation remains unresolved")]
+    ReconciliationUnresolved,
     #[error(transparent)]
     Authority(#[from] DarkIngressAuthorityError),
 }
@@ -196,6 +223,7 @@ impl DirectAdmissionLab {
     pub async fn start(
         &self,
         admission: &DirectAdmission,
+        lease: &SendLease,
     ) -> Result<DirectAdmissionOutcome, DirectAdmissionLabError> {
         if admission.connection != self.connection
             || admission.pin.key.resource != self.connection.resource
@@ -205,7 +233,13 @@ impl DirectAdmissionLab {
             || admission.connection.sm_session.as_str().is_empty()
             || SmSessionId::try_from_wire(admission.connection.sm_session.as_str()).is_err()
             || !admission.owner.is_active()
+            || !lease.never_started()
         {
+            return Err(DirectAdmissionLabError::Rejected);
+        }
+        let claimed =
+            DirectAdmission::for_lease(admission.pin.clone(), lease, admission.connection.clone())?;
+        if !identical_admission(&claimed, admission) {
             return Err(DirectAdmissionLabError::Rejected);
         }
         let payload = encode_payload(&admission.pin.payload)
@@ -222,7 +256,7 @@ impl DirectAdmissionLab {
                 let mut conn = self.authority.acquire_postgres(pool).await?;
                 let mut prepared = tokio::time::timeout(
                     self.authority.bounds.acquisition,
-                    prepare_postgres(&mut conn, schema, *schema_oid, self.authority.bounds),
+                    prepare_v1009(&mut conn, schema, *schema_oid, self.authority.bounds),
                 )
                 .await
                 .map_err(|_| DarkIngressAuthorityError::Timeout)??;
@@ -230,6 +264,7 @@ impl DirectAdmissionLab {
                     &mut prepared.transaction,
                     schema,
                     admission,
+                    lease,
                     &payload,
                     self.limits,
                 )
@@ -240,7 +275,7 @@ impl DirectAdmissionLab {
             Backend::Sqlite(db) => {
                 let mut tx = self.authority.begin_sqlite(db).await?;
                 read_sqlite_epoch(&mut tx).await?;
-                let result = start_sqlite(&mut tx, admission, &payload, self.limits).await?;
+                let result = start_sqlite(&mut tx, admission, lease, &payload, self.limits).await?;
                 tx.commit()
                     .await
                     .map_err(|_| DarkIngressAuthorityError::CommitIndeterminate)?;
@@ -249,12 +284,13 @@ impl DirectAdmissionLab {
         }
     }
 
-    /// Authoritative reconciliation after a lost commit response. It reads the
-    /// immutable payload by both preselected admission ID and attempt token.
+    /// Reconcile a lost response while holding the same canonical lock as the
+    /// old transaction. Absence is only an observation at this lock boundary;
+    /// callers must also stop any subsequent start using the same capability.
+    /// A missing canonical parent is not reported as proof of absence.
     pub async fn lookup(
         &self,
-        id: uuid::Uuid,
-        token: uuid::Uuid,
+        admission: &DirectAdmission,
     ) -> Result<Option<DirectAdmission>, DirectAdmissionLabError> {
         match &self.authority.backend {
             Backend::Postgres {
@@ -265,19 +301,49 @@ impl DirectAdmissionLab {
                 let mut conn = self.authority.acquire_postgres(pool).await?;
                 let mut prepared = tokio::time::timeout(
                     self.authority.bounds.acquisition,
-                    prepare_postgres(&mut conn, schema, *schema_oid, self.authority.bounds),
+                    prepare_v1009(&mut conn, schema, *schema_oid, self.authority.bounds),
                 )
                 .await
                 .map_err(|_| DarkIngressAuthorityError::Timeout)??;
-                let record = lookup_postgres(&mut prepared.transaction, schema, id).await?;
-                let record = check_token(record, token)?;
+                let lock = format!(
+                    "SELECT 1 FROM {}.ingress_messages WHERE message_key = $1 FOR UPDATE",
+                    quote_identifier(schema)
+                );
+                sqlx::query(&lock)
+                    .bind(admission.pin.key.message_key.to_storage())
+                    .fetch_optional(&mut *prepared.transaction)
+                    .await
+                    .map_err(super::super::postgres_error)?
+                    .ok_or(DirectAdmissionLabError::ReconciliationUnresolved)?;
+                let record = lookup_postgres(
+                    &mut prepared.transaction,
+                    schema,
+                    admission.pin.admission_id,
+                )
+                .await?;
+                let record = check_record(record, admission)?;
                 prepared.commit().await?;
                 Ok(record)
             }
             Backend::Sqlite(db) => {
                 let mut tx = self.authority.begin_sqlite(db).await?;
                 read_sqlite_epoch(&mut tx).await?;
-                let record = check_token(lookup_sqlite(&mut tx, id).await?, token)?;
+                let mut rows = tx
+                    .query(
+                        "SELECT 1 FROM main.ingress_messages WHERE message_key = ?",
+                        crate::db_params![admission.pin.key.message_key.to_storage().to_string()],
+                    )
+                    .await
+                    .map_err(|_| DarkIngressAuthorityError::Database)?;
+                rows.next()
+                    .await
+                    .map_err(|_| DarkIngressAuthorityError::Database)?
+                    .ok_or(DirectAdmissionLabError::ReconciliationUnresolved)?;
+                drop(rows);
+                let record = check_record(
+                    lookup_sqlite(&mut tx, admission.pin.admission_id).await?,
+                    admission,
+                )?;
                 tx.commit()
                     .await
                     .map_err(|_| DarkIngressAuthorityError::CommitIndeterminate)?;
@@ -287,14 +353,42 @@ impl DirectAdmissionLab {
     }
 }
 
-fn check_token(
+fn check_record(
     record: Option<DirectAdmission>,
-    token: uuid::Uuid,
+    expected: &DirectAdmission,
 ) -> Result<Option<DirectAdmission>, DirectAdmissionLabError> {
-    if record.as_ref().is_some_and(|r| r.attempt_token != token) {
+    if record
+        .as_ref()
+        .is_some_and(|r| !identical_admission(r, expected))
+    {
         return Err(DirectAdmissionLabError::Conflict);
     }
     Ok(record)
+}
+
+// V1009's installed guard reads the epoch row under a row lock. Acquire that
+// lock before any canonical row and recheck the earlier attested epoch. The
+// candidate relation-only laboratory keeps its existing separate entry.
+async fn prepare_v1009<'a>(
+    connection: &'a mut sqlx::PgConnection,
+    schema: &str,
+    schema_oid: u32,
+    bounds: TransactionBounds,
+) -> Result<super::super::PreparedPostgres<'a>, DarkIngressAuthorityError> {
+    let mut prepared = prepare_postgres(connection, schema, schema_oid, bounds).await?;
+    let locked: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT epoch FROM {}.ingress_protocol_epoch WHERE id = 1 FOR SHARE",
+        quote_identifier(schema)
+    ))
+    .fetch_optional(&mut *prepared.transaction)
+    .await
+    .map_err(super::super::postgres_error)?;
+    let locked =
+        super::super::supported_epoch(locked.ok_or(DarkIngressAuthorityError::MissingEpoch)?)?;
+    if locked != prepared.epoch {
+        return Err(DarkIngressAuthorityError::Database);
+    }
+    Ok(prepared)
 }
 
 fn identical_admission(a: &DirectAdmission, b: &DirectAdmission) -> bool {
@@ -424,6 +518,7 @@ async fn start_postgres(
     tx: &mut Transaction<'_, Postgres>,
     schema: &str,
     admission: &DirectAdmission,
+    lease: &SendLease,
     payload: &str,
     limits: DirectAdmissionLimits,
 ) -> Result<DirectAdmissionOutcome, DirectAdmissionLabError> {
@@ -447,8 +542,9 @@ async fn start_postgres(
         &intent_bytes,
         received_at,
     )?;
-    let attempt = sqlx::query(&format!("SELECT node_id, node_incarnation, lease_token, state, recovered, expires_at_ms > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint FROM {q}.ingress_send_attempts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 FOR UPDATE"))
+    let attempt = sqlx::query(&format!("SELECT 1 FROM {q}.ingress_send_attempts WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 FOR UPDATE"))
         .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).fetch_optional(&mut **tx).await.map_err(super::super::postgres_error)?;
+    attempt.ok_or(DirectAdmissionLabError::Rejected)?;
     sqlx::query(&format!(
         "SELECT id FROM {q}.direct_admission_lab_quota WHERE id = 1 FOR UPDATE"
     ))
@@ -473,28 +569,13 @@ async fn start_postgres(
     if blocked {
         return Err(DirectAdmissionLabError::Rejected);
     }
-    let attempt = attempt.ok_or(DirectAdmissionLabError::Rejected)?;
-    let node: String = attempt.try_get(0).map_err(bad)?;
-    let incarnation: String = attempt.try_get(1).map_err(bad)?;
-    let token: String = attempt.try_get(2).map_err(bad)?;
-    let state: i32 = attempt.try_get(3).map_err(bad)?;
-    let recovered: i32 = attempt.try_get(4).map_err(bad)?;
-    let fresh: bool = attempt.try_get(5).map_err(bad)?;
-    if node != admission.owner.node_id
-        || incarnation != admission.owner.node_epoch
-        || token != admission.attempt_token.to_string()
-        || state != 0
-        || recovered != 0
-        || !fresh
-    {
-        return Err(DirectAdmissionLabError::Rejected);
-    }
     let (rows, bytes): (i64, i64) = sqlx::query_as(&format!("SELECT COUNT(*), COALESCE(SUM(octet_length(payload)), 0)::bigint FROM {q}.direct_admission_lab"))
         .fetch_one(&mut **tx).await.map_err(super::super::postgres_error)?;
     capacity(rows, bytes, payload.len(), limits)?;
-    let changed = sqlx::query(&format!("UPDATE {q}.ingress_send_attempts SET state = 1, expires_at_ms = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + {STARTED_GRACE_MS} WHERE message_key = $1 AND kind = $2 AND semantic_identity_hash = $3 AND recipient = $4 AND node_id = $5 AND node_incarnation = $6 AND lease_token = $7 AND state = 0 AND recovered = 0 AND expires_at_ms > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint"))
-        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).bind(&admission.owner.node_id).bind(&admission.owner.node_epoch).bind(admission.attempt_token.to_string()).execute(&mut **tx).await.map_err(super::super::postgres_error)?.rows_affected();
-    if changed != 1 {
+    if !start_fresh_postgres(tx, &format!("{q}.ingress_send_attempts"), lease)
+        .await
+        .map_err(super::super::postgres_error)?
+    {
         return Err(DirectAdmissionLabError::Rejected);
     }
     sqlx::query(&format!("INSERT INTO {q}.direct_admission_lab (admission_id, message_key, receipt_kind, semantic_identity_hash, resource, attempt_token, node_id, node_incarnation, connection_generation, sm_session_id, payload, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"))
@@ -535,6 +616,7 @@ async fn lookup_sqlite(
 async fn start_sqlite(
     tx: &mut crate::db::Transaction<'_>,
     admission: &DirectAdmission,
+    lease: &SendLease,
     payload: &str,
     limits: DirectAdmissionLimits,
 ) -> Result<DirectAdmissionOutcome, DirectAdmissionLabError> {
@@ -571,8 +653,11 @@ async fn start_sqlite(
         &intent_bytes,
         received_at,
     )?;
-    let mut rows = tx.query("SELECT node_id, node_incarnation, lease_token, state, recovered, expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) FROM main.ingress_send_attempts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND recipient = ?", crate::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string()]).await.map_err(bad)?;
-    let attempt = rows.next().await.map_err(bad)?;
+    let mut rows = tx.query("SELECT 1 FROM main.ingress_send_attempts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND recipient = ?", crate::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string()]).await.map_err(bad)?;
+    rows.next()
+        .await
+        .map_err(bad)?
+        .ok_or(DirectAdmissionLabError::Rejected)?;
     drop(rows);
     let mut rows = tx
         .query(
@@ -603,22 +688,6 @@ async fn start_sqlite(
         return Err(DirectAdmissionLabError::Rejected);
     }
     drop(rows);
-    let attempt = attempt.ok_or(DirectAdmissionLabError::Rejected)?;
-    let node: String = attempt.get(0).map_err(bad)?;
-    let incarnation: String = attempt.get(1).map_err(bad)?;
-    let token: String = attempt.get(2).map_err(bad)?;
-    let state: i64 = attempt.get(3).map_err(bad)?;
-    let recovered: i64 = attempt.get(4).map_err(bad)?;
-    let fresh: bool = attempt.get(5).map_err(bad)?;
-    if node != admission.owner.node_id
-        || incarnation != admission.owner.node_epoch
-        || token != admission.attempt_token.to_string()
-        || state != 0
-        || recovered != 0
-        || !fresh
-    {
-        return Err(DirectAdmissionLabError::Rejected);
-    }
     let mut rows = tx.query("SELECT COUNT(*), COALESCE(SUM(length(CAST(payload AS BLOB))), 0) FROM main.direct_admission_lab", ()).await.map_err(bad)?;
     let row = rows
         .next()
@@ -632,8 +701,7 @@ async fn start_sqlite(
         limits,
     )?;
     drop(rows);
-    let changed = tx.execute(&format!("UPDATE main.ingress_send_attempts SET state = 1, expires_at_ms = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) + {STARTED_GRACE_MS} WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND recipient = ? AND node_id = ? AND node_incarnation = ? AND lease_token = ? AND state = 0 AND recovered = 0 AND expires_at_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"), crate::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string(), admission.owner.node_id.clone(), admission.owner.node_epoch.clone(), admission.attempt_token.to_string()]).await.map_err(bad)?;
-    if changed != 1 {
+    if !start_fresh_sqlite(tx, lease).await.map_err(bad)? {
         return Err(DirectAdmissionLabError::Rejected);
     }
     tx.execute("INSERT INTO main.direct_admission_lab (admission_id, message_key, receipt_kind, semantic_identity_hash, resource, attempt_token, node_id, node_incarnation, connection_generation, sm_session_id, payload, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", crate::db_params![pin.admission_id.to_string(), pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string(), admission.attempt_token.to_string(), admission.owner.node_id.clone(), admission.owner.node_epoch.clone(), admission.connection.generation.to_string(), admission.connection.sm_session.as_str().to_string(), payload.to_owned(), pin.received_at.to_rfc3339()]).await.map_err(bad)?;
