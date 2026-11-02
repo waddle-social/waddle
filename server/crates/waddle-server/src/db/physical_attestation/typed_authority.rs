@@ -19,6 +19,12 @@ use crate::db::{Database, DatabaseConfig, DatabaseDriver, DatabaseError};
 use crate::ingress::EffectReceiptKey;
 use crate::ingress_substrate::supported_protocol_epoch;
 
+#[cfg(feature = "test-support")]
+#[path = "retention_lab.rs"]
+mod retention_lab;
+#[cfg(feature = "test-support")]
+pub use retention_lab::{RetentionLab, RetentionLabBatch};
+
 /// Bounds on checkout and the first PostgreSQL relation-lock wait.
 #[derive(Debug, Clone, Copy)]
 pub struct TransactionBounds {

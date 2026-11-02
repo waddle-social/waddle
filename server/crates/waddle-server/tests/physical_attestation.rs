@@ -6163,3 +6163,7 @@ async fn attested_control_plane_registry_case(fixture: &Fixture) {
         recovered.failures()
     );
 }
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/retention.rs"]
+mod retention_lab_tests;
