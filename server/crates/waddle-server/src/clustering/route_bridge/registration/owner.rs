@@ -1,7 +1,7 @@
 use super::super::delivery::receiver::{current_claim, user_entity};
 use super::super::{
-    apply_remote_resource_presence_to_registry, apply_remote_resource_state, mpsc, Arc,
-    ConnectionEntry, Mutex, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
+    apply_remote_resource_presence_to_registry, apply_remote_resource_state, Arc, ConnectionEntry,
+    Mutex, OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices,
     RegisterUserResourceIfOwnerOrAbsent, RelayRegisterRemoteUserResource,
     RelayRemoteResourceRegistrationReply, RelayRemoteResourceRegistrationStatus,
     RelayRemoteResourceUnregisterReply, RelayRemoteResourceUnregisterStatus,
@@ -14,6 +14,9 @@ use super::owner_update::{
 };
 
 pub(in super::super) use super::owner_update::owner_remote_entry_if_current;
+
+#[cfg(test)]
+use super::super::mpsc;
 
 const REMOTE_RESOURCE_BUSY_UNREGISTER_ATTEMPTS: usize = 3;
 
