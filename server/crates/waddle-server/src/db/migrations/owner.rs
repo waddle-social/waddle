@@ -26,8 +26,10 @@ mod transition_lab;
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
 #[cfg(feature = "test-support")]
 pub use transition_lab::{
-    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
     DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
 };
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);

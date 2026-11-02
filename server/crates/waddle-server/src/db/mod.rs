@@ -35,8 +35,10 @@ pub use migrations::{
 };
 #[cfg(feature = "test-support")]
 pub use migrations::{
-    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
     DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
 };
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};

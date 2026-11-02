@@ -31,8 +31,10 @@ pub use owner::{
 };
 #[cfg(feature = "test-support")]
 pub use owner::{
-    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
     DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
 };
 pub use runner::MigrationRunner;
 pub use types::Migration;

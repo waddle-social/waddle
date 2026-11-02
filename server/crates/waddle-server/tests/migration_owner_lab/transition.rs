@@ -3,8 +3,10 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use waddle_server::db::{
-    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
     DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
 };
 
 const CANDIDATE: &str =
@@ -53,7 +55,7 @@ impl TransitionFixture {
             format!("CREATE SCHEMA {schema} AUTHORIZATION {owner}"),
             format!("GRANT USAGE ON SCHEMA {schema} TO {runtime}"),
             format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
-            format!("CREATE TABLE {schema}.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL)"),
+            format!("CREATE TABLE {schema}.waddle_epoch_transition_lab_marker (version TEXT PRIMARY KEY, checksum TEXT NOT NULL, attempt_id UUID NOT NULL)"),
             format!("ALTER TABLE {schema}.waddle_epoch_transition_lab_marker OWNER TO {owner}"),
         ] {
             sqlx::query(&statement).execute(&admin).await.expect("provision disposable fixture");
@@ -124,13 +126,31 @@ impl TransitionFixture {
         &self,
         fault: DisposableEpochTransitionFault,
     ) -> Result<(), DisposableEpochTransitionError> {
+        self.run_attempt(DisposableEpochTransitionAttempt::new(), fault)
+            .await
+    }
+
+    async fn run_attempt(
+        &self,
+        attempt: DisposableEpochTransitionAttempt,
+        fault: DisposableEpochTransitionFault,
+    ) -> Result<(), DisposableEpochTransitionError> {
         run_disposable_epoch_transition_lab(
             &self.migrator_options,
             &self.runtime_options,
             &self.config(),
+            attempt,
             fault,
         )
         .await
+    }
+
+    async fn observe(
+        &self,
+        attempt: DisposableEpochTransitionAttempt,
+    ) -> Result<DisposableEpochTransitionObservation, DisposableEpochTransitionError> {
+        observe_disposable_epoch_transition_lab(&self.migrator_options, &self.config(), attempt)
+            .await
     }
 
     async fn admin(&self, statement: &str) {
@@ -218,18 +238,26 @@ async fn transition_commits_exact_candidate_marker_and_select_only_acl_at_epoch_
     .expect_err("id-only epoch update refused");
     assert!(error.to_string().contains("must advance exactly one step"));
     drop(runtime);
+    let attempt = DisposableEpochTransitionAttempt::new();
     fixture
-        .run(DisposableEpochTransitionFault::None)
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
         .await
         .expect("commit laboratory transition");
+    assert_eq!(
+        fixture
+            .observe(attempt)
+            .await
+            .expect("observe exact receipt"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
     assert_eq!(fixture.state().await, (false, false, 1, 0));
     assert_eq!(
         fixture.ledger().await,
         before,
         "registered ledger remains unchanged"
     );
-    let marker: (String, String) = sqlx::query_as(&format!(
-        "SELECT version, checksum FROM {}.waddle_epoch_transition_lab_marker",
+    let marker: (String, String, uuid::Uuid) = sqlx::query_as(&format!(
+        "SELECT version, checksum, attempt_id FROM {}.waddle_epoch_transition_lab_marker",
         fixture.schema
     ))
     .fetch_one(&fixture.admin)
@@ -239,7 +267,8 @@ async fn transition_commits_exact_candidate_marker_and_select_only_acl_at_epoch_
         marker,
         (
             "relation-guard-lab-1".to_string(),
-            hex::encode(Sha256::digest(CANDIDATE.as_bytes()))
+            hex::encode(Sha256::digest(CANDIDATE.as_bytes())),
+            attempt.as_uuid()
         )
     );
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
@@ -301,9 +330,10 @@ async fn every_precommit_fault_rolls_back_candidate_acl_and_marker() {
         DisposableEpochTransitionFault::AfterRevoke,
         DisposableEpochTransitionFault::AfterMarker,
     ] {
+        let attempt = DisposableEpochTransitionAttempt::new();
         assert!(
             matches!(
-                fixture.run(fault).await,
+                fixture.run_attempt(attempt, fault).await,
                 Err(DisposableEpochTransitionError::Injected)
             ),
             "{fault:?}"
@@ -314,6 +344,13 @@ async fn every_precommit_fault_rolls_back_candidate_acl_and_marker() {
             "rollback after {fault:?}"
         );
         assert_eq!(fixture.ledger().await, ledger);
+        assert_eq!(
+            fixture
+                .observe(attempt)
+                .await
+                .expect("observe rolled-back attempt"),
+            DisposableEpochTransitionObservation::Unresolved
+        );
     }
     fixture.cleanup().await;
 }
@@ -343,6 +380,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
         &fixture.migrator_options,
         &fixture.runtime_options,
         &wrong,
+        DisposableEpochTransitionAttempt::new(),
         DisposableEpochTransitionFault::None
     )
     .await
@@ -369,6 +407,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
                 &fixture.migrator_options,
                 &fixture.runtime_options,
                 &wrong,
+                DisposableEpochTransitionAttempt::new(),
                 DisposableEpochTransitionFault::None
             )
             .await,
@@ -384,6 +423,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
             &wrong_current,
             &fixture.runtime_options,
             &fixture.config(),
+            DisposableEpochTransitionAttempt::new(),
             DisposableEpochTransitionFault::None
         )
         .await,
@@ -394,6 +434,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
             &fixture.runtime_options,
             &fixture.runtime_options,
             &fixture.config(),
+            DisposableEpochTransitionAttempt::new(),
             DisposableEpochTransitionFault::None
         )
         .await,
@@ -474,7 +515,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
                     .await
                     .expect("outsider write transaction");
                 for statement in [
-                    format!("INSERT INTO {}.waddle_epoch_transition_lab_marker VALUES ('forged', 'checksum')", fixture.schema),
+                    format!("INSERT INTO {}.waddle_epoch_transition_lab_marker VALUES ('forged', 'checksum', '00000000-0000-4000-8000-000000000001')", fixture.schema),
                     format!("UPDATE {}.waddle_epoch_transition_lab_marker SET checksum = 'modified'", fixture.schema),
                     format!("DELETE FROM {}.waddle_epoch_transition_lab_marker", fixture.schema),
                 ] {
@@ -771,7 +812,7 @@ async fn transition_acquires_advisory_and_epoch_locks_in_required_order() {
     let config = fixture.config();
     tokio::task::LocalSet::new().run_until(async {
         let operation = tokio::task::spawn_local(async move {
-            run_disposable_epoch_transition_lab(&migrator, &runtime, &config, DisposableEpochTransitionFault::None).await
+            run_disposable_epoch_transition_lab(&migrator, &runtime, &config, DisposableEpochTransitionAttempt::new(), DisposableEpochTransitionFault::None).await
         });
         let pid = wait_for_application(&fixture.admin, &application, migration_pid).await;
         let mut probe = fixture.admin.begin().await.expect("lineage probe");
@@ -839,11 +880,12 @@ struct CommitProxy {
 }
 
 #[cfg(unix)]
-async fn relay_until_commit<S>(
+async fn relay_until_response<S>(
     client: tokio::net::TcpStream,
     upstream: S,
     committed: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
+    command_tag: &'static [u8],
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -860,7 +902,7 @@ where
         let length = u32::from_be_bytes(header[1..5].try_into().expect("message length")) as usize;
         let mut payload = vec![0; length - 4];
         server_read.read_exact(&mut payload).await?;
-        if header[0] == b'C' && payload == b"COMMIT\0" {
+        if header[0] == b'C' && payload == command_tag {
             let _ = committed.send(());
             let _ = release.await;
             break;
@@ -873,7 +915,7 @@ where
 }
 
 #[cfg(unix)]
-async fn commit_proxy(fixture: &TransitionFixture) -> CommitProxy {
+async fn response_proxy(fixture: &TransitionFixture, command_tag: &'static [u8]) -> CommitProxy {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("proxy listener");
@@ -888,10 +930,10 @@ async fn commit_proxy(fixture: &TransitionFixture) -> CommitProxy {
         if let Some(socket) = socket {
             let upstream =
                 tokio::net::UnixStream::connect(socket.join(format!(".s.PGSQL.{port}"))).await?;
-            relay_until_commit(client, upstream, committed_tx, release_rx).await
+            relay_until_response(client, upstream, committed_tx, release_rx, command_tag).await
         } else {
             let upstream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-            relay_until_commit(client, upstream, committed_tx, release_rx).await
+            relay_until_response(client, upstream, committed_tx, release_rx, command_tag).await
         }
     });
     let options = PgConnectOptions::new()
@@ -910,6 +952,11 @@ async fn commit_proxy(fixture: &TransitionFixture) -> CommitProxy {
 }
 
 #[cfg(unix)]
+async fn commit_proxy(fixture: &TransitionFixture) -> CommitProxy {
+    response_proxy(fixture, b"COMMIT\0").await
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn real_lost_commit_response_is_unknown_without_replay() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
@@ -923,6 +970,7 @@ async fn real_lost_commit_response_is_unknown_without_replay() {
         release,
         task: proxy,
     } = commit_proxy(&fixture).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
     let runtime = fixture.runtime_options.clone();
     let config = fixture.config();
     tokio::task::LocalSet::new()
@@ -932,6 +980,7 @@ async fn real_lost_commit_response_is_unknown_without_replay() {
                     &options,
                     &runtime,
                     &config,
+                    attempt,
                     DisposableEpochTransitionFault::None,
                 )
                 .await
@@ -961,6 +1010,13 @@ async fn real_lost_commit_response_is_unknown_without_replay() {
         .expect("proxy ends")
         .expect("proxy task")
         .expect("proxy connection");
+    assert_eq!(
+        fixture
+            .observe(attempt)
+            .await
+            .expect("read back retained attempt"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
     assert_eq!(fixture.ledger().await, ledger);
     assert!(matches!(
         fixture.run(DisposableEpochTransitionFault::None).await,
@@ -983,6 +1039,7 @@ async fn cancellation_while_commit_response_is_withheld_requires_reconciliation(
         release,
         task: proxy,
     } = commit_proxy(&fixture).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
     let runtime = fixture.runtime_options.clone();
     let config = fixture.config();
     tokio::task::LocalSet::new()
@@ -992,6 +1049,7 @@ async fn cancellation_while_commit_response_is_withheld_requires_reconciliation(
                     &options,
                     &runtime,
                     &config,
+                    attempt,
                     DisposableEpochTransitionFault::None,
                 )
                 .await
@@ -1017,6 +1075,671 @@ async fn cancellation_while_commit_response_is_withheld_requires_reconciliation(
         fixture.state().await,
         (false, false, 1, 0),
         "independent observation requires reconciliation after cancellation"
+    );
+    assert_eq!(
+        fixture
+            .observe(attempt)
+            .await
+            .expect("read back retained attempt"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    assert_eq!(fixture.ledger().await, ledger);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn observation_refuses_mismatch_wrong_identity_and_changed_catalog() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = TransitionFixture::new(&url).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    assert_eq!(
+        fixture.observe(attempt).await.expect("absent receipt"),
+        DisposableEpochTransitionObservation::Unresolved
+    );
+    fixture
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
+        .await
+        .expect("commit");
+    let ledger = fixture.ledger().await;
+    assert_eq!(
+        fixture
+            .observe(DisposableEpochTransitionAttempt::new())
+            .await
+            .expect("different attempt"),
+        DisposableEpochTransitionObservation::Unresolved
+    );
+
+    let checksum = hex::encode(Sha256::digest(CANDIDATE.as_bytes()));
+    for (column, wrong, correct) in [
+        (
+            "version",
+            "'wrong-version'".to_owned(),
+            "'relation-guard-lab-1'".to_owned(),
+        ),
+        (
+            "checksum",
+            "'wrong-checksum'".to_owned(),
+            format!("'{checksum}'"),
+        ),
+        (
+            "attempt_id",
+            format!("'{}'", uuid::Uuid::new_v4()),
+            format!("'{}'", attempt.as_uuid()),
+        ),
+    ] {
+        fixture
+            .admin(&format!(
+                "UPDATE {}.waddle_epoch_transition_lab_marker SET {column} = {wrong}",
+                fixture.schema
+            ))
+            .await;
+        assert_eq!(
+            fixture.observe(attempt).await.expect("mismatched receipt"),
+            DisposableEpochTransitionObservation::Unresolved,
+            "{column}"
+        );
+        fixture
+            .admin(&format!(
+                "UPDATE {}.waddle_epoch_transition_lab_marker SET {column} = {correct}",
+                fixture.schema
+            ))
+            .await;
+    }
+    let mut wrong_schema = fixture.lineage.clone();
+    wrong_schema
+        .postgres_identity
+        .as_mut()
+        .expect("identity")
+        .schema
+        .oid += 1;
+    let mut wrong_database = fixture.lineage.clone();
+    wrong_database
+        .postgres_identity
+        .as_mut()
+        .expect("identity")
+        .database
+        .oid += 1;
+    let mut wrong_system = fixture.lineage.clone();
+    wrong_system
+        .postgres_identity
+        .as_mut()
+        .expect("identity")
+        .system_identifier
+        .0 ^= 1;
+    let mut wrong_lineage = fixture.lineage.clone();
+    wrong_lineage.lineage_uuid.0 = uuid::Uuid::new_v4();
+    for expected in [wrong_schema, wrong_database, wrong_system, wrong_lineage] {
+        let config = DisposableEpochTransitionConfig::new(
+            expected,
+            PgRoleName::new(&fixture.migrator).expect("migrator"),
+            PgRoleName::new(&fixture.owner).expect("owner"),
+            PgRoleName::new(&fixture.runtime).expect("runtime"),
+        )
+        .expect("config");
+        assert!(
+            observe_disposable_epoch_transition_lab(&fixture.migrator_options, &config, attempt)
+                .await
+                .is_err(),
+            "wrong identity accepted"
+        );
+    }
+    assert!(observe_disposable_epoch_transition_lab(
+        &fixture.runtime_options,
+        &fixture.config(),
+        attempt
+    )
+    .await
+    .is_err());
+    let owner_at_login = fixture
+        .migrator_options
+        .clone()
+        .options([("role", fixture.owner.as_str())]);
+    assert!(
+        observe_disposable_epoch_transition_lab(&owner_at_login, &fixture.config(), attempt)
+            .await
+            .is_err()
+    );
+
+    for (change, restore) in [
+        (format!("GRANT SELECT ON {}.waddle_epoch_transition_lab_marker TO {}", fixture.schema, fixture.runtime), format!("REVOKE SELECT ON {}.waddle_epoch_transition_lab_marker FROM {}", fixture.schema, fixture.runtime)),
+        (format!("ALTER TABLE {}.waddle_epoch_transition_lab_marker OWNER TO CURRENT_USER", fixture.schema), format!("ALTER TABLE {}.waddle_epoch_transition_lab_marker OWNER TO {}", fixture.schema, fixture.owner)),
+        (format!("GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}", fixture.schema, fixture.runtime), format!("REVOKE UPDATE (id) ON {}.ingress_protocol_epoch FROM {}", fixture.schema, fixture.runtime)),
+        (format!("ALTER TABLE {}.ingress_messages DISABLE TRIGGER ingress_messages_epoch_guard_dml", fixture.schema), format!("ALTER TABLE {}.ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml", fixture.schema)),
+        (format!("CREATE INDEX lab_marker_extra_observation ON {}.waddle_epoch_transition_lab_marker (checksum)", fixture.schema), format!("DROP INDEX {}.lab_marker_extra_observation", fixture.schema)),
+    ] {
+        fixture.admin(&change).await;
+        assert!(fixture.observe(attempt).await.is_err(), "accepted {change}");
+        fixture.admin(&restore).await;
+    }
+    fixture.admin(&format!("CREATE OR REPLACE FUNCTION {}.waddle_ingress_epoch_guard() RETURNS trigger LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog AS $$ BEGIN RETURN NULL; END $$", fixture.schema)).await;
+    assert!(
+        fixture.observe(attempt).await.is_err(),
+        "changed guard body accepted"
+    );
+    let mut restore = fixture
+        .admin
+        .begin()
+        .await
+        .expect("guard restore transaction");
+    sqlx::query(&format!(
+        "SET LOCAL search_path = {}, pg_temp",
+        fixture.schema
+    ))
+    .execute(&mut *restore)
+    .await
+    .expect("restore path");
+    sqlx::raw_sql(CANDIDATE)
+        .execute(&mut *restore)
+        .await
+        .expect("restore guard candidate");
+    restore.commit().await.expect("commit guard restore");
+    fixture
+        .admin(&format!(
+            "UPDATE {}._migrations SET checksum = 'wrong' WHERE version = 1009",
+            fixture.schema
+        ))
+        .await;
+    assert!(
+        fixture.observe(attempt).await.is_err(),
+        "changed ledger accepted"
+    );
+    fixture
+        .admin(&format!(
+            "UPDATE {}._migrations SET checksum = '{}' WHERE version = 1009",
+            fixture.schema,
+            ledger.iter().find(|(v, _)| *v == 1009).expect("V1009").1
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "ALTER TABLE {}.ingress_protocol_epoch DISABLE TRIGGER ingress_protocol_epoch_guard_row",
+            fixture.schema
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "UPDATE {}.ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = '{}' WHERE id = 1",
+            fixture.schema, fixture.lineage.lineage_uuid.0
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "ALTER TABLE {}.ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row",
+            fixture.schema
+        ))
+        .await;
+    assert!(
+        fixture.observe(attempt).await.is_err(),
+        "nonzero epoch accepted"
+    );
+    fixture
+        .admin(&format!(
+            "ALTER TABLE {}.ingress_protocol_epoch DISABLE TRIGGER ingress_protocol_epoch_guard_row",
+            fixture.schema
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "UPDATE {}.ingress_protocol_epoch SET epoch = 0, activated_at = NULL, lineage_uuid = NULL WHERE id = 1",
+            fixture.schema
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "ALTER TABLE {}.ingress_protocol_epoch ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row",
+            fixture.schema
+        ))
+        .await;
+    assert_eq!(
+        fixture
+            .observe(attempt)
+            .await
+            .expect("restored exact state"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    assert_eq!(fixture.ledger().await, ledger);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn observation_requires_byte_exact_receipt_with_hostile_collation() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = TransitionFixture::new(&url).await;
+    let available: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_collation WHERE collprovider = 'i')",
+    )
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("detect ICU support");
+    assert!(
+        available,
+        "the required hostile-collation test needs ICU support"
+    );
+    fixture
+        .admin(&format!(
+            "CREATE COLLATION {}.lab_case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false)",
+            fixture.schema
+        ))
+        .await;
+    fixture
+        .admin(&format!(
+            "ALTER TABLE {}.waddle_epoch_transition_lab_marker \
+             ALTER COLUMN version TYPE text COLLATE {}.lab_case_insensitive, \
+             ALTER COLUMN checksum TYPE text COLLATE {}.lab_case_insensitive",
+            fixture.schema, fixture.schema, fixture.schema
+        ))
+        .await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    fixture
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
+        .await
+        .expect("transition commits exact receipt under hostile collation");
+    assert_eq!(
+        fixture.observe(attempt).await.expect("exact receipt"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    for column in ["version", "checksum"] {
+        fixture
+            .admin(&format!(
+                "UPDATE {}.waddle_epoch_transition_lab_marker SET {column} = pg_catalog.upper({column})",
+                fixture.schema
+            ))
+            .await;
+        let checksum = hex::encode(Sha256::digest(CANDIDATE.as_bytes()));
+        let (case_equal, byte_different): (bool, bool) = sqlx::query_as(&format!(
+            "SELECT {column} = $1, pg_catalog.convert_to({column}, 'UTF8') <> pg_catalog.convert_to($1, 'UTF8') \
+             FROM {}.waddle_epoch_transition_lab_marker", fixture.schema
+        ))
+        .bind(if column == "version" { "relation-guard-lab-1" } else { &checksum })
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("prove case-insensitive equality hides a byte difference");
+        assert!(
+            case_equal && byte_different,
+            "fixture must reproduce hostile {column} equality"
+        );
+        assert_eq!(
+            fixture.observe(attempt).await.expect("changed receipt"),
+            DisposableEpochTransitionObservation::Unresolved,
+            "changed {column} must not match the exact receipt"
+        );
+        fixture
+            .admin(&format!(
+                "UPDATE {}.waddle_epoch_transition_lab_marker SET {column} = pg_catalog.lower({column})",
+                fixture.schema
+            ))
+            .await;
+    }
+    assert_eq!(
+        fixture.observe(attempt).await.expect("restored receipt"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    println!("ICU_HOSTILE_COLLATION_EXECUTED");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn observation_uses_fresh_session_with_hostile_search_path_and_temp() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = TransitionFixture::new(&url).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    fixture
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
+        .await
+        .expect("commit");
+    fixture
+        .admin(&format!(
+            "GRANT TEMP ON DATABASE {} TO {}",
+            fixture.database, fixture.migrator
+        ))
+        .await;
+    let mut hostile = PgConnection::connect_with(&fixture.migrator_options)
+        .await
+        .expect("hostile session");
+    sqlx::query("CREATE TEMP TABLE waddle_epoch_transition_lab_marker (version TEXT, checksum TEXT, attempt_id UUID)").execute(&mut hostile).await.expect("TEMP marker shadow");
+    sqlx::query("CREATE TEMP TABLE _lineage (id INT)")
+        .execute(&mut hostile)
+        .await
+        .expect("TEMP lineage shadow");
+    assert!(
+        fixture.observe(attempt).await.is_err(),
+        "TEMP privilege is unsafe"
+    );
+    fixture
+        .admin(&format!(
+            "REVOKE TEMP ON DATABASE {} FROM {}",
+            fixture.database, fixture.migrator
+        ))
+        .await;
+    let options = fixture
+        .migrator_options
+        .clone()
+        .options([("search_path", "pg_temp,public")]);
+    assert_eq!(
+        observe_disposable_epoch_transition_lab(&options, &fixture.config(), attempt)
+            .await
+            .expect("fresh qualified observation"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    let shadows: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_class WHERE relnamespace = pg_catalog.pg_my_temp_schema() AND relname IN ('waddle_epoch_transition_lab_marker', '_lineage')").fetch_one(&mut hostile).await.expect("old shadows still present");
+    assert_eq!(shadows, 2);
+    drop(hostile);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn observation_lock_timeout_remains_unresolved_until_late_commit() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = TransitionFixture::new(&url).await;
+    let ledger = fixture.ledger().await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    let mut marker_holder = fixture.admin.begin().await.expect("barrier transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.waddle_epoch_transition_lab_marker IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    ))
+    .execute(&mut *marker_holder)
+    .await
+    .expect("block transition before receipt");
+    let marker_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *marker_holder)
+        .await
+        .expect("barrier PID");
+    let application = format!("transition-late-{}", uuid::Uuid::new_v4().simple());
+    let migrator = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
+    let runtime = fixture.runtime_options.clone();
+    let config = fixture.config();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let operation = tokio::task::spawn_local(async move {
+                run_disposable_epoch_transition_lab(
+                    &migrator,
+                    &runtime,
+                    &config,
+                    attempt,
+                    DisposableEpochTransitionFault::None,
+                )
+                .await
+            });
+            wait_for_application(&fixture.admin, &application, marker_pid).await;
+            let observer_name = format!(
+                "transition-observer-timeout-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let options = fixture
+                .migrator_options
+                .clone()
+                .application_name(&observer_name)
+                .options([("lock_timeout", "100ms")]);
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                observe_disposable_epoch_transition_lab(&options, &fixture.config(), attempt),
+            )
+            .await
+            .expect("bounded observation");
+            assert!(
+                result.is_err(),
+                "a still-pending attempt must not become a positive observation"
+            );
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+            )
+            .bind(&observer_name)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observer backend count");
+            assert_eq!(active, 0, "timed out observer does not leak a session");
+            // The barrier keeps the transition pending; observing must not initiate a replay.
+            marker_holder.rollback().await.expect("allow late commit");
+            operation
+                .await
+                .expect("transition task")
+                .expect("late commit");
+        })
+        .await;
+    assert_eq!(
+        fixture.observe(attempt).await.expect("later observation"),
+        DisposableEpochTransitionObservation::ObservedCommitted
+    );
+    assert_eq!(fixture.ledger().await, ledger);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn observation_acquires_locks_before_catalog_reads_in_required_order() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    const LINEAGE_LOCK: i64 = 6_841_445_497_037_937_993;
+    const MIGRATION_LOCK: i64 = 6_841_445_497_037_937_992;
+    let fixture = TransitionFixture::new(&url).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    fixture
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
+        .await
+        .expect("commit");
+    let mut migration_holder = fixture.admin.begin().await.expect("migration holder");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *migration_holder)
+        .await
+        .expect("hold migration lock");
+    let migration_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *migration_holder)
+        .await
+        .expect("PID");
+    let mut epoch_holder = fixture.admin.begin().await.expect("epoch holder");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    ))
+    .execute(&mut *epoch_holder)
+    .await
+    .expect("hold epoch");
+    let epoch_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *epoch_holder)
+        .await
+        .expect("PID");
+    let mut marker_holder = fixture.admin.begin().await.expect("marker holder");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.waddle_epoch_transition_lab_marker IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    ))
+    .execute(&mut *marker_holder)
+    .await
+    .expect("hold marker");
+    let marker_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *marker_holder)
+        .await
+        .expect("PID");
+    let application = format!("observation-locks-{}", uuid::Uuid::new_v4().simple());
+    let options = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
+    let config = fixture.config();
+    tokio::task::LocalSet::new().run_until(async {
+        let observer = tokio::task::spawn_local(async move { observe_disposable_epoch_transition_lab(&options, &config, attempt).await });
+        let pid = wait_for_application(&fixture.admin, &application, migration_pid).await;
+        let mut probe = fixture.admin.begin().await.expect("probe");
+        let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)").bind(LINEAGE_LOCK).fetch_one(&mut *probe).await.expect("probe lineage");
+        assert!(!acquired);
+        probe.rollback().await.expect("release probe");
+        migration_holder.rollback().await.expect("release migration");
+        assert_eq!(wait_for_application(&fixture.admin, &application, epoch_pid).await, pid);
+        let mut probe = fixture.admin.begin().await.expect("probe");
+        let acquired: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)").bind(MIGRATION_LOCK).fetch_one(&mut *probe).await.expect("probe migration");
+        assert!(!acquired);
+        probe.rollback().await.expect("release probe");
+        epoch_holder.rollback().await.expect("release epoch");
+        assert_eq!(wait_for_application(&fixture.admin, &application, marker_pid).await, pid);
+        let share: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = $1 AND relation = pg_catalog.to_regclass($2) AND mode = 'AccessShareLock' AND granted)").bind(pid).bind(format!("{}.ingress_protocol_epoch", fixture.schema)).fetch_one(&fixture.admin).await.expect("held epoch AS");
+        assert!(share, "epoch AS precedes marker/catalog observation");
+        marker_holder.rollback().await.expect("release marker");
+        assert_eq!(observer.await.expect("observer task").expect("observation"), DisposableEpochTransitionObservation::ObservedCommitted);
+    }).await;
+    fixture.cleanup().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn observation_server_idle_timeouts_release_abandoned_backend() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    const LINEAGE_LOCK: i64 = 6_841_445_497_037_937_993;
+    const MIGRATION_LOCK: i64 = 6_841_445_497_037_937_992;
+    let fixture = TransitionFixture::new(&url).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    fixture
+        .run_attempt(attempt, DisposableEpochTransitionFault::None)
+        .await
+        .expect("commit receipt");
+    for (command_tag, state) in [
+        (b"LOCK TABLE\0".as_slice(), "idle in transaction"),
+        (b"ROLLBACK\0".as_slice(), "idle"),
+    ] {
+        for (configured, deadline) in [
+            ("0", Duration::from_secs(15)),
+            ("2s", Duration::from_secs(5)),
+        ] {
+            let CommitProxy {
+                options,
+                committed: withheld,
+                release,
+                task: proxy,
+            } = response_proxy(&fixture, command_tag).await;
+            let application = format!("observation-idle-{}", uuid::Uuid::new_v4().simple());
+            let options = options.application_name(&application).options([
+                ("idle_in_transaction_session_timeout", configured),
+                ("idle_session_timeout", configured),
+            ]);
+            let config = fixture.config();
+            tokio::task::LocalSet::new().run_until(async {
+                let observer = tokio::task::spawn_local(async move {
+                    observe_disposable_epoch_transition_lab(&options, &config, attempt).await
+                });
+                tokio::time::timeout(Duration::from_secs(5), withheld).await.expect("server response withheld").expect("proxy active");
+                let pid = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND state = $2")
+                            .bind(&application).bind(state).fetch_optional(&fixture.admin).await.expect("find idle backend");
+                        if let Some(pid) = pid { break pid; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("backend reached expected idle state");
+                if state == "idle in transaction" {
+                    let share: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE pid = $1 AND relation = pg_catalog.to_regclass($2) AND mode = 'AccessShareLock' AND granted)")
+                        .bind(pid).bind(format!("{}.ingress_protocol_epoch", fixture.schema)).fetch_one(&fixture.admin).await.expect("epoch AS held");
+                    assert!(share);
+                    let mut probe = fixture.admin.begin().await.expect("lock probe");
+                    for key in [LINEAGE_LOCK, MIGRATION_LOCK] {
+                        let available: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)").bind(key).fetch_one(&mut *probe).await.expect("probe held advisory lock");
+                        assert!(!available);
+                    }
+                    probe.rollback().await.expect("release probe");
+                }
+                tokio::time::timeout(deadline, async {
+                    loop {
+                        let alive: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)")
+                            .bind(pid).fetch_one(&fixture.admin).await.expect("inspect backend");
+                        if !alive { break; }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("server idle timeout removed backend");
+                let mut probe = fixture.admin.begin().await.expect("released-lock probe");
+                for key in [LINEAGE_LOCK, MIGRATION_LOCK] {
+                    let available: bool = sqlx::query_scalar("SELECT pg_catalog.pg_try_advisory_xact_lock($1)").bind(key).fetch_one(&mut *probe).await.expect("probe released advisory lock");
+                    assert!(available, "abandoned backend kept advisory lock");
+                }
+                sqlx::query("SET LOCAL lock_timeout = '200ms'").execute(&mut *probe).await.expect("bounded lock probe");
+                sqlx::query(&format!("LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE", fixture.schema)).execute(&mut *probe).await.expect("abandoned backend released epoch lock");
+                probe.rollback().await.expect("release probe");
+                release.send(()).expect("release proxy");
+                assert!(tokio::time::timeout(Duration::from_secs(5), observer).await.expect("observer ends").expect("observer task").is_err(), "interrupted observation cannot succeed");
+            }).await;
+            tokio::time::timeout(Duration::from_secs(5), proxy)
+                .await
+                .expect("proxy ends")
+                .expect("proxy task")
+                .expect("proxy connection");
+            assert_eq!(
+                fixture.observe(attempt).await.expect("fresh observation"),
+                DisposableEpochTransitionObservation::ObservedCommitted
+            );
+        }
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn transition_runtime_idle_timeout_fails_closed() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = TransitionFixture::new(&url).await;
+    let attempt = DisposableEpochTransitionAttempt::new();
+    let ledger = fixture.ledger().await;
+    let mut barrier = fixture.admin.begin().await.expect("marker barrier");
+    sqlx::query(&format!(
+        "LOCK TABLE ONLY {}.waddle_epoch_transition_lab_marker IN ACCESS EXCLUSIVE MODE",
+        fixture.schema
+    ))
+    .execute(&mut *barrier)
+    .await
+    .expect("block before candidate write");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .expect("barrier PID");
+    let application = format!("runtime-idle-transition-{}", uuid::Uuid::new_v4().simple());
+    let migrator = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
+    let runtime = fixture.runtime_options.clone().options([
+        ("idle_in_transaction_session_timeout", "1500ms"),
+        ("idle_session_timeout", "1500ms"),
+    ]);
+    let config = fixture.config();
+    tokio::task::LocalSet::new().run_until(async {
+        let transition = tokio::task::spawn_local(async move {
+            run_disposable_epoch_transition_lab(&migrator, &runtime, &config, attempt, DisposableEpochTransitionFault::None).await
+        });
+        let runtime_pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_catalog.pg_stat_activity WHERE usename = $1 AND application_name LIKE 'waddle-transition-lab-%' AND state = 'idle in transaction'")
+                    .bind(&fixture.runtime).fetch_optional(&fixture.admin).await.expect("find pinned runtime");
+                if let Some(pid) = pid { break pid; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("runtime pinned");
+        wait_for_application(&fixture.admin, &application, blocker_pid).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let alive: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)").bind(runtime_pid).fetch_one(&fixture.admin).await.expect("inspect runtime backend");
+                if !alive { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("server timeout removes idle runtime backend");
+        barrier.rollback().await.expect("release barrier");
+        assert!(tokio::time::timeout(Duration::from_secs(5), transition).await.expect("transition ends").expect("transition task").is_err(), "lost runtime cannot commit");
+    }).await;
+    assert_eq!(fixture.state().await, (true, true, 0, 0));
+    assert_eq!(
+        fixture.observe(attempt).await.expect("uncommitted attempt"),
+        DisposableEpochTransitionObservation::Unresolved
     );
     assert_eq!(fixture.ledger().await, ledger);
     fixture.cleanup().await;

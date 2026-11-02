@@ -26,6 +26,35 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 const MARKER_VERSION: &str = "relation-guard-lab-1";
 const MARKER_TABLE: &str = "waddle_epoch_transition_lab_marker";
+const IDLE_TIMEOUT_LIMIT_MS: i64 = 10_000;
+
+/// Caller-owned identity for one transition attempt. Allocate and retain it
+/// before starting the cancellable operation; never reuse it for another attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DisposableEpochTransitionAttempt(uuid::Uuid);
+
+impl DisposableEpochTransitionAttempt {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for DisposableEpochTransitionAttempt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A dark observation, never an authorization to replay, roll back, or activate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisposableEpochTransitionObservation {
+    ObservedCommitted,
+    Unresolved,
+}
 
 /// Inputs for the disposable three-role test experiment.
 #[derive(Clone, Debug)]
@@ -73,7 +102,7 @@ pub enum DisposableEpochTransitionError {
     Marker,
     #[error("disposable epoch transition injected a pre-commit fault")]
     Injected,
-    #[error("disposable epoch transition connection or setup timed out before commit")]
+    #[error("disposable epoch transition or observation timed out")]
     SetupTimeout,
     #[error("disposable epoch transition commit outcome is unknown; do not replay without reconciliation")]
     CommitUnknown,
@@ -86,23 +115,25 @@ pub enum DisposableEpochTransitionError {
 }
 
 /// Atomically replace the two laboratory guards, revoke runtime UPDATE(id),
-/// and record the candidate identifier/checksum in a pre-provisioned lab table.
+/// and record the attempt and candidate identifier/checksum in a pre-provisioned lab table.
 ///
 /// Only fixture names beginning with `migration_transition_lab_` are accepted.
 /// `_migrations` and the protocol epoch remain unchanged. A success is a
 /// received COMMIT acknowledgement, not deployment or writer admission.
-/// An error or cancellation after COMMIT dispatch is indeterminate; never retry
-/// without fencing and independently reconciling the target. The fault enum is
-/// intentionally closed and compiled only with the `test-support` feature.
+/// The caller must allocate and retain `attempt` before calling this cancellable
+/// operation. An error or cancellation after COMMIT dispatch is indeterminate;
+/// never retry without fencing and independently reconciling the target. The
+/// fault enum is intentionally closed and compiled only with the `test-support` feature.
 pub async fn run_disposable_epoch_transition_lab(
     migrator_options: &PgConnectOptions,
     runtime_options: &PgConnectOptions,
     config: &DisposableEpochTransitionConfig,
+    attempt: DisposableEpochTransitionAttempt,
     fault: DisposableEpochTransitionFault,
 ) -> Result<(), DisposableEpochTransitionError> {
     match tokio::time::timeout(
         OPERATION_DEADLINE,
-        run_with_connections(migrator_options, runtime_options, config, fault),
+        run_with_connections(migrator_options, runtime_options, config, attempt, fault),
     )
     .await
     {
@@ -115,51 +146,25 @@ async fn run_with_connections(
     migrator_options: &PgConnectOptions,
     runtime_options: &PgConnectOptions,
     config: &DisposableEpochTransitionConfig,
+    attempt: DisposableEpochTransitionAttempt,
     fault: DisposableEpochTransitionFault,
 ) -> Result<(), DisposableEpochTransitionError> {
-    let expected = config
-        .owner
-        .expected
-        .postgres_identity
-        .as_ref()
-        .ok_or(DisposableEpochTransitionError::Identity)?;
-    if migrator_options.get_username() != config.migrator.as_str()
-        || runtime_options.get_username() != config.owner.runtime.as_str()
-        || !expected
-            .database
-            .name
-            .0
-            .starts_with("migration_transition_lab_")
-        || !expected
-            .schema
-            .name
-            .0
-            .starts_with("migration_transition_lab_")
-        || !config
-            .migrator
-            .as_str()
-            .starts_with("migration_transition_lab_")
-        || !config
-            .owner
-            .owner
-            .as_str()
-            .starts_with("migration_transition_lab_")
-        || !config
-            .owner
-            .runtime
-            .as_str()
-            .starts_with("migration_transition_lab_")
-    {
+    check_fixture_options(migrator_options, config)?;
+    if runtime_options.get_username() != config.owner.runtime.as_str() {
         return Err(DisposableEpochTransitionError::Roles);
     }
 
     let nonce = format!("waddle-transition-lab-{}", uuid::Uuid::new_v4().simple());
+
     let mut runtime = tokio::time::timeout(
         CONNECT_DEADLINE,
         PgConnection::connect_with(&runtime_options.clone().application_name(&nonce)),
     )
     .await
     .map_err(|_| DisposableEpochTransitionError::SetupTimeout)??;
+    tokio::time::timeout(CONNECT_DEADLINE, bound_backend_idle_timeouts(&mut runtime))
+        .await
+        .map_err(|_| DisposableEpochTransitionError::SetupTimeout)??;
     let mut runtime_tx = tokio::time::timeout(CONNECT_DEADLINE, runtime.begin())
         .await
         .map_err(|_| DisposableEpochTransitionError::SetupTimeout)??;
@@ -178,14 +183,13 @@ async fn run_with_connections(
 
     let pool = tokio::time::timeout(
         CONNECT_DEADLINE,
-        PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(migrator_options.clone()),
+        bounded_migrator_pool_options().connect_with(migrator_options.clone()),
     )
     .await
     .map_err(|_| DisposableEpochTransitionError::SetupTimeout)??;
     let db = Database::from_postgres_pool("disposable owner transition lab", pool.clone());
-    let result = run_in_transaction(&db, &mut runtime_tx, config, pid, &nonce, fault).await;
+    let result =
+        run_in_transaction(&db, &mut runtime_tx, config, pid, &nonce, attempt, fault).await;
     drop(db);
     let _ = tokio::time::timeout(CONNECT_DEADLINE, pool.close()).await;
     let _ = tokio::time::timeout(CONNECT_DEADLINE, runtime_tx.rollback()).await;
@@ -199,6 +203,7 @@ async fn run_in_transaction(
     config: &DisposableEpochTransitionConfig,
     runtime_pid_before: i32,
     nonce: &str,
+    attempt: DisposableEpochTransitionAttempt,
     fault: DisposableEpochTransitionFault,
 ) -> Result<(), DisposableEpochTransitionError> {
     let expected = config
@@ -255,7 +260,9 @@ async fn run_in_transaction(
         (),
     )
     .await?;
-    check_marker(&mut tx, config, schema, &quoted).await?;
+    lock_marker(&mut tx, &quoted).await?;
+    check_marker_shape(&mut tx, config, schema).await?;
+    check_marker_empty(&mut tx, &quoted).await?;
     if inspect_catalog_in_transaction(&mut tx, &config.owner, schema, &quoted).await?
         != DarkEpochAclStage::V1009EpochZero
     {
@@ -271,8 +278,8 @@ async fn run_in_transaction(
     inject(fault, DisposableEpochTransitionFault::AfterRevoke)?;
     let checksum = hex::encode(Sha256::digest(RELATION_GUARD_CANDIDATE.as_bytes()));
     tx.execute(
-        &format!("INSERT INTO {quoted}.{MARKER_TABLE} (version, checksum) VALUES (?, ?)"),
-        crate::db_params![MARKER_VERSION, checksum.clone()],
+        &format!("INSERT INTO {quoted}.{MARKER_TABLE} (version, checksum, attempt_id) VALUES (?, ?, ?::pg_catalog.uuid)"),
+        crate::db_params![MARKER_VERSION, checksum.clone(), attempt.0.to_string()],
     )
     .await?;
     inject(fault, DisposableEpochTransitionFault::AfterMarker)?;
@@ -281,7 +288,9 @@ async fn run_in_transaction(
     {
         return Err(DisposableEpochTransitionError::UnexpectedStage);
     }
-    verify_marker(&mut tx, &quoted, &checksum).await?;
+    if !marker_matches(&mut tx, &quoted, &checksum, attempt).await? {
+        return Err(DisposableEpochTransitionError::Marker);
+    }
     if runtime_pid(runtime_tx, &config.owner, nonce).await? != runtime_pid_before {
         return Err(DarkMigrationOwnerError::RuntimeSessionUnverified.into());
     }
@@ -293,6 +302,156 @@ async fn run_in_transaction(
     }
 }
 
+/// Read back one attempt on a fresh migrator LOGIN, assuming the NOLOGIN owner.
+///
+/// This is a bounded dark observation, not a recovery or admission protocol.
+/// The expected lineage and physical identity must come from an independent
+/// source. A direct authoritative primary and backend (not a transaction pooler),
+/// old-backend fencing, and quiescent
+/// privileged DDL, roles, ACLs, ledger, marker, lineage, manifest, and epoch
+/// writes are external prerequisites; none is established here. Idle timeouts
+/// are installed before BEGIN, but a connection lost during the preceding
+/// setup may still leave an idle backend. An absent or mismatched receipt is
+/// unresolved even if the old transaction later commits.
+/// Neither result authorizes replay, rollback, or activation.
+pub async fn observe_disposable_epoch_transition_lab(
+    migrator_options: &PgConnectOptions,
+    config: &DisposableEpochTransitionConfig,
+    attempt: DisposableEpochTransitionAttempt,
+) -> Result<DisposableEpochTransitionObservation, DisposableEpochTransitionError> {
+    tokio::time::timeout(OPERATION_DEADLINE, async {
+        check_fixture_options(migrator_options, config)?;
+        let pool = tokio::time::timeout(
+            CONNECT_DEADLINE,
+            bounded_migrator_pool_options().connect_with(migrator_options.clone()),
+        )
+        .await
+        .map_err(|_| DisposableEpochTransitionError::SetupTimeout)??;
+        let db =
+            Database::from_postgres_pool("disposable owner transition observation", pool.clone());
+        let result = observe_in_transaction(&db, config, attempt).await;
+        drop(db);
+        let _ = tokio::time::timeout(CONNECT_DEADLINE, pool.close()).await;
+        result
+    })
+    .await
+    .map_err(|_| DisposableEpochTransitionError::SetupTimeout)?
+}
+
+fn check_fixture_options(
+    migrator_options: &PgConnectOptions,
+    config: &DisposableEpochTransitionConfig,
+) -> Result<(), DisposableEpochTransitionError> {
+    let expected = config
+        .owner
+        .expected
+        .postgres_identity
+        .as_ref()
+        .ok_or(DisposableEpochTransitionError::Identity)?;
+    if migrator_options.get_username() != config.migrator.as_str()
+        || !expected
+            .database
+            .name
+            .0
+            .starts_with("migration_transition_lab_")
+        || !expected
+            .schema
+            .name
+            .0
+            .starts_with("migration_transition_lab_")
+        || !config
+            .migrator
+            .as_str()
+            .starts_with("migration_transition_lab_")
+        || !config
+            .owner
+            .owner
+            .as_str()
+            .starts_with("migration_transition_lab_")
+        || !config
+            .owner
+            .runtime
+            .as_str()
+            .starts_with("migration_transition_lab_")
+    {
+        return Err(DisposableEpochTransitionError::Roles);
+    }
+    Ok(())
+}
+
+async fn observe_in_transaction(
+    db: &Database,
+    config: &DisposableEpochTransitionConfig,
+    attempt: DisposableEpochTransitionAttempt,
+) -> Result<DisposableEpochTransitionObservation, DisposableEpochTransitionError> {
+    let expected = config
+        .owner
+        .expected
+        .postgres_identity
+        .as_ref()
+        .ok_or(DisposableEpochTransitionError::Identity)?;
+    let schema = &expected.schema.name.0;
+    let quoted = format!("\"{}\"", schema.replace('\"', "\"\""));
+    let quoted_owner = format!("\"{}\"", config.owner.owner.as_str().replace('\"', "\"\""));
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY",
+        (),
+    )
+    .await?;
+    set_bounded_session(&mut tx, &quoted).await?;
+    check_roles(&mut tx, config, schema, i64::from(expected.schema.oid)).await?;
+    tx.execute(&format!("SET LOCAL ROLE {quoted_owner}"), ())
+        .await?;
+    check_current_role(&mut tx, config).await?;
+    for key in [
+        LINEAGE_ADVISORY_LOCK_KEY,
+        MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
+    ] {
+        tx.query(
+            "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+            crate::db_params![key],
+        )
+        .await?;
+    }
+    let lineage_config = LineageConfig {
+        deployment_uuid: Some(config.owner.expected.deployment_uuid),
+        action: None,
+    };
+    let observed = lineage::verify_qualified_in_transaction(
+        &mut tx,
+        DatabaseDriver::Postgres,
+        &lineage_config,
+        &format!("{quoted}._lineage"),
+    )
+    .await?;
+    if observed != config.owner.expected {
+        return Err(DisposableEpochTransitionError::Identity);
+    }
+    // Same lock order as the writer; AS must precede marker and catalog reads.
+    tx.execute(
+        &format!("LOCK TABLE ONLY {quoted}.ingress_protocol_epoch IN ACCESS SHARE MODE"),
+        (),
+    )
+    .await?;
+    lock_marker(&mut tx, &quoted).await?;
+    check_marker_shape(&mut tx, config, schema).await?;
+    let checksum = hex::encode(Sha256::digest(RELATION_GUARD_CANDIDATE.as_bytes()));
+    let exact_marker = marker_matches(&mut tx, &quoted, &checksum, attempt).await?;
+    let stage = inspect_catalog_in_transaction(&mut tx, &config.owner, schema, &quoted).await?;
+    check_current_role(&mut tx, config).await?;
+    tx.execute("RESET ROLE", ()).await?;
+    check_roles(&mut tx, config, schema, i64::from(expected.schema.oid)).await?;
+    tx.rollback().await?;
+    Ok(
+        if exact_marker && stage == DarkEpochAclStage::RelationGuardEpochZero {
+            DisposableEpochTransitionObservation::ObservedCommitted
+        } else {
+            DisposableEpochTransitionObservation::Unresolved
+        },
+    )
+}
+
 fn inject(
     actual: DisposableEpochTransitionFault,
     point: DisposableEpochTransitionFault,
@@ -302,6 +461,41 @@ fn inject(
     } else {
         Ok(())
     }
+}
+
+// Install server-side session limits on each fresh backend before BEGIN. A
+// client can disappear without PostgreSQL noticing its TCP connection closed.
+fn bounded_migrator_pool_options() -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move { bound_backend_idle_timeouts(connection).await })
+        })
+}
+
+async fn bound_backend_idle_timeouts(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let (idle, idle_in_transaction): (i64, i64) = sqlx::query_as(
+        "SELECT (EXTRACT(EPOCH FROM pg_catalog.current_setting('idle_session_timeout')::interval) * 1000)::bigint, \
+         (EXTRACT(EPOCH FROM pg_catalog.current_setting('idle_in_transaction_session_timeout')::interval) * 1000)::bigint",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let bounded = |current: i64| {
+        if current <= 0 {
+            IDLE_TIMEOUT_LIMIT_MS
+        } else {
+            current.min(IDLE_TIMEOUT_LIMIT_MS)
+        }
+    };
+    sqlx::query(
+        "SELECT pg_catalog.set_config('idle_session_timeout', $1, false), \
+         pg_catalog.set_config('idle_in_transaction_session_timeout', $2, false)",
+    )
+    .bind(format!("{}ms", bounded(idle)))
+    .bind(format!("{}ms", bounded(idle_in_transaction)))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 async fn set_bounded_session(
@@ -421,11 +615,22 @@ async fn check_current_role(
     }
 }
 
-async fn check_marker(
+async fn lock_marker(
+    tx: &mut Transaction<'_>,
+    quoted_schema: &str,
+) -> Result<(), DisposableEpochTransitionError> {
+    tx.execute(
+        &format!("LOCK TABLE ONLY {quoted_schema}.{MARKER_TABLE} IN ACCESS SHARE MODE"),
+        (),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn check_marker_shape(
     tx: &mut Transaction<'_>,
     config: &DisposableEpochTransitionConfig,
     schema: &str,
-    quoted_schema: &str,
 ) -> Result<(), DisposableEpochTransitionError> {
     let mut rows = tx
         .query(
@@ -436,13 +641,15 @@ async fn check_marker(
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
                               WHERE i.inhrelid = c.oid OR i.inhparent = c.oid)
               AND (SELECT count(*) FROM pg_catalog.pg_attribute a
-                   WHERE a.attrelid = c.oid AND a.attnum > 0) = 2
+                   WHERE a.attrelid = c.oid AND a.attnum > 0) = 3
               AND (SELECT count(*) FROM pg_catalog.pg_attribute a
                    WHERE a.attrelid = c.oid AND NOT a.attisdropped AND a.attnotnull AND NOT a.atthasdef
                      AND a.attgenerated = '' AND a.attidentity = ''
-                     AND a.atttypid = 'pg_catalog.text'::regtype
-                     AND ((a.attnum = 1 AND a.attname = 'version')
-                       OR (a.attnum = 2 AND a.attname = 'checksum'))) = 2
+                     AND ((a.atttypid = 'pg_catalog.text'::regtype
+                           AND ((a.attnum = 1 AND a.attname = 'version')
+                             OR (a.attnum = 2 AND a.attname = 'checksum')))
+                       OR (a.atttypid = 'pg_catalog.uuid'::regtype
+                           AND a.attnum = 3 AND a.attname = 'attempt_id'))) = 3
               AND (SELECT count(*) FROM pg_catalog.pg_constraint x WHERE x.conrelid = c.oid) = 1
               AND (SELECT count(*) FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid) = 1
               AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint x
@@ -474,9 +681,17 @@ async fn check_marker(
         Some(row) => row.get::<bool>(0)?,
         None => false,
     };
-    if !valid {
-        return Err(DisposableEpochTransitionError::Marker);
+    if valid {
+        Ok(())
+    } else {
+        Err(DisposableEpochTransitionError::Marker)
     }
+}
+
+async fn check_marker_empty(
+    tx: &mut Transaction<'_>,
+    quoted_schema: &str,
+) -> Result<(), DisposableEpochTransitionError> {
     let mut rows = tx
         .query(
             &format!("SELECT count(*) FROM {quoted_schema}.{MARKER_TABLE}"),
@@ -493,22 +708,27 @@ async fn check_marker(
     Ok(())
 }
 
-async fn verify_marker(
+async fn marker_matches(
     tx: &mut Transaction<'_>,
     quoted_schema: &str,
     checksum: &str,
-) -> Result<(), DisposableEpochTransitionError> {
-    let mut rows = tx.query(
-        &format!("SELECT count(*) = 1 AND bool_and(version = ? AND checksum = ?) FROM {quoted_schema}.{MARKER_TABLE}"),
-        (MARKER_VERSION, checksum),
-    ).await?;
-    let valid = match rows.next().await? {
-        Some(row) => row.get::<bool>(0)?,
-        None => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(DisposableEpochTransitionError::Marker)
+    attempt: DisposableEpochTransitionAttempt,
+) -> Result<bool, DisposableEpochTransitionError> {
+    // Text equality inherits the column collation, which may be case- or
+    // accent-insensitive. Compare the UTF-8 bytes of the receipt instead.
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT count(*) = 1 AND bool_and(\
+            pg_catalog.convert_to(version, 'UTF8') = pg_catalog.convert_to(?, 'UTF8') AND \
+            pg_catalog.convert_to(checksum, 'UTF8') = pg_catalog.convert_to(?, 'UTF8') AND \
+            attempt_id = ?::pg_catalog.uuid) FROM {quoted_schema}.{MARKER_TABLE}"
+            ),
+            crate::db_params![MARKER_VERSION, checksum, attempt.0.to_string()],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(row.get::<bool>(0)?),
+        None => Err(DisposableEpochTransitionError::Marker),
     }
 }
