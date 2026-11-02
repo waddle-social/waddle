@@ -13,6 +13,9 @@ use waddle_server::db::{
     DatabaseConfig, DatabaseDriver, MigrationRunner,
 };
 
+#[path = "migration_owner_lab/epoch_acl.rs"]
+mod epoch_acl;
+
 struct Fixture {
     cluster: PgPool,
     admin: PgPool,
@@ -598,7 +601,7 @@ async fn experimental_guard_requires_recorded_access_share_even_with_access_excl
         .await
         .expect("admin session");
     sqlx::raw_sql(include_str!(
-        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+        "../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
     ))
     .execute(&mut admin)
     .await

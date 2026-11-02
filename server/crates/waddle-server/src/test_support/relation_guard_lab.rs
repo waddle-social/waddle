@@ -27,7 +27,7 @@ use crate::ingress_uow::{
     EffectDescendantRepository, EffectIntentRepository, IngressUowError, ReconcileVerdict,
 };
 
-const GUARD: &str = include_str!("../../tests/fixtures/ingress_epoch_relation_guard_candidate.sql");
+const GUARD: &str = include_str!("../db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 
 #[derive(Debug, thiserror::Error)]
 enum LabWriteError {

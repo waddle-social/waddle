@@ -11,7 +11,8 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 
-const CANDIDATE: &str = include_str!("fixtures/ingress_epoch_relation_guard_candidate.sql");
+const CANDIDATE: &str =
+    include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 const TABLES: [&str; 12] = [
     "ingress_archive_dispatch",
     "ingress_carbon_receipts",

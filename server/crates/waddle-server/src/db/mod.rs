@@ -29,8 +29,9 @@ pub use backend::MAIN_POOL_ACQUIRE_TIMEOUT;
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use migrations::{
-    migration_checksum, run_dark_postgres_owner, DarkMigrationOwnerConfig, DarkMigrationOwnerError,
-    MigrationLedgerError, MigrationNamespace, MigrationRunner, WADDLE_NAMESPACE_START,
+    inspect_dark_postgres_epoch_acl, migration_checksum, run_dark_postgres_owner,
+    DarkEpochAclStage, DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError,
+    MigrationNamespace, MigrationRunner, WADDLE_NAMESPACE_START,
 };
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};

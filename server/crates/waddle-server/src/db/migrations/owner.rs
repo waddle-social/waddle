@@ -19,6 +19,10 @@ use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
+mod epoch_acl;
+
+pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
+
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 const COMMIT_DEADLINE: Duration = Duration::from_secs(15);
 const OPERATION_DEADLINE: Duration = Duration::from_secs(120);
@@ -67,6 +71,12 @@ pub enum DarkMigrationOwnerError {
     MissingEpochBaseline,
     #[error("migration owner does not support the live ingress protocol epoch")]
     UnsupportedEpoch,
+    #[error("epoch ACL preflight could not match the live runtime login to the attested database")]
+    RuntimeSessionUnverified,
+    #[error("epoch ACL preflight found missing or changed catalog objects")]
+    EpochCatalogDrift,
+    #[error("epoch ACL preflight did not finish before the deadline")]
+    PreflightTimeout,
     #[error("migration owner could not connect before the deadline")]
     ConnectTimeout,
     #[error("migration commit outcome is unknown; fence and reconcile before retrying")]

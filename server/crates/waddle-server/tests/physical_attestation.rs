@@ -35,7 +35,7 @@ use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 static CATALOG_GRANT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "test-support")]
-const CANDIDATE_GUARD: &str = include_str!("fixtures/ingress_epoch_relation_guard_candidate.sql");
+const CANDIDATE_GUARD: &str = include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 
 struct Fixture {
     cluster_admin: PgPool,
@@ -239,7 +239,7 @@ async fn typed_authority_fixture(fixture: &Fixture) -> (PhysicalAttestationConfi
     .await
     .expect("seed receipt intent");
     sqlx::raw_sql(include_str!(
-        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+        "../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
     ))
     .execute(&mut owner)
     .await
@@ -4020,7 +4020,7 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
     assert_eq!(live_epoch, 0);
 
     sqlx::raw_sql(include_str!(
-        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+        "../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
     ))
     .execute(&writer_admin)
     .await
@@ -4100,7 +4100,7 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
         .await
         .expect("schema-qualified writer observer");
     sqlx::raw_sql(include_str!(
-        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+        "../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
     ))
     .execute(&writer_admin)
     .await
@@ -4209,7 +4209,7 @@ async fn full_identity_writer_fails_closed_for_database_schema_pool_and_attestor
     let wrong_database_fixture = Fixture::new(url.clone()).await;
     let _ = prepare_attested_writer_fixture(&wrong_database_fixture).await;
     sqlx::raw_sql(include_str!(
-        "fixtures/ingress_epoch_relation_guard_candidate.sql"
+        "../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
     ))
     .execute(&wrong_database_fixture.admin)
     .await

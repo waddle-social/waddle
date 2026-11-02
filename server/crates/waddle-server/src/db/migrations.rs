@@ -25,6 +25,9 @@ pub mod waddle;
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
-pub use owner::{run_dark_postgres_owner, DarkMigrationOwnerConfig, DarkMigrationOwnerError};
+pub use owner::{
+    inspect_dark_postgres_epoch_acl, run_dark_postgres_owner, DarkEpochAclStage,
+    DarkMigrationOwnerConfig, DarkMigrationOwnerError,
+};
 pub use runner::MigrationRunner;
 pub use types::Migration;
