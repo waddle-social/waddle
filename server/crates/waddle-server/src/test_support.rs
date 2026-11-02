@@ -11,6 +11,10 @@ pub mod postgres_proxy;
 pub(crate) mod relation_guard_lab;
 #[cfg(feature = "test-support")]
 pub use relation_guard_lab::verify_disposable_relation_guard_chain;
+#[cfg(feature = "test-support")]
+mod shared_correctness;
+#[cfg(feature = "test-support")]
+pub use shared_correctness::{SharedCorrectnessFixture, SharedCorrectnessSubmitError};
 
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;
@@ -88,6 +92,18 @@ pub async fn database_pool_from_attested_postgres_pool(
     ingress_budget: u32,
 ) -> Result<DatabasePool, crate::db::DatabaseError> {
     DatabasePool::from_attested_postgres_pool(name, pool, main_budget, ingress_budget).await
+}
+
+/// Initialize MAM on the same SQLite pool used by a disposable fixture.
+#[cfg(feature = "test-support")]
+pub async fn initialize_mam_on_sqlite_test_pool(
+    pool: &DatabasePool,
+) -> Result<(), waddle_xmpp::mam::MamStorageError> {
+    let sqlite = pool.global().sqlite_pool().ok_or_else(|| {
+        waddle_xmpp::mam::MamStorageError::Database("test fixture requires SQLite".to_owned())
+    })?;
+    waddle_xmpp::mam::SqlxMamStorage::from_sqlite_pool(sqlite.clone()).await?;
+    Ok(())
 }
 
 /// Wrap attested main/ingress and optional control-plane pools for integration

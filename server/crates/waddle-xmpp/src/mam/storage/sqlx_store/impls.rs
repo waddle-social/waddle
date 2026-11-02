@@ -406,28 +406,14 @@ impl MamStorage for SqlxMamStorage {
         archive_jid: &BareJid,
         stanza_id: &str,
     ) -> Result<Option<ArchivedMessage>, MamStorageError> {
-        let archive_jid_str = archive_jid.to_string();
         match &self.backend {
             MamDatabaseBackend::Sqlite(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?) ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(stanza_id)
-                .bind(stanza_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_sqlite_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::sqlite(&mut conn, archive_jid, stanza_id).await
             }
             MamDatabaseBackend::Postgres(pool) => {
-                let row = sqlx::query(&format!(
-                    "SELECT {SELECT_COLUMNS} FROM mam_messages WHERE room_jid = $1 AND (id = $2 OR stanza_id = $2) ORDER BY archive_seq DESC LIMIT 1"
-                ))
-                .bind(archive_jid_str.as_str())
-                .bind(stanza_id)
-                .fetch_optional(pool)
-                .await?;
-                row.as_ref().map(decode_postgres_message_row).transpose()
+                let mut conn = pool.acquire().await?;
+                super::lookup::postgres(&mut conn, None, archive_jid, stanza_id).await
             }
         }
     }

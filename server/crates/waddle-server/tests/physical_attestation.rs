@@ -6173,3 +6173,7 @@ mod operator_observer_tests;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/owner_rejection_roles.rs"]
 mod owner_rejection_roles;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/shared_correctness.rs"]
+mod shared_correctness;

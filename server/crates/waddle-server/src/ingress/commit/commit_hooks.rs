@@ -41,9 +41,32 @@ pub(super) fn take_failure() -> Option<IngressUowError> {
 pub(super) fn consume_serialization_failure() -> bool {
     false
 }
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "test-support")))]
 pub(super) fn ambiguous_commit() -> bool {
     false
+}
+#[cfg(all(not(test), feature = "test-support"))]
+tokio::task_local! {
+    static TEST_SUPPORT_AMBIGUOUS_COMMIT: bool;
+}
+#[cfg(all(not(test), feature = "test-support"))]
+pub(super) fn ambiguous_commit() -> bool {
+    TEST_SUPPORT_AMBIGUOUS_COMMIT
+        .try_with(|value| *value)
+        .unwrap_or(false)
+}
+
+/// Simulate losing only an acknowledged commit reply for an isolated test.
+#[cfg(feature = "test-support")]
+pub(crate) async fn with_simulated_lost_commit_ack<F: std::future::Future>(future: F) -> F::Output {
+    #[cfg(test)]
+    {
+        AMBIGUOUS_COMMIT.scope(true, future).await
+    }
+    #[cfg(not(test))]
+    {
+        TEST_SUPPORT_AMBIGUOUS_COMMIT.scope(true, future).await
+    }
 }
 #[cfg(test)]
 pub(crate) use injected::*;
