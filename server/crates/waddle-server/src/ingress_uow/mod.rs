@@ -567,6 +567,14 @@ impl<'a> IngressUowTransaction<'a> {
             .map(PreparedAttestedReceiptWriter::schema)
     }
 
+    /// Test-only source-alias fixture access; not a runtime repository API.
+    #[cfg(test)]
+    pub(crate) fn source_alias_parts_for_fixture(
+        &mut self,
+    ) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
+        self.prepared_parts()
+    }
+
     /// Keep the prepared identity and its transaction together when ingress
     /// repositories choose their schema-qualified PostgreSQL statements.
     fn prepared_parts(&mut self) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {

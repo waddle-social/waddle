@@ -2096,14 +2096,22 @@ pub(in crate::ingress_substrate) async fn locked_alias(
     }
 }
 
-fn validate_stored_alias_identity(
+pub(in crate::ingress_substrate) fn validate_stored_alias_identity(
     row: &Row,
     key: &AliasStorageKey<'_>,
 ) -> Result<(), IngressSubstrateError> {
-    let sender_text: String = row.get(3).map_err(discard_database_error)?;
-    let target_kind: i64 = row.get(4).map_err(discard_database_error)?;
-    let target_jid: String = row.get(5).map_err(discard_database_error)?;
-    let origin_text: String = row.get(6).map_err(discard_database_error)?;
+    validate_stored_alias_identity_at(row, key, 3)
+}
+
+pub(in crate::ingress_substrate) fn validate_stored_alias_identity_at(
+    row: &Row,
+    key: &AliasStorageKey<'_>,
+    offset: usize,
+) -> Result<(), IngressSubstrateError> {
+    let sender_text: String = row.get(offset).map_err(discard_database_error)?;
+    let target_kind: i64 = row.get(offset + 1).map_err(discard_database_error)?;
+    let target_jid: String = row.get(offset + 2).map_err(discard_database_error)?;
+    let origin_text: String = row.get(offset + 3).map_err(discard_database_error)?;
 
     let sender = sender_text
         .parse::<BareJid>()

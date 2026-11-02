@@ -138,3 +138,37 @@ starvation and pending archive custody. The restricted-role grant and paired
 collection still need real PostgreSQL execution and commit-unknown testing.
 None of these dark labs closes the originless relayed rejection gap or
 establishes P2.1 safety.
+
+## Fixture-only source-aware alias classifier
+
+A `cfg(test)` laboratory consumes an entire ingress UOW before its first await
+and returns it only after a complete provisional classification. It checks the
+persisted principal at assertion time, requires the offered full sender to have
+the same bare JID, and distinguishes a new bound alias, an existing bound alias,
+a legacy unbound alias, and a digest conflict. The first source tuple and
+optional SM ID/ordinal are stored inputs; the classifier does not authenticate
+that occurrence against a live stream or session. It does not validate planner
+provenance or prove a claimed expected key or relayed owner result. An existing
+bound result does not prove that its historical envelope is present or usable.
+Existing and legacy rows are never backfilled or changed by the classifier.
+
+A candidate message with its first envelope and source plus its alias are
+inserted inside one manual savepoint. An alias-insert loser rolls the candidate
+back without requiring message DELETE, releases the savepoint, and performs a
+fresh READ COMMITTED lookup. Existing-alias resolution probes the exact alias,
+locks the observed canonical key, and re-reads that same key, hash, complete
+alias tuple, digest, and source. A vanished or rebound key aborts the entire
+owned UOW; it is not replaced. PostgreSQL requires the attested prepared schema;
+SQLite fixture statements explicitly select `main` for the epoch, session,
+message, and alias relations.
+
+This construction assumes protocol-following runtime code: alias UPDATE and
+DELETE are denied to the restricted fixture role, and privileged deletion must
+follow the existing canonical-first GC order. It does not fence non-cooperating
+privileged writers or prevent raw runtime INSERT from fabricating an alias or
+source. Principal expiry is checked once before subsequent lock waits, not at
+commit. No production admission, role grant, source frontier, relay authority,
+or automatic retry follows from this fixture. An observation of absence during a
+blocked COMMIT is not rollback proof, and positive readback for one fenced
+fixture schedule does not establish general commit-unknown recovery or P2.2
+mailbox readiness.

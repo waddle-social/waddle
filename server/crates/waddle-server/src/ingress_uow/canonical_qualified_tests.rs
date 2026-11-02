@@ -7,6 +7,7 @@ mod principal;
 #[cfg(feature = "clustering")]
 mod room_claim;
 mod sm;
+mod source_alias;
 
 use super::{CanonicalMessageRepository, IngressUnitOfWork, IngressUowTransaction};
 use crate::config::LineageConfig;

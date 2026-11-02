@@ -9,6 +9,8 @@ mod canonical_sender;
 pub(crate) use canonical_sender::canonical_sender_pooled;
 mod maintenance;
 mod retention;
+#[cfg(test)]
+mod source_alias;
 pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
@@ -16,6 +18,11 @@ pub use maintenance::{
 pub(crate) use retention::{
     invalidate_retention, invalidate_retention_in_prepared_transaction, refresh_retention,
     refresh_retention_in_prepared_transaction_with_db_clock, refresh_retention_with_db_clock,
+};
+#[cfg(test)]
+pub(crate) use source_alias::{
+    classify_source_alias, SavepointPhase, SourceAliasClassification, SourceAliasError,
+    SourceAliasOffer, STALL_AFTER_PROBE, STALL_SAVEPOINT_PHASE,
 };
 #[cfg(test)]
 mod authority_tests;
