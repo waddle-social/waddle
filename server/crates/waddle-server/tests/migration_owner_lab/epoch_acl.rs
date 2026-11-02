@@ -1,8 +1,6 @@
 //! PostgreSQL catalog and real separated-login checks for the dark diagnostic.
 
-use super::{
-    run_dark_postgres_owner, url_with_database, url_with_option, DarkMigrationOwnerError, Fixture,
-};
+use super::{url_with_database, url_with_option, DarkMigrationOwnerError, Fixture};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -130,11 +128,6 @@ async fn exact_guard_stages_have_distinct_effective_acl_and_real_login_behavior(
         DarkEpochAclStage::V1009EpochZero
     );
     assert_system_column_acls_rejected(&fixture, DarkEpochAclStage::V1009EpochZero).await;
-    assert!(matches!(
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
-        Err(DarkMigrationOwnerError::Roles)
-    ));
-
     admin(
         &fixture,
         &format!(

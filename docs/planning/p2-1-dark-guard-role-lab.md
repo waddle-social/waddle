@@ -26,6 +26,12 @@ The fresh migrator and pinned runtime backends receive server-side idle-session 
 
 A direct authoritative primary, independent expected identity, privileged DDL and role/ACL quiescence, and fencing the old backend remain external assumptions. No observer result proves those conditions or substitutes for a production recovery protocol.
 
+## Dark migration-owner handoff
+
+The unwired `run_dark_postgres_owner` accepts an independently configured migration LOGIN distinct from the NOLOGIN schema owner and the runtime LOGIN. It checks the authenticated session and initial effective role, requires a direct owner grant to the migrator with SET enabled and INHERIT and ADMIN disabled, and rejects other membership edges involving these three roles. It also checks restricted role attributes, database TEMP/CREATE and schema CREATE privileges. Inside its fresh transaction it uses `SET LOCAL ROLE`, verifies the resulting session and effective identities, then takes the existing lineage and ledger locks in order before the epoch locks and migration runner. The owner needs the separately provisioned `pg_control_system()` read permission. PostgreSQL 16 or later is required for the per-membership options used by this laboratory.
+
+This deliberately narrow check is not a production role provisioner or a complete ACL or security-definer audit. It assumes direct backend routing, independently supplied physical identity, a fenced primary, drained writers, and quiescent privileged role, ownership and ACL changes. A commit error, timeout or cancellation around commit remains indeterminate and requires fencing and reconciliation before retry. The separate epoch ACL diagnostic and owner-rejection grant/readback still require an owner LOGIN; they cannot yet operate with this NOLOGIN owner and remain blockers for a complete three-role transition.
+
 ## Gates not implemented
 
 - The migration runner applies all pending migrations in one transaction. It can hold protected-table DDL locks before reaching this candidate, and an old writer can have taken target-table locks before the new guard exists. Installation and subsequent protected-table migrations need an enforced quiescent owner-only protocol, old-session termination, reconnect fencing, and old-image admission control. The SQL artifact by itself is not that protocol.

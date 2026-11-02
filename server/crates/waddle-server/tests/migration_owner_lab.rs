@@ -27,10 +27,12 @@ struct Fixture {
     admin: PgPool,
     admin_options: PgConnectOptions,
     owner_options: PgConnectOptions,
+    migrator_options: PgConnectOptions,
     runtime_options: PgConnectOptions,
     database: String,
     schema: String,
     owner: String,
+    migrator: String,
     runtime: String,
     lineage: AttestedLineage,
 }
@@ -42,12 +44,13 @@ impl Fixture {
         let database = format!("migration_lab_db_{suffix}");
         let schema = format!("migration_lab_s_{suffix}");
         let owner = format!("migration_lab_o_{suffix}");
+        let migrator = format!("migration_lab_m_{suffix}");
         let runtime = format!("migration_lab_r_{suffix}");
         sqlx::query(&format!("CREATE DATABASE {database}"))
             .execute(&cluster)
             .await
             .expect("create isolated database");
-        for role in [&owner, &runtime] {
+        for role in [&owner, &migrator, &runtime] {
             sqlx::query(&format!("CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"))
                 .execute(&cluster).await.expect("create separated login");
         }
@@ -69,6 +72,7 @@ impl Fixture {
         let owner_url = url_with_option(&scoped, "user", &owner);
         let admin_options = PgConnectOptions::from_str(&scoped).expect("admin options");
         let owner_options = PgConnectOptions::from_str(&owner_url).expect("owner options");
+        let migrator_options = owner_options.clone().username(&migrator);
         let runtime_options = owner_options.clone().username(&runtime);
         let db = Database::from_config(
             "migration owner fixture",
@@ -97,10 +101,12 @@ impl Fixture {
             admin,
             admin_options,
             owner_options,
+            migrator_options,
             runtime_options,
             database,
             schema,
             owner,
+            migrator,
             runtime,
             lineage,
         }
@@ -115,13 +121,33 @@ impl Fixture {
         .expect("owner configuration")
     }
 
+    fn migrator_role(&self) -> PgRoleName {
+        PgRoleName::new(&self.migrator).expect("migrator name")
+    }
+
+    async fn enable_owner_handoff(&self) {
+        for statement in [
+            format!("REVOKE TEMP ON DATABASE {} FROM PUBLIC", self.database),
+            format!("ALTER ROLE {} NOLOGIN", self.owner),
+            format!(
+                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+                self.owner, self.migrator
+            ),
+        ] {
+            sqlx::query(&statement)
+                .execute(&self.admin)
+                .await
+                .expect("provision three-role handoff");
+        }
+    }
+
     async fn cleanup(self) {
         self.admin.close().await;
         sqlx::query(&format!("DROP DATABASE {} WITH (FORCE)", self.database))
             .execute(&self.cluster)
             .await
             .expect("drop test database");
-        for role in [&self.runtime, &self.owner] {
+        for role in [&self.runtime, &self.migrator, &self.owner] {
             sqlx::query(&format!("DROP ROLE {role}"))
                 .execute(&self.cluster)
                 .await
@@ -296,6 +322,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     assert_eq!(real_ledger, 1);
     path_tx.rollback().await.expect("reset path");
 
+    fixture.enable_owner_handoff().await;
     make_v1028_pending(&fixture).await;
     let mut blocker = fixture.admin.begin().await.expect("ledger blocker");
     sqlx::query(&format!(
@@ -311,13 +338,21 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         .expect("blocker PID");
     let application = format!("migration_owner_{}", uuid::Uuid::new_v4().simple());
     let options = fixture
-        .owner_options
+        .migrator_options
         .clone()
         .application_name(&application)
         .options([("search_path", "pg_temp,public")]);
     let config = fixture.config();
     let observe = async {
         let pid = wait_for_application(&fixture.admin, &application, blocker_pid).await;
+        let session_login: String = sqlx::query_scalar(
+            "SELECT usename::text FROM pg_catalog.pg_stat_activity WHERE pid = $1",
+        )
+        .bind(pid)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect migration session login");
+        assert_eq!(session_login, fixture.migrator);
         let (exclusive, share): (bool, bool) = sqlx::query_as(
             "SELECT COALESCE(bool_or(mode = 'AccessExclusiveLock'), false), \
                     COALESCE(bool_or(mode = 'AccessShareLock'), false) \
@@ -327,7 +362,11 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         assert!(exclusive && share, "owner needs both recorded lock modes");
         blocker.rollback().await.expect("release ledger");
     };
-    let (result, ()) = tokio::join!(run_dark_postgres_owner(&options, &config), observe);
+    let migrator = fixture.migrator_role();
+    let (result, ()) = tokio::join!(
+        run_dark_postgres_owner(&options, &config, &migrator),
+        observe
+    );
     assert_eq!(result.expect("owner commits"), vec![1028]);
     let (v1027, v1028, ack_table, rejection_table): (i64, i64, bool, bool) =
         sqlx::query_as(&format!(
@@ -347,6 +386,24 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         rejection_table,
         "owner committed the pending V1028 relation"
     );
+    let relation_owner: String = sqlx::query_scalar(
+        "SELECT pg_catalog.pg_get_userbyid(c.relowner)::text \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = 'ingress_owner_rejections'",
+    )
+    .bind(&fixture.schema)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect migrated relation owner");
+    assert_eq!(relation_owner, fixture.owner);
+    let epoch: i64 = sqlx::query_scalar(&format!(
+        "SELECT epoch FROM {}.ingress_protocol_epoch WHERE id = 1",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect unchanged epoch");
+    assert_eq!(epoch, 0);
     let decoy: i64 = sqlx::query_scalar("SELECT count(*) FROM _migrations WHERE version = 999999")
         .fetch_one(&mut hostile)
         .await
@@ -356,22 +413,27 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
 
     sqlx::query(&format!(
         "GRANT SET ON PARAMETER session_replication_role TO {}",
-        fixture.owner
+        fixture.migrator
     ))
     .execute(&fixture.admin)
     .await
     .expect("model unsafe owner parameter grant");
     let replica_options = fixture
-        .owner_options
+        .migrator_options
         .clone()
         .options([("session_replication_role", "replica")]);
     assert!(matches!(
-        run_dark_postgres_owner(&replica_options, &fixture.config()).await,
+        run_dark_postgres_owner(
+            &replica_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::ContaminatedSession)
     ));
     sqlx::query(&format!(
         "REVOKE SET ON PARAMETER session_replication_role FROM {}",
-        fixture.owner
+        fixture.migrator
     ))
     .execute(&fixture.admin)
     .await
@@ -389,7 +451,12 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         .await
         .expect("model unsafe runtime grant");
         assert!(matches!(
-            run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
+            run_dark_postgres_owner(
+                &fixture.migrator_options,
+                &fixture.config(),
+                &fixture.migrator_role()
+            )
+            .await,
             Err(DarkMigrationOwnerError::Roles)
         ));
         sqlx::query(&format!(
@@ -402,6 +469,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     }
 
     for (table, grant) in [
+        ("ingress_protocol_epoch", "UPDATE (id)"),
         (
             "ingress_protocol_epoch",
             "UPDATE (epoch, activated_at, lineage_uuid)",
@@ -416,7 +484,12 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         .await
         .expect("model unsafe column grant");
         assert!(matches!(
-            run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
+            run_dark_postgres_owner(
+                &fixture.migrator_options,
+                &fixture.config(),
+                &fixture.migrator_role()
+            )
+            .await,
             Err(DarkMigrationOwnerError::Roles)
         ));
         sqlx::query(&format!(
@@ -441,7 +514,11 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     .expect("hold epoch transition");
     let blocked = tokio::time::timeout(
         Duration::from_secs(6),
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config()),
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role(),
+        ),
     )
     .await
     .expect("server lock timeout bounds owner");
@@ -473,9 +550,13 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         .await
         .expect("model supported epoch");
     assert_eq!(
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config())
-            .await
-            .expect("apply at supported epoch"),
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await
+        .expect("apply at supported epoch"),
         vec![1028]
     );
     make_v1028_pending(&fixture).await;
@@ -486,7 +567,12 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         .await
         .expect("model future epoch");
     assert!(matches!(
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::UnsupportedEpoch)
     ));
     let (pending, ack_table, rejection_table): (i64, bool, bool) = sqlx::query_as(&format!(
@@ -511,8 +597,14 @@ async fn owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation(
         return;
     };
     let fixture = Fixture::new(&url, false).await;
+    fixture.enable_owner_handoff().await;
     assert!(matches!(
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::MissingEpochBaseline)
     ));
     let mut wrong = fixture.lineage.clone();
@@ -529,7 +621,7 @@ async fn owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation(
     )
     .expect("config");
     assert!(matches!(
-        run_dark_postgres_owner(&fixture.owner_options, &wrong).await,
+        run_dark_postgres_owner(&fixture.migrator_options, &wrong, &fixture.migrator_role()).await,
         Err(DarkMigrationOwnerError::Identity)
     ));
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
@@ -549,6 +641,15 @@ async fn owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation(
     .execute(&mut runtime)
     .await
     .is_err());
+    for role in [&fixture.owner, &fixture.migrator] {
+        assert!(
+            sqlx::query(&format!("SET ROLE {role}"))
+                .execute(&mut runtime)
+                .await
+                .is_err(),
+            "runtime must not assume {role}"
+        );
+    }
     drop(runtime);
     sqlx::query(&format!(
         "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
@@ -558,7 +659,12 @@ async fn owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation(
     .await
     .expect("model runtime SET ROLE escalation");
     assert!(matches!(
-        run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::Roles)
     ));
     sqlx::query(&format!(
@@ -568,6 +674,147 @@ async fn owner_refuses_missing_epoch_wrong_identity_and_runtime_role_escalation(
     .execute(&fixture.admin)
     .await
     .expect("remove test escalation");
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn owner_handoff_rejects_unsafe_role_graph_before_migration() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url, true).await;
+    fixture.enable_owner_handoff().await;
+    make_v1028_pending(&fixture).await;
+    let owner = &fixture.owner;
+    let migrator = &fixture.migrator;
+    let runtime = &fixture.runtime;
+    let database = &fixture.database;
+    let schema = &fixture.schema;
+    let safe_grant =
+        format!("GRANT {owner} TO {migrator} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE");
+    let cases = [
+        (
+            format!("ALTER ROLE {owner} LOGIN"),
+            format!("ALTER ROLE {owner} NOLOGIN"),
+        ),
+        (
+            format!("ALTER ROLE {migrator} CREATEROLE"),
+            format!("ALTER ROLE {migrator} NOCREATEROLE"),
+        ),
+        (
+            format!("ALTER ROLE {runtime} BYPASSRLS"),
+            format!("ALTER ROLE {runtime} NOBYPASSRLS"),
+        ),
+        (
+            format!("REVOKE {owner} FROM {migrator}"),
+            safe_grant.clone(),
+        ),
+        (
+            format!("GRANT {owner} TO {migrator} WITH INHERIT TRUE, SET TRUE, ADMIN FALSE"),
+            safe_grant.clone(),
+        ),
+        (
+            format!("GRANT {owner} TO {migrator} WITH INHERIT FALSE, SET FALSE, ADMIN FALSE"),
+            safe_grant.clone(),
+        ),
+        (
+            format!("GRANT {owner} TO {migrator} WITH INHERIT FALSE, SET TRUE, ADMIN TRUE"),
+            safe_grant,
+        ),
+        (
+            format!("GRANT {owner} TO {runtime} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"),
+            format!("REVOKE {owner} FROM {runtime}"),
+        ),
+        (
+            format!("GRANT {migrator} TO {runtime} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"),
+            format!("REVOKE {migrator} FROM {runtime}"),
+        ),
+        (
+            format!("GRANT pg_read_all_stats TO {migrator}"),
+            format!("REVOKE pg_read_all_stats FROM {migrator}"),
+        ),
+        (
+            format!("GRANT TEMP ON DATABASE {database} TO {migrator}"),
+            format!("REVOKE TEMP ON DATABASE {database} FROM {migrator}"),
+        ),
+        (
+            format!("GRANT TEMP ON DATABASE {database} TO {runtime}"),
+            format!("REVOKE TEMP ON DATABASE {database} FROM {runtime}"),
+        ),
+        (
+            format!("GRANT CREATE ON SCHEMA {schema} TO {migrator}"),
+            format!("REVOKE CREATE ON SCHEMA {schema} FROM {migrator}"),
+        ),
+        (
+            format!("GRANT CREATE ON SCHEMA {schema} TO {runtime}"),
+            format!("REVOKE CREATE ON SCHEMA {schema} FROM {runtime}"),
+        ),
+    ];
+    for (unsafe_change, restore) in cases {
+        sqlx::query(&unsafe_change)
+            .execute(&fixture.admin)
+            .await
+            .expect("inject unsafe role graph");
+        assert!(
+            matches!(
+                run_dark_postgres_owner(
+                    &fixture.migrator_options,
+                    &fixture.config(),
+                    &fixture.migrator_role(),
+                )
+                .await,
+                Err(DarkMigrationOwnerError::Roles)
+            ),
+            "accepted unsafe change: {unsafe_change}"
+        );
+        let (pending, relation): (i64, bool) = sqlx::query_as(&format!(
+            "SELECT (SELECT count(*) FROM {schema}._migrations WHERE version = 1028), \
+                    pg_catalog.to_regclass($1) IS NOT NULL"
+        ))
+        .bind(format!("{schema}.ingress_owner_rejections"))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("inspect refused migration");
+        assert_eq!((pending, relation), (0, false), "after {unsafe_change}");
+        sqlx::query(&restore)
+            .execute(&fixture.admin)
+            .await
+            .expect("restore role graph");
+    }
+
+    // An injected startup role must not substitute for the transaction-local handoff.
+    let assumed_at_login = fixture
+        .migrator_options
+        .clone()
+        .options([("role", owner.as_str())]);
+    assert!(matches!(
+        run_dark_postgres_owner(
+            &assumed_at_login,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
+        Err(DarkMigrationOwnerError::Roles)
+    ));
+    assert!(matches!(
+        run_dark_postgres_owner(
+            &fixture.runtime_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
+        Err(DarkMigrationOwnerError::Roles)
+    ));
+    assert_eq!(
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await
+        .expect("restored graph applies migration"),
+        vec![1028]
+    );
     fixture.cleanup().await;
 }
 
@@ -787,9 +1034,14 @@ async fn owner_reports_terminated_commit_as_unknown_without_replaying() {
     ] {
         sqlx::query(&statement).execute(&fixture.admin).await.expect("prepare delayed COMMIT");
     }
+    fixture.enable_owner_handoff().await;
     let application = format!("migration_commit_{}", uuid::Uuid::new_v4().simple());
-    let options = fixture.owner_options.clone().application_name(&application);
+    let options = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
     let config = fixture.config();
+    let migrator = fixture.migrator_role();
     let terminate = async {
         let pid = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -816,7 +1068,10 @@ async fn owner_reports_terminated_commit_as_unknown_without_replaying() {
             .expect("terminate committing backend");
         assert!(terminated);
     };
-    let (result, ()) = tokio::join!(run_dark_postgres_owner(&options, &config), terminate);
+    let (result, ()) = tokio::join!(
+        run_dark_postgres_owner(&options, &config, &migrator),
+        terminate
+    );
     assert!(matches!(
         result,
         Err(DarkMigrationOwnerError::CommitUnknown)

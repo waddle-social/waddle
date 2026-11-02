@@ -75,7 +75,7 @@ impl DarkMigrationOwnerConfig {
 pub enum DarkMigrationOwnerError {
     #[error("migration owner requires an independently supplied PostgreSQL identity")]
     MissingPostgresIdentity,
-    #[error("migration owner and runtime roles are not sufficiently separated for the laboratory")]
+    #[error("migration login, owner, and runtime roles are not sufficiently separated for the laboratory")]
     Roles,
     #[error("migration owner target does not match the expected primary and lineage")]
     Identity,
@@ -103,9 +103,9 @@ pub enum DarkMigrationOwnerError {
 
 /// Apply this binary's catalog on a new, exclusively owned PostgreSQL session.
 ///
-/// The expected lineage must be obtained independently of `options`; the
-/// owner needs read access to `pg_control_system()` for physical identity
-/// verification. Use a direct, dedicated PostgreSQL backend, not a transaction
+/// The expected lineage and migrator login must be obtained independently of
+/// `options`; the NOLOGIN owner needs read access to `pg_control_system()` for
+/// physical identity verification. Use a direct, dedicated PostgreSQL backend, not a transaction
 /// pooler: a fresh client connection alone does not guarantee a fresh backend.
 /// The operator must drain legacy sessions and prevent new
 /// writers and other migrations for the complete operation, and must fence
@@ -122,8 +122,12 @@ pub enum DarkMigrationOwnerError {
 pub async fn run_dark_postgres_owner(
     options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<Vec<i64>, DarkMigrationOwnerError> {
-    if options.get_username() != config.owner.as_str() {
+    if migrator == &config.owner
+        || migrator == &config.runtime
+        || options.get_username() != migrator.as_str()
+    {
         return Err(DarkMigrationOwnerError::Roles);
     }
     // The pool is private to this invocation. Direct-backend routing is an
@@ -137,12 +141,16 @@ pub async fn run_dark_postgres_owner(
     .await
     .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
     let db = Database::from_postgres_pool("dark migration owner", pool.clone());
-    let result =
-        match tokio::time::timeout(OPERATION_DEADLINE, run_on_fresh_session(&db, config)).await {
-            Ok(result) => result,
-            // The caller cannot tell whether cancellation raced COMMIT dispatch.
-            Err(_) => Err(DarkMigrationOwnerError::CommitUnknown),
-        };
+    let result = match tokio::time::timeout(
+        OPERATION_DEADLINE,
+        run_on_fresh_session(&db, config, migrator),
+    )
+    .await
+    {
+        Ok(result) => result,
+        // The caller cannot tell whether cancellation raced COMMIT dispatch.
+        Err(_) => Err(DarkMigrationOwnerError::CommitUnknown),
+    };
     drop(db);
     // A failed/unknown commit is not made definite by closing the client.
     let _ = tokio::time::timeout(CONNECT_DEADLINE, pool.close()).await;
@@ -152,6 +160,7 @@ pub async fn run_dark_postgres_owner(
 async fn run_on_fresh_session(
     db: &Database,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<Vec<i64>, DarkMigrationOwnerError> {
     let expected = config
         .expected
@@ -175,7 +184,14 @@ async fn run_on_fresh_session(
     )
     .await?;
 
-    check_roles_and_schema(&mut tx, config, schema, i64::from(expected.schema.oid)).await?;
+    check_migration_login_and_assume_owner(
+        &mut tx,
+        config,
+        migrator,
+        schema,
+        i64::from(expected.schema.oid),
+    )
+    .await?;
     // Lock lineage adoption before migrations. Neither check reads the epoch
     // or a protected table, and the runner never opens another connection.
     for lock in [
@@ -275,6 +291,95 @@ async fn run_on_fresh_session(
         Ok(Ok(())) => Ok(newly_applied),
         Ok(Err(_)) | Err(_) => Err(DarkMigrationOwnerError::CommitUnknown),
     }
+}
+
+// This deliberately accepts only the laboratory's direct three-role graph.
+// It is not a whole-database ACL or SECURITY DEFINER audit; privileged role,
+// ownership and ACL changes must remain quiescent throughout the operation.
+async fn check_migration_login_and_assume_owner(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
+    schema: &str,
+    expected_schema_oid: i64,
+) -> Result<(), DarkMigrationOwnerError> {
+    let mut rows = tx
+        .query(
+            r#"SELECT session_user::text = m.rolname AND current_user::text = m.rolname
+                  AND m.rolcanlogin AND NOT m.rolsuper AND NOT m.rolcreaterole
+                  AND NOT m.rolcreatedb AND NOT m.rolreplication AND NOT m.rolbypassrls
+                  AND NOT o.rolcanlogin AND NOT o.rolsuper AND NOT o.rolcreaterole
+                  AND NOT o.rolcreatedb AND NOT o.rolreplication AND NOT o.rolbypassrls
+                  AND r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreaterole
+                  AND NOT r.rolcreatedb AND NOT r.rolreplication AND NOT r.rolbypassrls
+                  AND n.nspowner = o.oid
+                  AND m.oid <> d.datdba AND o.oid <> d.datdba AND r.oid <> d.datdba
+                  AND NOT pg_catalog.has_database_privilege(m.oid, d.oid, 'CREATE,TEMP')
+                  AND NOT pg_catalog.has_database_privilege(o.oid, d.oid, 'CREATE,TEMP')
+                  AND NOT pg_catalog.has_database_privilege(r.oid, d.oid, 'CREATE,TEMP')
+                  AND NOT pg_catalog.has_schema_privilege(m.oid, n.oid, 'CREATE')
+                  AND NOT pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
+                  AND EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members x
+                              WHERE x.member = m.oid AND x.roleid = o.oid
+                                AND x.set_option AND NOT x.inherit_option AND NOT x.admin_option)
+                  AND (SELECT count(*) FROM pg_catalog.pg_auth_members x WHERE x.member = m.oid) = 1
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members x
+                                  WHERE x.member IN (o.oid, r.oid)
+                                     OR x.roleid IN (m.oid, r.oid)
+                                     OR (x.roleid = o.oid AND x.member <> m.oid))
+                  AND pg_catalog.pg_has_role(m.oid, o.oid, 'SET')
+                  AND NOT pg_catalog.pg_has_role(m.oid, o.oid, 'USAGE'),
+                  n.oid::bigint, pg_catalog.pg_is_in_recovery(),
+                  pg_catalog.pg_my_temp_schema()::bigint,
+                  pg_catalog.current_setting('session_replication_role')
+               FROM pg_catalog.pg_roles m
+               JOIN pg_catalog.pg_roles o ON o.rolname = ?
+               JOIN pg_catalog.pg_roles r ON r.rolname = ?
+               JOIN pg_catalog.pg_namespace n ON n.nspname = ?
+               JOIN pg_catalog.pg_database d ON d.datname = pg_catalog.current_database()
+               WHERE m.rolname = ?"#,
+            crate::db_params![
+                config.owner.as_str(),
+                config.runtime.as_str(),
+                schema,
+                migrator.as_str()
+            ],
+        )
+        .await?;
+    let row = rows.next().await?.ok_or(DarkMigrationOwnerError::Roles)?;
+    let valid_roles: bool = row.get(0)?;
+    let schema_oid: i64 = row.get(1)?;
+    let recovering: bool = row.get(2)?;
+    let temp_schema_oid: i64 = row.get(3)?;
+    let replication_role: String = row.get(4)?;
+    if temp_schema_oid != 0 || replication_role != "origin" {
+        return Err(DarkMigrationOwnerError::ContaminatedSession);
+    }
+    if !valid_roles {
+        return Err(DarkMigrationOwnerError::Roles);
+    }
+    if schema_oid != expected_schema_oid || recovering {
+        return Err(DarkMigrationOwnerError::Identity);
+    }
+
+    let quoted_owner = format!("\"{}\"", config.owner.as_str().replace('"', "\"\""));
+    tx.execute(&format!("SET LOCAL ROLE {quoted_owner}"), ())
+        .await?;
+    let mut rows = tx
+        .query(
+            "SELECT session_user::text = ? AND current_user::text = ?, \
+                    pg_catalog.current_schema()::text",
+            (migrator.as_str(), config.owner.as_str()),
+        )
+        .await?;
+    let row = rows.next().await?.ok_or(DarkMigrationOwnerError::Roles)?;
+    if !row.get::<bool>(0)? {
+        return Err(DarkMigrationOwnerError::Roles);
+    }
+    if row.get::<Option<String>>(1)?.as_deref() != Some(schema) {
+        return Err(DarkMigrationOwnerError::Identity);
+    }
+    Ok(())
 }
 
 async fn check_roles_and_schema(
