@@ -12,8 +12,9 @@ use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::connection_actor::{
     start_connection_actor, BindConnection, CompleteHandledInbound, ConnectionActorError,
-    ConnectionActorStartError, ConnectionWireFrame, PanicConnectionActor, RequestAcknowledgement,
-    ReserveHandledInbound, RetireBinding, SnapshotConnection, StopConnectionActor,
+    ConnectionActorStartError, ConnectionWireFrame, PanicConnectionActor, PauseConnectionActor,
+    RequestAcknowledgement, ReserveHandledInbound, RetireBinding, SnapshotConnection,
+    StopConnectionActor,
 };
 use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
@@ -121,11 +122,34 @@ async fn start_actor(
     ClientSocket,
     oneshot::Receiver<()>,
 ) {
+    start_actor_with_inbound_limit(
+        inventory,
+        8,
+        max_outbound_count,
+        max_outbound_bytes,
+        gate,
+        retirement_deadline,
+    )
+    .await
+}
+
+async fn start_actor_with_inbound_limit(
+    inventory: &IoCustodianInventory,
+    max_inbound_count: usize,
+    max_outbound_count: usize,
+    max_outbound_bytes: usize,
+    gate: Arc<FlushGate>,
+    retirement_deadline: Duration,
+) -> (
+    waddle_server::test_support::connection_actor::ConnectionActorController,
+    ClientSocket,
+    oneshot::Receiver<()>,
+) {
     let (server, client) = super::pumps::socket_pair().await;
     let (entered_tx, entered_rx) = oneshot::channel();
     let config = ReservedIoStartConfig::new(
         TransportLimits::new(
-            Limits::new(8, 2048).expect("inbound bounds"),
+            Limits::new(max_inbound_count, 2048).expect("inbound bounds"),
             Limits::new(max_outbound_count, max_outbound_bytes).expect("outbound bounds"),
         ),
         ShutdownProtocol::new(ConnectionWireFrame::Close, |error: &Error| {
@@ -215,20 +239,20 @@ async fn one_actor_owns_state_and_answers_xep0198_from_contiguous_handled_prefix
         .ask(ReserveHandledInbound)
         .send()
         .await
-        .expect("reserve first handled-prefix slot");
+        .expect("reserve first handled-prefix message");
     let second = controller
         .actor()
         .ask(ReserveHandledInbound)
         .send()
         .await
-        .expect("reserve second handled-prefix slot");
+        .expect("reserve second handled-prefix message");
     assert_eq!(
         controller
             .actor()
             .ask(CompleteHandledInbound(second))
             .send()
             .await
-            .expect("complete later operation"),
+            .expect("complete later operation message"),
         0,
         "later completion cannot skip the earlier hole"
     );
@@ -244,7 +268,7 @@ async fn one_actor_owns_state_and_answers_xep0198_from_contiguous_handled_prefix
             .ask(CompleteHandledInbound(first))
             .send()
             .await
-            .expect("complete earlier operation"),
+            .expect("complete earlier operation message"),
         2,
         "closing the hole advances the contiguous prefix through both completions"
     );
@@ -271,19 +295,19 @@ async fn actor_processes_control_while_writer_flush_is_blocked_and_wire_waits_fo
         .ask(ReserveHandledInbound)
         .send()
         .await
-        .expect("reserve first sequence");
+        .expect("reserve first sequence message");
     let second = controller
         .actor()
         .ask(ReserveHandledInbound)
         .send()
         .await
-        .expect("reserve second sequence");
+        .expect("reserve second sequence message");
     controller
         .actor()
         .ask(CompleteHandledInbound(second))
         .send()
         .await
-        .expect("complete later sequence");
+        .expect("complete later sequence message");
 
     send_request(&mut peer).await;
     timeout(TEST_TIMEOUT, entered)
@@ -457,11 +481,11 @@ async fn dropping_controller_stops_blocked_pumps_but_only_inventory_join_proves_
 }
 
 #[tokio::test]
-async fn binding_retirement_is_separate_from_physical_connection_and_stale_completion() {
+async fn binding_retirement_fences_stale_completion_without_resetting_handled_prefix() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
     let gate = Arc::new(FlushGate::new());
     gate.release();
-    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
     let connection_ref = controller.connection_ref().clone();
     let binding_a = BindingRef::fresh(connection_ref.clone());
     let binding_b = BindingRef::fresh(connection_ref.clone());
@@ -472,6 +496,54 @@ async fn binding_retirement_is_separate_from_physical_connection_and_stale_compl
         .send()
         .await
         .expect("binding A is accepted by the live actor");
+    let sequence_a = controller
+        .actor()
+        .ask(ReserveHandledInbound)
+        .send()
+        .await
+        .expect("reserve sequence A message");
+    let stale_a_completion = sequence_a.clone();
+    assert!(
+        !controller
+            .actor()
+            .ask(RetireBinding(binding_a.clone()))
+            .send()
+            .await
+            .expect("retirement with unresolved work is handled"),
+        "retiring a binding cannot strand its unresolved handled work"
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(BindConnection(binding_b.clone()))
+            .send()
+            .await
+            .expect_err("unresolved work rejects binding replacement")
+            .err()
+            .expect("typed binding transition rejection"),
+        ConnectionActorError::BindingHasPendingHandledInbound,
+        "a new binding cannot strand in-flight handled work from the current stream"
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(sequence_a))
+            .send()
+            .await
+            .expect("complete sequence A message"),
+        1
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(stale_a_completion.clone()))
+            .send()
+            .await
+            .expect_err("duplicate sequence completion is rejected")
+            .err()
+            .expect("typed duplicate completion rejection"),
+        ConnectionActorError::SequenceNotPending
+    );
     assert!(controller
         .actor()
         .ask(RetireBinding(binding_a.clone()))
@@ -484,14 +556,42 @@ async fn binding_retirement_is_separate_from_physical_connection_and_stale_compl
         .send()
         .await
         .expect("binding B reuses the same physical socket");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(stale_a_completion))
+            .send()
+            .await
+            .expect_err("retired binding completion is rejected")
+            .err()
+            .expect("typed stale binding rejection"),
+        ConnectionActorError::SequenceBindingMismatch,
+        "captured binding identity fences a late completion after rebinding"
+    );
+    let sequence_b = controller
+        .actor()
+        .ask(ReserveHandledInbound)
+        .send()
+        .await
+        .expect("reserve sequence B message");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(sequence_b))
+            .send()
+            .await
+            .expect("complete sequence B message"),
+        2,
+        "the existing non-resumable stream prefix continues across the binding attempt"
+    );
     assert!(
         !controller
             .actor()
             .ask(RetireBinding(binding_a))
             .send()
             .await
-            .expect("stale A completion is processed"),
-        "stale A completion must not retire B"
+            .expect("stale A retirement is processed"),
+        "stale A retirement must not retire B"
     );
     let snapshot = controller
         .actor()
@@ -501,12 +601,212 @@ async fn binding_retirement_is_separate_from_physical_connection_and_stale_compl
         .expect("snapshot actor-owned state");
     assert_eq!(snapshot.connection_ref, connection_ref);
     assert_eq!(snapshot.binding_ref, Some(binding_b));
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 2);
 
     controller.request_stop(StopReason::Requested);
     assert_eq!(
         controller.wait_until_joined().await,
         Some(CustodianState::Joined)
     );
+}
+
+#[tokio::test]
+async fn handled_completion_token_is_fenced_by_exact_physical_connection() {
+    let inventory = IoCustodianInventory::new(2).expect("inventory capacity");
+    let gate_a = FlushGate::new();
+    gate_a.release();
+    let gate_b = FlushGate::new();
+    gate_b.release();
+    let (controller_a, _peer_a, _) =
+        start_actor(&inventory, 4, 256, Arc::new(gate_a), TEST_TIMEOUT).await;
+    let (controller_b, mut peer_b, _) =
+        start_actor(&inventory, 4, 256, Arc::new(gate_b), TEST_TIMEOUT).await;
+
+    let sequence_a = controller_a
+        .actor()
+        .ask(ReserveHandledInbound)
+        .send()
+        .await
+        .expect("reserve A message");
+    let sequence_a_for_b = sequence_a.clone();
+    let sequence_b = controller_b
+        .actor()
+        .ask(ReserveHandledInbound)
+        .send()
+        .await
+        .expect("reserve B message");
+    assert_eq!(
+        controller_b
+            .actor()
+            .ask(CompleteHandledInbound(sequence_a_for_b))
+            .send()
+            .await
+            .expect_err("cross-connection completion is rejected")
+            .err()
+            .expect("typed physical connection rejection"),
+        ConnectionActorError::SequenceConnectionMismatch,
+        "equal ordinals from different physical sockets are not interchangeable"
+    );
+    assert_eq!(
+        controller_b
+            .actor()
+            .ask(CompleteHandledInbound(sequence_b))
+            .send()
+            .await
+            .expect("complete B message"),
+        1
+    );
+    assert_eq!(
+        controller_a
+            .actor()
+            .ask(CompleteHandledInbound(sequence_a))
+            .send()
+            .await
+            .expect("complete A message"),
+        1
+    );
+    send_request(&mut peer_b).await;
+    assert_eq!(read_ack(&mut peer_b).await.h, 1);
+
+    controller_a.request_stop(StopReason::Requested);
+    controller_b.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller_a.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(
+        controller_b.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(inventory.prune_joined(), 2);
+}
+
+#[tokio::test]
+async fn handled_prefix_window_bounds_pending_and_out_of_order_completions() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+
+    let mut sequences = Vec::with_capacity(256);
+    for _ in 0..256 {
+        sequences.push(
+            controller
+                .actor()
+                .ask(ReserveHandledInbound)
+                .send()
+                .await
+                .expect("reserve handled-prefix message"),
+        );
+    }
+    assert_eq!(
+        controller
+            .actor()
+            .ask(ReserveHandledInbound)
+            .send()
+            .await
+            .expect_err("pending handled-prefix window is full")
+            .err()
+            .expect("typed handled-prefix capacity rejection"),
+        ConnectionActorError::HandledInboundFull,
+        "uncompleted reservations cannot grow beyond the configured policy"
+    );
+
+    for sequence in sequences.iter().skip(1).cloned() {
+        assert_eq!(
+            controller
+                .actor()
+                .ask(CompleteHandledInbound(sequence))
+                .send()
+                .await
+                .expect("complete later operation message"),
+            0,
+            "completed entries behind the earliest gap do not advance h"
+        );
+    }
+    assert_eq!(
+        controller
+            .actor()
+            .ask(ReserveHandledInbound)
+            .send()
+            .await
+            .expect_err("out-of-order handled-prefix window is full")
+            .err()
+            .expect("typed handled-prefix capacity rejection"),
+        ConnectionActorError::HandledInboundFull,
+        "completed entries behind the gap retain the same bounded window"
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(sequences.remove(0)))
+            .send()
+            .await
+            .expect("complete earliest operation message"),
+        256
+    );
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 256);
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn inbound_permit_stays_held_while_actor_mailbox_is_paused() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) =
+        start_actor_with_inbound_limit(&inventory, 1, 4, 256, gate, TEST_TIMEOUT).await;
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    controller
+        .actor()
+        .tell(PauseConnectionActor {
+            entered: entered_tx,
+            release: release_rx,
+        })
+        .send()
+        .await
+        .expect("enqueue actor pause barrier");
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("actor enters pause barrier")
+        .expect("pause entry signal");
+
+    send_request(&mut peer).await;
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_inbound_forwarded(1))
+            .await
+            .expect("inbound forwarder enqueues first retained item"),
+        "the first admitted item reaches the paused actor mailbox"
+    );
+    send_request(&mut peer).await;
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("second ingress exceeds the one-item inbound budget"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(
+        controller.stop_reason(),
+        Some(StopReason::InboundOverload),
+        "the first item's count and byte permits remain held in the paused mailbox"
+    );
+
+    let _ = release_tx.send(());
+    controller
+        .actor()
+        .ask(SnapshotConnection)
+        .send()
+        .await
+        .expect("paused actor resumes and drains its retained item");
 }
 
 #[tokio::test]

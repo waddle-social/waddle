@@ -18,10 +18,12 @@ use kameo::mailbox;
 use kameo::message::{Context, Message};
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::stream_management::{SmAck, SmRequest};
+
+const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
 
 /// Typed input and output carried by the isolated connection transport.
 /// Serialization stays in the caller's transport sink adapter.
@@ -118,27 +120,40 @@ where
     );
     actor.wait_for_startup().await;
 
+    let (forwarded_tx, forwarded_rx) = watch::channel(0usize);
     let pump_actor = actor.clone();
     let input_forwarder = tokio::spawn(async move {
-        forward_inbound_frames(inbound, pump_actor).await;
+        forward_inbound_frames(inbound, pump_actor, forwarded_tx).await;
     });
 
     Ok(ConnectionActorController {
         actor,
         io_control,
         _input_forwarder: input_forwarder,
+        inbound_forwarded: forwarded_rx,
     })
 }
 
 async fn forward_inbound_frames(
     mut inbound: mpsc::Receiver<QueueItem<ConnectionWireFrame>>,
     actor: ActorRef<ConnectionActor>,
+    forwarded: watch::Sender<usize>,
 ) {
+    let mut forwarded_count = 0usize;
     while let Some(item) = inbound.recv().await {
-        if matches!(item.value, ConnectionWireFrame::RequestAcknowledgement(_))
-            && actor.tell(RequestAcknowledgement).send().await.is_err()
-        {
-            return;
+        if matches!(item.value, ConnectionWireFrame::RequestAcknowledgement(_)) {
+            if actor
+                .tell(ForwardedRequestAcknowledgement(item))
+                .send()
+                .await
+                .is_err()
+            {
+                return;
+            }
+            forwarded_count = forwarded_count.saturating_add(1);
+            forwarded.send_replace(forwarded_count);
+        } else {
+            drop(item);
         }
     }
 }
@@ -195,6 +210,7 @@ pub struct ConnectionActorController {
     actor: ActorRef<ConnectionActor>,
     io_control: Arc<ConnectionActorIoControl>,
     _input_forwarder: JoinHandle<()>,
+    inbound_forwarded: watch::Receiver<usize>,
 }
 
 impl ConnectionActorController {
@@ -228,6 +244,21 @@ impl ConnectionActorController {
         let observer = self.observer()?;
         Some(observer.wait_until_joined().await)
     }
+
+    /// Wait until the inbound forwarder has placed this many retained queue
+    /// items into the actor mailbox. This is a test-support synchronization
+    /// point for proving that admission permits survive mailbox wait time.
+    pub async fn wait_for_inbound_forwarded(&self, count: usize) -> bool {
+        let mut forwarded = self.inbound_forwarded.clone();
+        loop {
+            if *forwarded.borrow_and_update() >= count {
+                return true;
+            }
+            if forwarded.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
 }
 
 impl Drop for ConnectionActorController {
@@ -255,8 +286,12 @@ pub struct ConnectionActorSnapshot {
 
 /// Opaque handle for one inbound operation reserved from the actor-owned
 /// handled-prefix tracker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]
-pub struct ConnectionActorSequence(OrderedRelayInboundSequence);
+#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
+pub struct ConnectionActorSequence {
+    connection_ref: ConnectionRef,
+    binding_ref: Option<BindingRef>,
+    sequence: OrderedRelayInboundSequence,
+}
 
 /// Actor-side failures while sequencing a control event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -267,6 +302,21 @@ pub enum ConnectionActorError {
     /// Binding identity belongs to a different physical connection.
     #[error("binding attempt belongs to a different physical connection")]
     BindingConnectionMismatch,
+    /// Binding transition cannot strand handled work from the current stream.
+    #[error("binding transition has unresolved handled work")]
+    BindingHasPendingHandledInbound,
+    /// Completion belongs to a different physical connection.
+    #[error("handled completion belongs to a different physical connection")]
+    SequenceConnectionMismatch,
+    /// Completion belongs to a retired or superseded binding attempt.
+    #[error("handled completion belongs to a different binding attempt")]
+    SequenceBindingMismatch,
+    /// Completion token has already completed or was never reserved here.
+    #[error("handled completion is not pending on this connection")]
+    SequenceNotPending,
+    /// The bounded handled-prefix window is full.
+    #[error("handled-prefix window is full")]
+    HandledInboundFull,
     /// The bounded writer queue rejected this output.
     #[error("outbound writer queue rejected the frame: {0:?}")]
     Admission(AdmissionError),
@@ -282,18 +332,24 @@ impl From<AdmissionError> for ConnectionActorError {
 pub struct ReserveHandledInbound;
 
 impl Message<ReserveHandledInbound> for ConnectionActor {
-    type Reply = ConnectionActorSequence;
+    type Reply = Result<ConnectionActorSequence, ConnectionActorError>;
 
     async fn handle(
         &mut self,
         _: ReserveHandledInbound,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        ConnectionActorSequence(
-            self.state
+        if self.state.sm_inbound_completion.outstanding_count() >= MAX_HANDLED_INBOUND_OPERATIONS {
+            return Err(ConnectionActorError::HandledInboundFull);
+        }
+        Ok(ConnectionActorSequence {
+            connection_ref: self.state.connection_ref().clone(),
+            binding_ref: self.state.binding_ref.clone(),
+            sequence: self
+                .state
                 .sm_inbound_completion
                 .reserve(&self.state.sm_state),
-        )
+        })
     }
 }
 
@@ -301,18 +357,26 @@ impl Message<ReserveHandledInbound> for ConnectionActor {
 pub struct CompleteHandledInbound(pub ConnectionActorSequence);
 
 impl Message<CompleteHandledInbound> for ConnectionActor {
-    type Reply = u32;
+    type Reply = Result<u32, ConnectionActorError>;
 
     async fn handle(
         &mut self,
         msg: CompleteHandledInbound,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let ConnectionActorSequence(sequence) = msg.0;
+        if msg.0.connection_ref != *self.state.connection_ref() {
+            return Err(ConnectionActorError::SequenceConnectionMismatch);
+        }
+        if msg.0.binding_ref != self.state.binding_ref {
+            return Err(ConnectionActorError::SequenceBindingMismatch);
+        }
+        if !self.state.sm_inbound_completion.is_pending(msg.0.sequence) {
+            return Err(ConnectionActorError::SequenceNotPending);
+        }
         self.state
             .sm_inbound_completion
-            .complete(sequence, &mut self.state.sm_state);
-        self.state.sm_state.inbound_count()
+            .complete(msg.0.sequence, &mut self.state.sm_state);
+        Ok(self.state.sm_state.inbound_count())
     }
 }
 
@@ -335,6 +399,47 @@ impl Message<RequestAcknowledgement> for ConnectionActor {
     }
 }
 
+/// Forward one inbound transport frame while retaining its count and byte
+/// permits through actor mailbox waiting and handling.
+pub struct ForwardedRequestAcknowledgement(QueueItem<ConnectionWireFrame>);
+
+impl Message<ForwardedRequestAcknowledgement> for ConnectionActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: ForwardedRequestAcknowledgement,
+        _: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let item = msg.0;
+        if matches!(item.value, ConnectionWireFrame::RequestAcknowledgement(_)) {
+            let _ = self.enqueue_acknowledgement();
+        }
+        drop(item);
+    }
+}
+
+/// Pause the actor mailbox on deterministic barriers in capacity tests.
+pub struct PauseConnectionActor {
+    /// Signaled after this message owns the actor execution slot.
+    pub entered: oneshot::Sender<()>,
+    /// Releases the actor to process its queued messages.
+    pub release: oneshot::Receiver<()>,
+}
+
+impl Message<PauseConnectionActor> for ConnectionActor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: PauseConnectionActor,
+        _: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = msg.entered.send(());
+        let _ = msg.release.await;
+    }
+}
+
 /// Install one bind or resume attempt on this physical connection.
 pub struct BindConnection(pub BindingRef);
 
@@ -348,6 +453,11 @@ impl Message<BindConnection> for ConnectionActor {
     ) -> Self::Reply {
         if msg.0.connection_ref() != self.state.connection_ref() {
             return Err(ConnectionActorError::BindingConnectionMismatch);
+        }
+        if self.state.binding_ref.as_ref() != Some(&msg.0)
+            && self.state.sm_inbound_completion.outstanding_count() > 0
+        {
+            return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
         self.state.binding_ref = Some(msg.0);
         Ok(())
@@ -368,6 +478,7 @@ impl Message<RetireBinding> for ConnectionActor {
     ) -> Self::Reply {
         if self.state.binding_ref.as_ref() == Some(&msg.0)
             && msg.0.connection_ref() == self.state.connection_ref()
+            && self.state.sm_inbound_completion.outstanding_count() == 0
         {
             self.state.binding_ref = None;
             true

@@ -15,8 +15,8 @@ pub mod connection_actor {
         start_connection_actor, AcknowledgementResult, BindConnection, CompleteHandledInbound,
         ConnectionActor, ConnectionActorController, ConnectionActorError, ConnectionActorSequence,
         ConnectionActorSnapshot, ConnectionActorStartError, ConnectionWireFrame,
-        PanicConnectionActor, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
-        SnapshotConnection, StopConnectionActor,
+        PanicConnectionActor, PauseConnectionActor, RequestAcknowledgement, ReserveHandledInbound,
+        RetireBinding, SnapshotConnection, StopConnectionActor,
     };
 }
 
