@@ -4,10 +4,11 @@
 //! an external claim owner. It does not check claim authority, persist state,
 //! coordinate concurrent processes, or participate in production routing.
 //! Its synchronous `&mut self` transitions model a serialized compare-and-set
-//! history for tests only. Claim replacement fences the old actor but does
-//! not retire its binding; a successor must explicitly retire or continue the
-//! exact binding. Resource selection, cleanup, and delivery remain owned by
-//! their existing production paths.
+//! history for tests only. Claim replacement fences the old actor but retains
+//! its binding. A successor cannot update that binding and must explicitly
+//! retire it before a fresh bind; adoption requires a separately reviewed
+//! transition. Resource selection, cleanup, and delivery remain owned by their
+//! existing production paths.
 
 use jid::FullJid;
 use uuid::Uuid;

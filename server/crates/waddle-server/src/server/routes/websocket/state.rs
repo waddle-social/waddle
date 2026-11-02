@@ -1958,6 +1958,7 @@ impl WsConnState {
 
     /// Exact identity of this physical WebSocket, shared by every binding
     /// attempt made on the same socket.
+    #[cfg(feature = "test-support")]
     pub(super) fn connection_ref(&self) -> &waddle_xmpp::ownership::ConnectionRef {
         &self.connection_ref
     }
