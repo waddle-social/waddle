@@ -6166,3 +6166,10 @@ async fn attested_control_plane_registry_case(fixture: &Fixture) {
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/retention.rs"]
 mod retention_lab_tests;
+
+#[path = "physical_attestation/observer.rs"]
+mod operator_observer_tests;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/owner_rejection_roles.rs"]
+mod owner_rejection_roles;

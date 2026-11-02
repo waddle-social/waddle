@@ -14,9 +14,9 @@ use super::Uuid;
 #[cfg(test)]
 use super::FAIL_ORPHAN_SWEEP;
 use super::{
-    resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
-    NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
-    WireHandledCount,
+    resolve_alias, AliasResolution, CanonicalSourceBinding, DeliveryKey, IngressOrdinal,
+    MessageKey, NormalizedTarget, NormalizedTargetStorage, ProtocolEpoch, SemanticDigest,
+    SmIngressId, StoredAlias, WireHandledCount,
 };
 use super::{AtomicBool, AtomicUsize, Ordering};
 use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
@@ -47,7 +47,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 12] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 13] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -60,6 +60,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 12] = [
     "ingress_archive_dispatch",
     "ingress_send_attempts",
     "ingress_effect_descendants",
+    "ingress_owner_rejections",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -91,6 +92,8 @@ pub enum IngressSubstrateError {
     AliasIdentityConflict,
     #[error("relayed origin alias does not prove the supplied canonical message")]
     RelayedAliasUnproven,
+    #[error("canonical source principal conflicts with its immutable source binding")]
+    SourceBindingConflict,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
     #[error("ingress sm ordinal is already bound to a different message")]
@@ -500,7 +503,19 @@ pub async fn record_message(
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
 ) -> Result<(), IngressSubstrateError> {
-    record_message_in_prepared_transaction(tx, None, message_key, digest, envelope).await
+    record_message_in_prepared_transaction(tx, None, message_key, digest, envelope, None).await
+}
+
+#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+pub(crate) async fn record_message_with_source(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+    envelope: Option<&MessageEnvelope>,
+    source: &CanonicalSourceBinding,
+) -> Result<(), IngressSubstrateError> {
+    record_message_in_prepared_transaction(tx, None, message_key, digest, envelope, Some(source))
+        .await
 }
 
 pub(crate) async fn record_message_in_prepared_transaction(
@@ -509,9 +524,10 @@ pub(crate) async fn record_message_in_prepared_transaction(
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
+    source: Option<&CanonicalSourceBinding>,
 ) -> Result<(), IngressSubstrateError> {
     acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
-    record_message_after_epoch_lock(tx, prepared, message_key, digest, envelope)
+    record_message_after_epoch_lock(tx, prepared, message_key, digest, envelope, source)
         .await
         .map(|_| ())
 }
@@ -522,10 +538,14 @@ async fn record_message_after_epoch_lock(
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
+    source: Option<&CanonicalSourceBinding>,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    if insert_message(tx, prepared, message_key, digest, envelope).await? {
+    if insert_message(tx, prepared, message_key, digest, envelope, source).await? {
         Ok(MessageWriteOutcome::Recorded)
     } else {
+        if let Some(source) = source {
+            assert_source_principal_if_recorded(tx, prepared, message_key, source).await?;
+        }
         authority::complete_message_envelope(tx, prepared, message_key, digest, envelope).await?;
         Ok(MessageWriteOutcome::AlreadyRecorded)
     }
@@ -539,7 +559,7 @@ pub(crate) async fn record_message_in_relation_guard_lab(
     digest: &SemanticDigest,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
     let (tx, prepared) = lab.parts();
-    record_message_after_epoch_lock(tx, Some(prepared), message_key, digest, None).await
+    record_message_after_epoch_lock(tx, Some(prepared), message_key, digest, None, None).await
 }
 
 pub(in crate::ingress_substrate) async fn insert_message(
@@ -548,12 +568,13 @@ pub(in crate::ingress_substrate) async fn insert_message(
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
+    source: Option<&CanonicalSourceBinding>,
 ) -> Result<bool, IngressSubstrateError> {
     let (digest_version, digest_bytes) = digest.to_storage();
     let qualified;
     let postgres = if prepared.is_some() {
         qualified = format!(
-            "INSERT INTO {} (message_key, digest_version, digest, envelope_version, envelope) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT (message_key) DO NOTHING",
+            "INSERT INTO {} (message_key, digest_version, digest, envelope_version, envelope, source_binding_version, source_bare_jid, source_auth_context_id, source_auth_context_version, source_auth_epoch, source_sm_ingress_id, source_ingress_ordinal) VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?::uuid, ?::numeric, ?::numeric, ?::uuid, ?::numeric) ON CONFLICT (message_key) DO NOTHING",
             prepared_ingress_relation(prepared, PreparedIngressRelation::Messages)
         );
         qualified.as_str()
@@ -573,11 +594,65 @@ pub(in crate::ingress_substrate) async fn insert_message(
                 digest_bytes.to_vec(),
                 envelope.map(|value| value.version().to_storage()),
                 envelope.map(authority::serialize_envelope).transpose()?,
+                source.map(|_| 1_i32),
+                source.map(|source| source.principal().bare_jid().to_string()),
+                source.map(|source| source.principal().auth_context_id().as_uuid().to_string()),
+                source.map(|source| source.principal().auth_context_version().get().to_string()),
+                source.map(|source| source.principal().auth_epoch().get().to_string()),
+                source.and_then(|source| source
+                    .sm_occurrence()
+                    .map(|(id, _)| id.to_storage().to_string())),
+                source.and_then(|source| source
+                    .sm_occurrence()
+                    .map(|(_, ordinal)| ordinal.to_storage().to_string())),
             ],
         )
         .await
         .map_err(discard_database_error)?;
     Ok(inserted == 1)
+}
+
+async fn assert_source_principal_if_recorded(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    source: &CanonicalSourceBinding,
+) -> Result<(), IngressSubstrateError> {
+    let pg = format!(
+        "SELECT source_binding_version::int, source_bare_jid, source_auth_context_id::text, source_auth_context_version::text, source_auth_epoch::text FROM {} WHERE message_key = ?::uuid FOR UPDATE",
+        prepared_ingress_relation(prepared, PreparedIngressRelation::Messages)
+    );
+    let sql = if tx.driver() == DatabaseDriver::Postgres {
+        pg.as_str()
+    } else {
+        "SELECT source_binding_version, source_bare_jid, source_auth_context_id, source_auth_context_version, source_auth_epoch FROM ingress_messages WHERE message_key = ?"
+    };
+    let mut rows = tx
+        .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        .await
+        .map_err(discard_database_error)?;
+    let Some(row) = rows.next().await.map_err(discard_database_error)? else {
+        return Err(IngressSubstrateError::RelayedAliasUnproven);
+    };
+    let version: Option<i32> = row.get(0).map_err(discard_database_error)?;
+    if version.is_none() {
+        // Legacy rows remain untouched and cannot gain source authority by replay.
+        return Ok(());
+    }
+    let stored_bare: String = row.get(1).map_err(discard_database_error)?;
+    let stored_context: String = row.get(2).map_err(discard_database_error)?;
+    let stored_version: String = row.get(3).map_err(discard_database_error)?;
+    let stored_epoch: String = row.get(4).map_err(discard_database_error)?;
+    let principal = source.principal();
+    if version != Some(1)
+        || stored_bare != principal.bare_jid().to_string()
+        || stored_context != principal.auth_context_id().as_uuid().to_string()
+        || stored_version != principal.auth_context_version().get().to_string()
+        || stored_epoch != principal.auth_epoch().get().to_string()
+    {
+        return Err(IngressSubstrateError::SourceBindingConflict);
+    }
+    Ok(())
 }
 
 /// Resolve and atomically persist one sender/target/origin-id alias.
@@ -594,9 +669,36 @@ pub async fn resolve_and_record_alias(
     digest: &SemanticDigest,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
-    resolve_alias_in_prepared_transaction(tx, None, sender, target, origin_id, digest, mint).await
+    resolve_alias_in_prepared_transaction(tx, None, sender, target, origin_id, digest, None, mint)
+        .await
 }
 
+// Dark API for the staged source-binding contract; production activation is
+// deliberately deferred until caller and role contracts are complete.
+#[allow(dead_code)]
+pub(crate) async fn resolve_and_record_alias_with_source(
+    tx: &mut Transaction<'_>,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+    source: &CanonicalSourceBinding,
+    mint: impl FnOnce() -> MessageKey,
+) -> Result<AliasResolution, IngressSubstrateError> {
+    resolve_alias_in_prepared_transaction(
+        tx,
+        None,
+        sender,
+        target,
+        origin_id,
+        digest,
+        Some(source),
+        mint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_alias_in_prepared_transaction(
     tx: &mut Transaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
@@ -604,11 +706,15 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
     target: &NormalizedTarget,
     origin_id: &OriginId,
     digest: &SemanticDigest,
+    source: Option<&CanonicalSourceBinding>,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
     acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
     let alias_key = AliasStorageKey::new(sender, target, origin_id);
     if let Some(stored) = locked_alias(tx, prepared, &alias_key).await? {
+        if let Some(source) = source {
+            assert_source_principal_if_recorded(tx, prepared, stored.key, source).await?;
+        }
         return Ok(resolve_alias(true, digest, Some(&stored), mint));
     }
 
@@ -617,7 +723,7 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
         AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Inserted(key)) => key,
         _ => return Err(IngressSubstrateError::AliasMissingAfterConflict),
     };
-    if !insert_message(tx, prepared, candidate_key, digest, None).await? {
+    if !insert_message(tx, prepared, candidate_key, digest, None, source).await? {
         return Err(IngressSubstrateError::MessageContentConflict);
     }
     let qualified;
@@ -676,6 +782,9 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
     let stored = locked_alias(tx, prepared, &alias_key)
         .await?
         .ok_or(IngressSubstrateError::AliasMissingAfterConflict)?;
+    if let Some(source) = source {
+        assert_source_principal_if_recorded(tx, prepared, stored.key, source).await?;
+    }
     Ok(resolve_alias(true, digest, Some(&stored), || candidate_key))
 }
 
@@ -1387,7 +1496,7 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?
         {
-            CandidateLock::Eligible => processed += 1,
+            CandidateLock::Eligible => {}
             CandidateLock::Skipped(reason) => {
                 if reason == SkipReason::LockedElsewhere {
                     skipped_locked += 1;
@@ -1398,97 +1507,101 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
                 continue;
             }
         }
-        // Recheck receipt completeness after acquiring the canonical lock: a
-        // reconciliation may have added intents since the candidate scan.
-        if !crate::ingress_uow::EffectReceiptRepository::receipts_complete_on_transaction(
-            &mut tx,
-            message_key,
-        )
-        .await
-        .map_err(|error| gc_failure(deleted_messages, error.into()))?
-        {
-            tx.commit()
-                .await
-                .map_err(|error| gc_database_failure(deleted_messages, error))?;
-            continue;
-        }
-        // Adoption and reference settlement start a fresh full tail; aliases
-        // and key bindings remain available throughout that tail.
-        refresh_retention(&mut tx, message_key, now)
+        // Inspect the immutable mapping only after locking the source. A stale
+        // candidate that has become a child must never be reclaimed alone.
+        let pair = rejection_pair(&mut tx, message_key)
             .await
-            .map_err(|error| gc_failure(deleted_messages, error.into()))?;
-        let expired_sql = dialect_sql(tx.driver(),
-            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ?::timestamptz FROM ingress_messages WHERE message_key = ?::uuid",
-            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ? FROM ingress_messages WHERE message_key = ?");
-        let mut rows = tx
-            .query(
-                expired_sql,
-                crate::db_params![cutoff, message_key.to_storage().to_string()],
-            )
-            .await
-            .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        let expired = match rows
-            .next()
-            .await
-            .map_err(|error| gc_database_failure(deleted_messages, error))?
-        {
-            Some(row) => row
-                .get::<bool>(0)
-                .map_err(|error| gc_database_failure(deleted_messages, error))?,
-            None => false,
+            .map_err(|error| gc_failure(deleted_messages, error))?;
+        let child = match pair {
+            RejectionPair::Retained => {
+                tx.commit()
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                continue;
+            }
+            RejectionPair::Standalone => None,
+            RejectionPair::Source(child) => {
+                match lock_eligible_terminal_message(&mut tx, child, cutoff)
+                    .await
+                    .map_err(|error| gc_failure(deleted_messages, error))?
+                {
+                    CandidateLock::Eligible => Some(child),
+                    CandidateLock::Skipped(reason) => {
+                        if reason == SkipReason::LockedElsewhere {
+                            skipped_locked += 1;
+                        }
+                        tx.commit()
+                            .await
+                            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                        continue;
+                    }
+                }
+            }
         };
-        drop(rows);
-        if !expired {
+        // No chain is reclaimed as a pair. Mapping insertion takes the source
+        // lock, so these reads remain stable until the transaction completes.
+        let standalone_blocked = child.is_none()
+            && owner_result_retains_source(&mut tx, message_key)
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let child_blocked = if let Some(child) = child {
+            owner_result_retains_source(&mut tx, child)
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?
+        } else {
+            false
+        };
+        if standalone_blocked || child_blocked {
             tx.commit()
                 .await
                 .map_err(|error| gc_database_failure(deleted_messages, error))?;
             continue;
         }
-        tx.execute(
-            dialect_sql(tx.driver(), DELETE_ALIASES_POSTGRES, DELETE_ALIASES_SQLITE),
-            crate::db_params![message_key.to_storage().to_string()],
-        )
-        .await
-        .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        // Remove the complete dedup evidence together under the canonical lock.
-        tx.execute(
-            dialect_sql(
-                tx.driver(),
-                GC_DELETE_DELIVERIES_POSTGRES,
-                GC_DELETE_DELIVERIES_SQLITE,
-            ),
-            crate::db_params![message_key.to_storage().to_string()],
-        )
-        .await
-        .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        let delete_sql = gc_retained_child_sql(
-            &mut tx,
-            GC_DELETE_MESSAGE_POSTGRES,
-            GC_DELETE_MESSAGE_SQLITE,
-        )
-        .await
-        .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        let deleted = tx
-            .execute(
-                &delete_sql,
-                crate::db_params![message_key.to_storage().to_string()],
-            )
-            .await
-            .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        // Only a reclaimed canonical row proves the obligation is unretryable.
-        // A message retained by live SM refs keeps its proofs, so a still
-        // possible retry cannot be granted a second durable allocation.
-        if deleted > 0 {
-            tx.execute(
-                dialect_sql(
-                    tx.driver(),
-                    GC_DELETE_INGRESS_APPENDS_POSTGRES,
-                    GC_DELETE_INGRESS_APPENDS_SQLITE,
-                ),
-                crate::db_params![message_key.to_storage().to_string()],
-            )
-            .await
-            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let members = [Some(message_key), child];
+        let mut ready = true;
+        for member in members.into_iter().flatten() {
+            // Recompute custody and both retention clocks while both canonical
+            // locks are held. NULL clocks are adopted for a full new tail.
+            refresh_retention(&mut tx, member, now)
+                .await
+                .map_err(|error| gc_failure(deleted_messages, error.into()))?;
+            let complete =
+                crate::ingress_uow::EffectReceiptRepository::receipts_complete_on_transaction(
+                    &mut tx, member,
+                )
+                .await
+                .map_err(|error| gc_failure(deleted_messages, error.into()))?;
+            let expired = gc_message_expired(&mut tx, member, cutoff)
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            ready &= complete && expired;
+        }
+        if !ready {
+            tx.commit()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            processed += 1;
+            continue;
+        }
+        // The mapping cascades only inside this transaction. Delete the child
+        // first, then its source, or roll back every change to both rows.
+        let mut deleted = 0u64;
+        let mut lost_eligibility = false;
+        for member in [child, Some(message_key)].into_iter().flatten() {
+            let count = delete_gc_message(&mut tx, member)
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            if count != 1 {
+                lost_eligibility = true;
+                break;
+            }
+            deleted += count;
+        }
+        if lost_eligibility {
+            tx.rollback()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            continue;
         }
         tx.commit()
             .await
@@ -1504,6 +1617,7 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
         })?;
         budget.progress.record(deleted);
         deleted_messages += deleted;
+        processed += 1;
     }
 
     Ok(BatchOutcome {
@@ -1512,6 +1626,66 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
         skipped_locked,
         deadline_reached: false,
     })
+}
+
+async fn gc_message_expired(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    cutoff: &str,
+) -> Result<bool, DatabaseError> {
+    let sql = dialect_sql(tx.driver(),
+        "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ?::timestamptz FROM ingress_messages WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+        "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ? FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL");
+    let mut rows = tx
+        .query(
+            sql,
+            crate::db_params![cutoff, message_key.to_storage().to_string()],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => row.get(0),
+        None => Ok(false),
+    }
+}
+
+async fn delete_gc_message(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<u64, DatabaseError> {
+    tx.execute(
+        dialect_sql(tx.driver(), DELETE_ALIASES_POSTGRES, DELETE_ALIASES_SQLITE),
+        crate::db_params![message_key.to_storage().to_string()],
+    )
+    .await?;
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            GC_DELETE_DELIVERIES_POSTGRES,
+            GC_DELETE_DELIVERIES_SQLITE,
+        ),
+        crate::db_params![message_key.to_storage().to_string()],
+    )
+    .await?;
+    let sql =
+        gc_retained_child_sql(tx, GC_DELETE_MESSAGE_POSTGRES, GC_DELETE_MESSAGE_SQLITE).await?;
+    let deleted = tx
+        .execute(
+            &sql,
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
+    if deleted == 1 {
+        tx.execute(
+            dialect_sql(
+                tx.driver(),
+                GC_DELETE_INGRESS_APPENDS_POSTGRES,
+                GC_DELETE_INGRESS_APPENDS_SQLITE,
+            ),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
+    }
+    Ok(deleted)
 }
 
 /// Prepare a writer from the physical attestor's complete identity.
@@ -1679,6 +1853,8 @@ pub(crate) enum PreparedIngressRelation {
     CarbonReceipts,
     EffectReceipts,
     EffectDescendants,
+    #[allow(dead_code)] // used by staged relayed-source authority methods.
+    OwnerRejections,
     SendAttempts,
     SmAppends,
     PendingDelivery,
@@ -1707,6 +1883,7 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::CarbonReceipts => "ingress_carbon_receipts",
         PreparedIngressRelation::EffectReceipts => "ingress_effect_receipts",
         PreparedIngressRelation::EffectDescendants => "ingress_effect_descendants",
+        PreparedIngressRelation::OwnerRejections => "ingress_owner_rejections",
         PreparedIngressRelation::SendAttempts => "ingress_send_attempts",
         PreparedIngressRelation::SmAppends => "sm_ingress_appends",
         PreparedIngressRelation::PendingDelivery => "pending_delivery",
@@ -2065,7 +2242,7 @@ pub(in crate::ingress_substrate) async fn expired_candidates(
     let mut rows = tx
         .query(
             &candidate_sql,
-            crate::db_params![cutoff, GC_BATCH_LIMIT as i64],
+            crate::db_params![cutoff, cutoff, GC_BATCH_LIMIT as i64],
         )
         .await
         .map_err(gc_error_from_database)?;
@@ -2109,10 +2286,72 @@ pub(in crate::ingress_substrate) async fn gc_retained_child_sql(
     if !has_pending {
         return Ok(base.to_owned());
     }
-    Ok(base.replace(
-        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key",
-        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = m.message_key AND dispatch.pending_row_id <> ''",
-    ))
+    let mut sql = base.to_owned();
+    for alias in ["m", "child"] {
+        sql = sql.replace(
+            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key"),
+            &format!("SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = {alias}.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = {alias}.message_key AND dispatch.pending_row_id <> ''"),
+        );
+    }
+    Ok(sql)
+}
+
+/// A mapped child is never an independent GC candidate. A source and its
+/// child can only be reclaimed together after the rejected decision is latched.
+#[derive(Debug)]
+enum RejectionPair {
+    Standalone,
+    Source(MessageKey),
+    Retained,
+}
+
+async fn rejection_pair(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<RejectionPair, AliasGcError> {
+    let sql = dialect_sql(
+        tx.driver(),
+        "SELECT child.child_message_key::text, m.owner_decision::int, EXISTS (SELECT 1 FROM ingress_owner_rejections parent WHERE parent.child_message_key = m.message_key) FROM ingress_messages m LEFT JOIN ingress_owner_rejections child ON child.source_message_key = m.message_key WHERE m.message_key = ?::uuid",
+        "SELECT child.child_message_key, m.owner_decision, EXISTS (SELECT 1 FROM ingress_owner_rejections parent WHERE parent.child_message_key = m.message_key) FROM ingress_messages m LEFT JOIN ingress_owner_rejections child ON child.source_message_key = m.message_key WHERE m.message_key = ?",
+    );
+    let mut rows = tx
+        .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        .await
+        .map_err(gc_error_from_database)?;
+    let Some(row) = rows.next().await.map_err(gc_error_from_database)? else {
+        return Ok(RejectionPair::Retained);
+    };
+    let child: Option<String> = row.get(0).map_err(gc_error_from_database)?;
+    let decision: Option<i32> = row.get(1).map_err(gc_error_from_database)?;
+    let is_child: bool = row.get(2).map_err(gc_error_from_database)?;
+    if is_child {
+        return Ok(RejectionPair::Retained);
+    }
+    match (child, decision) {
+        (Some(child), Some(2)) => {
+            let child = child.parse::<Uuid>().map_err(|_| {
+                AliasGcError::Substrate(IngressSubstrateError::InvalidStoredMessageKey)
+            })?;
+            Ok(RejectionPair::Source(MessageKey::from_storage(child)))
+        }
+        (None, Some(2)) | (Some(_), _) => Ok(RejectionPair::Retained),
+        (None, _) => Ok(RejectionPair::Standalone),
+    }
+}
+
+async fn owner_result_retains_source(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<bool, DatabaseError> {
+    let sql = dialect_sql(
+        tx.driver(),
+        "SELECT 1 FROM ingress_messages m WHERE m.message_key = ?::uuid AND (EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key) OR m.owner_decision = 2 OR (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0) AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12)))",
+        "SELECT 1 FROM ingress_messages m WHERE m.message_key = ? AND (EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key) OR m.owner_decision = 2 OR (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0) AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12)))",
+    );
+    let mut rows = tx
+        .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Why a candidate was not collected in this pass.
@@ -2271,13 +2510,13 @@ pub(in crate::ingress_substrate) const READ_EPOCH_POSTGRES: &str =
 pub(in crate::ingress_substrate) const READ_EPOCH_SQLITE: &str =
     r#"SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 "#;
 pub(in crate::ingress_substrate) const INSERT_MESSAGE_POSTGRES: &str = r#"
-        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope)
-        VALUES (?::uuid, ?, ?, ?, ?)
+        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope, source_binding_version, source_bare_jid, source_auth_context_id, source_auth_context_version, source_auth_epoch, source_sm_ingress_id, source_ingress_ordinal)
+        VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?::uuid, ?::numeric, ?::numeric, ?::uuid, ?::numeric)
         ON CONFLICT (message_key) DO NOTHING
         "#;
 pub(in crate::ingress_substrate) const INSERT_MESSAGE_SQLITE: &str = r#"
-        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope, source_binding_version, source_bare_jid, source_auth_context_id, source_auth_context_version, source_auth_epoch, source_sm_ingress_id, source_ingress_ordinal)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (message_key) DO NOTHING
         "#;
 pub(in crate::ingress_substrate) const INSERT_ALIAS_POSTGRES: &str = r#"
@@ -2413,6 +2652,11 @@ pub(in crate::ingress_substrate) const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
                       SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
                   )
                   AND NOT EXISTS (
+                      SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+                  )
+                  AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+                      AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
+                  AND NOT EXISTS (
                       SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
                   )
                 "#;
@@ -2425,6 +2669,11 @@ pub(in crate::ingress_substrate) const GC_DELETE_MESSAGE_SQLITE: &str = r#"
                   AND NOT EXISTS (
                       SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
                   )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+                  )
+                  AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+                      AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
                   AND NOT EXISTS (
                       SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
                   )
@@ -2470,6 +2719,30 @@ pub(in crate::ingress_substrate) const GC_CANDIDATES_POSTGRES: &str = r#"
                   SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
               )
               AND NOT EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections parent WHERE parent.child_message_key = m.message_key
+              )
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              ))
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections pair WHERE pair.source_message_key = m.message_key
+                    AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR NOT EXISTS (
+                      SELECT 1 FROM ingress_messages child WHERE child.message_key = pair.child_message_key
+                        AND child.terminal_at IS NOT NULL
+                        AND (child.retention_eligible_at IS NULL OR child.retention_eligible_at <= ?::timestamptz)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = child.message_key)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = child.message_key AND d.settled_at IS NULL)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections nested WHERE nested.source_message_key = child.message_key)
+                        AND (child.owner_decision IS NULL OR child.owner_decision <> 2)
+                        AND NOT (child.source_binding_version IS NOT NULL AND (child.owner_decision IS NULL OR child.owner_decision = 0)
+                          AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = child.message_key AND owner_intent.kind = 12))
+                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = child.message_key AND NOT EXISTS (
+                          SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
+                    ))
+              )
+              AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+                  AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
+              AND NOT EXISTS (
                   SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
               )
             ORDER BY m.retention_eligible_at, m.message_key
@@ -2491,6 +2764,30 @@ pub(in crate::ingress_substrate) const GC_CANDIDATES_SQLITE: &str = r#"
               AND NOT EXISTS (
                   SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections parent WHERE parent.child_message_key = m.message_key
+              )
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              ))
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_owner_rejections pair WHERE pair.source_message_key = m.message_key
+                    AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR NOT EXISTS (
+                      SELECT 1 FROM ingress_messages child WHERE child.message_key = pair.child_message_key
+                        AND child.terminal_at IS NOT NULL
+                        AND (child.retention_eligible_at IS NULL OR child.retention_eligible_at <= ?)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = child.message_key)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = child.message_key AND d.settled_at IS NULL)
+                        AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections nested WHERE nested.source_message_key = child.message_key)
+                        AND (child.owner_decision IS NULL OR child.owner_decision <> 2)
+                        AND NOT (child.source_binding_version IS NOT NULL AND (child.owner_decision IS NULL OR child.owner_decision = 0)
+                          AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = child.message_key AND owner_intent.kind = 12))
+                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = child.message_key AND NOT EXISTS (
+                          SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
+                    ))
+              )
+              AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+                  AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
               AND NOT EXISTS (
                   SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
               )

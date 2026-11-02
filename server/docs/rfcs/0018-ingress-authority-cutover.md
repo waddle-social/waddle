@@ -638,6 +638,46 @@ through its local registry and settle its progress.
 - Deposed-owner scenario: first message commits under the live room claim;
   claim stolen; retry → `ClaimFenceMissing` before alias resolution.
 
+#### Remote-room acceptance gap (#1948, #2046)
+
+Origin custody of a remote groupchat is not proof that the room owner accepted
+it. With an origin-id, the origin can commit the canonical message, alias and
+remote-dispatch intent before the owner decides. A synthetic relayed
+`PlanRejection::AuthorizationDenied` submitted after that custody is classified
+as `OwnerFirstAcceptance` and leaves the recorded dispatch intent in place.
+That test does not run the actual room-owner planner or prove whether its
+denial and error frame are discarded. The existing alias guard prevents an
+unproven reference from borrowing another canonical message; it does not settle
+how a real owner denial after origin custody is handled or establish durable
+owner acceptance. This gap also matters to SM handling: an origin-side
+committed decision and its wire-position binding do not establish an owner
+decision.
+
+The relayed-origin characterization tests exercise a synthetic replan of the
+same canonical message from owner A to owner B. The persisted alias still
+identifies the same message, but the proposed remote-dispatch semantic key and
+the `DeliveryKey::effect` derived from it change with the owner identity. The
+origin retry retains A's recorded intent; it does not record B's proposal. Two
+submissions with distinct origin IDs remain distinct even if their content
+digests match. For an SM submission without an origin-id, the committed wire
+position instead binds a retry to the same message; a different wire position
+gets a different message. These tests exercise local planning and persistence,
+not delivery or an owner handoff.
+
+Any future remote-owner acceptance protocol needs an authenticated request
+identity available before an owner commit that might have an ambiguous reply.
+It must identify the same submission across retries and owner changes,
+distinguish different submissions with identical content, and cover SM
+submissions without origin IDs. The origin custody transaction could mint and
+persist such an identity before the owner attempt; these tests do not require
+it to exist before origin custody. An origin alias is optional, while an
+owner-specific dispatch `DeliveryKey` changes when the owner changes, so
+neither alone establishes the needed identity in all cases. The design must
+still specify identity creation, persistence and recovery, authority checks,
+denial handling, and the boundary for advancing `h`; this characterization
+chooses no protocol shape and does not claim durable acceptance or exactly-once
+execution.
+
 ### 3.5 Decision matrix
 Advancing (committed): `Accepted`, `ExistingCommitted`, `ExistingConsistent`,
 `ExistingRepaired`, `ExistingDivergent`, `OwnerFirstAcceptance`,

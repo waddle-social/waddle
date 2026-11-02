@@ -423,7 +423,7 @@ pub(super) async fn correlate_runtime(
     .await
 }
 
-fn source_body<'a>(sql: &'a str, name: &str) -> Option<&'a str> {
+pub(super) fn source_body<'a>(sql: &'a str, name: &str) -> Option<&'a str> {
     let marker = format!("FUNCTION {name}() RETURNS trigger");
     let (_, declaration) = sql.split_once(&marker)?;
     let (_, body) = declaration.split_once("AS $$")?;
@@ -530,12 +530,12 @@ async fn check_epoch_shape(
     .await
 }
 
-struct GuardFunction {
-    oid: i64,
-    source: String,
+pub(super) struct GuardFunction {
+    pub(super) oid: i64,
+    pub(super) source: String,
 }
 
-async fn function_source(
+pub(super) async fn function_source(
     tx: &mut Transaction<'_>,
     config: &DarkMigrationOwnerConfig,
     schema: &str,

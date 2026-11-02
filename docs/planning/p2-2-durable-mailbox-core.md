@@ -76,15 +76,20 @@ questions have already been adjudicated.
    dependent claims and rows, check the exact existing operation before
    incrementing, then increment and insert in the same transaction. A rollback
    rolls back both; a committed duplicate returns the existing sequence rather
-   than allocating another. Proposed range: zero for an empty counter and
+   than allocating another while the entry is retained. After authorized row
+   cleanup, a duplicate must read the exact retained canonical outcome without
+   allocating again; any required original sequence must survive in that
+   canonical proof. Proposed range: zero for an empty counter and
    positive, nonwrapping `u64` sequences through `18446744073709551615`, with
    an explicit exhaustion error. PostgreSQL storage must represent and check
    that entire range; do not narrow it silently to signed `BIGINT`. Confirm
    that gap-free committed allocations are worth the lane lock and specify the
    treatment of deleted entries and cursors before implementation.
-3. **Reference granularity.** Propose that each entry refers to a canonical
-   `MessageKey` and an exact effect or delivery reference, with a closed typed
-   variant distinguishing their roles. Child work refers to the owner's frozen
+3. **Reference granularity.** For message work, propose that each entry refers
+   to a canonical `MessageKey` and an exact effect or delivery reference. A
+   client join instead needs a distinct closed typed canonical request variant
+   in the same ingress authority; its key and storage contract remain blocked
+   by question 2. Child work refers to the owner's frozen
    delivery keys, never an audience rediscovered during consumption. The
    existing remote dispatch effect is an owner-specific reference, however,
    and cannot alone supply the stable acceptance-request identity needed on
@@ -162,6 +167,80 @@ failure evidence, not merely adding tests to the matrix. The positive-only
 lookup, per-lane transactional counter and separate MUC/Muji lanes remain
 proposals subject to that review and the #2116 prerequisite.
 
+### Adversarial review findings, 2026-11-02
+
+These findings narrow the design but **do not clear** the three blocking
+questions or the #2116 prerequisite:
+
+- A candidate remote-room request identity is `(MessageKey,
+  RemoteRoomAcceptance)`, unique across lanes. The room, original sender,
+  semantic digest and typed source authority are immutable checked request
+  data. `DispatchToRoomRemote` and its derived `DeliveryKey` include the
+  current owner and are dispatch provenance, not stable request identity.
+  Recovery must also recognize an originally **local** room result after a
+  local-to-remote owner change; no remote dispatch effect exists in that case.
+  A missing origin ID requires an independently verified canonical source
+  binding, since a supplied message key and digest alone do not authenticate
+  its sender.
+- Existing origin-ID aliases intentionally deduplicate by sender **bare** JID,
+  target and origin ID. A replacement connection or sibling resource can
+  therefore resolve the same `MessageKey` from a different physical lane.
+  Preserve the first lane and sequence. A separately authenticated retry may
+  look up or reconcile the original outcome from the retained row or, after
+  authorized cleanup, its exact retained canonical proof. It must not allocate
+  or execute a second request or borrow the new session's authority for old work. The
+  original response stays bound to its exact session/endpoint custody, even
+  if a replacement reuses the full JID. A replacement or sibling receives only
+  a separately authorized, occurrence-specific response; successful SM resume
+  preserves the original logical session under its own fence. If the old
+  request is pending, the new source frontier must remain behind it or use a
+  reviewed durable
+  dependency barrier. A response owed to a new stanza occurrence needs its
+  own recipient, stanza ID and recoverable response custody.
+- A proposed client MUC lane origin is the bound full JID plus
+  `OccupancySessionGeneration`, carried through SM resume and remote-resource
+  forwarding. `SmSession` and `UserActor` are execution authorities, not
+  different origins for repair. A join needs a new typed canonical request in
+  the existing ingress authority: the current join sends `canonical: None`
+  and `MessageEnvelope` holds only messages. Mint a distinct occurrence key
+  before each first owner attempt; repair reuses it, while a later identical
+  XEP-0045 join remains a new synchronization request. Source registration
+  must preserve arrival order before lane-lock acquisition. Both local and
+  remote room execution must honor the same pending lane head after a claim
+  transfer.
+- A committed room projection records a lifecycle revision but leaves
+  occupancy in actor memory. A successor cannot infer a joined occupant from
+  the projection or a cursor past the join. Recover the exact current
+  occupancy before dependent work, or fail closed. Composing the owner result
+  with mailbox disposition also requires changing the room store's current
+  independent transaction boundary. No schema or lane cutover should assume
+  these contracts already exist.
+- The proposed lane-before-parent order is not today's ingress order: the
+  current commit locks the SM stream before canonical resolution. Restructure
+  that enclosing transaction or prove another whole-system order. A candidate
+  GC schedule has lane-first append/terminal cleanup, while GC locks only the
+  canonical parent with `SKIP LOCKED` and never a lane. Under a fresh READ
+  COMMITTED snapshot, GC must check for **any** mailbox row, including a
+  terminal row being deleted concurrently, before deleting deliveries or the
+  parent. Otherwise the immediate foreign-key check can deadlock with a
+  lane-first cleaner waiting on the parent. The release proof still needs a
+  durable origin handled ordinal/frontier and retained checkpoint or
+  tombstone across P3.3 recovery; elapsed time, relay replies and child
+  consumption do not supply it. Deleting the mailbox row must not make the
+  accepted or rejected owner outcome undiscoverable during the remaining
+  canonical alias-retention tail. For manifest-bearing messages, an accepted
+  result may be read back from the exact immutable canonical room manifest;
+  a rejected result instead needs an exact canonical owner-rejection proof
+  and frozen error. These are mutually exclusive, and missing or mismatched
+  evidence fails closed. The current rejection detector does not recognize a
+  remote denial alongside an already recorded remote-dispatch intent, so
+  P2.2/P2.3 must extend that reconciliation before relying on rejection
+  readback after row cleanup. Other mailbox variants cannot borrow this
+  proof; retain their row until an equivalent result and release rule is
+  reviewed. The current eight-day alias
+  tail is a bounded deduplication horizon, not proof against every later
+  fresh-session client resubmission.
+
 ## Candidate storage contract
 
 The names and physical migration are intentionally not selected. This is a
@@ -176,11 +255,13 @@ contract for review after #2116, not executable DDL.
   recipient JIDs can exceed PostgreSQL's composite B-tree index-row limit; the
   existing ingress alias schema documents the same constraint
   ([`waddle.rs`](../../server/crates/waddle-server/src/db/migrations/waddle.rs)).
-- An **entry** is uniquely identified by lane and positive sequence. It stores
-  the canonical message and exact effect or delivery reference, its typed role,
-  and one disposition. It stores no stanza or duplicate frozen manifest.
-  Foreign-key and repository checks must establish the same message and exact
-  reference, without a cascade that can remove live custody. In particular,
+- An **entry** is uniquely identified by lane and positive sequence. Its closed
+  typed role refers to either a canonical message plus exact effect/delivery,
+  or a reviewed canonical non-message request such as a join. It stores no
+  stanza or duplicate frozen manifest. Foreign-key and repository checks for
+  the message variant must establish the same message and exact reference;
+  the join variant needs its own exact canonical reference checks. Neither may
+  cascade away live custody. In particular,
   `ingress_deliveries` keys a delivery separately from its message; a lookup or
   foreign key on the delivery key alone must not authorize a mismatched pair.
 - A bounded exact-operation identity must be known before attempting commit and
@@ -189,7 +270,10 @@ contract for review after #2116, not executable DDL.
   relationship to existing effect/delivery references remain blocked by
   questions 1 and 2. Bind the operation to its logical recipient and reviewed
   lane/handoff contract. Changing the physical owner must not create another
-  operation. An unapproved lane or logical-target change conflicts; a
+  operation. Reassigning an existing operation to a different lane or logical
+  target conflicts; a separately authenticated cross-lane duplicate may only
+  look up or reconcile the original responsibility without moving it; after
+  authorized row cleanup it reads the retained canonical outcome. A
   lane-scoped index alone cannot enforce this. Use fixed-width keys or a
   bounded digest with full-value equality and collision failure; handle nullable
   variant columns explicitly so SQL null uniqueness cannot admit duplicates.
@@ -199,13 +283,17 @@ contract for review after #2116, not executable DDL.
   appending, and fail closed on invalid stored discriminants. Resolve each
   operation's uniqueness scope during the design gate. A separate bounded
   target-first lookup supports later polling; its layout is subject to P2.4.
-- Dispositions are closed: pending, accepted, consumed, dead-lettered and
-  policy-discarded. The review must define each legal transition and its exact
-  actor, compare-and-set fence and proof. A dead letter retains recoverable
-  custody until an authorized repair or final policy disposition; it is not
-  automatically successful delivery. Advancing a cursor past it requires an
-  explicit ordering and policy decision. Terminal transitions cannot erase
-  the evidence required to resolve a prior acceptance while retry is possible.
+- Request outcomes need a closed, single-authority sum such as `Pending`,
+  `OwnerAccepted { canonical_result }` or
+  `OwnerRejected { canonical_rejection }`; child delivery dispositions are
+  separate. The owner must commit a rejection's typed reason, original request
+  and frozen error decision without minting an accepted manifest. The review
+  must define each legal transition and its exact actor, compare-and-set fence
+  and proof. Dead letters retain recoverable custody until authorized repair
+  or final policy disposition; they are not successful delivery. Advancing a
+  cursor past one requires an explicit ordering and policy decision. Terminal
+  transitions cannot erase evidence needed by a prior acceptance **or
+  rejection** lookup while retry remains possible.
 
 A checksummed, expand-only, append-only ledger migration may add the reviewed
 tables only after the #2116 gate. It must cover both tables in the actual epoch-guard
@@ -219,21 +307,27 @@ connection.
 ## Acceptance, consumption and retention
 
 1. **Acceptance:** the origin commits a canonical request and its mailbox
-   responsibility together. For a room, the owner checks its exact current
-   claim and occupancy/lifecycle authority and, in one authoritative
+   responsibility together. For a room **message**, the owner checks its exact
+   current claim and occupancy/lifecycle authority and, in one authoritative
    transaction, freezes the final canonical manifest, authoritative room stanza
    ID and complete child keys and changes the existing request's disposition to
-   accepted. The row refers to that canonical evidence; another table, relay
+   accepted. A join instead needs a separately reviewed typed canonical result,
+   occupancy projection and response-custody contract before its lane cuts over.
+   The row refers to its applicable canonical evidence; another table, relay
    ACK or in-memory flag must not independently declare acceptance. A rejected
-   request cannot fabricate an accepted manifest. The origin advances `h` only
-   after it can positively verify this committed authority. The actual
+   request cannot fabricate an accepted manifest. A committed owner rejection
+   instead records a canonical frozen error result and its response custody.
+   The origin advances `h` only after it positively verifies an accepted or
+   rejected handled result and commits the contiguous source frontier; an
+   unavailable, absent, stale or ambiguous lookup cannot advance it. The actual
    acceptance transaction and wire behavior are #1948/P2.3 work.
 2. **Uncertain commit:** the stable operation identity is available before the
    write. After a lost reply or indeterminate commit, a successful authoritative
    lookup of the exact identity and matching canonical evidence can recover the
-   same accepted result. An absent, unavailable or conflicting lookup is not
-   positive commit proof and cannot advance `h` or justify replacing the
-   manifest. Retry and refusal semantics must be specified with #1948.
+   same accepted or rejected result. An absent, unavailable or conflicting
+   lookup is not positive commit proof and cannot advance `h` or justify
+   replacing the manifest or frozen rejection. Retry response occurrences and
+   refusal semantics must be specified with #1948.
 3. **Consumption:** the target checks the exact current claim and row state;
    its transaction commits the disposition with the corresponding canonical
    receipt or durable same-key downstream custody. A socket write or relay ACK
@@ -241,9 +335,11 @@ connection.
    cannot retire successor obligations. The existing canonical receipts remain
    the effect-completion authority.
 4. **Retention:** adding, settling or removing mailbox custody and the existing
-   collector synchronize on the canonical message. A live or repairable entry
-   keeps the message, identity and evidence available. Once every canonical
-   obligation, SM reference and retained mailbox entry permits collection,
+   collector synchronize on the applicable canonical parent. A live or repairable
+   entry keeps that parent, identity and evidence available. The current message
+   collector needs extension for any approved non-message request variant.
+   Once every canonical obligation, SM reference and retained mailbox entry
+   permits collection,
    begin a fresh full ingress retention tail. Integrate the candidate scan,
    locked recheck, retention refresh and final delete. The post-lock recheck
    must use a fresh READ COMMITTED statement snapshot or an independently proven
@@ -278,7 +374,7 @@ skips. Add the applicable SQLite tests if the backend decision requires them.
 | Area | Controlled schedule and required result |
 | --- | --- |
 | Allocation — P2.2 | Hold the first lane lock while a second appender attempts the same lane; prove it cannot commit first, then release and assert unique monotonic sequences. Concurrent different lanes make independent progress. Roll back the first allocation and show no committed gap. Test the maximum and explicit exhaustion. |
-| Idempotency — P2.2 | Race the same pre-known operation across lanes; at most one responsibility commits, and unapproved logical-target or lane changes conflict. Replan an actual remote dispatch from owner A to B, whose existing effect keys differ: the reviewed request identity must recover the same acceptance, not allocate a second one. Distinct requests and child keys remain distinct. Test maximal JIDs, discriminators, encoding round trips and an injected digest collision that fails closed. |
+| Idempotency — P2.2 | Race the same pre-known operation across lanes; at most one responsibility commits, and an attempted lane or logical-target reassignment conflicts. A separately authenticated cross-lane duplicate reads the original responsibility without moving it; while that responsibility is pending, the new source frontier cannot overtake it. Replan a remote dispatch from owner A to B, whose effect keys differ: the request identity must recover the same accepted or rejected result, not allocate a second one. Distinct requests and child keys remain distinct. Test maximal JIDs, discriminators, encoding round trips and an injected digest collision that fails closed. |
 | Fences and handoff — P2.2/P2.3 | Change origin and target owner epochs and node incarnations while an entry is pending and while acceptance or consumption is paused; stale updates affect zero rows or return a typed fence failure. Include room lifecycle/occupancy changes, multiple-lane lock order and SM resume. Exercise the actual maybe-committed `SmSession` join followed by `UserActor` repair with `canonical: None`, restart and exclusive-cursor recovery: the reviewed custody and handoff preserve join-before-message ordering. |
 | Epoch and roles — P2.2/#2116 | Under the reviewed restricted role and real migration, verify both new tables in the manifest and DML/truncate guards. At the activated test epoch, unproven, stale and unsupported-epoch writes fail; properly prepared writes succeed. Exercise owner transition, schema shadowing and migration ordering as required by #2116, rather than inferring those guarantees from an epoch-zero write. |
 | Acceptance — #1948/P2.3 | Pause before owner commit and prove the origin cannot advance `h`; then commit the frozen manifest and all child identities before acknowledgement. Change membership around acceptance and retry: recover the original manifest, stanza ID and child keys. Owner rejection, unavailable owner and stale claims never manufacture acceptance. |

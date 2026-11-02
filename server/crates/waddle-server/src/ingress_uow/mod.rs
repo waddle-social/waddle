@@ -55,6 +55,8 @@ pub use error::IngressUowError;
 pub use extension_grants::{
     ConfiguredPluginGrants, GrantAssertion, GrantAssertionFailure, GrantSync,
 };
+#[allow(unused_imports)] // exported for dark tests and the future activation slice.
+pub(crate) use repositories::RoomOwnerDecision;
 pub use repositories::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectIntentRepository,
     EffectReceiptRepository, ExtensionGrantRepository, FrontierOutcome, InboxRepository,
@@ -63,6 +65,8 @@ pub use repositories::{
 };
 #[cfg(feature = "clustering")]
 pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
+#[cfg(test)]
+pub(crate) use repositories::{ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal};
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 
@@ -82,7 +86,7 @@ use crate::ingress_substrate::{
 use uuid::Uuid;
 use waddle_xmpp::ingress::ProtocolEpoch;
 #[cfg(feature = "clustering")]
-use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, SharedNodeIdentity};
+use waddle_xmpp::ownership::{CurrentNodeIdentityGuard, NodeIdentity, SharedNodeIdentity};
 
 /// Ownership authority available to an ingress unit of work.
 #[derive(Clone)]
@@ -442,6 +446,41 @@ impl<'a> IngressUowTransaction<'a> {
             IngressFencing::Clustered(identity) => Some(identity),
             IngressFencing::SingleNode => None,
         }
+    }
+
+    #[cfg(feature = "clustering")]
+    fn retained_authority(&self) -> Option<&CurrentNodeIdentityGuard> {
+        let identity = self.bound_node_identity()?;
+        self.authority_guards
+            .iter()
+            .find(|guard| identity.owns_guard(guard))
+    }
+
+    /// Reuse authority already retained by this transaction. Acquiring another
+    /// read guard behind a queued rotation would deadlock against that guard.
+    /// A newly acquired guard is returned to the caller so a failed claim
+    /// assertion does not retain it until the transaction ends.
+    #[cfg(feature = "clustering")]
+    async fn acquire_authority(
+        &mut self,
+        expected: &NodeIdentity,
+    ) -> Result<Option<CurrentNodeIdentityGuard>, IngressUowError> {
+        let identity = self
+            .bound_node_identity()
+            .cloned()
+            .ok_or(IngressUowError::NodeIdentityUnbound)?;
+        if let Some(authority) = self.retained_authority() {
+            return if authority.identity() == expected {
+                Ok(None)
+            } else {
+                Err(IngressUowError::ClaimFenceMissing)
+            };
+        }
+        identity
+            .guard_if_current(expected)
+            .await
+            .map(Some)
+            .ok_or(IngressUowError::ClaimFenceMissing)
     }
 
     /// Retain a minted node-authority guard until this transaction ends.

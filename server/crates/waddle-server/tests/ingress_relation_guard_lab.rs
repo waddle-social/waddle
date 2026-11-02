@@ -13,7 +13,7 @@ use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunne
 
 const CANDIDATE: &str =
     include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
-const TABLES: [&str; 12] = [
+const TABLES: [&str; 13] = [
     "ingress_archive_dispatch",
     "ingress_carbon_receipts",
     "ingress_deliveries",
@@ -23,6 +23,7 @@ const TABLES: [&str; 12] = [
     "ingress_effect_receipts",
     "ingress_messages",
     "ingress_origin_aliases",
+    "ingress_owner_rejections",
     "ingress_send_attempts",
     "ingress_sm_refs",
     "ingress_sm_streams",
@@ -113,8 +114,8 @@ impl Fixture {
             .await
             .expect("migration version");
         assert_eq!(
-            last, 1027,
-            "laboratory must use the actual V1008-V1027 catalog"
+            last, 1028,
+            "laboratory must use the actual V1008-V1028 catalog"
         );
         sqlx::raw_sql(CANDIDATE)
             .execute(&mut owner_connection)

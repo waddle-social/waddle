@@ -16,6 +16,9 @@ use super::{
 };
 use crate::db::lineage::LINEAGE_ADVISORY_LOCK_KEY;
 
+mod observation;
+pub use observation::{observe_installation, InstallationObservation};
+
 // The two-key advisory namespace is distinct from the existing one-key
 // lineage and migration locks. The second key is derived from the trusted
 // schema, not the operation ID: different operations for one target serialize.

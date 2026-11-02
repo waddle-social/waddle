@@ -15,7 +15,7 @@ pub use maintenance::{
 };
 pub(crate) use retention::{
     invalidate_retention, invalidate_retention_in_prepared_transaction, refresh_retention,
-    refresh_retention_with_db_clock,
+    refresh_retention_in_prepared_transaction_with_db_clock, refresh_retention_with_db_clock,
 };
 #[cfg(test)]
 mod authority_tests;
@@ -43,6 +43,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::Instant;
 use uuid::Uuid;
+use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::ingress::{
     resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
     NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
@@ -53,6 +54,36 @@ use waddle_xmpp_core::xep0359::OriginId;
 
 use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use crate::ingress_uow::DbRetryClass;
+
+/// Immutable authenticated origin identity stamped with a newly-created
+/// canonical message. The SM occurrence is absent for ephemeral streams.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+pub(crate) struct CanonicalSourceBinding {
+    principal: AuthenticatedPrincipalRef,
+    sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,
+}
+
+impl CanonicalSourceBinding {
+    #[allow(dead_code)] // staged repository contract; activation is intentionally deferred.
+    pub(crate) fn new(
+        principal: AuthenticatedPrincipalRef,
+        sm_occurrence: Option<(SmIngressId, IngressOrdinal)>,
+    ) -> Self {
+        Self {
+            principal,
+            sm_occurrence,
+        }
+    }
+
+    pub(crate) fn principal(&self) -> &AuthenticatedPrincipalRef {
+        &self.principal
+    }
+
+    pub(crate) fn sm_occurrence(&self) -> Option<(SmIngressId, IngressOrdinal)> {
+        self.sm_occurrence
+    }
+}
 
 #[cfg(test)]
 tokio::task_local! {
@@ -75,6 +106,8 @@ pub(crate) use substrate::prepare_attested_receipt_transaction;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
 pub use substrate::record_message;
+#[allow(unused_imports)] // exported for dark tests and the future activation slice.
+pub(crate) use substrate::record_message_with_source;
 pub use substrate::resolve_and_record_alias;
 pub(crate) use substrate::set_local_transaction_timeouts;
 pub use substrate::supported_protocol_epoch;

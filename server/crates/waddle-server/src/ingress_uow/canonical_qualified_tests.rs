@@ -4,6 +4,8 @@ mod acceptance;
 mod no_store;
 mod post_commit_repositories;
 mod principal;
+#[cfg(feature = "clustering")]
+mod room_claim;
 mod sm;
 
 use super::{CanonicalMessageRepository, IngressUnitOfWork, IngressUowTransaction};

@@ -191,6 +191,74 @@ async fn wait_for_application(pool: &PgPool, application: &str, blocker_pid: i32
     .expect("owner blocked on ledger")
 }
 
+/// Return a fully migrated fixture to its coherent V1027 state so V1028 is
+/// the only pending migration. V1027's ACK table and ledger row stay intact.
+async fn make_v1028_pending(fixture: &Fixture) {
+    let mut tx = fixture
+        .admin
+        .begin()
+        .await
+        .expect("begin V1028 fixture rollback");
+    let schema = &fixture.schema;
+    let statements = [
+        format!(
+            "DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_messages"
+        ),
+        format!(
+            "DROP TRIGGER ingress_messages_source_insert_guard ON {schema}.ingress_messages"
+        ),
+        format!(
+            "DROP TRIGGER ingress_owner_rejections_update_guard ON {schema}.ingress_owner_rejections"
+        ),
+        format!(
+            "DROP TRIGGER ingress_owner_rejections_insert_guard ON {schema}.ingress_owner_rejections"
+        ),
+        format!(
+            "DROP TRIGGER ingress_owner_rejections_delete_guard ON {schema}.ingress_owner_rejections"
+        ),
+        format!(
+            "DROP TRIGGER ingress_owner_rejections_epoch_guard_dml ON {schema}.ingress_owner_rejections"
+        ),
+        format!(
+            "DROP TRIGGER ingress_owner_rejections_epoch_guard_truncate ON {schema}.ingress_owner_rejections"
+        ),
+        format!("DROP FUNCTION {schema}.waddle_ingress_source_binding_guard()"),
+        format!("DROP FUNCTION {schema}.waddle_ingress_source_insert_guard()"),
+        format!("DROP FUNCTION {schema}.waddle_ingress_owner_rejection_immutable()"),
+        format!("DROP FUNCTION {schema}.waddle_ingress_owner_rejection_insert_guard()"),
+        format!("DROP FUNCTION {schema}.waddle_ingress_owner_rejection_delete_guard()"),
+        format!(
+            "ALTER TABLE {schema}.ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row"
+        ),
+        format!(
+            "DELETE FROM {schema}.ingress_epoch_guard_manifest WHERE table_name = 'ingress_owner_rejections'"
+        ),
+        format!(
+            "ALTER TABLE {schema}.ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row"
+        ),
+        format!("DROP TABLE {schema}.ingress_owner_rejections"),
+        format!(
+            "ALTER TABLE {schema}.ingress_messages DROP CONSTRAINT ingress_messages_source_binding_check"
+        ),
+        format!(
+            "ALTER TABLE {schema}.ingress_messages DROP CONSTRAINT ingress_messages_owner_decision_check"
+        ),
+        format!(
+            "ALTER TABLE {schema}.ingress_messages DROP COLUMN source_binding_version, DROP COLUMN source_bare_jid, DROP COLUMN source_auth_context_id, DROP COLUMN source_auth_context_version, DROP COLUMN source_auth_epoch, DROP COLUMN source_sm_ingress_id, DROP COLUMN source_ingress_ordinal, DROP COLUMN owner_decision"
+        ),
+        format!("DELETE FROM {schema}._migrations WHERE version = 1028"),
+    ];
+    for statement in statements {
+        sqlx::query(&statement)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|error| panic!("revert V1028 fixture state: {error}"));
+    }
+    tx.commit()
+        .await
+        .expect("commit coherent V1027 fixture state");
+}
+
 #[tokio::test]
 async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catalog() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
@@ -228,20 +296,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     assert_eq!(real_ledger, 1);
     path_tx.rollback().await.expect("reset path");
 
-    sqlx::query(&format!(
-        "DROP TABLE {}.sm_acknowledged_windows",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("make latest migration pending");
-    sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version = 1027",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("remove latest ledger row");
+    make_v1028_pending(&fixture).await;
     let mut blocker = fixture.admin.begin().await.expect("ledger blocker");
     sqlx::query(&format!(
         "LOCK TABLE {}._migrations IN ROW EXCLUSIVE MODE",
@@ -273,18 +328,25 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         blocker.rollback().await.expect("release ledger");
     };
     let (result, ()) = tokio::join!(run_dark_postgres_owner(&options, &config), observe);
-    assert_eq!(result.expect("owner commits"), vec![1027]);
-    let (count, table): (i64, bool) = sqlx::query_as(&format!(
-        "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
-         pg_catalog.to_regclass($1) IS NOT NULL",
-        fixture.schema,
-    ))
-    .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
-    .fetch_one(&fixture.admin)
-    .await
-    .expect("committed catalog");
-    assert_eq!(count, 1);
-    assert!(table);
+    assert_eq!(result.expect("owner commits"), vec![1028]);
+    let (v1027, v1028, ack_table, rejection_table): (i64, i64, bool, bool) =
+        sqlx::query_as(&format!(
+            "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
+         (SELECT count(*) FROM {}._migrations WHERE version = 1028), \
+         pg_catalog.to_regclass($1) IS NOT NULL, pg_catalog.to_regclass($2) IS NOT NULL",
+            fixture.schema, fixture.schema,
+        ))
+        .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
+        .bind(format!("{}.ingress_owner_rejections", fixture.schema))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("committed catalog");
+    assert_eq!((v1027, v1028), (1, 1));
+    assert!(ack_table, "V1027 schema remains installed");
+    assert!(
+        rejection_table,
+        "owner committed the pending V1028 relation"
+    );
     let decoy: i64 = sqlx::query_scalar("SELECT count(*) FROM _migrations WHERE version = 999999")
         .fetch_one(&mut hostile)
         .await
@@ -368,20 +430,7 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
 
     // A conflicting epoch holder times out before any ledger bootstrap or
     // catalog application, leaving the intentionally pending migration so.
-    sqlx::query(&format!(
-        "DROP TABLE {}.sm_acknowledged_windows",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("make migration pending again");
-    sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version = 1027",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("remove latest ledger row again");
+    make_v1028_pending(&fixture).await;
     let mut epoch_holder = fixture.admin.begin().await.expect("epoch holder");
     sqlx::query(&format!(
         "LOCK TABLE ONLY {}.ingress_protocol_epoch IN ACCESS EXCLUSIVE MODE",
@@ -398,16 +447,21 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
     .expect("server lock timeout bounds owner");
     assert!(blocked.is_err());
     epoch_holder.rollback().await.expect("release epoch");
-    let (ledger, table): (i64, bool) = sqlx::query_as(&format!(
-        "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
-         pg_catalog.to_regclass($1) IS NOT NULL",
-        fixture.schema,
-    ))
-    .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
-    .fetch_one(&fixture.admin)
-    .await
-    .expect("read timed-out state");
-    assert_eq!((ledger, table), (0, false));
+    let (v1027, ledger, ack_table, rejection_table): (i64, i64, bool, bool) =
+        sqlx::query_as(&format!(
+            "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
+         (SELECT count(*) FROM {}._migrations WHERE version = 1028), \
+         pg_catalog.to_regclass($1) IS NOT NULL, pg_catalog.to_regclass($2) IS NOT NULL",
+            fixture.schema, fixture.schema,
+        ))
+        .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
+        .bind(format!("{}.ingress_owner_rejections", fixture.schema))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("read timed-out state");
+    assert_eq!((v1027, ledger), (1, 0));
+    assert!(ack_table, "timeout preserves V1027 schema");
+    assert!(!rejection_table, "timeout leaves V1028 unapplied");
 
     // Only this disposable fixture advances: the binary accepts its current
     // supported epoch and refuses the next one before applying the catalog.
@@ -422,22 +476,9 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         run_dark_postgres_owner(&fixture.owner_options, &fixture.config())
             .await
             .expect("apply at supported epoch"),
-        vec![1027]
+        vec![1028]
     );
-    sqlx::query(&format!(
-        "DROP TABLE {}.sm_acknowledged_windows",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("make migration pending for future epoch");
-    sqlx::query(&format!(
-        "DELETE FROM {}._migrations WHERE version = 1027",
-        fixture.schema
-    ))
-    .execute(&fixture.admin)
-    .await
-    .expect("remove future-epoch ledger row");
+    make_v1028_pending(&fixture).await;
     sqlx::query(&update_epoch)
         .bind(2_i64)
         .bind(fixture.lineage.lineage_uuid.0)
@@ -448,14 +489,19 @@ async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catal
         run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
         Err(DarkMigrationOwnerError::UnsupportedEpoch)
     ));
-    let pending: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM {}._migrations WHERE version = 1027",
+    let (pending, ack_table, rejection_table): (i64, bool, bool) = sqlx::query_as(&format!(
+        "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1028), \
+         pg_catalog.to_regclass($1) IS NOT NULL, pg_catalog.to_regclass($2) IS NOT NULL",
         fixture.schema
     ))
+    .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
+    .bind(format!("{}.ingress_owner_rejections", fixture.schema))
     .fetch_one(&fixture.admin)
     .await
     .expect("read future-epoch ledger");
     assert_eq!(pending, 0);
+    assert!(ack_table, "future epoch preserves V1027 schema");
+    assert!(!rejection_table, "future epoch leaves V1028 pending");
     fixture.cleanup().await;
 }
 
@@ -734,9 +780,8 @@ async fn owner_reports_terminated_commit_as_unknown_without_replaying() {
         return;
     };
     let fixture = Fixture::new(&url, true).await;
+    make_v1028_pending(&fixture).await;
     for statement in [
-        format!("DROP TABLE {}.sm_acknowledged_windows", fixture.schema),
-        format!("DELETE FROM {}._migrations WHERE version = 1027", fixture.schema),
         format!("CREATE FUNCTION {}.lab_delay_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(10); RETURN NEW; END $$", fixture.schema),
         format!("CREATE CONSTRAINT TRIGGER lab_delay_commit AFTER INSERT ON {}._migrations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {}.lab_delay_commit()", fixture.schema, fixture.schema),
     ] {
@@ -776,16 +821,21 @@ async fn owner_reports_terminated_commit_as_unknown_without_replaying() {
         result,
         Err(DarkMigrationOwnerError::CommitUnknown)
     ));
-    let (ledger, table): (i64, bool) = sqlx::query_as(&format!(
-        "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
-         pg_catalog.to_regclass($1) IS NOT NULL",
-        fixture.schema,
-    ))
-    .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
-    .fetch_one(&fixture.admin)
-    .await
-    .expect("observe terminated transaction");
-    assert_eq!((ledger, table), (0, false));
+    let (v1027, ledger, ack_table, rejection_table): (i64, i64, bool, bool) =
+        sqlx::query_as(&format!(
+            "SELECT (SELECT count(*) FROM {}._migrations WHERE version = 1027), \
+         (SELECT count(*) FROM {}._migrations WHERE version = 1028), \
+         pg_catalog.to_regclass($1) IS NOT NULL, pg_catalog.to_regclass($2) IS NOT NULL",
+            fixture.schema, fixture.schema,
+        ))
+        .bind(format!("{}.sm_acknowledged_windows", fixture.schema))
+        .bind(format!("{}.ingress_owner_rejections", fixture.schema))
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("observe terminated transaction");
+    assert_eq!((v1027, ledger), (1, 0));
+    assert!(ack_table, "commit uncertainty preserves V1027 schema");
+    assert!(!rejection_table, "rollback leaves V1028 relation absent");
     fixture.cleanup().await;
 }
 
@@ -798,7 +848,7 @@ async fn sqlite_runner_still_applies_and_rechecks_the_catalog() {
         .expect("open SQLite");
     let runner = MigrationRunner::single();
     let applied = runner.run(&db).await.expect("apply SQLite catalog");
-    assert!(applied.contains(&1008) && applied.contains(&1027));
+    assert!(applied.contains(&1008) && applied.contains(&1027) && applied.contains(&1028));
     assert!(runner.run(&db).await.expect("recheck catalog").is_empty());
     let conn = db.guard().await.expect("SQLite guard");
     let mut rows = conn

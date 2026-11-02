@@ -31,9 +31,11 @@ pub use backend::MAIN_POOL_ACQUIRE_TIMEOUT;
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
 pub use migrations::{
+    grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
     inspect_dark_postgres_epoch_acl, migration_checksum, run_dark_postgres_owner,
     DarkEpochAclStage, DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError,
-    MigrationNamespace, MigrationRunner, WADDLE_NAMESPACE_START,
+    MigrationNamespace, MigrationRunner, OwnerRejectionGrantError, OwnerRejectionGrantState,
+    WADDLE_NAMESPACE_START,
 };
 #[cfg(feature = "test-support")]
 pub use migrations::{

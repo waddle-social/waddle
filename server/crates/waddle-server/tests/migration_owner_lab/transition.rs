@@ -213,7 +213,10 @@ async fn transition_commits_exact_candidate_marker_and_select_only_acl_at_epoch_
     };
     let fixture = TransitionFixture::new(&url).await;
     let before = fixture.ledger().await;
-    assert!(!before.iter().any(|(version, _)| *version == 1028));
+    assert!(
+        before.iter().any(|(version, _)| *version == 1028),
+        "V1028 is part of the registered baseline catalog"
+    );
     assert_eq!(fixture.state().await, (true, true, 0, 0));
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
         .await

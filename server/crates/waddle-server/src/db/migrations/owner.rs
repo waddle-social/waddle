@@ -20,10 +20,15 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
 mod epoch_acl;
+mod owner_rejection_grants;
 #[cfg(feature = "test-support")]
 mod transition_lab;
 
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
+pub use owner_rejection_grants::{
+    grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
+    OwnerRejectionGrantError, OwnerRejectionGrantState,
+};
 #[cfg(feature = "test-support")]
 pub use transition_lab::{
     observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,

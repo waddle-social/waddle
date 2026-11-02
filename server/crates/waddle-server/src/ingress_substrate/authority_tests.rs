@@ -2,12 +2,12 @@ use super::substrate::{expired_candidates, gc_candidate_batch, message_exists};
 use super::{
     advance_frontier, authority, dialect_sql, flush_checkpoint, gc_expired_aliases, insert_sm_ref,
     load_envelope, load_stream_checkpoint, lookup_wire_binding, receipts_complete, record_message,
-    record_receipt, record_receipt_pooled, resolve_and_record_alias, terminalize_message,
-    AliasGcBudget, AliasGcProgress, AliasResolution, Database, DatabaseDriver, Duration,
-    EffectReceiptKind, FrontierOutcome, IngressOrdinal, IngressSubstrateError, Instant,
-    MessageEnvelope, MessageKey, MessageWriteOutcome, MucArchiveContext, NormalizedTarget,
-    OriginId, SemanticDigest, SmIngressId, TerminalizeOutcome, Transaction, Utc, Uuid,
-    WireHandledCount, ALIAS_RETENTION,
+    record_message_with_source, record_receipt, record_receipt_pooled, resolve_and_record_alias,
+    terminalize_message, AliasGcBudget, AliasGcProgress, AliasResolution, CanonicalSourceBinding,
+    Database, DatabaseDriver, Duration, EffectReceiptKind, FrontierOutcome, IngressOrdinal,
+    IngressSubstrateError, Instant, MessageEnvelope, MessageKey, MessageWriteOutcome,
+    MucArchiveContext, NormalizedTarget, OriginId, SemanticDigest, SmIngressId, TerminalizeOutcome,
+    Transaction, Utc, Uuid, WireHandledCount, ALIAS_RETENTION,
 };
 use crate::db::{DatabaseConfig, MigrationRunner};
 use std::time::Duration as StdDuration;
@@ -115,6 +115,30 @@ async fn insert_intent(tx: &mut Transaction<'_>, key: MessageKey, hash: [u8; 32]
     )
     .await
     .expect("insert storage fixture intent");
+}
+
+async fn insert_completed_remote_room_dispatch(tx: &mut Transaction<'_>, key: MessageKey) {
+    let hash = vec![9u8; 32];
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, 0, 12, ?, 1, ?)",
+            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, '0', 12, ?, 1, ?)",
+        ),
+        crate::db_params![key.to_storage().to_string(), hash.clone(), vec![1u8]],
+    )
+    .await
+    .expect("record remote room dispatch intent");
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?::uuid, 12, ?)",
+            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, 12, ?)",
+        ),
+        crate::db_params![key.to_storage().to_string(), hash],
+    )
+    .await
+    .expect("fixture has completed the outbound relay dispatch");
 }
 
 async fn malformed_stored_envelope_fails_typed(driver: DatabaseDriver) {
@@ -1121,6 +1145,641 @@ async fn sqlite_gc_rechecks_pending_intents_under_canonical_lock() {
 #[tokio::test]
 async fn postgres_gc_rechecks_pending_intents_under_canonical_lock() {
     gc_rechecks_pending_intents_under_canonical_lock(DatabaseDriver::Postgres).await;
+}
+
+fn pair_gc_budget() -> AliasGcBudget {
+    AliasGcBudget {
+        deadline: Instant::now() + StdDuration::from_secs(60),
+        lock_timeout: StdDuration::from_secs(1),
+        statement_timeout: StdDuration::from_secs(3),
+        scan_timeout: StdDuration::from_secs(3),
+        progress: AliasGcProgress::default(),
+    }
+}
+
+async fn seed_rejection_pair(
+    tx: &mut Transaction<'_>,
+    at: chrono::DateTime<Utc>,
+) -> (MessageKey, MessageKey) {
+    let source = MessageKey::new();
+    let child = MessageKey::new();
+    let principal = waddle_xmpp::auth::AuthenticatedPrincipalRef::new(
+        "romeo@example.com".parse().expect("source JID"),
+        waddle_xmpp::auth::AuthContextId::new(Uuid::new_v4()),
+        waddle_xmpp::auth::AuthContextVersion::new(1),
+        waddle_xmpp::auth::PrincipalAuthEpoch::new(1),
+    );
+    let binding = CanonicalSourceBinding::new(principal, None);
+    record_message_with_source(tx, source, &digest(), None, &binding)
+        .await
+        .expect("source");
+    record_message(tx, child, &digest(), None)
+        .await
+        .expect("child");
+    tx.execute(dialect_sql(tx.driver(),
+        "UPDATE ingress_messages SET terminal_at = ?::timestamptz, retention_eligible_at = ?::timestamptz WHERE message_key IN (?::uuid, ?::uuid)",
+        "UPDATE ingress_messages SET terminal_at = ?, retention_eligible_at = ? WHERE message_key IN (?, ?)"),
+        crate::db_params![at.to_rfc3339(), at.to_rfc3339(), source.to_storage().to_string(), child.to_storage().to_string()]).await.expect("expire pair");
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            "UPDATE ingress_messages SET owner_decision = 0 WHERE message_key = ?::uuid",
+            "UPDATE ingress_messages SET owner_decision = 0 WHERE message_key = ?",
+        ),
+        crate::db_params![source.to_storage().to_string()],
+    )
+    .await
+    .expect("undecided");
+    tx.execute(dialect_sql(tx.driver(),
+        "INSERT INTO ingress_owner_rejections (source_message_key, child_message_key) VALUES (?::uuid, ?::uuid)",
+        "INSERT INTO ingress_owner_rejections (source_message_key, child_message_key) VALUES (?, ?)"),
+        crate::db_params![source.to_storage().to_string(), child.to_storage().to_string()]).await.expect("mapping");
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            "UPDATE ingress_messages SET owner_decision = 2 WHERE message_key = ?::uuid",
+            "UPDATE ingress_messages SET owner_decision = 2 WHERE message_key = ?",
+        ),
+        crate::db_params![source.to_storage().to_string()],
+    )
+    .await
+    .expect("rejected");
+    (source, child)
+}
+
+async fn set_pair_tail(tx: &mut Transaction<'_>, key: MessageKey, at: chrono::DateTime<Utc>) {
+    tx.execute(dialect_sql(tx.driver(),
+        "UPDATE ingress_messages SET retention_eligible_at = ?::timestamptz WHERE message_key = ?::uuid",
+        "UPDATE ingress_messages SET retention_eligible_at = ? WHERE message_key = ?"),
+        crate::db_params![at.to_rfc3339(), key.to_storage().to_string()]).await.expect("set tail");
+}
+
+async fn assert_pair_present(db: &Database, source: MessageKey, child: MessageKey) {
+    assert!(message_exists_in_db(db, source).await, "source retained");
+    assert!(message_exists_in_db(db, child).await, "child retained");
+    assert_eq!(
+        fixture_count(db, "ingress_owner_rejections").await,
+        1,
+        "mapping retained"
+    );
+}
+
+async fn pair_waits_for_both_tails(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let now = Utc::now();
+    let expired = now - ALIAS_RETENTION - Duration::days(1);
+    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let (source, child) = seed_rejection_pair(&mut tx, expired).await;
+    set_pair_tail(&mut tx, source, now).await;
+    tx.commit().await.expect("commit");
+    let budget = pair_gc_budget();
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    assert!(expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("scan")
+        .is_empty());
+    for key in [child, source] {
+        assert_eq!(
+            gc_candidate_batch(&fixture.db, now, &cutoff, vec![key], &budget)
+                .await
+                .expect("stale candidate")
+                .deleted_messages,
+            0
+        );
+    }
+    assert_pair_present(&fixture.db, source, child).await;
+    let mut tx = fixture.db.begin_immediate().await.expect("reverse tails");
+    set_pair_tail(&mut tx, source, expired).await;
+    set_pair_tail(&mut tx, child, now).await;
+    tx.commit().await.expect("commit");
+    assert!(expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("scan")
+        .is_empty());
+    assert_pair_present(&fixture.db, source, child).await;
+    let mut tx = fixture.db.begin_immediate().await.expect("expire child");
+    set_pair_tail(&mut tx, child, expired).await;
+    tx.commit().await.expect("commit");
+    let candidates = expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("scan pair");
+    assert_eq!(
+        candidates,
+        vec![source],
+        "the pair occupies one candidate slot"
+    );
+    let outcome = gc_candidate_batch(&fixture.db, now, &cutoff, candidates, &budget)
+        .await
+        .expect("collect pair");
+    assert_eq!(outcome.deleted_messages, 2);
+    assert!(!message_exists_in_db(&fixture.db, source).await);
+    assert!(!message_exists_in_db(&fixture.db, child).await);
+    assert_eq!(
+        fixture_count(&fixture.db, "ingress_owner_rejections").await,
+        0
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_rejection_pair_waits_for_both_tails() {
+    pair_waits_for_both_tails(DatabaseDriver::Sqlite).await;
+}
+#[tokio::test]
+async fn postgres_rejection_pair_waits_for_both_tails() {
+    pair_waits_for_both_tails(DatabaseDriver::Postgres).await;
+}
+
+#[tokio::test]
+async fn sqlite_pending_archive_custody_protects_rejection_pair() {
+    for protect_child in [false, true] {
+        let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
+        let now = Utc::now();
+        let expired = now - ALIAS_RETENTION - Duration::days(1);
+        let mut tx = fixture.db.begin_immediate().await.expect("seed");
+        tx.execute(
+            "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+            (),
+        )
+        .await
+        .expect("pending delivery fixture");
+        let (source, child) = seed_rejection_pair(&mut tx, expired).await;
+        let protected = if protect_child { child } else { source };
+        insert_intent(&mut tx, protected, [5; 32]).await;
+        record_receipt(
+            &mut tx,
+            protected,
+            EffectReceiptKind::from_storage(1),
+            &[5; 32],
+        )
+        .await
+        .expect("completed archive intent");
+        set_pair_tail(&mut tx, protected, expired).await;
+        let ordinary = MessageKey::new();
+        record_message(&mut tx, ordinary, &digest(), None)
+            .await
+            .expect("ordinary control");
+        terminalize_message(&mut tx, ordinary, expired)
+            .await
+            .expect("terminal control");
+        tx.commit().await.expect("commit seed");
+
+        let budget = pair_gc_budget();
+        let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+        let before = expired_candidates(&fixture.db, &cutoff, &budget)
+            .await
+            .expect("scan before pending custody");
+        assert_eq!(before.len(), 2);
+        assert!(before.contains(&source));
+        assert!(before.contains(&ordinary));
+        assert!(!before.contains(&child));
+
+        let mut tx = fixture.db.begin_immediate().await.expect("add custody");
+        tx.execute(
+            "INSERT INTO pending_delivery (row_id) VALUES ('queued')",
+            (),
+        )
+        .await
+        .expect("pending copy");
+        tx.execute(
+            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES ('archive@example.com', 1, ?, 1, ?, '', 'queued')",
+            crate::db_params![protected.to_storage().to_string(), vec![5u8; 32]],
+        )
+        .await
+        .expect("archive custody link");
+        tx.commit().await.expect("commit custody");
+        assert_eq!(
+            expired_candidates(&fixture.db, &cutoff, &budget)
+                .await
+                .expect("exclude blocked pair before limit"),
+            vec![ordinary],
+            "pending custody of child={protect_child} does not block the control"
+        );
+        assert_eq!(
+            gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+                .await
+                .expect("recheck the previously scanned source")
+                .deleted_messages,
+            0
+        );
+        assert_pair_present(&fixture.db, source, child).await;
+
+        let mut tx = fixture.db.begin_immediate().await.expect("release custody");
+        tx.execute("DELETE FROM pending_delivery WHERE row_id = 'queued'", ())
+            .await
+            .expect("release pending copy");
+        super::refresh_retention(&mut tx, protected, now)
+            .await
+            .expect("start a full tail after custody");
+        tx.commit().await.expect("commit release");
+        assert_eq!(
+            gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+                .await
+                .expect("full tail still protects pair")
+                .deleted_messages,
+            0
+        );
+        assert_pair_present(&fixture.db, source, child).await;
+        let later = now + ALIAS_RETENTION + Duration::seconds(1);
+        let later_cutoff = (later - ALIAS_RETENTION).to_rfc3339();
+        let candidates = expired_candidates(&fixture.db, &later_cutoff, &budget)
+            .await
+            .expect("scan after both tails");
+        assert!(candidates.contains(&source));
+        assert!(candidates.contains(&ordinary));
+        assert!(!candidates.contains(&child));
+        assert_eq!(
+            gc_candidate_batch(&fixture.db, later, &later_cutoff, vec![source], &budget)
+                .await
+                .expect("collect released pair")
+                .deleted_messages,
+            2
+        );
+        assert!(!message_exists_in_db(&fixture.db, source).await);
+        assert!(!message_exists_in_db(&fixture.db, child).await);
+        assert!(message_exists_in_db(&fixture.db, ordinary).await);
+        assert_eq!(
+            fixture_count(&fixture.db, "ingress_owner_rejections").await,
+            0
+        );
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_rejection_pair_blockers_do_not_enter_scan() {
+    for blocker in ["receipt", "sm", "descendant"] {
+        for block_child in [false, true] {
+            let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
+            let now = Utc::now();
+            let expired = now - ALIAS_RETENTION - Duration::days(1);
+            let mut tx = fixture.db.begin_immediate().await.expect("seed");
+            let (source, child) = seed_rejection_pair(&mut tx, expired).await;
+            let blocked = if block_child { child } else { source };
+            match blocker {
+                "receipt" => insert_intent(&mut tx, blocked, [3; 32]).await,
+                "sm" => {
+                    let stream = SmIngressId::new();
+                    insert_stream(&mut tx, stream).await;
+                    insert_sm_ref(
+                        &mut tx,
+                        stream,
+                        IngressOrdinal::FIRST,
+                        WireHandledCount::from_storage(1),
+                        blocked,
+                    )
+                    .await
+                    .expect("SM reference");
+                }
+                _ => {
+                    insert_intent(&mut tx, blocked, [4; 32]).await;
+                    record_receipt(
+                        &mut tx,
+                        blocked,
+                        EffectReceiptKind::from_storage(1),
+                        &[4; 32],
+                    )
+                    .await
+                    .expect("receipt");
+                    tx.execute("INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?, 1, ?, 'pending')", crate::db_params![blocked.to_storage().to_string(), vec![4u8; 32]]).await.expect("descendant");
+                }
+            }
+            set_pair_tail(&mut tx, blocked, expired).await;
+            tx.commit().await.expect("commit blocker");
+            let budget = pair_gc_budget();
+            let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+            assert!(
+                expired_candidates(&fixture.db, &cutoff, &budget)
+                    .await
+                    .expect("scan")
+                    .is_empty(),
+                "{blocker} on child={block_child}"
+            );
+            assert_eq!(
+                gc_candidate_batch(&fixture.db, now, &cutoff, vec![source, child], &budget)
+                    .await
+                    .expect("locked recheck")
+                    .deleted_messages,
+                0
+            );
+            assert_pair_present(&fixture.db, source, child).await;
+            fixture.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn sqlite_blocked_pairs_do_not_starve_later_candidates() {
+    let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
+    let now = Utc::now();
+    let expired = now - ALIAS_RETENTION - Duration::days(1);
+    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    for _ in 0..super::substrate::GC_BATCH_LIMIT {
+        let (_, child) = seed_rejection_pair(&mut tx, expired).await;
+        set_pair_tail(&mut tx, child, now).await;
+    }
+    let ordinary = MessageKey::new();
+    record_message(&mut tx, ordinary, &digest(), None)
+        .await
+        .expect("ordinary");
+    terminalize_message(&mut tx, ordinary, expired)
+        .await
+        .expect("terminalize");
+    tx.commit().await.expect("commit");
+    let budget = pair_gc_budget();
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let candidates = expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("scan");
+    assert_eq!(candidates, vec![ordinary]);
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, candidates, &budget)
+            .await
+            .expect("collect")
+            .deleted_messages,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_pair_delete_rolls_back_after_child_and_readback_handles_lost_ack() {
+    let fixture = Fixture::open(DatabaseDriver::Sqlite).await.expect("SQLite");
+    let now = Utc::now();
+    let expired = now - ALIAS_RETENTION - Duration::days(1);
+    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let (source, child) = seed_rejection_pair(&mut tx, expired).await;
+    tx.commit().await.expect("commit");
+    let guard = fixture.db.guard().await.expect("install fault");
+    guard.execute(&format!("CREATE TRIGGER fail_source_delete BEFORE DELETE ON ingress_messages WHEN OLD.message_key = '{}' BEGIN SELECT RAISE(ABORT, 'after child delete'); END", source.to_storage()), ()).await.expect("trigger");
+    drop(guard);
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let budget = pair_gc_budget();
+    assert!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+            .await
+            .is_err()
+    );
+    assert_pair_present(&fixture.db, source, child).await;
+    let guard = fixture.db.guard().await.expect("remove fault");
+    guard
+        .execute("DROP TRIGGER fail_source_delete", ())
+        .await
+        .expect("drop trigger");
+    drop(guard);
+    // Discard the successful acknowledgement to model an uncertain caller;
+    // an independent readback and retry observe the committed pair outcome.
+    let _lost_ack = gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+        .await
+        .expect("commit pair");
+    assert!(!message_exists_in_db(&fixture.db, source).await);
+    assert!(!message_exists_in_db(&fixture.db, child).await);
+    assert_eq!(
+        fixture_count(&fixture.db, "ingress_owner_rejections").await,
+        0
+    );
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+            .await
+            .expect("safe retry")
+            .deleted_messages,
+        0
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_pair_gc_skips_locked_child_and_retries() {
+    let Some(fixture) = Fixture::open(DatabaseDriver::Postgres).await else {
+        return;
+    };
+    let now = Utc::now();
+    let expired = now - ALIAS_RETENTION - Duration::days(1);
+    let mut tx = fixture.db.begin_immediate().await.expect("seed");
+    let (source, child) = seed_rejection_pair(&mut tx, expired).await;
+    tx.commit().await.expect("commit");
+    let mut blocker = fixture.db.begin().await.expect("independent connection");
+    let mut rows = blocker
+        .query(
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            crate::db_params![child.to_storage().to_string()],
+        )
+        .await
+        .expect("lock child");
+    assert!(rows.next().await.expect("locked").is_some());
+    drop(rows);
+    let budget = pair_gc_budget();
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let blocked = gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+        .await
+        .expect("skip child lock");
+    assert_eq!(blocked.deleted_messages, 0);
+    assert_eq!(blocked.skipped_locked, 1);
+    blocker.rollback().await.expect("release");
+    assert_pair_present(&fixture.db, source, child).await;
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+            .await
+            .expect("collect")
+            .deleted_messages,
+        2
+    );
+    fixture.close().await;
+}
+
+async fn gc_retains_bound_undecided_remote_source(driver: DatabaseDriver) {
+    let Some(fixture) = Fixture::open(driver).await else {
+        return;
+    };
+    let source = MessageKey::new();
+    let legacy = MessageKey::new();
+    let now = Utc::now();
+    let expired = (now - ALIAS_RETENTION - Duration::days(1)).to_rfc3339();
+    let principal = waddle_xmpp::auth::AuthenticatedPrincipalRef::new(
+        "romeo@example.com".parse().expect("source JID"),
+        waddle_xmpp::auth::AuthContextId::new(Uuid::new_v4()),
+        waddle_xmpp::auth::AuthContextVersion::new(1),
+        waddle_xmpp::auth::PrincipalAuthEpoch::new(1),
+    );
+    let binding = CanonicalSourceBinding::new(principal, None);
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("seed remote sources");
+    record_message_with_source(&mut tx, source, &digest(), None, &binding)
+        .await
+        .expect("bound remote source");
+    record_message(&mut tx, legacy, &digest(), None)
+        .await
+        .expect("legacy-null source");
+    for key in [source, legacy] {
+        insert_completed_remote_room_dispatch(&mut tx, key).await;
+    }
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            "UPDATE ingress_messages SET terminal_at = ?::timestamptz, retention_eligible_at = ?::timestamptz WHERE message_key IN (?::uuid, ?::uuid)",
+            "UPDATE ingress_messages SET terminal_at = ?, retention_eligible_at = ? WHERE message_key IN (?, ?)",
+        ),
+        crate::db_params![
+            expired.clone(),
+            expired,
+            source.to_storage().to_string(),
+            legacy.to_storage().to_string()
+        ],
+    )
+    .await
+    .expect("expire both sources");
+    tx.commit().await.expect("commit sources");
+    let budget = AliasGcBudget {
+        deadline: Instant::now() + StdDuration::from_secs(10),
+        lock_timeout: StdDuration::from_secs(1),
+        statement_timeout: StdDuration::from_secs(2),
+        scan_timeout: StdDuration::from_secs(2),
+        progress: AliasGcProgress::default(),
+    };
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    assert_eq!(
+        expired_candidates(&fixture.db, &cutoff, &budget)
+            .await
+            .expect("scan bound and legacy sources"),
+        vec![legacy],
+        "an undecided bound source stays out of the batch; legacy-null remains eligible"
+    );
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+            .await
+            .expect("locked pending owner recheck")
+            .deleted_messages,
+        0
+    );
+    assert!(message_exists_in_db(&fixture.db, source).await);
+
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("latch accepted owner");
+    for decision in [0, 1] {
+        tx.execute(
+            dialect_sql(
+                tx.driver(),
+                "UPDATE ingress_messages SET owner_decision = ? WHERE message_key = ?::uuid",
+                "UPDATE ingress_messages SET owner_decision = ? WHERE message_key = ?",
+            ),
+            crate::db_params![decision, source.to_storage().to_string()],
+        )
+        .await
+        .expect("advance owner decision");
+    }
+    super::invalidate_retention(&mut tx, source)
+        .await
+        .expect("owner result restarts source tail");
+    tx.commit().await.expect("commit accepted result");
+    assert!(expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("source can now be adopted")
+        .contains(&source));
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, vec![source], &budget)
+            .await
+            .expect("adopt accepted source")
+            .deleted_messages,
+        0,
+        "owner result begins a full new tail"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_gc_retains_bound_undecided_remote_source() {
+    gc_retains_bound_undecided_remote_source(DatabaseDriver::Sqlite).await;
+}
+
+#[tokio::test]
+async fn postgres_gc_retains_bound_undecided_remote_source() {
+    gc_retains_bound_undecided_remote_source(DatabaseDriver::Postgres).await;
+}
+
+#[tokio::test]
+async fn sqlite_pending_owner_sources_do_not_starve_a_full_gc_batch() {
+    let fixture = Fixture::open(DatabaseDriver::Sqlite)
+        .await
+        .expect("SQLite fixture");
+    let principal = waddle_xmpp::auth::AuthenticatedPrincipalRef::new(
+        "romeo@example.com".parse().expect("source JID"),
+        waddle_xmpp::auth::AuthContextId::new(Uuid::new_v4()),
+        waddle_xmpp::auth::AuthContextVersion::new(1),
+        waddle_xmpp::auth::PrincipalAuthEpoch::new(1),
+    );
+    let binding = CanonicalSourceBinding::new(principal, None);
+    let eligible = MessageKey::new();
+    let now = Utc::now();
+    let expired = (now - ALIAS_RETENTION - Duration::days(1)).to_rfc3339();
+    let mut tx = fixture.db.begin_immediate().await.expect("seed full head");
+    for _ in 0..super::substrate::GC_BATCH_LIMIT {
+        let source = MessageKey::new();
+        record_message_with_source(&mut tx, source, &digest(), None, &binding)
+            .await
+            .expect("bound remote source");
+        insert_completed_remote_room_dispatch(&mut tx, source).await;
+    }
+    record_message(&mut tx, eligible, &digest(), None)
+        .await
+        .expect("collectable row after full head");
+    tx.execute(
+        "UPDATE ingress_messages SET terminal_at = ?, retention_eligible_at = ?",
+        crate::db_params![expired.clone(), expired],
+    )
+    .await
+    .expect("expire all rows");
+    tx.commit().await.expect("commit full head");
+    let budget = AliasGcBudget {
+        deadline: Instant::now() + StdDuration::from_secs(10),
+        lock_timeout: StdDuration::from_secs(1),
+        statement_timeout: StdDuration::from_secs(2),
+        scan_timeout: StdDuration::from_secs(2),
+        progress: AliasGcProgress::default(),
+    };
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let candidates = expired_candidates(&fixture.db, &cutoff, &budget)
+        .await
+        .expect("skip pending owner head before limit");
+    assert_eq!(candidates, vec![eligible]);
+    assert_eq!(
+        gc_candidate_batch(&fixture.db, now, &cutoff, candidates, &budget)
+            .await
+            .expect("collect later eligible row")
+            .deleted_messages,
+        1
+    );
+    fixture.close().await;
+}
+
+async fn message_exists_in_db(db: &Database, key: MessageKey) -> bool {
+    let mut tx = db.begin_immediate().await.expect("check retained message");
+    let exists = message_exists(&mut tx, key)
+        .await
+        .expect("message presence");
+    tx.commit().await.expect("finish message check");
+    exists
+}
+
+async fn fixture_count(db: &Database, table: &str) -> i64 {
+    let connection = db.guard().await.expect("count database");
+    let mut rows = connection
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .expect("count table");
+    rows.next()
+        .await
+        .expect("count row")
+        .expect("count exists")
+        .get(0)
+        .expect("count integer")
 }
 
 fn archive_context() -> MucArchiveContext {

@@ -272,7 +272,7 @@ impl Lab {
         let mut owner_connection = PgConnection::connect_with(&owner_options).await?;
         let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM guarded._migrations")
             .fetch_one(&mut owner_connection).await?;
-        ensure!(latest == 1027, "unexpected migration catalog version: {latest}");
+        ensure!(latest == 1028, "unexpected migration catalog version: {latest}");
         sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
         for statement in [
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
@@ -587,6 +587,7 @@ async fn role_boundary(lab: &Lab) -> anyhow::Result<()> {
         "ingress_effect_receipts",
         "ingress_deliveries",
         "ingress_effect_descendants",
+        "ingress_owner_rejections",
     ] {
         let guards: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_trigger WHERE tgrelid = pg_catalog.to_regclass(pg_catalog.format('guarded.%I', $1)) AND NOT tgisinternal AND tgenabled = 'A' AND ((tgname = $1 || '_epoch_guard_dml' AND tgfoid = 'guarded.waddle_ingress_epoch_guard()'::regprocedure AND tgtype = 30) OR (tgname = $1 || '_epoch_guard_truncate' AND tgfoid = 'guarded.waddle_ingress_truncate_guard()'::regprocedure AND tgtype = 34))")
             .bind(table).fetch_one(&mut runtime).await?;
@@ -753,6 +754,7 @@ async fn shadow_and_wrong_pool(
         "ingress_effect_receipts",
         "ingress_deliveries",
         "ingress_effect_descendants",
+        "ingress_owner_rejections",
     ] {
         sqlx::query(&format!(
             "CREATE TABLE shadow.{table} (LIKE guarded.{table} INCLUDING ALL)"
@@ -778,6 +780,7 @@ async fn shadow_and_wrong_pool(
         "ingress_effect_receipts",
         "ingress_deliveries",
         "ingress_effect_descendants",
+        "ingress_owner_rejections",
     ] {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM shadow.{table}"))
             .fetch_one(&lab.admin)

@@ -47,6 +47,12 @@ pub(crate) async fn refresh_retention(
         UPDATE ingress_messages AS m
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
+          AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS
+              (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key))
+          AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS (
               SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
@@ -57,6 +63,12 @@ pub(crate) async fn refresh_retention(
         UPDATE ingress_messages AS m
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
+          AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS
+              (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key))
+          AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS (
               SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
@@ -110,6 +122,12 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
     let sql = format!(
         "UPDATE {} AS m SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL \
          AND NOT EXISTS (SELECT 1 FROM {} r WHERE r.message_key = m.message_key) \
+         AND NOT EXISTS (SELECT 1 FROM {} owner_child WHERE owner_child.source_message_key = m.message_key \
+           AND (m.owner_decision IS NULL OR m.owner_decision <> 2)) \
+         AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS \
+           (SELECT 1 FROM {} owner_child WHERE owner_child.source_message_key = m.message_key)) \
+         AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0) \
+           AND EXISTS (SELECT 1 FROM {} owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12)) \
          {pending_guard} \
          AND NOT EXISTS (SELECT 1 FROM {} d WHERE d.message_key = m.message_key AND d.settled_at IS NULL) \
          AND NOT EXISTS (SELECT 1 FROM {} i WHERE i.message_key = m.message_key AND NOT EXISTS \
@@ -119,6 +137,9 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
          WHERE m.message_key = ?::uuid",
         relation(PreparedIngressRelation::Messages),
         relation(PreparedIngressRelation::SmRefs),
+        relation(PreparedIngressRelation::OwnerRejections),
+        relation(PreparedIngressRelation::OwnerRejections),
+        relation(PreparedIngressRelation::Effects),
         relation(PreparedIngressRelation::EffectDescendants),
         relation(PreparedIngressRelation::Effects),
         relation(PreparedIngressRelation::EffectReceipts),
@@ -134,6 +155,14 @@ pub(crate) async fn refresh_retention_in_prepared_transaction(
 
 pub(crate) async fn refresh_retention_with_db_clock(
     tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<(), IngressSubstrateError> {
+    refresh_retention_in_prepared_transaction_with_db_clock(tx, None, message_key).await
+}
+
+pub(crate) async fn refresh_retention_in_prepared_transaction_with_db_clock(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
     let query = dialect_sql(
@@ -152,5 +181,5 @@ pub(crate) async fn refresh_retention_with_db_clock(
         .map_err(|_| IngressSubstrateError::InvalidStoredTimestamp)?
         .with_timezone(&Utc);
     drop(rows);
-    refresh_retention(tx, message_key, now).await
+    refresh_retention_in_prepared_transaction(tx, prepared, message_key, now).await
 }

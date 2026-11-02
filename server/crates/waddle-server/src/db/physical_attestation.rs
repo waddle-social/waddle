@@ -21,7 +21,10 @@ use super::lineage::{
 use super::DatabaseError;
 
 mod installer;
-pub use installer::{inspect_installation, install, InstallationStatus};
+pub use installer::{
+    inspect_installation, install, observe_installation, InstallationObservation,
+    InstallationStatus,
+};
 mod typed_authority;
 #[cfg(feature = "test-support")]
 pub use typed_authority::{
@@ -276,7 +279,10 @@ impl PhysicalAttestationConfig {
     }
 }
 
-fn validate_identifier(value: &str, field: &'static str) -> Result<(), PhysicalAttestationError> {
+pub(crate) fn validate_identifier(
+    value: &str,
+    field: &'static str,
+) -> Result<(), PhysicalAttestationError> {
     let mut bytes = value.bytes();
     let valid_start = bytes
         .next()
@@ -290,7 +296,7 @@ fn validate_identifier(value: &str, field: &'static str) -> Result<(), PhysicalA
     Ok(())
 }
 
-fn quote_identifier(value: &str) -> String {
+pub(crate) fn quote_identifier(value: &str) -> String {
     // Every caller validates the narrow identifier grammar before this point.
     format!("\"{value}\"")
 }

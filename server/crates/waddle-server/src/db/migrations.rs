@@ -26,8 +26,10 @@ pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
 pub use owner::{
+    grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
     inspect_dark_postgres_epoch_acl, run_dark_postgres_owner, DarkEpochAclStage,
-    DarkMigrationOwnerConfig, DarkMigrationOwnerError,
+    DarkMigrationOwnerConfig, DarkMigrationOwnerError, OwnerRejectionGrantError,
+    OwnerRejectionGrantState,
 };
 #[cfg(feature = "test-support")]
 pub use owner::{
