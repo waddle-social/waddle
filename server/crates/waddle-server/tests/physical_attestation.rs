@@ -35,7 +35,8 @@ use waddle_xmpp::ingress::{MessageKey, ProtocolEpoch};
 static CATALOG_GRANT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "test-support")]
-const CANDIDATE_GUARD: &str = include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
+const CANDIDATE_GUARD: &str =
+    include_str!("../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql");
 
 struct Fixture {
     cluster_admin: PgPool,
