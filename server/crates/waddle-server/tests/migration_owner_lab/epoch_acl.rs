@@ -953,20 +953,12 @@ async fn stalled_runtime_setup_times_out_and_discards_connection() {
         .await
         .expect("proxy listener");
     let proxy_address = listener.local_addr().expect("proxy address");
-    let socket = fixture.runtime_options.get_socket().cloned();
-    let host = fixture.runtime_options.get_host().to_owned();
-    let port = fixture.runtime_options.get_port();
+    let target = fixture.runtime_options.clone();
     let (stalled, observed) = tokio::sync::oneshot::channel();
     let proxy = tokio::spawn(async move {
         let (client, _) = listener.accept().await?;
-        if let Some(socket) = socket {
-            let upstream =
-                tokio::net::UnixStream::connect(socket.join(format!(".s.PGSQL.{port}"))).await?;
-            relay_until_setup_stalls(client, upstream, stalled).await
-        } else {
-            let upstream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-            relay_until_setup_stalls(client, upstream, stalled).await
-        }
+        let upstream = crate::postgres_proxy::connect_local_postgres(&target).await?;
+        relay_until_setup_stalls(client, upstream, stalled).await
     });
     let runtime = PgConnectOptions::new()
         .host("127.0.0.1")

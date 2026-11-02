@@ -1,5 +1,8 @@
 //! Real PostgreSQL checks for the dark P2.1 physical-connection gate.
 
+#[path = "../src/test_support/postgres_proxy.rs"]
+pub mod postgres_proxy;
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -200,6 +203,15 @@ impl Fixture {
         }
         self.cluster_admin.close().await;
     }
+}
+
+#[cfg(feature = "test-support")]
+fn proxy_runtime_options(fixture: &Fixture, port: u16) -> PgConnectOptions {
+    let mut url = postgres_proxy::local_proxy_url(&fixture.base_url, port).expect("proxy URL");
+    url.query_pairs_mut()
+        .append_pair("user", &fixture.runtime)
+        .append_pair("options", &format!("-c search_path={}", fixture.target));
+    PgConnectOptions::from_str(url.as_str()).expect("proxy runtime options")
 }
 
 async fn typed_authority_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, MessageKey) {
@@ -3488,9 +3500,6 @@ async fn same_id_installers_with_repeatable_read_default_converge_after_lock_wai
     fixture.cleanup().await;
 }
 
-trait ProxyStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ProxyStream for T {}
-
 async fn lose_commit_reply_proxy(
     listener: tokio::net::TcpListener,
     target: PgConnectOptions,
@@ -3500,12 +3509,7 @@ async fn lose_commit_reply_proxy(
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (client, _) = listener.accept().await?;
-    let server: Box<dyn ProxyStream> = if let Some(socket) = target.get_socket() {
-        let path = socket.join(format!(".s.PGSQL.{}", target.get_port()));
-        Box::new(tokio::net::UnixStream::connect(path).await?)
-    } else {
-        Box::new(tokio::net::TcpStream::connect((target.get_host(), target.get_port())).await?)
-    };
+    let server = postgres_proxy::connect_local_postgres(&target).await?;
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = tokio::io::split(server);
     let hold = std::sync::Arc::new(AtomicBool::new(false));
@@ -3566,17 +3570,11 @@ async fn lost_commit_ack_resolves_by_fresh_exact_operation_readback() {
         reply_held.clone(),
         disconnect.clone(),
     ));
-    let mut proxy_url = url::Url::parse(&fixture.base_url).expect("test URL");
-    proxy_url.set_host(Some("127.0.0.1")).expect("proxy host");
-    proxy_url.set_port(Some(port)).expect("proxy port");
+    let mut proxy_url =
+        postgres_proxy::local_proxy_url(&fixture.base_url, port).expect("proxy URL");
     let retained: Vec<_> = proxy_url
         .query_pairs()
-        .filter(|(key, _)| {
-            !matches!(
-                key.as_ref(),
-                "host" | "hostaddr" | "port" | "sslmode" | "user" | "options"
-            )
-        })
+        .filter(|(key, _)| !matches!(key.as_ref(), "sslmode" | "user" | "options"))
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
     proxy_url

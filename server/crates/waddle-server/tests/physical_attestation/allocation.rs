@@ -1,5 +1,6 @@
 use super::super::super::{
-    test_url, typed_bounds, wait_for_blocked_application, Fixture, CATALOG_GRANT_LOCK,
+    proxy_runtime_options, test_url, typed_bounds, wait_for_blocked_application, Fixture,
+    CATALOG_GRANT_LOCK,
 };
 use super::super::{
     direct_pin, postgres_fixture, seed_pg_direct, seed_sqlite_direct, sqlite_count, sqlite_exec,
@@ -741,15 +742,14 @@ async fn postgres_fixture_allocation_lost_reply_and_cancel_require_fence() {
         .await
         .expect("proxy");
     let port = listener.local_addr().expect("address").port();
-    let upstream_host = fixture.admin_options.get_host().to_owned();
-    let upstream_port = fixture.admin_options.get_port();
+    let upstream = fixture.admin_options.clone();
     let proxy = tokio::spawn(async move {
         let (client, _) = listener.accept().await.expect("accept");
-        let server = tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port))
+        let server = crate::postgres_proxy::connect_local_postgres(&upstream)
             .await
             .expect("upstream");
         let (mut client_read, mut client_write) = client.into_split();
-        let (mut server_read, mut server_write) = server.into_split();
+        let (mut server_read, mut server_write) = tokio::io::split(server);
         let forward = tokio::spawn(async move {
             let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
         });
@@ -771,12 +771,7 @@ async fn postgres_fixture_allocation_lost_reply_and_cancel_require_fence() {
         client_write.shutdown().await.expect("drop committed reply");
     });
     let proxied = DirectAdmissionLab::postgres(
-        fixture
-            .runtime_options
-            .clone()
-            .host("127.0.0.1")
-            .port(port)
-            .ssl_mode(sqlx::postgres::PgSslMode::Disable),
+        proxy_runtime_options(&fixture, port),
         config.clone(),
         1,
         typed_bounds(),

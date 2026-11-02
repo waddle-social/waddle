@@ -1,5 +1,8 @@
 //! Real PostgreSQL characterization for the unwired migration-owner lab.
 
+#[path = "../src/test_support/postgres_proxy.rs"]
+pub mod postgres_proxy;
+
 use std::str::FromStr;
 use std::time::Duration;
 

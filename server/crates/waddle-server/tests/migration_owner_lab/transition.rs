@@ -928,21 +928,13 @@ async fn response_proxy(fixture: &TransitionFixture, command_tag: &'static [u8])
         .await
         .expect("proxy listener");
     let address = listener.local_addr().expect("proxy address");
-    let socket = fixture.migrator_options.get_socket().cloned();
-    let host = fixture.migrator_options.get_host().to_owned();
-    let port = fixture.migrator_options.get_port();
+    let target = fixture.migrator_options.clone();
     let (committed_tx, committed) = tokio::sync::oneshot::channel();
     let (release, release_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         let (client, _) = listener.accept().await?;
-        if let Some(socket) = socket {
-            let upstream =
-                tokio::net::UnixStream::connect(socket.join(format!(".s.PGSQL.{port}"))).await?;
-            relay_until_response(client, upstream, committed_tx, release_rx, command_tag).await
-        } else {
-            let upstream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-            relay_until_response(client, upstream, committed_tx, release_rx, command_tag).await
-        }
+        let upstream = crate::postgres_proxy::connect_local_postgres(&target).await?;
+        relay_until_response(client, upstream, committed_tx, release_rx, command_tag).await
     });
     let options = PgConnectOptions::new()
         .host("127.0.0.1")

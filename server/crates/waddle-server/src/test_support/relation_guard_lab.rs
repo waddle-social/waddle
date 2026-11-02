@@ -1169,9 +1169,6 @@ async fn concurrency_and_transition(
     Ok(())
 }
 
-trait ProxyStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ProxyStream for T {}
-
 async fn lose_commit_reply(
     listener: tokio::net::TcpListener,
     target: PgConnectOptions,
@@ -1181,14 +1178,7 @@ async fn lose_commit_reply(
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (client, _) = listener.accept().await?;
-    let server: Box<dyn ProxyStream> = if let Some(socket) = target.get_socket() {
-        Box::new(
-            tokio::net::UnixStream::connect(socket.join(format!(".s.PGSQL.{}", target.get_port())))
-                .await?,
-        )
-    } else {
-        Box::new(tokio::net::TcpStream::connect((target.get_host(), target.get_port())).await?)
-    };
+    let server = super::postgres_proxy::connect_local_postgres(&target).await?;
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = tokio::io::split(server);
     let saw_commit = std::sync::Arc::new(AtomicBool::new(false));
