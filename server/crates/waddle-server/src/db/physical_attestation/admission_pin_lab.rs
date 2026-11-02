@@ -1,8 +1,12 @@
 //! Test-only admission pins for a narrow prepared direct-route experiment.
 //!
-//! No runtime writer uses these pins. They have no allocation or settlement
-//! transition and are retained indefinitely; they do not close the production
+//! No runtime writer uses these pins. Pins and observed allocation/settlement
+//! records are retained indefinitely; they do not close the production
 //! late-append race. Only exact prepared direct messages are admitted.
+
+#[path = "admission_state_lab.rs"]
+mod state;
+pub use state::{PinAllocationBinding, PinRecovery, PinState, PinTerminalDisposition};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;
@@ -40,6 +44,27 @@ BEFORE UPDATE OR DELETE ON __PIN_SCHEMA__.ingress_admission_pins FOR EACH ROW
 EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
 CREATE TRIGGER ingress_admission_pins_immutable_truncate
 BEFORE TRUNCATE ON __PIN_SCHEMA__.ingress_admission_pins FOR EACH STATEMENT
+EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
+CREATE TABLE __PIN_SCHEMA__.ingress_pin_allocations (
+    admission_id UUID PRIMARY KEY REFERENCES __PIN_SCHEMA__.ingress_admission_pins (admission_id),
+    accepting_stream_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL CHECK (sequence BETWEEN 0 AND 4294967295)
+);
+CREATE TRIGGER ingress_pin_allocations_immutable_row
+BEFORE UPDATE OR DELETE ON __PIN_SCHEMA__.ingress_pin_allocations FOR EACH ROW
+EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
+CREATE TRIGGER ingress_pin_allocations_immutable_truncate
+BEFORE TRUNCATE ON __PIN_SCHEMA__.ingress_pin_allocations FOR EACH STATEMENT
+EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
+CREATE TABLE __PIN_SCHEMA__.ingress_pin_settlements (
+    admission_id UUID PRIMARY KEY REFERENCES __PIN_SCHEMA__.ingress_pin_allocations (admission_id),
+    disposition INTEGER NOT NULL CHECK (disposition IN (1, 2, 3))
+);
+CREATE TRIGGER ingress_pin_settlements_immutable_row
+BEFORE UPDATE OR DELETE ON __PIN_SCHEMA__.ingress_pin_settlements FOR EACH ROW
+EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
+CREATE TRIGGER ingress_pin_settlements_immutable_truncate
+BEFORE TRUNCATE ON __PIN_SCHEMA__.ingress_pin_settlements FOR EACH STATEMENT
 EXECUTE FUNCTION __PIN_SCHEMA__.ingress_admission_pins_immutable();
 "#;
 
@@ -80,6 +105,31 @@ CREATE TRIGGER main.ingress_admission_pins_immutable_update
 BEFORE UPDATE ON ingress_admission_pins BEGIN SELECT RAISE(ABORT, 'laboratory admission pins are immutable'); END;
 CREATE TRIGGER main.ingress_admission_pins_immutable_delete
 BEFORE DELETE ON ingress_admission_pins BEGIN SELECT RAISE(ABORT, 'laboratory admission pins are immutable'); END;
+CREATE TABLE main.ingress_pin_allocations (
+    admission_id TEXT PRIMARY KEY REFERENCES ingress_admission_pins (admission_id),
+    accepting_stream_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence BETWEEN 0 AND 4294967295)
+) WITHOUT ROWID;
+CREATE TRIGGER main.ingress_pin_allocations_immutable_insert
+BEFORE INSERT ON ingress_pin_allocations
+WHEN EXISTS (SELECT 1 FROM main.ingress_pin_allocations WHERE admission_id = NEW.admission_id)
+BEGIN SELECT RAISE(ABORT, 'laboratory pin allocations are immutable'); END;
+CREATE TRIGGER main.ingress_pin_allocations_immutable_update
+BEFORE UPDATE ON ingress_pin_allocations BEGIN SELECT RAISE(ABORT, 'laboratory pin allocations are immutable'); END;
+CREATE TRIGGER main.ingress_pin_allocations_immutable_delete
+BEFORE DELETE ON ingress_pin_allocations BEGIN SELECT RAISE(ABORT, 'laboratory pin allocations are immutable'); END;
+CREATE TABLE main.ingress_pin_settlements (
+    admission_id TEXT PRIMARY KEY REFERENCES ingress_pin_allocations (admission_id),
+    disposition INTEGER NOT NULL CHECK (disposition IN (1, 2, 3))
+) WITHOUT ROWID;
+CREATE TRIGGER main.ingress_pin_settlements_immutable_insert
+BEFORE INSERT ON ingress_pin_settlements
+WHEN EXISTS (SELECT 1 FROM main.ingress_pin_settlements WHERE admission_id = NEW.admission_id)
+BEGIN SELECT RAISE(ABORT, 'laboratory pin settlements are immutable'); END;
+CREATE TRIGGER main.ingress_pin_settlements_immutable_update
+BEFORE UPDATE ON ingress_pin_settlements BEGIN SELECT RAISE(ABORT, 'laboratory pin settlements are immutable'); END;
+CREATE TRIGGER main.ingress_pin_settlements_immutable_delete
+BEFORE DELETE ON ingress_pin_settlements BEGIN SELECT RAISE(ABORT, 'laboratory pin settlements are immutable'); END;
 "#;
 
 /// Immutable pending laboratory pin. The receipt time must equal the

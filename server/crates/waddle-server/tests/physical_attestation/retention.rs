@@ -5,6 +5,9 @@ use waddle_server::db::physical_attestation::{
 };
 use waddle_server::ingress_substrate::ALIAS_RETENTION;
 
+#[path = "admission_state.rs"]
+mod admission_state_tests;
+
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-11-01T12:00:00Z")
         .expect("fixed time")
@@ -354,20 +357,28 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         .execute(&mut owner)
         .await
         .expect("install unregistered pin lab schema");
-    let target_exists: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
-        .bind(format!("{}.ingress_admission_pins", fixture.target))
-        .fetch_one(&mut owner)
-        .await
-        .expect("target pin relation");
-    let shadow_exists: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
-        .bind(format!("{shadow}.ingress_admission_pins"))
-        .fetch_one(&mut owner)
-        .await
-        .expect("shadow pin relation");
-    assert!(
-        target_exists && !shadow_exists,
-        "candidate DDL uses attested schema"
-    );
+    for table in [
+        "ingress_admission_pins",
+        "ingress_pin_allocations",
+        "ingress_pin_settlements",
+    ] {
+        let target_exists: bool =
+            sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+                .bind(format!("{}.{table}", fixture.target))
+                .fetch_one(&mut owner)
+                .await
+                .expect("target relation");
+        let shadow_exists: bool =
+            sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+                .bind(format!("{shadow}.{table}"))
+                .fetch_one(&mut owner)
+                .await
+                .expect("shadow relation");
+        assert!(
+            target_exists && !shadow_exists,
+            "candidate DDL uses attested schema"
+        );
+    }
     drop(owner);
     sqlx::query(&format!(
         "CREATE TABLE {}.pending_delivery (row_id TEXT PRIMARY KEY)",
@@ -391,6 +402,8 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         "pending_delivery",
         "sm_ingress_appends",
         "ingress_admission_pins",
+        "ingress_pin_allocations",
+        "ingress_pin_settlements",
     ] {
         sqlx::query(&format!(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {}",

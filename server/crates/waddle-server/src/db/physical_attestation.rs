@@ -25,7 +25,8 @@ pub use installer::{inspect_installation, install, InstallationStatus};
 mod typed_authority;
 #[cfg(feature = "test-support")]
 pub use typed_authority::{
-    pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab, AdmissionPinLabError, PinOutcome,
+    pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab, AdmissionPinLabError,
+    PinAllocationBinding, PinOutcome, PinRecovery, PinState, PinTerminalDisposition,
     PIN_LAB_SQLITE_DDL,
 };
 #[cfg(feature = "test-support")]
