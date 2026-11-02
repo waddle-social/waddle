@@ -61,20 +61,38 @@ impl UserClaimIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::UserClaimIdentity;
+    use super::{UserActorIncarnation, UserClaimIdentity};
     use crate::ownership::{ClaimEpoch, NodeIdentity, NodeLeaseIdentity};
 
-    fn identity(claim_epoch: i64) -> UserClaimIdentity {
-        UserClaimIdentity::fresh(
-            "alice@example.test".parse().expect("bare JID"),
-            NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("node-a", "epoch-a")),
-            ClaimEpoch(claim_epoch),
-        )
+    fn identity_with(
+        bare_jid: &str,
+        owner: NodeLeaseIdentity,
+        claim_epoch: i64,
+        actor_incarnation: UserActorIncarnation,
+    ) -> UserClaimIdentity {
+        UserClaimIdentity {
+            bare_jid: bare_jid.parse().expect("bare JID"),
+            owner,
+            claim_epoch: ClaimEpoch(claim_epoch),
+            actor_incarnation,
+        }
+    }
+
+    fn clustered_owner(node_id: &str, node_epoch: &str) -> NodeLeaseIdentity {
+        NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(node_id, node_epoch))
+    }
+
+    fn actor_incarnation(value: &str) -> UserActorIncarnation {
+        UserActorIncarnation(uuid::Uuid::parse_str(value).expect("actor incarnation UUID"))
     }
 
     #[test]
     fn user_claim_identity_round_trip_preserves_account_and_all_generations() {
-        let original = identity(7);
+        let original = UserClaimIdentity::fresh(
+            "alice@example.test".parse().expect("bare JID"),
+            clustered_owner("node-a", "epoch-a"),
+            ClaimEpoch(7),
+        );
         let encoded = serde_json::to_vec(&original).expect("encode claim identity");
         let decoded: UserClaimIdentity =
             serde_json::from_slice(&encoded).expect("decode claim identity");
@@ -86,9 +104,25 @@ mod tests {
 
     #[test]
     fn actor_and_claim_epoch_changes_produce_distinct_claim_identities() {
-        let first = identity(7);
-        let replacement_actor = identity(7);
-        let replacement_claim = identity(8);
+        let actor = actor_incarnation("00000000-0000-0000-0000-000000000001");
+        let first = identity_with(
+            "alice@example.test",
+            clustered_owner("node-a", "epoch-a"),
+            7,
+            actor,
+        );
+        let replacement_actor = identity_with(
+            "alice@example.test",
+            clustered_owner("node-a", "epoch-a"),
+            7,
+            actor_incarnation("00000000-0000-0000-0000-000000000002"),
+        );
+        let replacement_claim = identity_with(
+            "alice@example.test",
+            clustered_owner("node-a", "epoch-a"),
+            8,
+            actor,
+        );
 
         assert_ne!(first, replacement_actor);
         assert_eq!(first.claim_epoch(), replacement_actor.claim_epoch());
@@ -100,20 +134,65 @@ mod tests {
     }
 
     #[test]
-    fn owner_incarnation_and_account_are_part_of_claim_identity() {
-        let original = identity(7);
-        let other_owner = UserClaimIdentity::fresh(
-            "alice@example.test".parse().expect("bare JID"),
-            NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("node-a", "epoch-b")),
-            ClaimEpoch(7),
+    fn every_claim_identity_field_changes_equality_independently() {
+        let actor = actor_incarnation("00000000-0000-0000-0000-000000000001");
+        let owner = clustered_owner("node-a", "epoch-a");
+        let original = identity_with("alice@example.test", owner.clone(), 7, actor);
+
+        let other_account = identity_with("bob@example.test", owner.clone(), 7, actor);
+        let other_node_id = identity_with(
+            "alice@example.test",
+            clustered_owner("node-b", "epoch-a"),
+            7,
+            actor,
         );
-        let other_account = UserClaimIdentity::fresh(
-            "bob@example.test".parse().expect("bare JID"),
-            NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("node-a", "epoch-a")),
-            ClaimEpoch(7),
+        let other_node_epoch = identity_with(
+            "alice@example.test",
+            clustered_owner("node-a", "epoch-b"),
+            7,
+            actor,
+        );
+        let other_claim_epoch = identity_with("alice@example.test", owner.clone(), 8, actor);
+        let other_actor = identity_with(
+            "alice@example.test",
+            owner,
+            7,
+            actor_incarnation("00000000-0000-0000-0000-000000000002"),
         );
 
-        assert_ne!(original, other_owner);
-        assert_ne!(original, other_account);
+        assert_ne!(original, other_account, "bare JID participates in equality");
+        assert_ne!(
+            original, other_node_id,
+            "owner node ID participates in equality"
+        );
+        assert_ne!(
+            original, other_node_epoch,
+            "owner node epoch participates in equality"
+        );
+        assert_ne!(
+            original, other_claim_epoch,
+            "claim epoch participates in equality"
+        );
+        assert_ne!(
+            original, other_actor,
+            "actor incarnation participates in equality"
+        );
+    }
+
+    #[test]
+    fn standalone_process_incarnation_participates_in_claim_identity_equality() {
+        let local_process_a: NodeLeaseIdentity = serde_json::from_str(
+            r#"{"LocalProcess":{"process_incarnation":"00000000-0000-0000-0000-00000000000a"}}"#,
+        )
+        .expect("first standalone process identity");
+        let local_process_b: NodeLeaseIdentity = serde_json::from_str(
+            r#"{"LocalProcess":{"process_incarnation":"00000000-0000-0000-0000-00000000000b"}}"#,
+        )
+        .expect("second standalone process identity");
+        let actor = actor_incarnation("00000000-0000-0000-0000-000000000001");
+        let first = identity_with("alice@example.test", local_process_a, 7, actor);
+        let second = identity_with("alice@example.test", local_process_b, 7, actor);
+
+        assert_ne!(first, second);
     }
 }

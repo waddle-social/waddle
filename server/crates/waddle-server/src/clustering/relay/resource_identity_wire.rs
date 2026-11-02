@@ -47,6 +47,8 @@ pub struct RelayRegisterRemoteUserResourceV5 {
     pub jid: jid::FullJid,
     pub registration_id: RemoteResourceRegistrationId,
     pub socket_generation: RemoteResourceSocketGeneration,
+    /// Routing hint only. A future handler must authenticate this value and
+    /// the nested binding's node lease against the remote sender and lease.
     pub socket_node: NodeId,
     pub state: RemoteResourceStateSnapshotV5,
     /// Telemetry context only.

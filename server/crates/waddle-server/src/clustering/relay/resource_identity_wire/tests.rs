@@ -89,25 +89,14 @@ fn legacy_unregister() -> RelayUnregisterRemoteUserResource {
     }
 }
 
-fn assert_round_trip<T>(message: &T)
-where
-    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
-{
-    let encoded = serde_json::to_vec(message).expect("encode identity message");
-    let decoded: T = serde_json::from_slice(&encoded).expect("decode identity message");
-    assert_eq!(&decoded, message);
-}
-
-#[test]
-fn identity_bearing_resource_messages_round_trip_exact_claim_and_binding_identity() {
-    let binding_ref = binding_ref();
-    let register = RelayRegisterRemoteUserResourceV5 {
+fn identity_register(binding_ref: BindingRef) -> RelayRegisterRemoteUserResourceV5 {
+    RelayRegisterRemoteUserResourceV5 {
         jid: "alice@example.test/phone".parse().expect("full JID"),
         registration_id: registration_id(),
         socket_generation: socket_generation(),
         socket_node: NodeId::new("socket-a".to_owned()),
         state: RemoteResourceStateSnapshotV5 {
-            binding_ref: binding_ref.clone(),
+            binding_ref,
             occupancy_session: None,
             carbons_enabled: true,
             roster_interested: false,
@@ -122,41 +111,87 @@ fn identity_bearing_resource_messages_round_trip_exact_claim_and_binding_identit
             }),
         },
         trace: RelayTraceContext::default(),
-    };
+    }
+}
+
+fn identity_update(
+    user_claim_identity: UserClaimIdentity,
+    binding_ref: BindingRef,
+) -> RelayUpdateRemoteUserResourceV2 {
+    RelayUpdateRemoteUserResourceV2 {
+        jid: "alice@example.test/phone".parse().expect("full JID"),
+        registration_id: registration_id(),
+        socket_generation: socket_generation(),
+        user_claim_identity,
+        binding_ref,
+        update: RemoteResourceStateUpdate::Carbons { enabled: false },
+        trace: RelayTraceContext::default(),
+    }
+}
+
+fn identity_unregister(
+    user_claim_identity: UserClaimIdentity,
+    binding_ref: BindingRef,
+) -> RelayUnregisterRemoteUserResourceV3 {
+    RelayUnregisterRemoteUserResourceV3 {
+        jid: "alice@example.test/phone".parse().expect("full JID"),
+        registration_id: registration_id(),
+        socket_generation: socket_generation(),
+        user_claim_identity,
+        binding_ref,
+        trace: RelayTraceContext::default(),
+    }
+}
+
+fn assert_json_round_trip<T>(message: &T)
+where
+    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let encoded = serde_json::to_vec(message).expect("encode identity message");
+    let decoded: T = serde_json::from_slice(&encoded).expect("decode identity message");
+    assert_eq!(&decoded, message);
+}
+
+fn assert_named_messagepack_round_trip<T>(message: &T)
+where
+    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let encoded = rmp_serde::to_vec_named(message).expect("encode named MessagePack message");
+    let decoded: T = rmp_serde::from_slice(&encoded).expect("decode named MessagePack message");
+    assert_eq!(&decoded, message);
+}
+
+fn messagepack_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn identity_bearing_resource_messages_round_trip_exact_claim_and_binding_identity() {
+    let binding_ref = binding_ref();
+    let register = identity_register(binding_ref.clone());
     assert_eq!(
         register.state.binding_ref.connection_ref(),
         &connection_ref()
     );
-    assert_round_trip(&register);
+    assert_json_round_trip(&register);
+    assert_named_messagepack_round_trip(&register);
 
     let identity = claim_identity();
-    let update = RelayUpdateRemoteUserResourceV2 {
-        jid: register.jid.clone(),
-        registration_id: register.registration_id,
-        socket_generation: register.socket_generation,
-        user_claim_identity: identity.clone(),
-        binding_ref: binding_ref.clone(),
-        update: RemoteResourceStateUpdate::Carbons { enabled: false },
-        trace: RelayTraceContext::default(),
-    };
-    assert_round_trip(&update);
+    let update = identity_update(identity.clone(), binding_ref.clone());
+    assert_json_round_trip(&update);
+    assert_named_messagepack_round_trip(&update);
 
-    let unregister = RelayUnregisterRemoteUserResourceV3 {
-        jid: register.jid,
-        registration_id: register.registration_id,
-        socket_generation: register.socket_generation,
-        user_claim_identity: identity.clone(),
-        binding_ref,
-        trace: RelayTraceContext::default(),
-    };
-    assert_round_trip(&unregister);
+    let unregister = identity_unregister(identity.clone(), binding_ref.clone());
+    assert_json_round_trip(&unregister);
+    assert_named_messagepack_round_trip(&unregister);
 
     let reply = RelayRemoteResourceRegistrationV5Reply {
         result: RelayRemoteResourceRegistrationV5Result::Registered {
             user_claim_identity: identity,
         },
     };
-    assert_round_trip(&reply);
+    assert_json_round_trip(&reply);
+    assert_named_messagepack_round_trip(&reply);
 }
 
 #[test]
@@ -182,6 +217,13 @@ fn failed_resume_and_fresh_bind_on_the_same_transport_have_distinct_binding_refs
     .expect("decode failed resume binding");
     assert_eq!(decoded, failed_resume);
     assert_ne!(decoded, fresh_bind);
+
+    let messagepack_decoded: BindingRef = rmp_serde::from_slice(
+        &rmp_serde::to_vec_named(&failed_resume).expect("encode failed resume binding"),
+    )
+    .expect("decode failed resume binding");
+    assert_eq!(messagepack_decoded, failed_resume);
+    assert_ne!(messagepack_decoded, fresh_bind);
 }
 
 #[test]
@@ -306,10 +348,98 @@ fn serde_tolerance_does_not_make_legacy_endpoint_ids_support_identity_messages()
 }
 
 #[test]
+fn named_messagepack_version_evolution_preserves_only_intended_decoder_tolerance() {
+    let legacy_register_bytes =
+        rmp_serde::to_vec_named(&legacy_register()).expect("encode legacy register");
+    let identity_register_bytes = rmp_serde::to_vec_named(&identity_register(binding_ref()))
+        .expect("encode identity register");
+    assert!(
+        rmp_serde::from_slice::<RelayRegisterRemoteUserResourceV5>(&legacy_register_bytes).is_err(),
+        "a v4 connection-only registration has no required v5 binding reference"
+    );
+    assert!(
+        rmp_serde::from_slice::<RelayRegisterRemoteUserResource>(&identity_register_bytes).is_err(),
+        "a v5 binding-only snapshot does not satisfy the v4 connection-only snapshot"
+    );
+
+    let legacy_update_bytes = rmp_serde::to_vec_named(&legacy_update()).expect("encode v1 update");
+    let identity_update_bytes =
+        rmp_serde::to_vec_named(&identity_update(claim_identity(), binding_ref()))
+            .expect("encode v2 update");
+    assert!(
+        rmp_serde::from_slice::<RelayUpdateRemoteUserResourceV2>(&legacy_update_bytes).is_err(),
+        "v2 requires claim and binding identities"
+    );
+    assert!(
+        rmp_serde::from_slice::<RelayUpdateRemoteUserResource>(&identity_update_bytes).is_ok(),
+        "the old decoder ignores added identity fields, so message IDs remain the capability boundary"
+    );
+
+    let legacy_unregister_bytes =
+        rmp_serde::to_vec_named(&legacy_unregister()).expect("encode v2 unregister");
+    let identity_unregister_bytes =
+        rmp_serde::to_vec_named(&identity_unregister(claim_identity(), binding_ref()))
+            .expect("encode v3 unregister");
+    assert!(
+        rmp_serde::from_slice::<RelayUnregisterRemoteUserResourceV3>(&legacy_unregister_bytes)
+            .is_err(),
+        "v3 requires claim and binding identities"
+    );
+    assert!(
+        rmp_serde::from_slice::<RelayUnregisterRemoteUserResource>(&identity_unregister_bytes)
+            .is_ok(),
+        "the old decoder can ignore added fields but is never registered under the v3 ID"
+    );
+
+    let legacy_reply = RelayRemoteResourceRegistrationReply {
+        status: RelayRemoteResourceRegistrationStatus::Registered,
+    };
+    let legacy_reply_bytes = rmp_serde::to_vec_named(&legacy_reply).expect("encode v4 reply");
+    let identity_reply = RelayRemoteResourceRegistrationV5Reply {
+        result: RelayRemoteResourceRegistrationV5Result::Registered {
+            user_claim_identity: claim_identity(),
+        },
+    };
+    let identity_reply_bytes = rmp_serde::to_vec_named(&identity_reply).expect("encode v5 reply");
+    assert!(
+        rmp_serde::from_slice::<RelayRemoteResourceRegistrationV5Reply>(&legacy_reply_bytes)
+            .is_err(),
+        "a status-only v4 success reply cannot provide v5 claim identity"
+    );
+    assert!(
+        rmp_serde::from_slice::<RelayRemoteResourceRegistrationReply>(&identity_reply_bytes)
+            .is_err(),
+        "the v5 result shape does not satisfy the legacy status reply"
+    );
+}
+
+#[test]
 fn legacy_resource_registration_wire_bytes_remain_frozen() {
     let register = serde_json::to_string(&legacy_register()).expect("encode legacy register");
     let update = serde_json::to_string(&legacy_update()).expect("encode legacy update");
     let unregister = serde_json::to_string(&legacy_unregister()).expect("encode legacy unregister");
+    let register_messagepack =
+        rmp_serde::to_vec_named(&legacy_register()).expect("encode legacy register MessagePack");
+    let update_messagepack =
+        rmp_serde::to_vec_named(&legacy_update()).expect("encode legacy update MessagePack");
+    let unregister_messagepack = rmp_serde::to_vec_named(&legacy_unregister())
+        .expect("encode legacy unregister MessagePack");
+
+    assert_eq!(
+        messagepack_hex(&register_messagepack),
+        "86a36a6964b8616c696365406578616d706c652e746573742f70686f6e65af726567697374726174696f6e5f6964c41000000000000000000000000000000003b1736f636b65745f67656e65726174696f6e03ab736f636b65745f6e6f6465a8736f636b65742d61a5737461746588ae636f6e6e656374696f6e5f72656682aa6e6f64655f6c6561736581a9436c7573746572656482a76e6f64655f6964a66e6f64652d61aa6e6f64655f65706f6368a765706f63682d61b47472616e73706f72745f67656e65726174696f6ec41000000000000000000000000000000001b16f63637570616e63795f73657373696f6ec0af636172626f6e735f656e61626c6564c3b1726f737465725f696e7465726573746564c2b4626c6f636b6c6973745f696e7465726573746564c3b270726573656e63655f617661696c61626c65c3b170726573656e63655f7072696f7269747904ae70726573656e63655f7374617465c0a5747261636580",
+        "baseline v4 named-MessagePack bytes"
+    );
+    assert_eq!(
+        messagepack_hex(&update_messagepack),
+        "85a36a6964b8616c696365406578616d706c652e746573742f70686f6e65af726567697374726174696f6e5f6964c41000000000000000000000000000000003b1736f636b65745f67656e65726174696f6e03a675706461746581a7436172626f6e7381a7656e61626c6564c2a5747261636580",
+        "baseline v1 named-MessagePack bytes"
+    );
+    assert_eq!(
+        messagepack_hex(&unregister_messagepack),
+        "84a36a6964b8616c696365406578616d706c652e746573742f70686f6e65af726567697374726174696f6e5f6964c41000000000000000000000000000000003b1736f636b65745f67656e65726174696f6e03a5747261636580",
+        "baseline v2 named-MessagePack bytes"
+    );
 
     assert_eq!(
         register,
