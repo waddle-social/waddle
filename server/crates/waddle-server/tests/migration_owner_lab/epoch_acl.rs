@@ -17,11 +17,7 @@ async fn admin(fixture: &Fixture, sql: &str) {
 }
 
 async fn prepare(fixture: &Fixture) {
-    admin(
-        fixture,
-        &format!("REVOKE TEMP ON DATABASE {} FROM PUBLIC", fixture.database),
-    )
-    .await;
+    fixture.enable_owner_handoff().await;
     admin(
         fixture,
         &format!(
@@ -45,9 +41,10 @@ async fn grant_id(fixture: &Fixture) {
 
 async fn inspect(fixture: &Fixture) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
     inspect_dark_postgres_epoch_acl(
-        &fixture.owner_options,
+        &fixture.migrator_options,
         &fixture.runtime_options,
         &fixture.config(),
+        &fixture.migrator_role(),
     )
     .await
 }
@@ -278,6 +275,11 @@ async fn scoped_acl_rejects_broad_public_grant_options_and_role_paths() {
         DarkEpochAclStage::V1009EpochZero
     );
     let table = format!("{}.ingress_protocol_epoch", fixture.schema);
+    let server_version: i32 =
+        sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("server version");
     for (grant, revoke) in [
         (
             format!("GRANT UPDATE ON {table} TO {}", fixture.runtime),
@@ -346,6 +348,9 @@ async fn scoped_acl_rejects_broad_public_grant_options_and_role_paths() {
             format!("REVOKE SELECT ON {}._lineage FROM PUBLIC", fixture.schema),
         ),
     ] {
+        if server_version < 170000 && grant.starts_with("GRANT MAINTAIN ") {
+            continue;
+        }
         admin(&fixture, &grant).await;
         assert!(
             matches!(inspect(&fixture).await, Err(DarkMigrationOwnerError::Roles)),
@@ -608,9 +613,13 @@ async fn observations_do_not_rule_out_callable_security_definer_bypass() {
     let fixture = Fixture::new(&url, true).await;
     prepare(&fixture).await;
     grant_id(&fixture).await;
-    let mut owner = PgConnection::connect_with(&fixture.owner_options)
+    let mut owner = PgConnection::connect_with(&fixture.migrator_options)
         .await
-        .expect("actual owner login");
+        .expect("actual migrator login");
+    sqlx::query(&format!("SET ROLE {}", fixture.owner))
+        .execute(&mut owner)
+        .await
+        .expect("assume NOLOGIN owner");
     sqlx::query(&format!(
         "CREATE FUNCTION {}.lab_privileged_advance() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN UPDATE {}.ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = '{}'::uuid WHERE id = 1; END $$",
         fixture.schema, fixture.schema, fixture.lineage.lineage_uuid.0
@@ -656,16 +665,26 @@ async fn runtime_session_must_match_role_database_and_observed_cluster() {
     grant_id(&fixture).await;
     let wrong_role = fixture.runtime_options.clone().username(&fixture.owner);
     assert!(matches!(
-        inspect_dark_postgres_epoch_acl(&fixture.owner_options, &wrong_role, &fixture.config())
-            .await,
+        inspect_dark_postgres_epoch_acl(
+            &fixture.migrator_options,
+            &wrong_role,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::Roles)
     ));
     let wrong_database =
         PgConnectOptions::from_str(&url_with_option(&url, "user", &fixture.runtime))
             .expect("same role in other database");
     assert!(matches!(
-        inspect_dark_postgres_epoch_acl(&fixture.owner_options, &wrong_database, &fixture.config())
-            .await,
+        inspect_dark_postgres_epoch_acl(
+            &fixture.migrator_options,
+            &wrong_database,
+            &fixture.config(),
+            &fixture.migrator_role()
+        )
+        .await,
         Err(DarkMigrationOwnerError::RuntimeSessionUnverified)
     ));
     let caller_application = fixture
@@ -674,9 +693,10 @@ async fn runtime_session_must_match_role_database_and_observed_cluster() {
         .application_name("caller-controlled-value");
     assert_eq!(
         inspect_dark_postgres_epoch_acl(
-            &fixture.owner_options,
+            &fixture.migrator_options,
             &caller_application,
-            &fixture.config()
+            &fixture.config(),
+            &fixture.migrator_role()
         )
         .await
         .expect("caller name is replaced by internal nonce"),
@@ -703,9 +723,10 @@ async fn runtime_session_must_match_role_database_and_observed_cluster() {
                 .expect("other-cluster options");
         assert!(matches!(
             inspect_dark_postgres_epoch_acl(
-                &fixture.owner_options,
+                &fixture.migrator_options,
                 &other_runtime,
-                &fixture.config()
+                &fixture.config(),
+                &fixture.migrator_role()
             )
             .await,
             Err(DarkMigrationOwnerError::RuntimeSessionUnverified)
@@ -748,13 +769,16 @@ async fn terminated_runtime_during_scan_cannot_yield_an_observation() {
     .await
     .expect("block final epoch read");
     let application = format!("epoch-acl-owner-{}", uuid::Uuid::new_v4().simple());
-    let owner = fixture.owner_options.clone().application_name(&application);
+    let owner = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
     let runtime = fixture.runtime_options.clone();
     let config = fixture.config();
-    let task =
-        tokio::spawn(
-            async move { inspect_dark_postgres_epoch_acl(&owner, &runtime, &config).await },
-        );
+    let migrator = fixture.migrator_role();
+    let task = tokio::spawn(async move {
+        inspect_dark_postgres_epoch_acl(&owner, &runtime, &config, &migrator).await
+    });
     let pid = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let blocked: bool = sqlx::query_scalar(
@@ -829,11 +853,15 @@ async fn owner_respects_tighter_lock_and_statement_timeouts() {
         [("lock_timeout", "200ms"), ("statement_timeout", "5s")],
         [("lock_timeout", "5s"), ("statement_timeout", "200ms")],
     ] {
-        let owner = fixture.owner_options.clone().options(options);
+        let owner = fixture.migrator_options.clone().options(options);
         let started = std::time::Instant::now();
-        let result =
-            inspect_dark_postgres_epoch_acl(&owner, &fixture.runtime_options, &fixture.config())
-                .await;
+        let result = inspect_dark_postgres_epoch_acl(
+            &owner,
+            &fixture.runtime_options,
+            &fixture.config(),
+            &fixture.migrator_role(),
+        )
+        .await;
         assert!(result.is_err(), "blocked scan unexpectedly succeeded");
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -862,13 +890,16 @@ async fn epoch_transition_while_first_read_waits_is_refused() {
     .await
     .expect("hold epoch transition lock");
     let application = format!("epoch-acl-race-{}", uuid::Uuid::new_v4().simple());
-    let owner = fixture.owner_options.clone().application_name(&application);
+    let owner = fixture
+        .migrator_options
+        .clone()
+        .application_name(&application);
     let runtime = fixture.runtime_options.clone();
     let config = fixture.config();
-    let task =
-        tokio::spawn(
-            async move { inspect_dark_postgres_epoch_acl(&owner, &runtime, &config).await },
-        );
+    let migrator = fixture.migrator_role();
+    let task = tokio::spawn(async move {
+        inspect_dark_postgres_epoch_acl(&owner, &runtime, &config, &migrator).await
+    });
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')")
@@ -959,12 +990,12 @@ async fn stalled_runtime_setup_times_out_and_discards_connection() {
         .username(&fixture.runtime)
         .database(&fixture.database)
         .ssl_mode(sqlx::postgres::PgSslMode::Disable);
-    let owner = fixture.owner_options.clone();
+    let owner = fixture.migrator_options.clone();
     let config = fixture.config();
-    let task =
-        tokio::spawn(
-            async move { inspect_dark_postgres_epoch_acl(&owner, &runtime, &config).await },
-        );
+    let migrator = fixture.migrator_role();
+    let task = tokio::spawn(async move {
+        inspect_dark_postgres_epoch_acl(&owner, &runtime, &config, &migrator).await
+    });
     tokio::time::timeout(Duration::from_secs(5), observed)
         .await
         .expect("setup statement reached proxy")

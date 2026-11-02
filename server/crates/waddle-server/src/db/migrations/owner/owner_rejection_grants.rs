@@ -1,18 +1,21 @@
 //! Dark owner-only grant for the V1028 owner-rejection relation.
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{Connection, PgConnection};
 use thiserror::Error;
 
-use super::epoch_acl::{function_source, source_body, RELATION_GUARD_CANDIDATE};
+use super::epoch_acl::{
+    correlate_runtime, function_source, runtime_pid, source_body, RELATION_GUARD_CANDIDATE,
+};
 use super::{
-    check_roles_and_schema, DarkMigrationOwnerConfig, DarkMigrationOwnerError, COMMIT_DEADLINE,
-    CONNECT_DEADLINE, OPERATION_DEADLINE,
+    check_migration_login_and_assume_owner, check_migrator_options, DarkMigrationOwnerConfig,
+    DarkMigrationOwnerError, COMMIT_DEADLINE, CONNECT_DEADLINE, OPERATION_DEADLINE,
 };
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, LINEAGE_ADVISORY_LOCK_KEY};
 use crate::db::migrations::runner::MIGRATION_LEDGER_ADVISORY_LOCK_KEY;
 use crate::db::migrations::{migration_checksum, waddle};
-use crate::db::physical_attestation::{quote_identifier, validate_identifier};
+use crate::db::physical_attestation::{quote_identifier, validate_identifier, PgRoleName};
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 
 /// Result of a fresh owner-side observation, not an admission capability.
@@ -53,24 +56,36 @@ pub enum OwnerRejectionGrantError {
 /// The operator supplies the independent expected physical lineage and roles
 /// in `config`, provides a direct authoritative primary, fences old attempts,
 /// and keeps privileged DDL, role membership and ACL changes quiescent. The
-/// owner login must own the schema and relation and read pg_control_system().
+/// NOLOGIN owner must own the schema and relation and read pg_control_system();
+/// the independently configured migrator login must be allowed to assume it.
 /// The checks do not audit arbitrary SECURITY DEFINER functions or all schema
 /// objects. Failure/cancellation around COMMIT is indeterminate; a later read
 /// cannot prove an older unfenced backend will not commit afterward.
+/// A separately pinned runtime backend is checked in origin mode, but this does
+/// not prove that old sessions are drained or that other sessions use origin.
 pub async fn grant_dark_owner_rejection_runtime_access(
-    owner_options: &PgConnectOptions,
+    migrator_options: &PgConnectOptions,
+    runtime_options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<(), OwnerRejectionGrantError> {
     let result = tokio::time::timeout(
         OPERATION_DEADLINE,
-        with_fresh_connection(owner_options, config, true),
+        with_fresh_connection(migrator_options, runtime_options, config, migrator, true),
     )
     .await
     .map_err(|_| OwnerRejectionGrantError::CommitUnknown)??;
     if result != OwnerRejectionGrantState::Granted {
         return Err(OwnerRejectionGrantError::PostCommitUnverified);
     }
-    match inspect_dark_owner_rejection_runtime_access(owner_options, config).await {
+    match inspect_dark_owner_rejection_runtime_access(
+        migrator_options,
+        runtime_options,
+        config,
+        migrator,
+    )
+    .await
+    {
         Ok(OwnerRejectionGrantState::Granted) => Ok(()),
         Ok(OwnerRejectionGrantState::Missing) | Err(_) => {
             Err(OwnerRejectionGrantError::PostCommitUnverified)
@@ -81,12 +96,14 @@ pub async fn grant_dark_owner_rejection_runtime_access(
 /// Read the scoped grant using a fresh, read-only owner transaction. A missing
 /// grant is not proof that an earlier unfenced attempt cannot later commit.
 pub async fn inspect_dark_owner_rejection_runtime_access(
-    owner_options: &PgConnectOptions,
+    migrator_options: &PgConnectOptions,
+    runtime_options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<OwnerRejectionGrantState, OwnerRejectionGrantError> {
     tokio::time::timeout(
         OPERATION_DEADLINE,
-        with_fresh_connection(owner_options, config, false),
+        with_fresh_connection(migrator_options, runtime_options, config, migrator, false),
     )
     .await
     .map_err(|_| OwnerRejectionGrantError::ProbeTimeout)?
@@ -94,12 +111,46 @@ pub async fn inspect_dark_owner_rejection_runtime_access(
 
 async fn with_fresh_connection(
     options: &PgConnectOptions,
+    runtime_options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
     grant: bool,
 ) -> Result<OwnerRejectionGrantState, OwnerRejectionGrantError> {
-    if options.get_username() != config.owner.as_str() {
+    check_migrator_options(options, config, migrator)?;
+    if runtime_options.get_username() != config.runtime.as_str() {
         return Err(DarkMigrationOwnerError::Roles.into());
     }
+    let nonce = format!("waddle-owner-rejection-{}", uuid::Uuid::new_v4().simple());
+    let mut runtime = tokio::time::timeout(
+        CONNECT_DEADLINE,
+        PgConnection::connect_with(&runtime_options.clone().application_name(&nonce)),
+    )
+    .await
+    .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
+    let mut runtime_tx = tokio::time::timeout(CONNECT_DEADLINE, runtime.begin())
+        .await
+        .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
+    match tokio::time::timeout(
+        CONNECT_DEADLINE,
+        sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *runtime_tx),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            drop(runtime_tx);
+            let _ = tokio::time::timeout(CONNECT_DEADLINE, runtime.close_hard()).await;
+            return Err(DarkMigrationOwnerError::PreflightTimeout.into());
+        }
+    }
+    let pid = tokio::time::timeout(
+        CONNECT_DEADLINE,
+        runtime_pid(&mut runtime_tx, config, &nonce),
+    )
+    .await
+    .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
     let pool = tokio::time::timeout(
         CONNECT_DEADLINE,
         PgPoolOptions::new()
@@ -109,16 +160,23 @@ async fn with_fresh_connection(
     .await
     .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
     let db = Database::from_postgres_pool("owner rejection grant", pool.clone());
-    let result = run_on_connection(&db, config, grant).await;
+    let result =
+        run_on_connection(&db, &mut runtime_tx, config, migrator, grant, pid, &nonce).await;
     drop(db);
     let _ = tokio::time::timeout(CONNECT_DEADLINE, pool.close()).await;
+    let _ = tokio::time::timeout(CONNECT_DEADLINE, runtime_tx.rollback()).await;
+    drop(runtime);
     result
 }
 
 async fn run_on_connection(
     db: &Database,
+    runtime_tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
     grant: bool,
+    pid: i32,
+    nonce: &str,
 ) -> Result<OwnerRejectionGrantState, OwnerRejectionGrantError> {
     let identity = config
         .expected
@@ -145,7 +203,14 @@ async fn run_on_connection(
         crate::db_params![format!("{quoted}, pg_temp")],
     )
     .await?;
-    check_roles_and_schema(&mut tx, config, schema, i64::from(identity.schema.oid)).await?;
+    check_migration_login_and_assume_owner(
+        &mut tx,
+        config,
+        migrator,
+        schema,
+        i64::from(identity.schema.oid),
+    )
+    .await?;
     for key in [
         LINEAGE_ADVISORY_LOCK_KEY,
         MIGRATION_LEDGER_ADVISORY_LOCK_KEY,
@@ -170,7 +235,15 @@ async fn run_on_connection(
     if observed != config.expected {
         return Err(DarkMigrationOwnerError::Identity.into());
     }
+    correlate_runtime(&mut tx, config, pid, nonce).await?;
     verify_v1028_ledger(&mut tx, &quoted).await?;
+    // Take the epoch relation before the protected mapping relation. This
+    // avoids a target-first lock against an epoch-first migration.
+    tx.execute(
+        &format!("LOCK TABLE ONLY {quoted}.ingress_protocol_epoch IN ACCESS SHARE MODE"),
+        (),
+    )
+    .await?;
     // Lock the exact qualified relation before inspecting or modifying its
     // ACL. Errors after the GRANT drop this uncommitted transaction.
     tx.execute(
@@ -196,6 +269,10 @@ async fn run_on_connection(
     } else {
         state
     };
+    if runtime_pid(runtime_tx, config, nonce).await? != pid {
+        return Err(DarkMigrationOwnerError::RuntimeSessionUnverified.into());
+    }
+    correlate_runtime(&mut tx, config, pid, nonce).await?;
     if grant {
         match tokio::time::timeout(COMMIT_DEADLINE, tx.commit()).await {
             Ok(Ok(())) => {}
@@ -394,6 +471,7 @@ async fn inspect_locked(
             AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'USAGE')
             AND NOT pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
             AND NOT pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'TEMPORARY')
+            AND NOT pg_catalog.has_parameter_privilege(r.oid, 'session_replication_role', 'SET')
             AND NOT pg_catalog.has_table_privilege(r.oid, c.oid, 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
             AND NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'UPDATE,REFERENCES')
             AND NOT pg_catalog.has_table_privilege(r.oid, c.oid, 'SELECT WITH GRANT OPTION,INSERT WITH GRANT OPTION')

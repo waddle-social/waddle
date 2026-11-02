@@ -124,12 +124,7 @@ pub async fn run_dark_postgres_owner(
     config: &DarkMigrationOwnerConfig,
     migrator: &PgRoleName,
 ) -> Result<Vec<i64>, DarkMigrationOwnerError> {
-    if migrator == &config.owner
-        || migrator == &config.runtime
-        || options.get_username() != migrator.as_str()
-    {
-        return Err(DarkMigrationOwnerError::Roles);
-    }
+    check_migrator_options(options, config, migrator)?;
     // The pool is private to this invocation. Direct-backend routing is an
     // operator prerequisite, not something a fresh client pool can prove.
     let pool = tokio::time::timeout(
@@ -155,6 +150,20 @@ pub async fn run_dark_postgres_owner(
     // A failed/unknown commit is not made definite by closing the client.
     let _ = tokio::time::timeout(CONNECT_DEADLINE, pool.close()).await;
     result
+}
+
+fn check_migrator_options(
+    options: &PgConnectOptions,
+    config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
+) -> Result<(), DarkMigrationOwnerError> {
+    if migrator == &config.owner
+        || migrator == &config.runtime
+        || options.get_username() != migrator.as_str()
+    {
+        return Err(DarkMigrationOwnerError::Roles);
+    }
+    Ok(())
 }
 
 async fn run_on_fresh_session(
@@ -382,65 +391,6 @@ async fn check_migration_login_and_assume_owner(
     Ok(())
 }
 
-async fn check_roles_and_schema(
-    tx: &mut Transaction<'_>,
-    config: &DarkMigrationOwnerConfig,
-    schema: &str,
-    expected_schema_oid: i64,
-) -> Result<(), DarkMigrationOwnerError> {
-    let mut rows = tx
-        .query(
-            "SELECT session_user::text, current_user::text, pg_catalog.current_schema()::text, \
-                n.oid::bigint, n.nspowner = owner_role.oid, \
-                owner_role.rolsuper, runtime_role.rolsuper, \
-                pg_catalog.pg_has_role(runtime_role.oid, owner_role.oid, 'MEMBER'), \
-                pg_catalog.has_schema_privilege(runtime_role.oid, n.oid, 'CREATE'), \
-                pg_catalog.pg_is_in_recovery(), pg_catalog.pg_my_temp_schema()::bigint, \
-                pg_catalog.current_setting('session_replication_role'), \
-                EXISTS (SELECT 1 FROM pg_catalog.pg_roles privileged \
-                        WHERE privileged.rolsuper \
-                        AND pg_catalog.pg_has_role(runtime_role.oid, privileged.oid, 'MEMBER')) \
-         FROM pg_catalog.pg_namespace n \
-         JOIN pg_catalog.pg_roles owner_role ON owner_role.rolname = ? \
-         JOIN pg_catalog.pg_roles runtime_role ON runtime_role.rolname = ? \
-         WHERE n.nspname = ?",
-            crate::db_params![config.owner.as_str(), config.runtime.as_str(), schema],
-        )
-        .await?;
-    let row = rows.next().await?.ok_or(DarkMigrationOwnerError::Roles)?;
-    let session: String = row.get(0)?;
-    let current: String = row.get(1)?;
-    let current_schema: Option<String> = row.get(2)?;
-    let oid: i64 = row.get(3)?;
-    let owns_schema: bool = row.get(4)?;
-    let owner_super: bool = row.get(5)?;
-    let runtime_super: bool = row.get(6)?;
-    let runtime_member: bool = row.get(7)?;
-    let runtime_can_create: bool = row.get(8)?;
-    let recovering: bool = row.get(9)?;
-    let temp_schema_oid: i64 = row.get(10)?;
-    let replication_role: String = row.get(11)?;
-    let runtime_super_member: bool = row.get(12)?;
-    if temp_schema_oid != 0 || replication_role != "origin" {
-        return Err(DarkMigrationOwnerError::ContaminatedSession);
-    }
-    if session != config.owner.as_str()
-        || current != config.owner.as_str()
-        || !owns_schema
-        || owner_super
-        || runtime_super
-        || runtime_super_member
-        || runtime_member
-        || runtime_can_create
-    {
-        return Err(DarkMigrationOwnerError::Roles);
-    }
-    if current_schema.as_deref() != Some(schema) || oid != expected_schema_oid || recovering {
-        return Err(DarkMigrationOwnerError::Identity);
-    }
-    Ok(())
-}
-
 // A bounded role check, not a whole-database ACL or SECURITY DEFINER audit.
 // Provisioning must also prevent privilege changes throughout the operation.
 async fn check_protected_role_privileges(
@@ -457,9 +407,16 @@ async fn check_protected_role_privileges(
                 pg_catalog.has_table_privilege(runtime_role.oid, ledger.oid, \
                     'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES'), \
                 pg_catalog.has_any_column_privilege(runtime_role.oid, epoch.oid, \
-                    'INSERT,UPDATE,REFERENCES'), \
+                    'INSERT,REFERENCES'), \
                 pg_catalog.has_any_column_privilege(runtime_role.oid, ledger.oid, \
-                    'INSERT,UPDATE,REFERENCES') \
+                    'INSERT,UPDATE,REFERENCES'), \
+                CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000 \
+                    THEN pg_catalog.has_table_privilege(runtime_role.oid, epoch.oid, 'MAINTAIN') \
+                    ELSE false END, \
+                CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000 \
+                    THEN pg_catalog.has_table_privilege(runtime_role.oid, ledger.oid, 'MAINTAIN') \
+                    ELSE false END, \
+                pg_catalog.has_any_column_privilege(runtime_role.oid, epoch.oid, 'UPDATE') \
          FROM pg_catalog.pg_roles runtime_role \
          JOIN pg_catalog.pg_namespace n ON n.nspname = ? \
          JOIN pg_catalog.pg_class epoch ON epoch.relnamespace = n.oid \
@@ -474,10 +431,24 @@ async fn check_protected_role_privileges(
         .next()
         .await?
         .ok_or(DarkMigrationOwnerError::MissingEpochBaseline)?;
-    for column in 0..6 {
+    for column in 0..8 {
         if row.get::<bool>(column)? {
             return Err(DarkMigrationOwnerError::Roles);
         }
+    }
+    if row.get::<bool>(8)? {
+        // V1009's FOR SHARE requires UPDATE(id). Accept that one privilege only
+        // after checking the installed ledger, locked epoch guard, and exact ACL.
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        MigrationRunner::single()
+            .verify_applied_through_in_transaction(
+                tx,
+                DatabaseDriver::Postgres,
+                &format!("{quoted}._migrations"),
+                1009,
+            )
+            .await?;
+        epoch_acl::verify_v1009_epoch_owner_stage(tx, config, schema, &quoted).await?;
     }
     Ok(())
 }

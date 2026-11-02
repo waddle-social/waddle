@@ -282,6 +282,37 @@ impl MigrationRunner {
         Ok(())
     }
 
+    /// Verify the committed ledger prefix without applying pending migrations.
+    /// No checksum repair or schema DDL is permitted by this check.
+    pub(super) async fn verify_applied_through_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+        ledger_table: &str,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
+            .await?;
+        self.validate_ledger(&applied_rows, driver, false)?;
+        let mut seen = HashSet::new();
+        for row in &applied_rows {
+            if self.owns_version(row.version) && !seen.insert(row.version) {
+                return Err(MigrationLedgerError::DuplicateVersion {
+                    version: row.version,
+                }
+                .into());
+            }
+        }
+        if !seen.contains(&required_version) {
+            return Err(MigrationLedgerError::PendingMigration {
+                version: required_version,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// The table each namespace's first migration unconditionally drops and
     /// recreates. The exhaustive match ties the data-loss guard to the
     /// namespace enum: adding a namespace without a sentinel fails to

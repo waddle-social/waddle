@@ -4,14 +4,15 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPoolOptions};
 use sqlx::Connection;
 
 use super::{
-    check_roles_and_schema, DarkMigrationOwnerConfig, DarkMigrationOwnerError, CONNECT_DEADLINE,
-    OPERATION_DEADLINE,
+    check_migration_login_and_assume_owner, check_migrator_options, DarkMigrationOwnerConfig,
+    DarkMigrationOwnerError, CONNECT_DEADLINE, OPERATION_DEADLINE,
 };
 use crate::config::LineageConfig;
 use crate::db::lineage;
 use crate::db::migrations::waddle::{
     V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES, V1028_INGRESS_SOURCE_BINDING_POSTGRES,
 };
+use crate::db::physical_attestation::PgRoleName;
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
 use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
 
@@ -44,14 +45,14 @@ pub enum DarkEpochAclStage {
     RelationGuardEpochZero,
 }
 
-/// Inspect the epoch and ledger objects using separate, live owner and runtime
-/// logins. The owner independently verifies its physical identity and lineage.
+/// Inspect the epoch and ledger objects using separate, live migrator and runtime
+/// logins. The migrator assumes the NOLOGIN owner and verifies physical lineage.
 /// The pinned runtime backend is correlated through `pg_stat_activity` using
 /// its PID and an internally generated application-name nonce; insufficient
 /// visibility or any mismatch fails closed. This correlation assumes honest
 /// endpoints and no adversarial replay; it is not physical attestation of the
 /// runtime connection. The owner needs the same identity-read permissions as
-/// the dark migration owner.
+/// the dark migration owner. The configured migrator is independent of the DSN.
 ///
 /// Only the complete current migration catalog and the two exact guard bodies
 /// are recognized. Unknown or changed inspected epoch/catalog objects and
@@ -59,26 +60,27 @@ pub enum DarkEpochAclStage {
 /// epoch and manifest tables must match the live non-index relation set. This
 /// diagnostic performs no grants, DDL, migration, or epoch transition.
 pub async fn inspect_dark_postgres_epoch_acl(
-    owner_options: &PgConnectOptions,
+    migrator_options: &PgConnectOptions,
     runtime_options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
     tokio::time::timeout(
         OPERATION_DEADLINE,
-        inspect_with_connections(owner_options, runtime_options, config),
+        inspect_with_connections(migrator_options, runtime_options, config, migrator),
     )
     .await
     .map_err(|_| DarkMigrationOwnerError::PreflightTimeout)?
 }
 
 async fn inspect_with_connections(
-    owner_options: &PgConnectOptions,
+    migrator_options: &PgConnectOptions,
     runtime_options: &PgConnectOptions,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
 ) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
-    if owner_options.get_username() != config.owner.as_str()
-        || runtime_options.get_username() != config.runtime.as_str()
-    {
+    check_migrator_options(migrator_options, config, migrator)?;
+    if runtime_options.get_username() != config.runtime.as_str() {
         return Err(DarkMigrationOwnerError::Roles);
     }
 
@@ -122,7 +124,7 @@ async fn inspect_with_connections(
         CONNECT_DEADLINE,
         PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(owner_options.clone()),
+            .connect_with(migrator_options.clone()),
     )
     .await
     .map_err(|_| DarkMigrationOwnerError::ConnectTimeout)??;
@@ -130,7 +132,7 @@ async fn inspect_with_connections(
     // Keep the runtime connection alive while its backend is correlated.
     let result = tokio::time::timeout(
         OPERATION_DEADLINE,
-        inspect_in_transaction(&db, &mut runtime_tx, config, pid, &nonce),
+        inspect_in_transaction(&db, &mut runtime_tx, config, migrator, pid, &nonce),
     )
     .await
     .map_err(|_| DarkMigrationOwnerError::PreflightTimeout)
@@ -146,6 +148,7 @@ async fn inspect_in_transaction(
     db: &Database,
     runtime_tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &DarkMigrationOwnerConfig,
+    migrator: &PgRoleName,
     runtime_pid: i32,
     nonce: &str,
 ) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
@@ -193,7 +196,14 @@ async fn inspect_in_transaction(
         ],
     )
     .await?;
-    check_roles_and_schema(&mut tx, config, schema, i64::from(expected.schema.oid)).await?;
+    check_migration_login_and_assume_owner(
+        &mut tx,
+        config,
+        migrator,
+        schema,
+        i64::from(expected.schema.oid),
+    )
+    .await?;
     let lineage_config = LineageConfig {
         deployment_uuid: Some(config.expected.deployment_uuid),
         action: None,
@@ -220,6 +230,63 @@ async fn inspect_in_transaction(
     check_epoch_zero(&mut tx, &quoted).await?;
     tx.rollback().await?;
     Ok(stage)
+}
+
+// This deliberately checks only the V1009 epoch relation and runtime ACL. The
+// caller separately validates the applied ledger and holds the epoch AX lock;
+// this does not establish old-session fencing or audit SECURITY DEFINER code.
+pub(super) async fn verify_v1009_epoch_owner_stage(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+    quoted: &str,
+) -> Result<(), DarkMigrationOwnerError> {
+    require(
+        tx,
+        "SELECT pg_catalog.current_setting('transaction_isolation') = 'read committed' \
+         AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks l \
+                     JOIN pg_catalog.pg_class c ON c.oid = l.relation \
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = ? AND c.relname = 'ingress_protocol_epoch' \
+                       AND l.locktype = 'relation' AND l.pid = pg_catalog.pg_backend_pid() \
+                       AND l.mode = 'AccessExclusiveLock' AND l.granted)",
+        crate::db_params![schema],
+        DarkMigrationOwnerError::EpochCatalogDrift,
+    )
+    .await?;
+    check_runtime_role(tx, config, schema).await?;
+    check_epoch_shape(tx, config, schema).await?;
+    let epoch = function_source(tx, config, schema, "waddle_ingress_protocol_epoch_guard").await?;
+    if Some(epoch.source.as_str())
+        != source_body(
+            V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES,
+            "waddle_ingress_protocol_epoch_guard",
+        )
+    {
+        return Err(DarkMigrationOwnerError::EpochCatalogDrift);
+    }
+    check_trigger_pair(
+        tx,
+        config,
+        schema,
+        "ingress_protocol_epoch",
+        TriggerPair {
+            row_function: epoch.oid,
+            truncate_function: epoch.oid,
+            row_type: 31,
+            reject_internal: true,
+        },
+    )
+    .await?;
+    check_acl(
+        tx,
+        config,
+        schema,
+        "ingress_protocol_epoch",
+        DarkEpochAclStage::V1009EpochZero,
+    )
+    .await?;
+    check_epoch_zero(tx, quoted).await
 }
 
 // Shared by the read-only diagnostic and the test-only owner transition lab.

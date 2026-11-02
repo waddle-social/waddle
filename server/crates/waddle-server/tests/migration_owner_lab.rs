@@ -286,6 +286,263 @@ async fn make_v1028_pending(fixture: &Fixture) {
 }
 
 #[tokio::test]
+async fn v1009_epoch_id_grant_requires_exact_guard_and_valid_pending_ledger() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url, true).await;
+    fixture.enable_owner_handoff().await;
+    make_v1028_pending(&fixture).await;
+    let epoch = format!("{}.ingress_protocol_epoch", fixture.schema);
+    async fn run(fixture: &Fixture) -> Result<Vec<i64>, DarkMigrationOwnerError> {
+        run_dark_postgres_owner(
+            &fixture.migrator_options,
+            &fixture.config(),
+            &fixture.migrator_role(),
+        )
+        .await
+    }
+    for statement in [
+        format!("GRANT SELECT ON {epoch} TO {}", fixture.runtime),
+        format!("GRANT UPDATE (id) ON {epoch} TO {}", fixture.runtime),
+    ] {
+        sqlx::query(&statement)
+            .execute(&fixture.admin)
+            .await
+            .expect("V1009 scoped grant");
+    }
+
+    let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("restricted login");
+    let mut row_lock = runtime.begin().await.expect("row lock transaction");
+    sqlx::query(&format!("SELECT id FROM {epoch} WHERE id = 1 FOR SHARE"))
+        .execute(&mut *row_lock)
+        .await
+        .expect("id update permits FOR SHARE");
+    row_lock.rollback().await.expect("release row lock");
+    let mut exclusive = runtime.begin().await.expect("exclusive lock transaction");
+    assert!(
+        sqlx::query(&format!("LOCK TABLE {epoch} IN ACCESS EXCLUSIVE MODE"))
+            .execute(&mut *exclusive)
+            .await
+            .is_err(),
+        "column UPDATE must not permit ACCESS EXCLUSIVE"
+    );
+    exclusive
+        .rollback()
+        .await
+        .expect("release failed transaction");
+    assert!(
+        sqlx::query(&format!("UPDATE {epoch} SET epoch = 1 WHERE id = 1"))
+            .execute(&mut runtime)
+            .await
+            .is_err(),
+        "runtime cannot update epoch"
+    );
+    assert!(
+        sqlx::query(&format!("UPDATE {epoch} SET id = id WHERE id = 1"))
+            .execute(&mut runtime)
+            .await
+            .is_err(),
+        "V1009 trigger rejects id mutation"
+    );
+    drop(runtime);
+
+    let disabled = format!("ALTER TABLE {epoch} DISABLE TRIGGER ingress_protocol_epoch_guard_row");
+    sqlx::query(&disabled)
+        .execute(&fixture.admin)
+        .await
+        .expect("disable guard");
+    assert!(matches!(
+        run(&fixture).await,
+        Err(DarkMigrationOwnerError::EpochCatalogDrift)
+    ));
+    sqlx::query(&format!(
+        "ALTER TABLE {epoch} ENABLE ALWAYS TRIGGER ingress_protocol_epoch_guard_row"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore guard");
+
+    let original: String =
+        sqlx::query_scalar("SELECT pg_catalog.pg_get_functiondef($1::regprocedure)")
+            .bind(format!(
+                "{}.waddle_ingress_protocol_epoch_guard()",
+                fixture.schema
+            ))
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("original guard definition");
+    sqlx::query(&format!("CREATE OR REPLACE FUNCTION {}.waddle_ingress_protocol_epoch_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", fixture.schema))
+        .execute(&fixture.admin).await.expect("tamper guard body");
+    assert!(matches!(
+        run(&fixture).await,
+        Err(DarkMigrationOwnerError::EpochCatalogDrift)
+    ));
+    sqlx::query(&original)
+        .execute(&fixture.admin)
+        .await
+        .expect("restore guard body");
+
+    let runtime_role = &fixture.runtime;
+    for (grant, revoke) in [
+        (
+            format!("GRANT UPDATE ON {epoch} TO {runtime_role}"),
+            format!("REVOKE UPDATE ON {epoch} FROM {runtime_role}"),
+        ),
+        (
+            format!("GRANT UPDATE (epoch) ON {epoch} TO {runtime_role}"),
+            format!("REVOKE UPDATE (epoch) ON {epoch} FROM {runtime_role}"),
+        ),
+        (
+            format!("GRANT UPDATE (id) ON {epoch} TO {runtime_role} WITH GRANT OPTION"),
+            format!("REVOKE UPDATE (id) ON {epoch} FROM {runtime_role}"),
+        ),
+        (
+            format!("GRANT UPDATE (id) ON {epoch} TO PUBLIC"),
+            format!("REVOKE UPDATE (id) ON {epoch} FROM PUBLIC"),
+        ),
+        (
+            format!("GRANT SELECT ON {epoch} TO PUBLIC"),
+            format!("REVOKE SELECT ON {epoch} FROM PUBLIC"),
+        ),
+        (
+            format!("GRANT SELECT ON {epoch} TO {runtime_role} WITH GRANT OPTION"),
+            format!("REVOKE GRANT OPTION FOR SELECT ON {epoch} FROM {runtime_role}"),
+        ),
+        (
+            format!(
+                "GRANT CREATE ON SCHEMA {} TO {runtime_role}",
+                fixture.schema
+            ),
+            format!(
+                "REVOKE CREATE ON SCHEMA {} FROM {runtime_role}",
+                fixture.schema
+            ),
+        ),
+        (
+            format!(
+                "GRANT TEMP ON DATABASE {} TO {runtime_role}",
+                fixture.database
+            ),
+            format!(
+                "REVOKE TEMP ON DATABASE {} FROM {runtime_role}",
+                fixture.database
+            ),
+        ),
+    ] {
+        sqlx::query(&grant)
+            .execute(&fixture.admin)
+            .await
+            .expect("install unsafe grant");
+        assert!(run(&fixture).await.is_err(), "accepted {grant}");
+        sqlx::query(&revoke)
+            .execute(&fixture.admin)
+            .await
+            .expect("remove unsafe grant");
+        sqlx::query(&format!("GRANT UPDATE (id) ON {epoch} TO {runtime_role}"))
+            .execute(&fixture.admin)
+            .await
+            .expect("restore scoped update");
+    }
+
+    let delegated = format!("{}_delegate", fixture.runtime);
+    sqlx::query(&format!("CREATE ROLE {delegated} NOLOGIN"))
+        .execute(&fixture.admin)
+        .await
+        .expect("create delegated role");
+    sqlx::query(&format!(
+        "GRANT {delegated} TO {runtime_role} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant SET ROLE");
+    assert!(run(&fixture).await.is_err(), "runtime role escalation");
+    sqlx::query(&format!("REVOKE {delegated} FROM {runtime_role}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("revoke SET ROLE");
+    sqlx::query(&format!("DROP ROLE {delegated}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop delegated role");
+
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::int")
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("server version");
+    if version >= 170000 {
+        for with_id in [false, true] {
+            let verb = if with_id { "GRANT" } else { "REVOKE" };
+            let direction = if with_id { "TO" } else { "FROM" };
+            sqlx::query(&format!(
+                "{verb} UPDATE (id) ON {epoch} {direction} {runtime_role}"
+            ))
+            .execute(&fixture.admin)
+            .await
+            .expect("configure scoped UPDATE");
+            for table in [&epoch, &format!("{}._migrations", fixture.schema)] {
+                sqlx::query(&format!("GRANT MAINTAIN ON {table} TO {runtime_role}"))
+                    .execute(&fixture.admin)
+                    .await
+                    .expect("grant MAINTAIN");
+                assert!(
+                    matches!(run(&fixture).await, Err(DarkMigrationOwnerError::Roles)),
+                    "accepted MAINTAIN on {table}"
+                );
+                sqlx::query(&format!("REVOKE MAINTAIN ON {table} FROM {runtime_role}"))
+                    .execute(&fixture.admin)
+                    .await
+                    .expect("revoke MAINTAIN");
+            }
+        }
+    }
+
+    let checksum: String = sqlx::query_scalar(&format!(
+        "SELECT checksum FROM {}._migrations WHERE version = 1009",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("original V1009 checksum");
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum = 'tampered' WHERE version = 1009",
+        fixture.schema
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("tamper V1009 ledger");
+    assert!(run(&fixture).await.is_err(), "unchecked V1009 ledger");
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum = $1 WHERE version = 1009",
+        fixture.schema
+    ))
+    .bind(checksum)
+    .execute(&fixture.admin)
+    .await
+    .expect("restore V1009 ledger");
+    assert_eq!(
+        run(&fixture)
+            .await
+            .expect("pending V1028 with scoped V1009 ACL"),
+        vec![1028]
+    );
+    sqlx::query(&format!(
+        "UPDATE {epoch} SET epoch = 1, activated_at = now(), lineage_uuid = $1 WHERE id = 1"
+    ))
+    .bind(fixture.lineage.lineage_uuid.0)
+    .execute(&fixture.admin)
+    .await
+    .expect("advance epoch");
+    assert!(matches!(
+        run(&fixture).await,
+        Err(DarkMigrationOwnerError::UnsupportedEpoch)
+    ));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn owner_uses_one_session_takes_both_epoch_locks_and_applies_pending_catalog() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
         return;

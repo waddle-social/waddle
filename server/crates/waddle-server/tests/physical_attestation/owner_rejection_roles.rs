@@ -10,8 +10,8 @@ use waddle_server::config::{IngressConfig, LineageConfig};
 use waddle_server::db::physical_attestation::{attested_pool, PgRoleName};
 use waddle_server::db::{
     grant_dark_owner_rejection_runtime_access, inspect_dark_owner_rejection_runtime_access,
-    DarkMigrationOwnerConfig, Database, DatabasePool, OwnerRejectionGrantError,
-    OwnerRejectionGrantState, Transaction,
+    DarkMigrationOwnerConfig, DarkMigrationOwnerError, Database, DatabasePool,
+    OwnerRejectionGrantError, OwnerRejectionGrantState, Transaction,
 };
 use waddle_server::ingress::{IngressAuthority, IngressStartupError};
 use waddle_server::ingress_uow::IngressUnitOfWork;
@@ -107,8 +107,12 @@ async fn owner_grant_and_attested_ingress_lab() {
     let fixture = Fixture::new(url.clone()).await;
     let attestation = prepare_candidate_application_fixture(&fixture).await;
     let owner = format!("owner_grant_{}", Uuid::new_v4().simple());
+    let migrator = format!("migrator_grant_{}", Uuid::new_v4().simple());
+    let migrator_role = PgRoleName::new(&migrator).expect("migrator name");
     for statement in [
-        format!("CREATE ROLE {owner} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"),
+        format!("CREATE ROLE {owner} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"),
+        format!("CREATE ROLE {migrator} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"),
+        format!("GRANT {owner} TO {migrator} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"),
         format!("GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO {owner}"),
         format!("ALTER SCHEMA {} OWNER TO {owner}", fixture.target),
         format!("ALTER TABLE {}.ingress_owner_rejections OWNER TO {owner}", fixture.target),
@@ -137,23 +141,175 @@ async fn owner_grant_and_attested_ingress_lab() {
         .await
         .expect("align guard function ownership with migration owner");
     }
-    let owner_options = fixture.admin_options.clone().username(&owner);
+    let owner_options = fixture.admin_options.clone().username(&migrator);
     let config = DarkMigrationOwnerConfig::new(
         fixture.lineage.clone(),
         PgRoleName::new(&owner).expect("owner name"),
         PgRoleName::new(&fixture.runtime).expect("runtime name"),
     )
     .expect("independent role config");
+    let wrong_runtime_options = fixture.runtime_options.clone().username(&fixture.outsider);
+    assert!(inspect_dark_owner_rejection_runtime_access(
+        &owner_options,
+        &wrong_runtime_options,
+        &config,
+        &migrator_role,
+    )
+    .await
+    .is_err());
+    let other_database = format!("owner_rejection_other_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {other_database}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("create other disposable database");
+    sqlx::query(&format!(
+        "GRANT CONNECT ON DATABASE {other_database} TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant runtime access to other database");
+    let wrong_database_options = fixture.runtime_options.clone().database(&other_database);
+    let wrong_database = PgConnection::connect_with(&wrong_database_options)
+        .await
+        .expect("runtime login in different database");
+    drop(wrong_database);
+    assert!(matches!(
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &wrong_database_options,
+            &config,
+            &migrator_role,
+        )
+        .await,
+        Err(OwnerRejectionGrantError::Owner(
+            DarkMigrationOwnerError::RuntimeSessionUnverified
+        ))
+    ));
+    sqlx::query(&format!("DROP DATABASE {other_database} WITH (FORCE)"))
+        .execute(&fixture.admin)
+        .await
+        .expect("drop other disposable database");
+    sqlx::query(&format!(
+        "GRANT SET ON PARAMETER session_replication_role TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant unique runtime parameter privilege");
+    assert!(
+        matches!(
+            grant_dark_owner_rejection_runtime_access(
+                &owner_options,
+                &fixture.runtime_options,
+                &config,
+                &migrator_role,
+            )
+            .await,
+            Err(OwnerRejectionGrantError::UnsafeRuntime)
+        ),
+        "runtime parameter grant must be refused"
+    );
+    sqlx::query(&format!(
+        "REVOKE SET ON PARAMETER session_replication_role FROM {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke unique runtime parameter privilege");
+    // Parameter grants are cluster-wide. Keep the PUBLIC probe uncommitted so
+    // concurrent sessions never observe it and pre-existing grants are retained.
+    let mut public_probe = fixture
+        .admin
+        .begin()
+        .await
+        .expect("PUBLIC probe transaction");
+    sqlx::query("GRANT SET ON PARAMETER session_replication_role TO PUBLIC")
+        .execute(&mut *public_probe)
+        .await
+        .expect("uncommitted PUBLIC grant");
+    let effective: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_parameter_privilege($1::pg_catalog.name, 'session_replication_role', 'SET')",
+    )
+    .bind(&fixture.runtime)
+    .fetch_one(&mut *public_probe)
+    .await
+    .expect("PUBLIC grant is effective inside transaction");
+    assert!(effective);
+    public_probe.rollback().await.expect("discard PUBLIC grant");
+    sqlx::query(&format!(
+        "ALTER ROLE {} SET session_replication_role = 'replica'",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("set replica default");
+    let mut replica = PgConnection::connect_with(&fixture.runtime_options)
+        .await
+        .expect("runtime with replica default");
+    let mode: String = sqlx::query_scalar("SHOW session_replication_role")
+        .fetch_one(&mut replica)
+        .await
+        .expect("runtime mode");
+    assert_eq!(mode, "replica");
+    drop(replica);
+    assert!(
+        matches!(
+            grant_dark_owner_rejection_runtime_access(
+                &owner_options,
+                &fixture.runtime_options,
+                &config,
+                &migrator_role,
+            )
+            .await,
+            Err(OwnerRejectionGrantError::Owner(
+                DarkMigrationOwnerError::RuntimeSessionUnverified
+            ))
+        ),
+        "replica runtime cannot receive grant"
+    );
+    assert!(
+        matches!(
+            inspect_dark_owner_rejection_runtime_access(
+                &owner_options,
+                &fixture.runtime_options,
+                &config,
+                &migrator_role,
+            )
+            .await,
+            Err(OwnerRejectionGrantError::Owner(
+                DarkMigrationOwnerError::RuntimeSessionUnverified
+            ))
+        ),
+        "replica runtime cannot receive positive readback"
+    );
+    sqlx::query(&format!(
+        "ALTER ROLE {} RESET session_replication_role",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("reset replica default");
     assert_eq!(
-        inspect_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .expect("initial owner probe"),
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .expect("initial owner probe"),
         OwnerRejectionGrantState::Missing
     );
     assert!(
-        grant_dark_owner_rejection_runtime_access(&fixture.runtime_options, &config)
-            .await
-            .is_err(),
+        grant_dark_owner_rejection_runtime_access(
+            &fixture.runtime_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "runtime cannot invoke owner operation"
     );
 
@@ -170,28 +326,39 @@ async fn owner_grant_and_attested_ingress_lab() {
         PgRoleName::new(&fixture.runtime).expect("runtime"),
     )
     .expect("wrong schema config");
-    assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &wrong_schema)
-            .await
-            .is_err()
-    );
+    assert!(grant_dark_owner_rejection_runtime_access(
+        &owner_options,
+        &fixture.runtime_options,
+        &wrong_schema,
+        &migrator_role
+    )
+    .await
+    .is_err());
     let wrong_runtime = DarkMigrationOwnerConfig::new(
         fixture.lineage.clone(),
         PgRoleName::new(&owner).expect("owner"),
         PgRoleName::new(&fixture.outsider).expect("outsider"),
     )
     .expect("wrong runtime config");
-    assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &wrong_runtime)
-            .await
-            .is_err()
-    );
+    assert!(grant_dark_owner_rejection_runtime_access(
+        &owner_options,
+        &fixture.runtime_options,
+        &wrong_runtime,
+        &migrator_role
+    )
+    .await
+    .is_err());
     sqlx::query(&format!("ALTER TABLE {}.ingress_owner_rejections DISABLE TRIGGER ingress_owner_rejections_insert_guard", fixture.target))
         .execute(&fixture.admin).await.expect("disable mapping guard");
     assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .is_err(),
+        grant_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "disabled V1028 guard prevents granting"
     );
     sqlx::query(&format!("ALTER TABLE {}.ingress_owner_rejections ENABLE TRIGGER ingress_owner_rejections_insert_guard", fixture.target))
@@ -199,9 +366,14 @@ async fn owner_grant_and_attested_ingress_lab() {
     sqlx::query(&format!("ALTER TABLE {}.ingress_owner_rejections DROP CONSTRAINT ingress_owner_rejections_child_message_key_fkey", fixture.target))
         .execute(&fixture.admin).await.expect("drop child FK");
     assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .is_err(),
+        grant_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "missing child FK prevents granting"
     );
     sqlx::query(&format!("ALTER TABLE {}.ingress_owner_rejections ADD CONSTRAINT ingress_owner_rejections_child_message_key_fkey FOREIGN KEY (child_message_key) REFERENCES {}.ingress_messages(message_key) ON DELETE CASCADE", fixture.target, fixture.target))
@@ -214,9 +386,14 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("change function security");
     assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .is_err(),
+        grant_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "definer-mode guard prevents granting"
     );
     sqlx::query(&format!(
@@ -234,9 +411,14 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("inject public grant");
     assert!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .is_err(),
+        grant_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "unexpected public grant prevents granting"
     );
     sqlx::query(&format!(
@@ -254,7 +436,13 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("inject unsafe column privilege");
     assert!(matches!(
-        grant_dark_owner_rejection_runtime_access(&owner_options, &config).await,
+        grant_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await,
         Err(OwnerRejectionGrantError::UnsafeRuntime)
     ));
     sqlx::query(&format!(
@@ -265,26 +453,46 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("remove unsafe test privilege");
     assert_eq!(
-        inspect_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .expect("negative checks left ACL untouched"),
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .expect("negative checks left ACL untouched"),
         OwnerRejectionGrantState::Missing
     );
 
     let hostile_owner =
         PgConnectOptions::from_str(&url_with_search_path(&fixture.base_url, "public,pg_temp"))
             .expect("hostile owner options")
-            .username(&owner);
-    grant_dark_owner_rejection_runtime_access(&hostile_owner, &config)
-        .await
-        .expect("owner grant");
-    grant_dark_owner_rejection_runtime_access(&owner_options, &config)
-        .await
-        .expect("idempotent owner grant");
+            .username(&migrator);
+    grant_dark_owner_rejection_runtime_access(
+        &hostile_owner,
+        &fixture.runtime_options,
+        &config,
+        &migrator_role,
+    )
+    .await
+    .expect("owner grant");
+    grant_dark_owner_rejection_runtime_access(
+        &owner_options,
+        &fixture.runtime_options,
+        &config,
+        &migrator_role,
+    )
+    .await
+    .expect("idempotent owner grant");
     assert_eq!(
-        inspect_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .expect("fresh committed readback"),
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .expect("fresh committed readback"),
         OwnerRejectionGrantState::Granted
     );
 
@@ -465,8 +673,14 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("inject TEMP privilege");
     assert!(matches!(
-        inspect_dark_owner_rejection_runtime_access(&owner_options, &config).await,
-        Err(OwnerRejectionGrantError::UnsafeRuntime)
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await,
+        Err(OwnerRejectionGrantError::Owner(_))
     ));
     let mut shadow = PgConnection::connect_with(&fixture.runtime_options)
         .await
@@ -501,9 +715,14 @@ async fn owner_grant_and_attested_ingress_lab() {
     .await
     .expect("hide relation");
     assert!(
-        inspect_dark_owner_rejection_runtime_access(&owner_options, &config)
-            .await
-            .is_err(),
+        inspect_dark_owner_rejection_runtime_access(
+            &owner_options,
+            &fixture.runtime_options,
+            &config,
+            &migrator_role
+        )
+        .await
+        .is_err(),
         "missing relation fails closed"
     );
     sqlx::query(&format!(
@@ -519,6 +738,10 @@ async fn owner_grant_and_attested_ingress_lab() {
     drop(database_pool);
     fixture.cleanup().await;
     let cluster = PgPool::connect(&url).await.expect("cleanup cluster");
+    sqlx::query(&format!("DROP ROLE {migrator}"))
+        .execute(&cluster)
+        .await
+        .expect("drop migrator role");
     sqlx::query(&format!("DROP ROLE {owner}"))
         .execute(&cluster)
         .await
