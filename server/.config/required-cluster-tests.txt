@@ -278,3 +278,7 @@ waddle-server::physical_attestation inbox_runtime_attach_bounds_lock_wait_and_re
 waddle-server::physical_attestation inbox_attach_timeout_setup_does_not_pin_snapshot
 waddle-server::owner_bootstrap inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair
 waddle-server inbox::runtime_attach::tests::postgres_timeout_display_units_and_invalid_values
+
+# Prepared archive-position, carbon receipt and send-attempt statements
+# must ignore hostile schemas; full live delivery remains blocked.
+waddle-server ingress_uow::canonical_qualified_tests::post_commit_repositories::attested_send_attempt_repositories_ignore_hostile_schema

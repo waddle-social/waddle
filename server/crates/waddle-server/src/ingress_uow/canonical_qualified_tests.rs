@@ -2,6 +2,7 @@
 
 mod acceptance;
 mod no_store;
+mod post_commit_repositories;
 mod principal;
 mod sm;
 

@@ -25,22 +25,34 @@ atomic alias, message, stream-management, archive, and receipt writes still
 need a reviewed set of closed domain operations or another design that preserves
 their shared commit without exposing raw transactions or arbitrary async work.
 
-The prepared PostgreSQL UOW now carries its attested schema through a direct
-message's archive, inbox and exact-resource no-store acceptance paths, including intent reconciliation,
-archive sequence and row, inbox projection and delivery marker, archive
-dispatch, SM claim and delivery-progress statements. MAM's cross-crate
-adapters take the schema from the prepared UOW; raw PostgreSQL and SQLite use
-their existing paths. The factory and repositories still expose legacy
-transactions. Other message shapes, and post-commit and recovery paths, still
-require conversion. Some shared post-commit reads use the prepared schema, but
-their sibling writes remain on the legacy path; the attested UOW stays dark
-until those operations are closed. Optional pending-table detection during no-store retention
-is limited to the attested schema; it does not prove a separate store's location.
-The catalog probe does not fence concurrent creation of the pending table after
-an absent result. Production activation therefore requires owner bootstrap and
-co-location to be settled, with concurrent owner DDL quiesced or otherwise fenced.
-This does not make
-the service closed, connect normal startup to the attested pool, or establish
+The prepared PostgreSQL UOW carries its attested schema through a direct
+message's archive, inbox and exact-resource no-store acceptance paths, including
+intent reconciliation, archive sequence and row, inbox projection and delivery
+marker, archive dispatch, SM claim and delivery-progress statements. MAM's
+cross-crate adapters take the schema from the prepared UOW; raw PostgreSQL and
+SQLite use their existing paths. Prepared transactions also qualify the archive
+position and per-resource carbon receipt existence reads, and send-attempt
+claim, start, completion and release statements. These repository changes do not
+close the live-delivery operation or enable startup on the attested pool.
+
+Guarded live delivery remains blocked. Its room-manifest preflight uses a pooled
+read and the room actor's `protect_room_acceptance` claim query is unqualified.
+Even an attested preflight and a canonical-locked direct-only check are not an
+immutable classification: a later room-owner acceptance may add a MUC intent
+and seal the same canonical row after a send's start transaction commits but
+before its socket callback. Some local relay paths bypass the ordered-relay
+stanza validator. Production requires an enforced shared classification or
+fence respected by every room-seal and live-send writer, with no transaction
+held over socket I/O. Carbon sends, pooled archive readiness, pending handoff,
+descendants, recovery and GC also remain on legacy paths, and custody stores
+must be proven co-located before activation.
+
+Optional pending-table detection during no-store retention is limited to the
+attested schema; it does not prove a separate store's location. Its catalog probe
+does not fence concurrent creation of the pending table after an absent result.
+Production activation requires owner bootstrap and co-location to be settled,
+with concurrent owner DDL quiesced or otherwise fenced. This does not make the
+service closed, connect normal startup to the attested pool, or establish
 production authority.
 
 ## Migration and review

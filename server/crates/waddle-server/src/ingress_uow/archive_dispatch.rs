@@ -139,11 +139,17 @@ impl ArchiveDispatchRepository {
         key: MessageKey,
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<waddle_xmpp::stream_management::ArchiveDispatchPosition>, IngressUowError> {
-        let query = positions_query(tx.transaction_mut().driver());
-        let rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let query = crate::ingress_substrate::prepared_ingress_sql(
+            transaction.driver(),
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
+            ("SELECT DISTINCT archive_jid, archive_seq FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY archive_jid, archive_seq"),
+            positions_query(DatabaseDriver::Sqlite),
+        );
+        let rows = transaction
             .query(
-                query,
+                &query,
                 crate::db_params![
                     key.to_storage().to_string(),
                     receipt.kind.to_storage(),
