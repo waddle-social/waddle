@@ -5,6 +5,7 @@ pub use crate::server::routes::websocket::supervised_io::{
     CustodianState, CustodianSummary, InboundExit, InboundTerminal, IoCustodianHandle,
     IoCustodianInventory, IoCustodianObserver, IoCustodianReservation, IoSupervisor, Joined,
     Limits, LimitsError, OutboundExit, OutboundTerminal, QueueItem, ReservedIoStartConfig,
-    ReservedStartStage, RetirementMode, ShutdownProtocol, StopReason, StopSignal, TransportLimits,
-    WriteProgress, WriteReceipt, WriteSender,
+    ReservedReaperExitPoint, ReservedStartError, ReservedStartStage, RetirementMode,
+    ShutdownProtocol, StopReason, StopSignal, TransportLimits, WriteProgress, WriteReceipt,
+    WriteSender,
 };

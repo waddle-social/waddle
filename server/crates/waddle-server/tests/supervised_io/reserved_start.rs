@@ -12,7 +12,8 @@ use tokio_tungstenite::tungstenite::{Error, Message};
 use waddle_server::test_support::supervised_io::{
     CustodianInventoryError, CustodianState, InboundTerminal, IoCustodianHandle,
     IoCustodianInventory, IoCustodianReservation, Limits, OutboundTerminal, QueueItem,
-    ReservedIoStartConfig, ReservedStartStage, ShutdownProtocol, TransportLimits, WriteSender,
+    ReservedIoStartConfig, ReservedReaperExitPoint, ReservedStartError, ReservedStartStage,
+    ShutdownProtocol, TransportLimits, WriteSender,
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 
@@ -23,7 +24,7 @@ type Started = (
     WriteSender<u8>,
     tokio::sync::mpsc::Receiver<QueueItem<u8>>,
 );
-type StartTask = tokio::task::JoinHandle<Result<Started, CustodianInventoryError>>;
+type StartTask = tokio::task::JoinHandle<Result<Started, ReservedStartError>>;
 type StageFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 fn test_limits() -> TransportLimits {
@@ -184,6 +185,7 @@ async fn cancellation_at_each_reserved_start_boundary_joins_only_started_pumps()
         wait_terminal(&before_observer).await,
         CustodianState::StartupAbandoned
     );
+    assert!(!before_observer.cleanup_pending_was_published());
     assert!(
         inventory.is_empty(),
         "no started pump leaves no retained slot"
@@ -211,6 +213,7 @@ async fn cancellation_at_each_reserved_start_boundary_joins_only_started_pumps()
         wait_terminal(&partial_observer).await,
         CustodianState::PartialStartJoined
     );
+    assert!(!partial_observer.cleanup_pending_was_published());
     let partial_summary = partial_observer
         .terminal_summary()
         .expect("partial-start outcomes retained");
@@ -283,6 +286,48 @@ async fn cancellation_at_each_reserved_start_boundary_joins_only_started_pumps()
 }
 
 #[tokio::test]
+async fn reaper_loss_returns_typed_error_and_keeps_cleanup_pending_indexed() {
+    let inventory = IoCustodianInventory::new(2).expect("inventory capacity");
+
+    for exit_point in [
+        ReservedReaperExitPoint::BeforeCommit,
+        ReservedReaperExitPoint::BeforeReady,
+    ] {
+        let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        let reservation = inventory
+            .reserve(connection_ref.clone())
+            .expect("reserve exact connection");
+        let config = ReservedIoStartConfig::new(
+            test_limits(),
+            ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+            |_| 1,
+            |_| false,
+            Duration::from_millis(40),
+        )
+        .with_test_reaper_exit_point(exit_point);
+
+        let result = timeout(
+            TEST_TIMEOUT,
+            reservation.start_with(config, |_| async {
+                (
+                    futures::stream::pending::<Result<u8, Infallible>>(),
+                    futures::sink::drain::<u8>(),
+                )
+            }),
+        )
+        .await
+        .expect("starter observes the lost reaper");
+        assert_eq!(result.err(), Some(ReservedStartError::ReaperUnavailable));
+
+        let observer = inventory_observer(&inventory, &connection_ref).await;
+        assert_eq!(observer.state(), CustodianState::CleanupPending);
+        assert!(observer.cleanup_pending_was_published());
+        assert!(observer.terminal_summary().is_none());
+        assert_eq!(inventory.prune_joined(), 0);
+    }
+}
+
+#[tokio::test]
 async fn panic_before_between_and_after_reserved_spawns_never_loses_started_handles() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
     let factory_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
@@ -338,6 +383,7 @@ async fn panic_before_between_and_after_reserved_spawns_never_loses_started_hand
         wait_terminal(&before_observer).await,
         CustodianState::StartupAbandoned
     );
+    assert!(!before_observer.cleanup_pending_was_published());
     assert!(inventory.is_empty());
 
     let between_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
@@ -362,6 +408,7 @@ async fn panic_before_between_and_after_reserved_spawns_never_loses_started_hand
         wait_terminal(&between_observer).await,
         CustodianState::PartialStartJoined
     );
+    assert!(!between_observer.cleanup_pending_was_published());
     let between_summary = between_observer
         .terminal_summary()
         .expect("partial panic outcomes retained");

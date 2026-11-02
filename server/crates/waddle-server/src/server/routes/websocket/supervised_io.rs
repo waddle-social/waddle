@@ -10,7 +10,7 @@ use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
@@ -429,6 +429,13 @@ pub enum ReservedStartStage {
     AfterCommit,
 }
 
+/// Deterministic reaper-loss point used only by lifecycle tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedReaperExitPoint {
+    BeforeCommit,
+    BeforeReady,
+}
+
 /// Validated bounds and pump behavior for one reserved physical connection.
 pub struct ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose> {
     limits: TransportLimits,
@@ -436,6 +443,7 @@ pub struct ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose> {
     frame_size: Size,
     is_close: IsClose,
     retirement_deadline: Duration,
+    reaper_exit_point: Option<ReservedReaperExitPoint>,
 }
 
 impl<M, IsSendAfterClose, Size, IsClose> ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>
@@ -457,7 +465,14 @@ where
             frame_size,
             is_close,
             retirement_deadline,
+            reaper_exit_point: None,
         }
+    }
+
+    /// Inject reaper loss at a startup boundary for lifecycle tests.
+    pub fn with_test_reaper_exit_point(mut self, exit_point: ReservedReaperExitPoint) -> Self {
+        self.reaper_exit_point = Some(exit_point);
+        self
     }
 }
 
@@ -528,6 +543,7 @@ struct CustodianClient {
     admission_open: Arc<Mutex<bool>>,
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
+    cleanup_pending_published: Arc<AtomicBool>,
 }
 
 /// Observation-only view of custodian state that does not keep control alive.
@@ -536,6 +552,7 @@ pub struct IoCustodianObserver {
     connection_ref: ConnectionRef,
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
+    cleanup_pending_published: Arc<AtomicBool>,
 }
 
 /// Refusal to retain an observation in the bounded physical-connection index.
@@ -556,6 +573,17 @@ pub enum CustodianInventoryError {
     /// The inventory no longer contains this reservation's exact token.
     #[error("custodian reservation is no longer active")]
     ReservationLost,
+}
+
+/// Startup failure after reservation when the independent reaper disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReservedStartError {
+    /// The inventory refused or lost the exact reservation.
+    #[error(transparent)]
+    Inventory(#[from] CustodianInventoryError),
+    /// The reaper disappeared before it acknowledged ownership readiness.
+    #[error("reserved pump reaper disappeared during startup")]
+    ReaperUnavailable,
 }
 
 enum InventoryEntry {
@@ -810,7 +838,7 @@ impl IoCustodianReservation {
             WriteSender<M>,
             mpsc::Receiver<QueueItem<M>>,
         ),
-        CustodianInventoryError,
+        ReservedStartError,
     >
     where
         R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
@@ -856,7 +884,7 @@ impl IoCustodianReservation {
             WriteSender<M>,
             mpsc::Receiver<QueueItem<M>>,
         ),
-        CustodianInventoryError,
+        ReservedStartError,
     >
     where
         R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
@@ -932,6 +960,7 @@ impl IoCustodianHandle {
             connection_ref: self.client.connection_ref.clone(),
             state: self.client.state.clone(),
             summary: self.client.summary.clone(),
+            cleanup_pending_published: self.client.cleanup_pending_published.clone(),
         }
     }
 
@@ -965,6 +994,11 @@ impl IoCustodianObserver {
     /// JoinHandles have returned.
     pub fn state(&self) -> CustodianState {
         *self.state.borrow()
+    }
+
+    /// Whether this custodian ever published `CleanupPending`.
+    pub fn cleanup_pending_was_published(&self) -> bool {
+        self.cleanup_pending_published.load(Ordering::Acquire)
     }
 
     /// Terminal outcomes become available after all started tasks have joined.
@@ -1024,12 +1058,15 @@ where
     let (state_tx, state_rx) = watch::channel(CustodianState::Running);
     let summary = Arc::new(Mutex::new(None));
     let custodian_summary = summary.clone();
+    let cleanup_pending_published = Arc::new(AtomicBool::new(false));
+    let custodian_cleanup_pending_published = cleanup_pending_published.clone();
 
     tokio::spawn(run_io_custodian(
         supervisor,
         retirement_deadline,
         state_tx,
         custodian_summary,
+        custodian_cleanup_pending_published,
     ));
 
     IoCustodianHandle {
@@ -1040,6 +1077,7 @@ where
             admission_open,
             state: state_rx,
             summary,
+            cleanup_pending_published,
         }),
     }
 }
@@ -1049,6 +1087,7 @@ async fn run_io_custodian<ReadError, WriteError>(
     retirement_deadline: Duration,
     state_tx: watch::Sender<CustodianState>,
     custodian_summary: Arc<Mutex<Option<CustodianSummary>>>,
+    cleanup_pending_published: Arc<AtomicBool>,
 ) where
     ReadError: Send + 'static,
     WriteError: Send + 'static,
@@ -1076,6 +1115,7 @@ async fn run_io_custodian<ReadError, WriteError>(
     }
 
     if inbound.is_none() || outbound.is_none() {
+        cleanup_pending_published.store(true, Ordering::Release);
         state_tx.send_replace(CustodianState::CleanupPending);
         supervisor.stop.cancel(StopReason::ShutdownDeadline);
         supervisor.force_stop.cancel();
@@ -1119,12 +1159,15 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     inbound_owner_rx: oneshot::Receiver<JoinHandle<InboundExit<ReadError>>>,
     outbound_owner_rx: oneshot::Receiver<JoinHandle<OutboundExit<WriteError>>>,
     commit_rx: oneshot::Receiver<()>,
+    ready_tx: oneshot::Sender<()>,
     inbound_start_tx: oneshot::Sender<()>,
     outbound_start_tx: oneshot::Sender<()>,
     state_tx: watch::Sender<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
     inventory: IoCustodianInventory,
     reservation_id: u64,
+    exit_point: Option<ReservedReaperExitPoint>,
+    cleanup_pending_published: Arc<AtomicBool>,
 }
 
 async fn run_reserved_start<ReadError, WriteError>(
@@ -1143,13 +1186,19 @@ async fn run_reserved_start<ReadError, WriteError>(
         inbound_owner_rx,
         outbound_owner_rx,
         commit_rx,
+        ready_tx,
         inbound_start_tx,
         outbound_start_tx,
         state_tx,
         summary,
         inventory,
         reservation_id,
+        exit_point,
+        cleanup_pending_published,
     } = setup;
+    if exit_point == Some(ReservedReaperExitPoint::BeforeCommit) {
+        return;
+    }
     let (inbound_handle, outbound_handle, committed) =
         tokio::join!(inbound_owner_rx, outbound_owner_rx, commit_rx);
     let mut inbound = inbound_handle.ok().map(TaskOwner::new);
@@ -1158,9 +1207,13 @@ async fn run_reserved_start<ReadError, WriteError>(
     if committed.is_ok() {
         match (inbound.take(), outbound.take()) {
             (Some(inbound_owner), Some(outbound_owner)) => {
+                if exit_point == Some(ReservedReaperExitPoint::BeforeReady) {
+                    return;
+                }
                 let _ = inbound_start_tx.send(());
                 let _ = outbound_start_tx.send(());
                 state_tx.send_replace(CustodianState::Running);
+                let _ = ready_tx.send(());
                 return run_io_custodian(
                     IoSupervisor {
                         connection_ref,
@@ -1174,6 +1227,7 @@ async fn run_reserved_start<ReadError, WriteError>(
                     retirement_deadline,
                     state_tx,
                     summary,
+                    cleanup_pending_published,
                 )
                 .await;
             }
@@ -1208,7 +1262,10 @@ async fn run_reserved_start<ReadError, WriteError>(
             _ = &mut deadline => break,
         }
     }
-    if inbound_result.is_none() || outbound_result.is_none() {
+    let inbound_pending = inbound.is_some() && inbound_result.is_none();
+    let outbound_pending = outbound.is_some() && outbound_result.is_none();
+    if inbound_pending || outbound_pending {
+        cleanup_pending_published.store(true, Ordering::Release);
         state_tx.send_replace(CustodianState::CleanupPending);
         stop.cancel(StopReason::ShutdownDeadline);
         force_stop.cancel();
@@ -1664,7 +1721,7 @@ async fn start_reserved_supervised_io<
         WriteSender<M>,
         mpsc::Receiver<QueueItem<M>>,
     ),
-    CustodianInventoryError,
+    ReservedStartError,
 >
 where
     R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
@@ -1686,6 +1743,7 @@ where
         frame_size,
         is_close,
         retirement_deadline,
+        reaper_exit_point,
     } = config;
     let connection_ref = reservation.connection_ref.clone();
     let (reader, writer) = factory(&connection_ref).await;
@@ -1701,11 +1759,13 @@ where
 
     let (state_tx, state_rx) = watch::channel(CustodianState::Starting);
     let summary = Arc::new(Mutex::new(None));
+    let cleanup_pending_published = Arc::new(AtomicBool::new(false));
     let handle_summary = summary.clone();
     let observer = IoCustodianObserver {
         connection_ref: connection_ref.clone(),
         state: state_rx.clone(),
         summary: summary.clone(),
+        cleanup_pending_published: cleanup_pending_published.clone(),
     };
     let inventory = reservation.inventory.clone();
     let reservation_id = reservation.reservation_id;
@@ -1713,11 +1773,14 @@ where
     let (inbound_owner_tx, inbound_owner_rx) = oneshot::channel();
     let (outbound_owner_tx, outbound_owner_rx) = oneshot::channel();
     let (commit_tx, commit_rx) = oneshot::channel();
+    let (ready_tx, ready_rx) = oneshot::channel();
     let (inbound_start_tx, inbound_start_rx) = oneshot::channel();
     let (outbound_start_tx, outbound_start_rx) = oneshot::channel();
 
     // The reservation remains armed until the reaper exists and has the
     // channels needed to recover every later startup cancellation or panic.
+    let failure_state_tx = state_tx.clone();
+    let failure_cleanup_pending_published = cleanup_pending_published.clone();
     tokio::spawn(run_reserved_start(ReservedReaperSetup {
         connection_ref: connection_ref.clone(),
         stop: prepared.stop.clone(),
@@ -1728,12 +1791,15 @@ where
         inbound_owner_rx,
         outbound_owner_rx,
         commit_rx,
+        ready_tx,
         inbound_start_tx,
         outbound_start_tx,
         state_tx,
         summary,
         inventory,
         reservation_id,
+        exit_point: reaper_exit_point,
+        cleanup_pending_published: cleanup_pending_published.clone(),
     }));
 
     reservation
@@ -1749,6 +1815,7 @@ where
             admission_open: prepared.admission_open,
             state: state_rx,
             summary: handle_summary,
+            cleanup_pending_published,
         }),
     };
 
@@ -1771,7 +1838,16 @@ where
     PumpHandoff::new(outbound_task, outbound_owner_tx).transfer();
 
     hook(ReservedStartStage::AfterOutboundSpawn).await;
-    let _ = commit_tx.send(());
+    if commit_tx.send(()).is_err() {
+        failure_cleanup_pending_published.store(true, Ordering::Release);
+        failure_state_tx.send_replace(CustodianState::CleanupPending);
+        return Err(ReservedStartError::ReaperUnavailable);
+    }
+    if ready_rx.await.is_err() {
+        failure_cleanup_pending_published.store(true, Ordering::Release);
+        failure_state_tx.send_replace(CustodianState::CleanupPending);
+        return Err(ReservedStartError::ReaperUnavailable);
+    }
     hook(ReservedStartStage::AfterCommit).await;
 
     Ok((handle, prepared.outbound_sender, prepared.inbound_receiver))
