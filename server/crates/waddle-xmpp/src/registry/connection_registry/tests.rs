@@ -3,7 +3,7 @@ use super::{
     FullJid, Instant, LocalConnectionBindingId, Ordering, OutboundStanza, OutboundWriteAcceptance,
     PendingFlushReserveError, SendResult, Stanza,
 };
-use crate::ownership::{ConnectionRef, NodeIdentity, NodeLeaseIdentity};
+use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
 use std::time::Duration;
 use xmpp_parsers::message::{Message, MessageType};
@@ -294,8 +294,9 @@ fn physical_reference_survives_binding_replacement_and_remote_owner_movement() {
     let source_incarnation =
         NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("source-node", "source-epoch"));
     let connection_ref = ConnectionRef::fresh(source_incarnation.clone());
+    let first_binding = BindingRef::fresh(connection_ref.clone());
     let (first_sender, _first_receiver) = mpsc::channel(1);
-    let first = ConnectionEntry::new_for_connection(first_sender, connection_ref.clone());
+    let first = ConnectionEntry::new_for_binding(first_sender, first_binding.clone());
     let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
     let replacement =
         ConnectionEntry::new_for_connection(replacement_sender, connection_ref.clone());
@@ -313,6 +314,9 @@ fn physical_reference_survives_binding_replacement_and_remote_owner_movement() {
 
     assert_eq!(first.connection_ref(), replacement.connection_ref());
     assert_ne!(first.binding_id(), replacement.binding_id());
+    assert_eq!(first.binding_ref(), Some(&first_binding));
+    assert_ne!(first.binding_ref(), replacement.binding_ref());
+    assert_eq!(first.binding_ref(), first.clone().binding_ref());
     assert_ne!(first.connection_ref(), new_socket.connection_ref());
     assert_ne!(first.binding_id(), new_socket.binding_id());
     assert_eq!(
@@ -320,6 +324,8 @@ fn physical_reference_survives_binding_replacement_and_remote_owner_movement() {
         owner_b_mirror.connection_ref()
     );
     assert_ne!(owner_a_mirror.binding_id(), owner_b_mirror.binding_id());
+    assert!(owner_a_mirror.binding_ref().is_none());
+    assert!(owner_b_mirror.binding_ref().is_none());
 }
 
 #[test]

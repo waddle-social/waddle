@@ -249,6 +249,7 @@ async fn rollback_registered_connection(
     .await;
     unregister_remote_clustered_resource_if_owner(state, jid, owner).await;
     conn.registry_owner = None;
+    conn.retire_binding_ref();
 }
 
 #[cfg(feature = "clustering")]
@@ -442,6 +443,13 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> RegistrationAfterFrame {
+    // Take the provisional resume identity before any early return or await.
+    // It is reinstalled only if this registration reaches local publication.
+    let pending_resume_binding = if conn.pending_resume_stream_id.is_some() {
+        conn.binding_ref.take()
+    } else {
+        None
+    };
     if !registration_authoritative(permit, shutdown) {
         return RegistrationAfterFrame::AuthorityRevoked;
     }
@@ -457,6 +465,18 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
     // reach `on_peer_stanza`. We detect SM-resume vs fresh bind from whether
     // `pending_resume_stream_id` is waiting to be consumed below.
     let resumed = conn.pending_resume_stream_id.is_some();
+    let binding_ref = if resumed {
+        match pending_resume_binding {
+            Some(binding) if binding.connection_ref() == &conn.connection_ref => binding,
+            _ => {
+                error!("resume binding identity is missing or belongs to another socket");
+                return RegistrationAfterFrame::SessionInitializationFailed;
+            }
+        }
+    } else {
+        conn.retire_binding_ref();
+        waddle_xmpp::ownership::BindingRef::fresh(conn.connection_ref.clone())
+    };
 
     let blocklist = if resumed {
         // XEP-0198 resume: the previous session was detached/dropped, but we
@@ -583,8 +603,8 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         return RegistrationAfterFrame::Unchanged;
     };
 
-    let mut entry =
-        waddle_xmpp::registry::ConnectionEntry::new_for_connection(tx, conn.connection_ref.clone());
+    conn.binding_ref = Some(binding_ref.clone());
+    let mut entry = waddle_xmpp::registry::ConnectionEntry::new_for_binding(tx, binding_ref);
     entry.write_interruption = conn.write_interruption.clone();
     let wired = entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone());
     debug_assert!(wired, "new connection resume control must be unbound");
@@ -744,6 +764,7 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             )
             .await;
             conn.registry_owner = None;
+            conn.retire_binding_ref();
             // This was the server-silent path from #1454: the rollback ran
             // and the client got a stream error with no server-side trace.
             record_session_init_failure(

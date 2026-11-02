@@ -1,5 +1,5 @@
 use super::{mpsc, Arc, Ordering, Stanza};
-use crate::ownership::{ConnectionRef, NodeLeaseIdentity};
+use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
@@ -276,6 +276,9 @@ impl LocalConnectionBindingId {
 pub struct ConnectionEntry {
     binding_id: LocalConnectionBindingId,
     connection_ref: ConnectionRef,
+    // The current v4 remote registration carries only the physical source.
+    // A mirror must not fabricate a source binding attempt from its own ID.
+    binding_ref: Option<BindingRef>,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
@@ -380,10 +383,29 @@ impl ConnectionEntry {
         sender: mpsc::Sender<OutboundStanza>,
         connection_ref: ConnectionRef,
     ) -> Self {
+        Self::new_for_binding(sender, BindingRef::fresh(connection_ref))
+    }
+
+    /// Create a local registry entry for the exact bind or resume attempt.
+    /// The independently minted local owner ID still fences this registry entry.
+    pub fn new_for_binding(sender: mpsc::Sender<OutboundStanza>, binding_ref: BindingRef) -> Self {
+        Self::new_entry(
+            sender,
+            binding_ref.connection_ref().clone(),
+            Some(binding_ref),
+        )
+    }
+
+    fn new_entry(
+        sender: mpsc::Sender<OutboundStanza>,
+        connection_ref: ConnectionRef,
+        binding_ref: Option<BindingRef>,
+    ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             binding_id: LocalConnectionBindingId::fresh(),
             connection_ref,
+            binding_ref,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
@@ -437,7 +459,7 @@ impl ConnectionEntry {
         sender: mpsc::Sender<OutboundStanza>,
         connection_ref: ConnectionRef,
     ) -> Self {
-        let mut entry = Self::new_for_connection(sender, connection_ref);
+        let mut entry = Self::new_entry(sender, connection_ref, None);
         entry.hosting = ConnectionHosting::Remote;
         entry
     }
@@ -445,6 +467,13 @@ impl ConnectionEntry {
     /// Immutable physical transport identity carried by this registry entry.
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref
+    }
+
+    /// This entry's source binding attempt when locally hosted. The current
+    /// remote registration protocol carries only the source transport, so a
+    /// remote-hosted mirror returns `None` instead of minting a false attempt.
+    pub fn binding_ref(&self) -> Option<&BindingRef> {
+        self.binding_ref.as_ref()
     }
 
     pub fn is_locally_hosted(&self) -> bool {

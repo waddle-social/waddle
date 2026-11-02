@@ -44,7 +44,9 @@ pub mod in_process;
 mod observe;
 pub mod resume;
 
-pub use connection_identity::{ConnectionRef, NodeLeaseIdentity, PhysicalTransportGeneration};
+pub use connection_identity::{
+    BindingAttemptId, BindingRef, ConnectionRef, NodeLeaseIdentity, PhysicalTransportGeneration,
+};
 pub use in_process::InProcessClaimStore;
 pub use observe::{observed_claim_store, ObservedClaimStore};
 pub use resume::{verify_resume_identity, ResumeIdentityProof};

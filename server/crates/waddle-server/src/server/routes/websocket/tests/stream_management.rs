@@ -10206,6 +10206,12 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    assert_eq!(conn.resume_binding_attempts.len(), 1);
+    assert_eq!(
+        conn.resume_binding_attempts[0].connection_ref(),
+        &conn.connection_ref
+    );
+    assert!(conn.binding_ref.is_none());
     // Write-gated accounting: the failure is staged for the main loop to
     // record once the batch carrying the <failed/> frame is written; frame
     // handling alone must not have counted it.

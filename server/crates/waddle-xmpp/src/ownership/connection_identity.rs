@@ -88,9 +88,41 @@ impl ConnectionRef {
     }
 }
 
+/// Opaque equality token for one bind or resume attempt on a transport.
+/// It is neither a durable SM generation nor a node-local mirror owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BindingAttemptId(uuid::Uuid);
+
+/// Immutable identity of one bind or resume attempt on one physical socket.
+/// Cloning or deserializing this value never creates another attempt or an
+/// allocator. A new attempt is minted explicitly, including after failure.
+/// This value is identity evidence only, not endpoint or publication authority.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BindingRef {
+    connection_ref: ConnectionRef,
+    attempt_id: BindingAttemptId,
+}
+
+impl BindingRef {
+    pub fn fresh(connection_ref: ConnectionRef) -> Self {
+        Self {
+            connection_ref,
+            attempt_id: BindingAttemptId(uuid::Uuid::new_v4()),
+        }
+    }
+
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    pub fn attempt_id(&self) -> BindingAttemptId {
+        self.attempt_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionRef, NodeLeaseIdentity};
+    use super::{BindingRef, ConnectionRef, NodeLeaseIdentity};
     use crate::ownership::{NodeIdentity, SharedNodeIdentity};
 
     #[tokio::test]
@@ -157,5 +189,22 @@ mod tests {
             serde_json::from_slice(&serialized).expect("deserialize connection ref");
 
         assert_eq!(reference, deserialized);
+    }
+
+    #[test]
+    fn binding_ref_round_trip_preserves_attempt_and_physical_identity() {
+        let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        let failed_resume = BindingRef::fresh(connection.clone());
+        let fresh_bind = BindingRef::fresh(connection.clone());
+        let new_socket =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+
+        assert_eq!(failed_resume.connection_ref(), fresh_bind.connection_ref());
+        assert_ne!(failed_resume.attempt_id(), fresh_bind.attempt_id());
+        assert_ne!(fresh_bind.connection_ref(), new_socket.connection_ref());
+        let serialized = serde_json::to_vec(&failed_resume).expect("serialize binding ref");
+        let decoded: BindingRef = serde_json::from_slice(&serialized).expect("decode binding ref");
+        assert_eq!(failed_resume, decoded);
+        assert_ne!(decoded, fresh_bind);
     }
 }

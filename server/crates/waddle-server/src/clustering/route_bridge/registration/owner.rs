@@ -1493,6 +1493,11 @@ mod tests {
             NodeId::new("socket-node".to_owned()),
         )
         .await;
+        let encoded = serde_json::to_vec(&request).expect("encode remote registration");
+        let decoded: RelayRegisterRemoteUserResource =
+            serde_json::from_slice(&encoded).expect("decode remote registration");
+        assert_eq!(decoded.state.connection_ref, request.state.connection_ref);
+        let request = decoded;
         assert_eq!(
             bridge
                 .register_remote_user_resource_on_owner(request.clone())
@@ -1517,9 +1522,14 @@ mod tests {
             .expect("owner mirror entry");
         assert_eq!(published.owner, mirror_entry.binding_id());
         assert_eq!(mirror_entry.connection_ref(), &request.state.connection_ref);
+        assert!(
+            mirror_entry.binding_ref().is_none(),
+            "v4 does not carry the source binding attempt"
+        );
         let (source_tx, _source_rx) = mpsc::channel(1);
         let source_entry =
             ConnectionEntry::new_for_connection(source_tx, request.state.connection_ref.clone());
+        assert!(source_entry.binding_ref().is_some());
         assert_ne!(
             mirror_entry.binding_id(),
             source_entry.binding_id(),

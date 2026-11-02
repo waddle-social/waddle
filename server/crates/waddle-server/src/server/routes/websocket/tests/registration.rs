@@ -958,6 +958,86 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
     );
 }
 
+#[tokio::test]
+async fn resume_registration_rejects_missing_or_foreign_binding_identity() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    for foreign in [false, true] {
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(jid.clone(), true);
+        conn.pending_resume_stream_id = Some("resume-attempt".to_owned());
+        if foreign {
+            let other = waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::local_process(),
+            );
+            conn.binding_ref = Some(waddle_xmpp::ownership::BindingRef::fresh(other));
+        }
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+        let mut pending = Some(tx);
+        let outcome =
+            register_bound_connection_after_frame(&state, "example.com", &mut conn, &mut pending)
+                .await;
+        assert!(matches!(
+            outcome,
+            RegistrationAfterFrame::SessionInitializationFailed
+        ));
+        assert!(pending.is_some(), "no sender is consumed");
+        assert!(conn.binding_ref.is_none(), "invalid attempt is retired");
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&jid)
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn early_resume_registration_exit_retires_pending_binding_identity() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/web".parse().expect("jid");
+    for reason in ["authority", "unbound", "no-sender"] {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        if reason == "authority" {
+            lifecycle.begin_fenced_recovery();
+        }
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.phase = if reason == "unbound" {
+            ConnectionPhase::authenticated(&jid)
+        } else {
+            ConnectionPhase::ready(jid.clone(), true)
+        };
+        conn.pending_resume_stream_id = Some("resume-attempt".to_owned());
+        conn.binding_ref = Some(waddle_xmpp::ownership::BindingRef::fresh(
+            conn.connection_ref.clone(),
+        ));
+        let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+        let mut pending = (reason != "no-sender").then_some(tx);
+        let outcome = register_bound_connection_after_frame_with_admission(
+            &state,
+            "example.com",
+            &mut conn,
+            &mut pending,
+            &permit,
+            &shutdown,
+        )
+        .await;
+        match reason {
+            "authority" => assert!(matches!(outcome, RegistrationAfterFrame::AuthorityRevoked)),
+            _ => assert!(matches!(outcome, RegistrationAfterFrame::Unchanged)),
+        }
+        assert!(conn.binding_ref.is_none(), "{reason} retains no attempt");
+        assert!(state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&jid)
+            .is_none());
+    }
+}
+
 /// XEP-0198 section 5: a pre-cutover stream can fail resumption without
 /// terminating the authenticated transport or dropping its unhandled tail.
 #[tokio::test]
@@ -1129,6 +1209,8 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             conn.connection_ref, physical_connection_ref,
             "failed resume keeps the same physical WebSocket identity"
         );
+        assert_eq!(conn.resume_binding_attempts.len(), 1);
+        assert!(conn.binding_ref.is_none(), "the failed attempt is retired");
         assert!(!conn.carbons_enabled);
         assert!(!conn.roster_interested);
         assert!(!conn.blocklist_interested);
@@ -1186,6 +1268,16 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         .connection_registry
         .entry(&jid)
         .expect("fresh bind");
+    assert_eq!(entry.binding_ref(), conn.binding_ref.as_ref());
+    if resume_first {
+        let failed = &conn.resume_binding_attempts[0];
+        let current = entry.binding_ref().expect("fresh binding identity");
+        assert_eq!(failed.connection_ref(), current.connection_ref());
+        assert_ne!(
+            failed, current,
+            "fresh bind must not reuse the failed attempt"
+        );
+    }
     assert!(
         !entry.is_presence_available(),
         "fresh bind waits for initial presence"

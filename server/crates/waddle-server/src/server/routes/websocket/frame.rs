@@ -342,6 +342,10 @@ async fn handle_xmpp_frame_impl(
     }
 
     let WsConnState {
+        connection_ref,
+        binding_ref,
+        #[cfg(test)]
+        resume_binding_attempts,
         phase,
         authenticated_session,
         occupancy_session,
@@ -384,6 +388,10 @@ async fn handle_xmpp_frame_impl(
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
+                connection_ref,
+                binding_ref,
+                #[cfg(test)]
+                resume_binding_attempts,
                 phase,
                 sm_state,
                 sm_ingress_fence,
