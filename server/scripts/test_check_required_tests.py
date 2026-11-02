@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Contract tests for the required-test executed-name check."""
 from pathlib import Path
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
+import check_required_tests
 from check_required_tests import LANE_ID, PREREQUISITE_ANCHORS
 
 SCRIPT = Path(__file__).with_name("check_required_tests.py")
@@ -311,6 +316,34 @@ class RequiredTestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertFalse(malformed["evidence"].exists())
 
+        malformed_hierarchy = self.make_evidence_checkout()
+        cases = junit_cases(malformed_hierarchy["required_tests"])
+        malformed_hierarchy["reports"][0].write_text(
+            cases.replace("<testsuite>", "").replace("</testsuite>", "")
+        )
+        result = self.run_evidence_check(malformed_hierarchy)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("testcase must be a direct child of testsuite", result.stderr)
+        self.assertFalse(malformed_hierarchy["evidence"].exists())
+
+        nested_suites = self.make_evidence_checkout()
+        cases = junit_cases(nested_suites["required_tests"])
+        nested_suites["reports"][0].write_text(f"<testsuites><extra>{cases}</extra></testsuites>")
+        result = self.run_evidence_check(nested_suites)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("testsuites must be the root element", result.stderr)
+        self.assertFalse(nested_suites["evidence"].exists())
+
+        nested_failure = self.make_evidence_checkout()
+        failed_case = '<testcase name="required_non_anchor" classname="waddle-server::clustering_cluster_e2e">'
+        cases = junit_cases(nested_failure["required_tests"])
+        nested_failure["reports"][0].write_text(cases.replace(
+            failed_case, failed_case + "<extra><failure/></extra>"))
+        result = self.run_evidence_check(nested_failure)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("test outcome must be a direct child of testcase", result.stderr)
+        self.assertFalse(nested_failure["evidence"].exists())
+
         missing_required = self.make_evidence_checkout()
         report = missing_required["reports"][0]
         report.write_text(junit_cases([
@@ -349,6 +382,40 @@ class RequiredTestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("required test did not run", result.stderr)
         self.assertFalse(contradictory["evidence"].exists())
+
+    def test_temporarily_reduced_inventory_cannot_attest_restored_candidate(self):
+        fixture = self.make_evidence_checkout()
+        non_anchor = "waddle-server::clustering_cluster_e2e required_non_anchor"
+        fixture["reports"][0].write_text(junit_cases([
+            test for test in fixture["required_tests"] if test != non_anchor
+        ]))
+        original_parse = check_required_tests.parse_required
+
+        def parse_during_temporary_edit(path):
+            original = path.read_bytes()
+            try:
+                path.write_bytes(original.replace((non_anchor + "\n").encode(), b""))
+                return original_parse(path)
+            finally:
+                path.write_bytes(original)
+
+        argv = [str(SCRIPT), "--required", ".config/required-cluster-tests.txt",
+                "--evidence-out", ".ci/nextest-archive/qualification-evidence.json",
+                "--candidate-sha", fixture["candidate_sha"],
+                *(str(path.relative_to(fixture["server"])) for path in fixture["reports"])]
+        errors = io.StringIO()
+        previous = Path.cwd()
+        try:
+            os.chdir(fixture["server"])
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(check_required_tests, "parse_required", parse_during_temporary_edit), \
+                    redirect_stderr(errors), redirect_stdout(io.StringIO()):
+                result = check_required_tests.main()
+        finally:
+            os.chdir(previous)
+        self.assertEqual(result, 2)
+        self.assertIn("parsed required-test list differs from committed candidate", errors.getvalue())
+        self.assertFalse(fixture["evidence"].exists())
 
     def test_evidence_sidecar_requires_each_explicit_prerequisite_inventory_anchor(self):
         for anchor_ids in PREREQUISITE_ANCHORS.values():

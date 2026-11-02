@@ -114,7 +114,10 @@ The existing `server/scripts/run-nextest-shards.sh` runner writes
 check passes. The sidecar binds the clean candidate commit to the required-list
 and JUnit report hashes, records every required outcome and the executed test
 inventory, and requires PostgreSQL, multiprocess, real cross-node resume, and
-relay/WebSocket anchor tests. It contains no database URL or report contents.
+relay/WebSocket anchor tests. The runner builds from one Nix store snapshot
+verified against the committed Git tree, and the gate compares the parsed
+required-list bytes with the committed list. It contains no database URL or
+report contents.
 Its `qualification` value is always `not_assessed`; it does not establish image
 identity, deployed topology, resource enforcement, workload results, fault
 results, or deployment state. A missing sidecar or a failed lane supplies no

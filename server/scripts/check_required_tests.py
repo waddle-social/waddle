@@ -64,12 +64,13 @@ class InputError(Exception):
     pass
 
 
-def parse_required(path: Path) -> list[TestId]:
+def parse_required(path: Path) -> tuple[list[TestId], str]:
     required: list[TestId] = []
     seen: set[TestId] = set()
     try:
-        lines = path.read_text().splitlines()
-    except OSError as error:
+        contents = path.read_bytes()
+        lines = contents.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
         raise InputError(f"{path}: cannot read required-test list") from error
     for number, raw in enumerate(lines, start=1):
         line = raw.split("#", 1)[0].strip()
@@ -85,7 +86,7 @@ def parse_required(path: Path) -> list[TestId]:
         required.append(test)
     if not required:
         raise InputError(f"{path}: the required test list is empty")
-    return required
+    return required, hashlib.sha256(contents).hexdigest()
 
 
 def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[TestId], dict[Path, str]]:
@@ -103,6 +104,16 @@ def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[T
         report_digests[report.resolve()] = hashlib.sha256(contents).hexdigest()
         if root.tag not in {"testsuites", "testsuite"}:
             raise InputError(f"{report}: expected a JUnit <testsuites> or <testsuite> document")
+        for parent in root.iter():
+            for child in parent:
+                if child.tag == "testsuites":
+                    raise InputError(f"{report}: testsuites must be the root element")
+                if child.tag == "testcase" and parent.tag != "testsuite":
+                    raise InputError(f"{report}: testcase must be a direct child of testsuite")
+                if child.tag == "testsuite" and parent.tag not in {"testsuites", "testsuite"}:
+                    raise InputError(f"{report}: testsuite must be inside testsuites or testsuite")
+                if child.tag in (NOT_EXECUTED, *FAILED) and parent.tag != "testcase":
+                    raise InputError(f"{report}: test outcome must be a direct child of testcase")
         for case in root.iter("testcase"):
             binary, name = case.get("classname"), case.get("name")
             if not binary or not name:
@@ -293,13 +304,23 @@ def build_evidence(
     required_path: Path,
     report_paths: list[Path],
     required: list[TestId],
+    required_digest: str,
     executed: set[TestId],
     failed: set[TestId],
     skipped: set[TestId],
     report_digests: dict[Path, str],
 ) -> dict[str, object]:
     actual_sha = candidate_sha(root, expected_sha)
-    _, required_relative, required_digest = repo_relative_file(required_path, root)
+    _, required_relative, current_digest = repo_relative_file(required_path, root)
+    try:
+        committed = subprocess.run(
+            ["git", "-C", str(root), "show", f"{actual_sha}:server/.config/required-cluster-tests.txt"],
+            capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise InputError("cannot read committed required-test list") from error
+    if required_digest != hashlib.sha256(committed).hexdigest() or current_digest != required_digest:
+        raise InputError("parsed required-test list differs from committed candidate")
     report_files: list[tuple[str, str]] = []
     for path in report_paths:
         resolved, relative, _ = repo_relative_file(path, root)
@@ -370,7 +391,7 @@ def main() -> int:
     parser.add_argument("reports", type=Path, nargs="+", help="nextest JUnit reports")
     args = parser.parse_args()
     try:
-        required = parse_required(args.required)
+        required, required_digest = parse_required(args.required)
         executed, failed, skipped, report_digests = executed_tests(args.reports)
         evidence_output = None
         evidence_root = None
@@ -407,6 +428,7 @@ def main() -> int:
                 required_path=args.required,
                 report_paths=args.reports,
                 required=required,
+                required_digest=required_digest,
                 executed=executed,
                 failed=failed,
                 skipped=skipped,

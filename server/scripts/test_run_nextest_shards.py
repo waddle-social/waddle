@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,10 +42,14 @@ class LocalShardTests(unittest.TestCase):
             (self.archive / name).write_text("baseline evidence")
         (self.server / "scripts").mkdir()
         (self.server / "scripts/build-nextest-archive.sh").write_text(
+            'printf "%s\\n%s\\n" "$PWD" "$1" > "$TEST_ROOT/.ci/nextest-archive/helper-source"\n'
             'exit_code="${COMPILE_EXIT:-0}"\n'
             'if [ "$exit_code" != 0 ]; then exit "$exit_code"; fi\n'
             'printf "%s\\n" "$TEST_ARCHIVE"\n'
         )
+        shutil.copyfile(SCRIPT.with_name("check_required_tests.py"),
+                        self.server / "scripts/check_required_tests.py")
+        (self.root / "flake.nix").write_text('committed source $Format:%H$\n')
         (self.server / ".config").mkdir()
         self.required = self.server / ".config/required-cluster-tests.txt"
         self.required.write_text("\n".join([*ANCHORS, f"{BINARY} whole_1", f"{BINARY} shared_4"]) + "\n")
@@ -62,10 +67,31 @@ class LocalShardTests(unittest.TestCase):
         nix = self.server / "scripts/nix"
         nix.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, pathlib, sys\n"
+            "import json, os, pathlib, shutil, sys\n"
             "root = pathlib.Path(os.environ['TEST_ROOT'])\n"
             "args = sys.argv[1:]\n"
-            "if args[0] == 'build' and args[-1] == '../#waddle-ci-sandbox-probe':\n"
+            "if args[:2] == ['store', 'add-path']:\n"
+            "    source = root / '.ci/nextest-archive/mock-store-source'\n"
+            "    if source.exists(): shutil.rmtree(source)\n"
+            "    shutil.copytree(args[-1], source, symlinks=True)\n"
+            "    if os.environ.get('TAMPER_SOURCE'):\n"
+            "        (source / 'flake.nix').write_text('tampered store source\\n')\n"
+            "    print(source)\n"
+            "    sys.exit(0)\n"
+            "ref = next((arg for arg in args if arg.startswith('path:') and '#' in arg), None)\n"
+            "if ref is not None:\n"
+            "    source = pathlib.Path(ref[5:].split('#', 1)[0])\n"
+            "    if os.environ.get('MUTATE_CHECKOUT'):\n"
+            "        original = root.parent / 'flake.nix'\n"
+            "        content = original.read_text()\n"
+            "        try:\n"
+            "            original.write_text('dirty source during Nix evaluation\\n')\n"
+            "            observed = (source / 'flake.nix').read_text()\n"
+            "            with (root / '.ci/nextest-archive/source-observations').open('a') as log:\n"
+            "                log.write(json.dumps({'ref': ref, 'content': observed}) + '\\n')\n"
+            "        finally:\n"
+            "            original.write_text(content)\n"
+            "if args[0] == 'build' and args[-1].endswith('#waddle-ci-sandbox-probe'):\n"
             "    (root / '.ci/nextest-archive/probe-args.json').write_text(json.dumps(args))\n"
             "    sys.exit(int(os.environ.get('SANDBOX_EXIT', '0')))\n"
             "if args[0] == 'build':\n"
@@ -83,7 +109,8 @@ class LocalShardTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.root), "config", "user.name", "Fixture"], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "user.email", "fixture@example.invalid"], check=True)
         subprocess.run(["git", "-C", str(self.root), "config", "commit.gpgsign", "false"], check=True)
-        subprocess.run(["git", "-C", str(self.root), "add", "server/scripts/build-nextest-archive.sh",
+        subprocess.run(["git", "-C", str(self.root), "add", "flake.nix",
+                        "server/scripts/build-nextest-archive.sh", "server/scripts/check_required_tests.py",
                         "server/scripts/nix", "server/.config/required-cluster-tests.txt"], check=True)
         subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "fixture"], check=True)
         self.env = dict(os.environ, PATH=f"{self.server / 'scripts'}:{os.environ['PATH']}",
@@ -101,7 +128,11 @@ class LocalShardTests(unittest.TestCase):
         result = self.run_shards()
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.server / ".ci/nextest-archive/build-args.json").read_text())
-        self.assertEqual(args[-4:], [f"../#waddle-server-test-shard-{i}" for i in range(1, 5)])
+        source = self.server / ".ci/nextest-archive/mock-store-source"
+        flake = f"path:{source}"
+        self.assertEqual(args[-4:], [f"{flake}#waddle-server-test-shard-{i}" for i in range(1, 5)])
+        self.assertEqual((self.server / ".ci/nextest-archive/helper-source").read_text().splitlines(),
+                         [str(source / "server"), f"{flake}#waddle-server-test-archive"])
         probe_args = json.loads((self.server / ".ci/nextest-archive/probe-args.json").read_text())
         for setting in ("builders", "sandbox", "sandbox-fallback"):
             self.assertIn(setting, probe_args)
@@ -119,6 +150,64 @@ class LocalShardTests(unittest.TestCase):
         evidence = json.loads(sidecar.read_text())
         self.assertEqual(evidence["candidate"]["worktree"], "clean")
         self.assertEqual(evidence["qualification"], "not_assessed")
+
+    def test_all_nix_evaluations_use_committed_source_during_checkout_mutations(self):
+        self.env["MUTATE_CHECKOUT"] = "1"
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observations = [json.loads(line) for line in
+                        (self.server / ".ci/nextest-archive/source-observations").read_text().splitlines()]
+        self.assertEqual(len(observations), 6)  # probe, build, and four shard evals
+        source = self.server / ".ci/nextest-archive/mock-store-source"
+        self.assertTrue(all(item["ref"].startswith(f"path:{source}#") for item in observations))
+        self.assertTrue(all(item["content"] == "committed source $Format:%H$\n" for item in observations))
+        self.assertTrue((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+
+    def test_archive_export_transformations_fail_before_nix_builds(self):
+        for attribute in ("export-ignore", "export-subst"):
+            with self.subTest(attribute=attribute):
+                (self.root / ".gitattributes").write_text(f"flake.nix {attribute}\n")
+                subprocess.run(["git", "-C", str(self.root), "add", ".gitattributes"], check=True)
+                subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", attribute], check=True)
+                result = self.run_shards()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("candidate source snapshot:", result.stderr)
+                self.assertFalse((self.server / ".ci/nextest-archive/probe-args.json").exists())
+                self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+
+    def test_gitlinks_and_modified_materialized_source_fail_closed(self):
+        self.env["TAMPER_SOURCE"] = "1"
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("content differs from Git tree: flake.nix", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/probe-args.json").exists())
+
+        del self.env["TAMPER_SOURCE"]
+        sha = subprocess.check_output(["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True).strip()
+        subprocess.run(["git", "-C", str(self.root), "update-index", "--add", "--cacheinfo",
+                        f"160000,{sha},module"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "gitlink fixture"], check=True)
+        (self.root / "module").mkdir()
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported Git tree entry: module", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/probe-args.json").exists())
+
+    def test_source_symlinks_cannot_escape_immutable_store_tree(self):
+        link = self.root / "source-link"
+        link.symlink_to("flake.nix")
+        subprocess.run(["git", "-C", str(self.root), "add", "source-link"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "internal link"], check=True)
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        link.unlink()
+        link.symlink_to("../outside-source")
+        subprocess.run(["git", "-C", str(self.root), "add", "source-link"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "external link"], check=True)
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink escapes source: source-link", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
 
     def test_executed_test_names_from_every_shard_are_emitted(self):
         result = self.run_shards()
