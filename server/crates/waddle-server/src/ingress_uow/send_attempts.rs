@@ -57,7 +57,7 @@ pub(crate) enum SendAttemptStatus {
 }
 
 /// Bound uncertainty independently of the short pre-invocation reservation.
-const STARTED_GRACE_MS: i64 = 60_000;
+pub(crate) const STARTED_GRACE_MS: i64 = 60_000;
 
 /// SQL shared by custody and fanout boundaries. Completion never expires;
 /// either in-flight phase excludes competing sinks only until its deadline.

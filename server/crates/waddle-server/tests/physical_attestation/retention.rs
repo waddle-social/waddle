@@ -1,12 +1,15 @@
 use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use waddle_server::db::physical_attestation::{
-    pin_lab_postgres_ddl, RetentionLab, RetentionLabBatch, PIN_LAB_SQLITE_DDL,
+    direct_lab_postgres_ddl, pin_lab_postgres_ddl, RetentionLab, RetentionLabBatch,
+    DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
 use waddle_server::ingress_substrate::ALIAS_RETENTION;
 
 #[path = "admission_state.rs"]
 mod admission_state_tests;
+#[path = "direct_admission.rs"]
+mod direct_admission_tests;
 
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-11-01T12:00:00Z")
@@ -36,6 +39,10 @@ async fn sqlite_fixture() -> (Database, RetentionLab) {
         .execute_batch(PIN_LAB_SQLITE_DDL)
         .await
         .expect("install unregistered pin lab schema");
+    schema
+        .execute_batch(DIRECT_LAB_SQLITE_DDL)
+        .await
+        .expect("install unregistered direct admission lab schema");
     schema.commit().await.expect("commit pin lab schema");
     let lab = RetentionLab::sqlite(&db, typed_bounds()).expect("bind exact runtime pool");
     (db, lab)
@@ -357,10 +364,16 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         .execute(&mut owner)
         .await
         .expect("install unregistered pin lab schema");
+    sqlx::raw_sql(&direct_lab_postgres_ddl(&config))
+        .execute(&mut owner)
+        .await
+        .expect("install unregistered direct admission lab schema");
     for table in [
         "ingress_admission_pins",
         "ingress_pin_allocations",
         "ingress_pin_settlements",
+        "direct_admission_lab",
+        "direct_admission_lab_quota",
     ] {
         let target_exists: bool =
             sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
@@ -404,6 +417,8 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         "ingress_admission_pins",
         "ingress_pin_allocations",
         "ingress_pin_settlements",
+        "direct_admission_lab",
+        "direct_admission_lab_quota",
     ] {
         sqlx::query(&format!(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {}",

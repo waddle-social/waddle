@@ -42,6 +42,8 @@ pub(crate) use recovery_receipts::{
     RecoveryReceiptRepository,
 };
 mod send_attempts;
+#[cfg(feature = "test-support")]
+pub(crate) use send_attempts::STARTED_GRACE_MS;
 pub(crate) use send_attempts::{send_attempt_blocks_delivery, SendAttemptStatus};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod projections;

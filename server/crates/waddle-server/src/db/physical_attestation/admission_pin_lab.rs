@@ -7,6 +7,12 @@
 #[path = "admission_state_lab.rs"]
 mod state;
 pub use state::{PinAllocationBinding, PinRecovery, PinState, PinTerminalDisposition};
+#[path = "direct_admission_lab.rs"]
+mod direct;
+pub use direct::{
+    direct_lab_postgres_ddl, DirectAdmission, DirectAdmissionLab, DirectAdmissionLabError,
+    DirectAdmissionLimits, DirectAdmissionOutcome, FixtureConnection, DIRECT_LAB_SQLITE_DDL,
+};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;

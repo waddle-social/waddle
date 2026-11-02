@@ -29,8 +29,10 @@ pub use retention_lab::{RetentionLab, RetentionLabBatch};
 mod admission_pin_lab;
 #[cfg(feature = "test-support")]
 pub use admission_pin_lab::{
-    pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab, AdmissionPinLabError,
-    PinAllocationBinding, PinOutcome, PinRecovery, PinState, PinTerminalDisposition,
+    direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab,
+    AdmissionPinLabError, DirectAdmission, DirectAdmissionLab, DirectAdmissionLabError,
+    DirectAdmissionLimits, DirectAdmissionOutcome, FixtureConnection, PinAllocationBinding,
+    PinOutcome, PinRecovery, PinState, PinTerminalDisposition, DIRECT_LAB_SQLITE_DDL,
     PIN_LAB_SQLITE_DDL,
 };
 
