@@ -1,5 +1,6 @@
 //! Canonical UoW statements must not follow a hostile PostgreSQL search path.
 
+mod principal;
 mod sm;
 
 use super::{CanonicalMessageRepository, IngressUnitOfWork, IngressUowTransaction};

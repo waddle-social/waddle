@@ -258,3 +258,7 @@ waddle-server ingress_uow::canonical_qualified_tests::sqlite_shared_memory_canon
 # must target the attested schema; retirement remains outside this slice.
 waddle-server ingress_uow::canonical_qualified_tests::sm::attested_sm_pair_ignores_hostile_shadows_and_missing_relations
 waddle-server ingress_uow::canonical_qualified_tests::sm::sqlite_shared_memory_sm_pair_replay_and_rollback
+
+# Prepared principal assertions must use the attested sessions table.
+waddle-server ingress_uow::canonical_qualified_tests::principal::attested_principal_ignores_hostile_schema_and_locks_trusted_session
+waddle-server ingress_uow::canonical_qualified_tests::principal::sqlite_principal_assertion_remains_on_shared_pool

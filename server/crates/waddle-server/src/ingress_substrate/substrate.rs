@@ -1498,7 +1498,7 @@ impl PreparedAttestedReceiptWriter {
     }
 }
 
-/// The relations selected by prepared canonical and SM UoW statements.
+/// The relations selected by prepared ingress UoW statements.
 #[derive(Clone, Copy)]
 pub(crate) enum PreparedIngressRelation {
     Epoch,
@@ -1506,6 +1506,7 @@ pub(crate) enum PreparedIngressRelation {
     Aliases,
     SmRefs,
     SmStreams,
+    Sessions,
 }
 
 /// Only a prepared transaction can supply a schema; callers cannot pass an
@@ -1520,6 +1521,7 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::Aliases => "ingress_origin_aliases",
         PreparedIngressRelation::SmRefs => "ingress_sm_refs",
         PreparedIngressRelation::SmStreams => "ingress_sm_streams",
+        PreparedIngressRelation::Sessions => "sessions",
     };
     match prepared {
         Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),

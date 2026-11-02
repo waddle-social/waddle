@@ -1557,13 +1557,22 @@ impl PrincipalRepository {
         transaction: &mut IngressUowTransaction<'_>,
         principal: &AuthenticatedPrincipalRef,
     ) -> Result<PrincipalAssertion, IngressUowError> {
-        const POSTGRES: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE";
+        const POSTGRES: (&str, &str) = (
+            "SELECT expires_at FROM ",
+            " WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE",
+        );
         const SQLITE: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Sessions,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
             .query(
-                sql,
+                &sql,
                 crate::db_params![
                     principal.bare_jid().to_string(),
                     principal.auth_context_id().as_uuid().to_string(),
