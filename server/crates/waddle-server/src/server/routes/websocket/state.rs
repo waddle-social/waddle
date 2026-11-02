@@ -1721,6 +1721,9 @@ pub(super) struct WsConnState {
     /// Physical transport identity, retained across bind/resume attempts on
     /// this WebSocket and kept separate from ingress and durable SM generations.
     pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    /// Read-only local I/O evidence shared by every binding on this socket.
+    /// Synthetic state has no physical transport and therefore no witness.
+    pub(super) local_io_relinquishment: Option<waddle_xmpp::registry::LocalIoRelinquishment>,
     /// The current bind or resume attempt, separate from registry ownership.
     pub(super) binding_ref: Option<waddle_xmpp::ownership::BindingRef>,
     #[cfg(test)]
@@ -1730,6 +1733,8 @@ pub(super) struct WsConnState {
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
     /// restart, independently from lifecycle revocation.
     pub(super) stream_open_handled: bool,
+    /// Untrusted `from` hint from this stream's RFC 7395 open frame.
+    pub(super) stream_open_from: Option<BareJid>,
     /// Conservative transport state for the current server `<open/>` response.
     /// `Committed` is reached only after its entire authority-aware batch
     /// returns `Continue`; lifecycle close uses this state to decide whether a
@@ -1891,8 +1896,15 @@ impl WsConnState {
         Self::new_for_node_lease(waddle_xmpp::ownership::NodeLeaseIdentity::local_process())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn new_for_node_lease(
         node_lease: waddle_xmpp::ownership::NodeLeaseIdentity,
+    ) -> Self {
+        Self::new_for_connection_ref(waddle_xmpp::ownership::ConnectionRef::fresh(node_lease))
+    }
+
+    pub(super) fn new_for_connection_ref(
+        connection_ref: waddle_xmpp::ownership::ConnectionRef,
     ) -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
@@ -1906,12 +1918,14 @@ impl WsConnState {
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
-            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(node_lease),
+            connection_ref,
+            local_io_relinquishment: None,
             binding_ref: None,
             #[cfg(test)]
             resume_binding_attempts: Vec::new(),
             phase: ConnectionPhase::new(),
             stream_open_handled: false,
+            stream_open_from: None,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -2062,6 +2076,7 @@ impl WsConnState {
     /// remains eligible for the best-effort system-shutdown error.
     pub(super) fn reset_stream_open_for_xmpp_lifecycle(&mut self) {
         self.stream_open_handled = false;
+        self.stream_open_from = None;
         self.stream_open_wire_state = StreamOpenWireState::NotCommitted;
     }
 

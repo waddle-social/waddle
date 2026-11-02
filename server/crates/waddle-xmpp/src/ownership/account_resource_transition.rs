@@ -9,7 +9,9 @@
 //! retire it before a fresh bind. Adoption compares identities; it does not
 //! prove claim authority, transfer a pump, or make an endpoint routable.
 //! Resource selection, cleanup, and delivery remain owned by their existing
-//! production paths.
+//! production paths. The routing metadata here represents only the current
+//! attached binding; it does not define persistence across detach/resume or
+//! production payload semantics.
 
 use jid::FullJid;
 use uuid::Uuid;
@@ -49,6 +51,15 @@ impl AccountResourceOperationId {
     }
 }
 
+/// Routing metadata for the one currently attached resource binding in this
+/// test fixture. This is not a production storage contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountResourceRoutingMetadata {
+    pub available: bool,
+    pub priority: i8,
+    pub carbons_enabled: bool,
+}
+
 /// Compare-and-set request for the one resource slot.
 ///
 /// Each mutation carries the exact actor identity and expected revision. The
@@ -65,6 +76,7 @@ pub enum AccountResourceMutation {
         claim_identity: UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: BindingRef,
+        routing_metadata: AccountResourceRoutingMetadata,
     },
     Retire {
         claim_identity: UserClaimIdentity,
@@ -168,6 +180,7 @@ pub struct AccountResourceSlot {
     revision: AccountResourceRevision,
     binding_ref: Option<BindingRef>,
     binding_claim_identity: Option<UserClaimIdentity>,
+    routing_metadata: AccountResourceRoutingMetadata,
     retired_claim_identities: Vec<UserClaimIdentity>,
     seen_binding_refs: Vec<BindingRef>,
     journal: Vec<JournalEntry>,
@@ -190,6 +203,7 @@ impl AccountResourceSlot {
             revision: AccountResourceRevision::INITIAL,
             binding_ref: None,
             binding_claim_identity: None,
+            routing_metadata: AccountResourceRoutingMetadata::default(),
             retired_claim_identities: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
             seen_binding_refs: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
             journal: Vec::with_capacity(ACCOUNT_RESOURCE_OPERATION_CAPACITY),
@@ -210,6 +224,10 @@ impl AccountResourceSlot {
 
     pub fn binding_ref(&self) -> Option<&BindingRef> {
         self.binding_ref.as_ref()
+    }
+
+    pub fn routing_metadata(&self) -> AccountResourceRoutingMetadata {
+        self.routing_metadata
     }
 
     /// Apply one operation serially. Both successful and rejected transition
@@ -273,7 +291,13 @@ impl AccountResourceSlot {
                 claim_identity,
                 expected_revision,
                 binding_ref,
-            } => self.update(claim_identity, *expected_revision, binding_ref),
+                routing_metadata,
+            } => self.update(
+                claim_identity,
+                *expected_revision,
+                binding_ref,
+                *routing_metadata,
+            ),
             AccountResourceMutation::Retire {
                 claim_identity,
                 expected_revision,
@@ -331,6 +355,7 @@ impl AccountResourceSlot {
 
         self.binding_ref = Some(binding_ref.clone());
         self.binding_claim_identity = Some(claim_identity.clone());
+        self.routing_metadata = AccountResourceRoutingMetadata::default();
         self.seen_binding_refs.push(binding_ref.clone());
         self.revision = revision;
         Ok(revision)
@@ -341,6 +366,7 @@ impl AccountResourceSlot {
         claim_identity: &UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: &BindingRef,
+        routing_metadata: AccountResourceRoutingMetadata,
     ) -> Result<AccountResourceRevision, AccountResourceTransitionError> {
         self.check_actor(claim_identity)?;
         self.check_revision(expected_revision)?;
@@ -350,9 +376,7 @@ impl AccountResourceSlot {
         }
         let revision = self.next_revision()?;
 
-        // The fixture models the exact-CAS update boundary. Resource metadata
-        // is deliberately omitted so this does not define production payload
-        // semantics.
+        self.routing_metadata = routing_metadata;
         self.revision = revision;
         Ok(revision)
     }
@@ -377,6 +401,7 @@ impl AccountResourceSlot {
 
         self.binding_ref = None;
         self.binding_claim_identity = None;
+        self.routing_metadata = AccountResourceRoutingMetadata::default();
         self.revision = revision;
         Ok(revision)
     }
@@ -503,6 +528,18 @@ mod tests {
         ConnectionRef::fresh(NodeLeaseIdentity::local_process())
     }
 
+    fn routing_metadata(
+        available: bool,
+        priority: i8,
+        carbons_enabled: bool,
+    ) -> AccountResourceRoutingMetadata {
+        AccountResourceRoutingMetadata {
+            available,
+            priority,
+            carbons_enabled,
+        }
+    }
+
     fn operation(mutation: AccountResourceMutation) -> AccountResourceOperation {
         AccountResourceOperation::new(AccountResourceOperationId::fresh(), mutation)
     }
@@ -516,6 +553,20 @@ mod tests {
             claim_identity: claim_identity.clone(),
             expected_revision,
             binding_ref: binding_ref.clone(),
+        })
+    }
+
+    fn update_operation(
+        claim_identity: &UserClaimIdentity,
+        expected_revision: AccountResourceRevision,
+        binding_ref: &BindingRef,
+        routing_metadata: AccountResourceRoutingMetadata,
+    ) -> AccountResourceOperation {
+        operation(AccountResourceMutation::Update {
+            claim_identity: claim_identity.clone(),
+            expected_revision,
+            binding_ref: binding_ref.clone(),
+            routing_metadata,
         })
     }
 
@@ -586,6 +637,7 @@ mod tests {
                 claim_identity: replacement.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             })),
             Ok(AccountResourceExecution::Applied(
                 AccountResourceOperationOutcome::Rejected(
@@ -615,6 +667,7 @@ mod tests {
                 claim_identity: old_claim.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: new_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             },
             AccountResourceMutation::Retire {
                 claim_identity: old_claim.clone(),
@@ -678,6 +731,7 @@ mod tests {
                     claim_identity: replacement.clone(),
                     expected_revision: slot.revision(),
                     binding_ref: old_binding.clone(),
+                    routing_metadata: AccountResourceRoutingMetadata::default(),
                 })),
                 Ok(AccountResourceExecution::Applied(
                     AccountResourceOperationOutcome::Rejected(
@@ -739,11 +793,22 @@ mod tests {
             ))
             .expect("fresh bind after failed resume"),
         );
+        let fresh_metadata = routing_metadata(true, 6, true);
+        committed_revision(
+            slot.execute(update_operation(
+                &claim_identity,
+                slot.revision(),
+                &fresh_bind,
+                fresh_metadata,
+            ))
+            .expect("set fresh binding metadata"),
+        );
         for mutation in [
             AccountResourceMutation::Update {
                 claim_identity: claim_identity.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: failed_resume.clone(),
+                routing_metadata: routing_metadata(false, 9, false),
             },
             AccountResourceMutation::Retire {
                 claim_identity,
@@ -762,6 +827,7 @@ mod tests {
             );
         }
         assert_eq!(slot.binding_ref(), Some(&fresh_bind));
+        assert_eq!(slot.routing_metadata(), fresh_metadata);
     }
 
     #[test]
@@ -802,6 +868,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: old_revision,
                 binding_ref: old_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             })),
             Ok(AccountResourceExecution::Applied(
                 AccountResourceOperationOutcome::Rejected(
@@ -814,6 +881,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             },
             AccountResourceMutation::Retire {
                 claim_identity,
@@ -832,6 +900,294 @@ mod tests {
             );
         }
         assert_eq!(slot.binding_ref(), Some(&next_binding));
+    }
+
+    #[test]
+    fn routing_metadata_update_is_exact_revision_fenced_and_payload_bound() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let binding_ref = binding(local_connection());
+        committed_revision(
+            slot.execute(bind_operation(
+                &claim_identity,
+                slot.revision(),
+                &binding_ref,
+            ))
+            .expect("bind resource"),
+        );
+        assert_eq!(
+            slot.routing_metadata(),
+            AccountResourceRoutingMetadata::default()
+        );
+
+        let revision_before_update = slot.revision();
+        let metadata = routing_metadata(true, 7, true);
+        let update = update_operation(
+            &claim_identity,
+            revision_before_update,
+            &binding_ref,
+            metadata,
+        );
+        let committed = slot
+            .execute(update.clone())
+            .expect("update routing metadata");
+        let new_revision = committed_revision(committed);
+        assert_eq!(slot.revision(), new_revision);
+        assert_eq!(slot.routing_metadata(), metadata);
+        assert_eq!(
+            slot.execute(update.clone()),
+            Ok(AccountResourceExecution::Replayed(
+                AccountResourceOperationOutcome::Committed {
+                    revision: new_revision,
+                },
+            ))
+        );
+
+        let mut conflicting_update = update.clone();
+        if let AccountResourceMutation::Update {
+            routing_metadata: payload,
+            ..
+        } = &mut conflicting_update.mutation
+        {
+            *payload = routing_metadata(true, 8, false);
+        }
+        assert_eq!(
+            slot.execute(conflicting_update.clone()),
+            Err(AccountResourceExecuteError::OperationIdConflict)
+        );
+        assert_eq!(
+            slot.lookup(&conflicting_update),
+            AccountResourceOperationLookup::PayloadMismatch
+        );
+        assert_eq!(slot.revision(), new_revision);
+        assert_eq!(slot.routing_metadata(), metadata);
+
+        assert_eq!(
+            slot.execute(update_operation(
+                &claim_identity,
+                revision_before_update,
+                &binding_ref,
+                routing_metadata(false, 1, false),
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::RevisionConflict,
+                ),
+            ))
+        );
+        assert_eq!(slot.revision(), new_revision);
+        assert_eq!(slot.routing_metadata(), metadata);
+    }
+
+    #[test]
+    fn stale_claim_and_binding_updates_leave_routing_metadata_unchanged() {
+        let mut slot = slot();
+        let claim_identity = slot.claim_identity().clone();
+        let connection_ref = local_connection();
+        let old_binding = binding(connection_ref.clone());
+        committed_revision(
+            slot.execute(bind_operation(
+                &claim_identity,
+                slot.revision(),
+                &old_binding,
+            ))
+            .expect("bind old attempt"),
+        );
+        let old_metadata = routing_metadata(true, 5, false);
+        committed_revision(
+            slot.execute(update_operation(
+                &claim_identity,
+                slot.revision(),
+                &old_binding,
+                old_metadata,
+            ))
+            .expect("update old attempt metadata"),
+        );
+
+        let replacement_actor = claim("node-a", "epoch-a", 1);
+        assert_ne!(claim_identity, replacement_actor);
+        assert_eq!(claim_identity.owner(), replacement_actor.owner());
+        assert_eq!(
+            claim_identity.claim_epoch(),
+            replacement_actor.claim_epoch()
+        );
+        assert_eq!(
+            slot.execute(update_operation(
+                &replacement_actor,
+                slot.revision(),
+                &old_binding,
+                routing_metadata(false, 9, true),
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::ClaimMismatch,
+                ),
+            ))
+        );
+        assert_eq!(slot.routing_metadata(), old_metadata);
+
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::Retire {
+                claim_identity: claim_identity.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+            }))
+            .expect("retire old attempt"),
+        );
+        assert_eq!(
+            slot.routing_metadata(),
+            AccountResourceRoutingMetadata::default()
+        );
+
+        let fresh_binding = binding(connection_ref);
+        assert_eq!(old_binding.connection_ref(), fresh_binding.connection_ref());
+        assert_ne!(old_binding, fresh_binding);
+        committed_revision(
+            slot.execute(bind_operation(
+                &claim_identity,
+                slot.revision(),
+                &fresh_binding,
+            ))
+            .expect("fresh bind after failed resume on same transport"),
+        );
+        let fresh_metadata = routing_metadata(true, 2, true);
+        committed_revision(
+            slot.execute(update_operation(
+                &claim_identity,
+                slot.revision(),
+                &fresh_binding,
+                fresh_metadata,
+            ))
+            .expect("update fresh binding metadata"),
+        );
+
+        assert_eq!(
+            slot.execute(update_operation(
+                &claim_identity,
+                slot.revision(),
+                &old_binding,
+                old_metadata,
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::BindingMismatch,
+                ),
+            ))
+        );
+        assert_eq!(slot.binding_ref(), Some(&fresh_binding));
+        assert_eq!(slot.routing_metadata(), fresh_metadata);
+    }
+
+    #[test]
+    fn claim_adoption_preserves_metadata_and_retirement_requires_custody() {
+        let mut slot = slot();
+        let old_claim = slot.claim_identity().clone();
+        let old_binding = binding(local_connection());
+        committed_revision(
+            slot.execute(bind_operation(&old_claim, slot.revision(), &old_binding))
+                .expect("bind resource"),
+        );
+        let predecessor_metadata = routing_metadata(true, 4, true);
+        committed_revision(
+            slot.execute(update_operation(
+                &old_claim,
+                slot.revision(),
+                &old_binding,
+                predecessor_metadata,
+            ))
+            .expect("set predecessor metadata"),
+        );
+
+        let successor = claim("node-b", "epoch-b", 2);
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::ReplaceClaim {
+                expected_claim_identity: old_claim.clone(),
+                expected_revision: slot.revision(),
+                replacement_claim_identity: successor.clone(),
+            }))
+            .expect("replace account claim"),
+        );
+        assert_eq!(slot.routing_metadata(), predecessor_metadata);
+        assert_eq!(
+            slot.execute(update_operation(
+                &successor,
+                slot.revision(),
+                &old_binding,
+                routing_metadata(false, 3, false),
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::BindingOwnerMismatch,
+                ),
+            ))
+        );
+        assert_eq!(slot.routing_metadata(), predecessor_metadata);
+
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::AdoptBinding {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                expected_binding_claim_identity: old_claim,
+            }))
+            .expect("successor adopts exact binding"),
+        );
+        assert_eq!(slot.routing_metadata(), predecessor_metadata);
+        let successor_metadata = routing_metadata(true, 8, false);
+        committed_revision(
+            slot.execute(update_operation(
+                &successor,
+                slot.revision(),
+                &old_binding,
+                successor_metadata,
+            ))
+            .expect("successor updates adopted binding"),
+        );
+        assert_eq!(slot.routing_metadata(), successor_metadata);
+
+        assert_eq!(
+            slot.execute(operation(AccountResourceMutation::Retire {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                custody_disposition: BindingRetirementDisposition::Unknown,
+            })),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::RetirementCustodyUnknown,
+                ),
+            ))
+        );
+        assert_eq!(slot.routing_metadata(), successor_metadata);
+
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::Retire {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding,
+                custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
+            }))
+            .expect("retire after custody is established"),
+        );
+        assert_eq!(slot.binding_ref(), None);
+        assert_eq!(
+            slot.routing_metadata(),
+            AccountResourceRoutingMetadata::default()
+        );
+
+        committed_revision(
+            slot.execute(bind_operation(
+                &successor,
+                slot.revision(),
+                &binding(local_connection()),
+            ))
+            .expect("new binding starts with default routing metadata"),
+        );
+        assert_eq!(
+            slot.routing_metadata(),
+            AccountResourceRoutingMetadata::default()
+        );
     }
 
     #[test]
@@ -994,6 +1350,7 @@ mod tests {
                 claim_identity: replacement.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: binding_ref.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             })),
             Ok(AccountResourceExecution::Applied(
                 AccountResourceOperationOutcome::Rejected(
@@ -1150,6 +1507,7 @@ mod tests {
                 claim_identity: old_claim.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             },
             AccountResourceMutation::Retire {
                 claim_identity: old_claim.clone(),
@@ -1172,6 +1530,7 @@ mod tests {
                 claim_identity: successor.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             }))
             .expect("adopted owner updates binding"),
         );
@@ -1227,6 +1586,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: binding_ref.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             });
             committed_revision(
                 slot.execute(operation.clone())
@@ -1241,6 +1601,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: revision_at_capacity,
                 binding_ref: binding_ref.clone(),
+                routing_metadata: AccountResourceRoutingMetadata::default(),
             },
         );
         assert_eq!(
@@ -1276,6 +1637,7 @@ mod tests {
             claim_identity: overflow_claim,
             expected_revision: overflow_slot.revision(),
             binding_ref: overflow_binding.clone(),
+            routing_metadata: AccountResourceRoutingMetadata::default(),
         });
         assert_eq!(
             overflow_slot.execute(overflow),

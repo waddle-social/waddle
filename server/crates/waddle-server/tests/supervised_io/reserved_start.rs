@@ -306,6 +306,21 @@ async fn auxiliary_registration_remains_single_assignment_while_join_handle_is_a
     .expect("reaper took the first handle and is joining it");
     assert_ne!(observer.state(), CustodianState::Joined);
     assert_eq!(inventory.prune_joined(), 0);
+    let successor_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    assert_eq!(
+        inventory.reserve(successor_ref.clone()).err(),
+        Some(CustodianInventoryError::Full),
+        "a signalled guard is not proof the auxiliary task joined"
+    );
+    assert_eq!(
+        wait_for_state(&observer, CustodianState::CleanupPending).await,
+        CustodianState::CleanupPending
+    );
+    assert_eq!(
+        inventory.reserve(successor_ref.clone()).err(),
+        Some(CustodianInventoryError::Full),
+        "pending cleanup must retain capacity"
+    );
 
     let second_task = tokio::spawn(std::future::pending::<()>());
     assert_eq!(
@@ -314,7 +329,12 @@ async fn auxiliary_registration_remains_single_assignment_while_join_handle_is_a
     );
     let _ = task_release_tx.send(());
     assert_eq!(wait_terminal(&observer).await, CustodianState::Joined);
-    assert_eq!(inventory.prune_joined(), 1);
+    let successor = inventory
+        .reserve(successor_ref)
+        .expect("joined auxiliary owner permits automatic reclamation");
+    assert!(inventory.observe(&connection_ref).is_none());
+    assert_eq!(observer.state(), CustodianState::Joined);
+    drop(successor);
 }
 
 #[tokio::test]
@@ -382,6 +402,55 @@ async fn completed_auxiliary_guard_without_registration_stays_pending_until_task
     assert_eq!(inventory.prune_joined(), 1);
 }
 
+#[tokio::test]
+async fn partial_start_reclaims_only_after_its_auxiliary_owner_joins() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let old_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let mut reservation = inventory.reserve(old_ref.clone()).expect("reservation");
+    let cleanup = reservation
+        .retain_until_auxiliary_cleanup()
+        .expect("retain cleanup hold");
+    let (start, entered, release_start) =
+        paused_start(reservation, ReservedStartStage::BetweenPumpSpawns, false);
+    timeout(TEST_TIMEOUT, entered)
+        .await
+        .expect("partial startup pauses")
+        .expect("barrier notification");
+    let observer = inventory_observer(&inventory, &old_ref).await;
+    let (release_owner, owner_released) = oneshot::channel();
+    inventory
+        .register_auxiliary_task(
+            &old_ref,
+            tokio::spawn(async move {
+                let _ = owner_released.await;
+            }),
+        )
+        .expect("register cleanup owner");
+    cleanup.complete();
+    start.abort();
+    assert!(start.await.err().expect("start canceled").is_cancelled());
+    let _ = release_start.send(());
+    assert_eq!(
+        wait_for_state(&observer, CustodianState::CleanupPending).await,
+        CustodianState::CleanupPending
+    );
+    let next_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    assert_eq!(
+        inventory.reserve(next_ref.clone()).err(),
+        Some(CustodianInventoryError::Full)
+    );
+    let _ = release_owner.send(());
+    assert_eq!(
+        wait_terminal(&observer).await,
+        CustodianState::PartialStartJoined
+    );
+    let next = inventory
+        .reserve(next_ref)
+        .expect("partial start and its auxiliary owner are joined");
+    assert!(inventory.observe(&old_ref).is_none());
+    drop(next);
+}
+
 async fn panic_before_building_pump_halves() -> (
     futures::stream::Pending<Result<u8, Infallible>>,
     futures::sink::Drain<u8>,
@@ -437,6 +506,106 @@ async fn reservation_is_exact_raii_bounded_and_race_safe() {
         }
         _ => panic!("exactly one final-slot reservation must win"),
     }
+    assert!(inventory.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_reclamation_serializes_contenders_and_preserves_reused_identity() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let old_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let reservation = inventory.reserve(old_ref.clone()).expect("old reservation");
+    let config = ReservedIoStartConfig::new(
+        test_limits(),
+        ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+        |_| 1,
+        |_| false,
+        Duration::from_millis(40),
+    );
+    let (custodian, outbound, inbound) = reservation
+        .start_with(config, |_| async {
+            (
+                futures::stream::pending::<Result<u8, Infallible>>(),
+                futures::sink::drain::<u8>(),
+            )
+        })
+        .await
+        .expect("old pumps start");
+    let old_observer = inventory.observe(&old_ref).expect("old observer");
+    custodian.request_stop(StopReason::Requested);
+    drop((outbound, inbound));
+    assert_eq!(wait_terminal(&old_observer).await, CustodianState::Joined);
+    assert_eq!(
+        inventory.reserve(old_ref.clone()).err(),
+        Some(CustodianInventoryError::DuplicateConnection)
+    );
+
+    let contenders = Arc::new(AsyncBarrier::new(3));
+    let first_inventory = inventory.clone();
+    let first_barrier = Arc::clone(&contenders);
+    let first = tokio::spawn(async move {
+        let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        first_barrier.wait().await;
+        first_inventory.reserve(connection_ref)
+    });
+    let second_inventory = inventory.clone();
+    let second_barrier = Arc::clone(&contenders);
+    let second = tokio::spawn(async move {
+        let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        second_barrier.wait().await;
+        second_inventory.reserve(connection_ref)
+    });
+    contenders.wait().await;
+    let first = first.await.expect("first contender");
+    let second = second.await.expect("second contender");
+    let winner = match (first, second) {
+        (Ok(winner), Err(CustodianInventoryError::Full))
+        | (Err(CustodianInventoryError::Full), Ok(winner)) => winner,
+        _ => panic!("only one contender can reclaim the joined slot"),
+    };
+    assert!(inventory.observe(&old_ref).is_none());
+    assert_eq!(inventory.prune_joined(), 0, "new reservation stays indexed");
+    assert_eq!(inventory.len(), 1);
+    drop(winner);
+
+    // Keep the old terminal observer while reserving the same exact key again.
+    // Concurrent pruning and admission must never remove this new generation.
+    let reused = inventory
+        .reserve(old_ref.clone())
+        .expect("reuse the old key");
+    let barrier = Arc::new(AsyncBarrier::new(3));
+    let prune_inventory = inventory.clone();
+    let prune_barrier = Arc::clone(&barrier);
+    let prune = tokio::spawn(async move {
+        prune_barrier.wait().await;
+        for _ in 0..64 {
+            assert_eq!(prune_inventory.prune_joined(), 0);
+            tokio::task::yield_now().await;
+        }
+    });
+    let admission_inventory = inventory.clone();
+    let admission_barrier = Arc::clone(&barrier);
+    let admission = tokio::spawn(async move {
+        admission_barrier.wait().await;
+        for _ in 0..64 {
+            assert_eq!(
+                admission_inventory
+                    .reserve(ConnectionRef::fresh(NodeLeaseIdentity::local_process()))
+                    .err(),
+                Some(CustodianInventoryError::Full)
+            );
+            tokio::task::yield_now().await;
+        }
+    });
+    barrier.wait().await;
+    prune.await.expect("concurrent pruning");
+    admission.await.expect("concurrent admissions");
+    assert_eq!(old_observer.state(), CustodianState::Joined);
+    assert_eq!(inventory.reserved_connection_refs(), vec![old_ref.clone()]);
+    assert_eq!(
+        inventory.reserve(old_ref).err(),
+        Some(CustodianInventoryError::DuplicateConnection)
+    );
+    drop(reused);
     assert!(inventory.is_empty());
 }
 
@@ -504,14 +673,18 @@ async fn cancellation_at_each_reserved_start_boundary_joins_only_started_pumps()
     assert_eq!(
         inventory.len(),
         1,
-        "partial cleanup remains indexed until pruned"
+        "partial cleanup remains indexed until reclaimed"
     );
-    assert_eq!(inventory.prune_joined(), 1);
-
     let precommit_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    assert_eq!(
+        inventory.reserve(partial_ref.clone()).err(),
+        Some(CustodianInventoryError::DuplicateConnection),
+        "the exact reference cannot bypass duplicate rejection"
+    );
     let precommit = inventory
         .reserve(precommit_ref.clone())
-        .expect("reserve complete pair");
+        .expect("a partial join is reclaimed for the next reservation");
+    assert!(inventory.observe(&partial_ref).is_none());
     let (precommit_task, precommit_entered, precommit_release) =
         paused_start(precommit, ReservedStartStage::AfterOutboundSpawn, false);
     timeout(TEST_TIMEOUT, precommit_entered)

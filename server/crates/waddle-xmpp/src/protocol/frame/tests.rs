@@ -7,39 +7,112 @@ use super::{
 fn parses_open_frame() {
     let xml =
         r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" version="1.0" to="waddle.social"/>"#;
-    assert!(matches!(parse_frame(xml), Ok(InboundFrame::Open)));
+    assert!(matches!(
+        parse_frame(xml),
+        Ok(InboundFrame::Open { from: None })
+    ));
+}
+
+#[test]
+fn open_from_is_a_normalized_bare_jid() {
+    let xml = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='Ali&#99;e@EXAMPLE.com'/>";
+    match parse_frame(xml).expect("valid stream open") {
+        InboundFrame::Open { from: Some(from) } => {
+            assert_eq!(from.to_string(), "alice@example.com")
+        }
+        other => panic!("unexpected frame: {other:?}"),
+    }
+}
+
+#[test]
+fn open_from_rejects_invalid_non_bare_or_domain_only_values() {
+    for from in [
+        "",
+        "@example.com",
+        "example.com",
+        "alice@example.com/device",
+        "bad jid",
+    ] {
+        let xml = format!("<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' from='{from}'/>");
+        assert!(
+            matches!(parse_frame(&xml), Err(ParseError::InvalidOpenFrom)),
+            "{from:?}"
+        );
+    }
 }
 
 #[test]
 fn rejects_open_frame_with_wrong_namespace() {
     let xml = r#"<open xmlns="jabber:client" version="1.0"/>"#;
-    assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    assert!(matches!(
+        parse_frame(xml),
+        Err(ParseError::InvalidOpenNamespace)
+    ));
 }
 
 #[test]
 fn rejects_truncated_open_frame() {
     assert!(matches!(
         parse_frame("<open"),
-        Err(ParseError::InvalidXml(_))
+        Err(ParseError::InvalidOpenXml)
     ));
 }
 
 #[test]
 fn rejects_open_frame_with_payload() {
     let xml = r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing"><iq/></open>"#;
-    assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    assert!(matches!(
+        parse_frame(xml),
+        Err(ParseError::InvalidOpenContent)
+    ));
 }
 
 #[test]
 fn rejects_open_frame_with_whitespace_payload() {
     let xml = "<open xmlns='urn:ietf:params:xml:ns:xmpp-framing'>\n</open>";
-    assert!(matches!(parse_frame(xml), Err(ParseError::InvalidXml(_))));
+    assert!(matches!(
+        parse_frame(xml),
+        Err(ParseError::InvalidOpenContent)
+    ));
 }
 
 #[test]
 fn parses_close_frame() {
     let xml = r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#;
     assert!(matches!(parse_frame(xml), Ok(InboundFrame::Close)));
+}
+
+#[test]
+fn parses_prefixed_framing_and_sasl_only_in_their_namespaces() {
+    assert!(matches!(
+        parse_frame("<f:open xmlns:f='urn:ietf:params:xml:ns:xmpp-framing'/>"),
+        Ok(InboundFrame::Open { from: None })
+    ));
+    assert!(matches!(
+        parse_frame("<f:close xmlns:f='urn:ietf:params:xml:ns:xmpp-framing'/>"),
+        Ok(InboundFrame::Close)
+    ));
+    assert!(matches!(
+        parse_frame("<s:auth xmlns:s='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='OAUTHBEARER'>eA==</s:auth>"),
+        Ok(InboundFrame::Auth { .. })
+    ));
+    assert!(matches!(
+        parse_frame("<s:response xmlns:s='urn:ietf:params:xml:ns:xmpp-sasl'>eA==</s:response>"),
+        Ok(InboundFrame::SaslResponse(data)) if data == "eA=="
+    ));
+    assert!(matches!(
+        parse_frame("<f:open xmlns:f='urn:wrong'/>"),
+        Err(ParseError::InvalidOpenNamespace)
+    ));
+    for xml in [
+        "<f:close xmlns:f='urn:wrong'/>",
+        "<s:auth xmlns:s='urn:wrong' mechanism='OAUTHBEARER'/>",
+        "<s:response xmlns:s='urn:wrong'>eA==</s:response>",
+        "<s:response>eA==</s:response>",
+        "<f:open/>",
+    ] {
+        assert!(parse_frame(xml).is_err(), "{xml}");
+    }
 }
 
 #[test]

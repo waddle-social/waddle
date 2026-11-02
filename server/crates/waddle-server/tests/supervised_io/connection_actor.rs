@@ -98,7 +98,8 @@ where
             }
             ConnectionWireFrame::Acknowledgement(ack) => Message::Text(ack.to_xml().into()),
             ConnectionWireFrame::CountableStanza { .. }
-            | ConnectionWireFrame::RejectedInbound { .. } => {
+            | ConnectionWireFrame::RejectedInbound { .. }
+            | ConnectionWireFrame::Prebind { .. } => {
                 return Err(Error::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "inbound-only frame cannot be written",
@@ -2119,7 +2120,7 @@ async fn reservation_is_indexed_before_the_actor_pump_factory_runs() {
 #[tokio::test]
 async fn failed_reservation_does_not_call_the_connection_pump_factory() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
-    let first = start_actor(
+    let (first, _first_peer, _) = start_actor(
         &inventory,
         4,
         256,
@@ -2130,8 +2131,7 @@ async fn failed_reservation_does_not_call_the_connection_pump_factory() {
         }),
         TEST_TIMEOUT,
     )
-    .await
-    .0;
+    .await;
     let (server, _client) = super::pumps::socket_pair().await;
     let called = Arc::new(AtomicBool::new(false));
     let called_factory = Arc::clone(&called);
@@ -2929,7 +2929,7 @@ async fn caller_cancellation_after_actor_start_joins_registered_auxiliary_cleanu
 
     timeout(TEST_TIMEOUT, entered_rx)
         .await
-        .expect("Kameo actor started before cleanup registration")
+        .expect("Kameo actor started before input and effect handoff")
         .expect("barrier entry");
     let connection_ref = timeout(TEST_TIMEOUT, connection_ref_rx)
         .await
@@ -2947,7 +2947,11 @@ async fn caller_cancellation_after_actor_start_joins_registered_auxiliary_cleanu
     })
     .await
     .expect("caller loss requests stop while actor startup is paused");
-    assert_eq!(inventory.prune_joined(), 0, "cleanup is still unregistered");
+    assert_eq!(
+        inventory.prune_joined(),
+        0,
+        "startup handoff is still incomplete"
+    );
     let _ = release_tx.send(());
     assert_eq!(
         timeout(TEST_TIMEOUT, observer.wait_until_joined())

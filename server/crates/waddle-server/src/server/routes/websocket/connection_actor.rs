@@ -2,12 +2,17 @@
 //! protocol state and its exact reserved physical pump pair.
 //!
 //! This is a dark vertical slice. It does not replace the production
-//! WebSocket loop, perform authentication or publish a registry binding. The
-//! fixture begins with non-resumable XEP-0198 state so it can exercise the
-//! existing handled-prefix tracker and the typed `<r/>` → `<a h='N'/>` path.
-//! Its synthetic effect boundary does not perform production routing or
-//! storage, and the fixture does not preserve parser metadata such as a
-//! message's `xml:lang`; this proves sequencing and custody only.
+//! WebSocket loop or publish a registry binding. The
+//! explicit synthetic-SM fixture exercises the handled-prefix tracker. The
+//! separate pre-bind fixtures start unauthenticated with SM disabled and use
+//! scripted or session-validated authentication; neither performs routing.
+
+mod prebind;
+pub use prebind::{
+    CompletePrebindAuth, CompleteValidatedPrebindAuth, PrebindAuthAttempt, PrebindAuthOutcome,
+    PrebindAuthToken, PrebindInput, PrebindPhase, PrebindSaslInput, PrebindSnapshot,
+    PrebindValidationAttempt, SnapshotPrebind,
+};
 
 use super::state::WsConnState;
 use super::supervised_io::{
@@ -16,7 +21,14 @@ use super::supervised_io::{
     QueueItem, ReservedIoStartConfig, ReservedStartError, StopReason, WriteSender,
 };
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
+use crate::server::routes::websocket::WebSocketState;
+use crate::websocket_transport::{
+    ActorWriteProbe, RetainedWebSocketInput, SocketAdmission, SocketAdmissionError, WebSocketInput,
+    WebSocketOutput,
+};
+use axum::extract::ws::{Message as WebSocketMessage, WebSocket};
 use futures::future::BoxFuture;
+use futures::FutureExt;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::mailbox;
 use kameo::message::{Context, Message};
@@ -53,6 +65,11 @@ pub enum ConnectionWireFrame {
     /// A malformed or non-stanza peer frame retained only long enough for
     /// the reader's byte bound to reject it. It never consumes an SM sequence.
     RejectedInbound { wire_bytes: usize },
+    /// Parsed pre-bind input held under the reader's original wire budget.
+    Prebind {
+        input: Arc<PrebindInput>,
+        wire_bytes: usize,
+    },
     /// Transport close marker used by the supervised writer.
     Close,
 }
@@ -64,9 +81,9 @@ impl ConnectionWireFrame {
         match self {
             Self::RequestAcknowledgement { wire_bytes, .. } => *wire_bytes,
             Self::Acknowledgement(ack) => ack.to_xml().len(),
-            Self::CountableStanza { wire_bytes, .. } | Self::RejectedInbound { wire_bytes } => {
-                *wire_bytes
-            }
+            Self::CountableStanza { wire_bytes, .. }
+            | Self::RejectedInbound { wire_bytes }
+            | Self::Prebind { wire_bytes, .. } => *wire_bytes,
             Self::Close => 0,
         }
     }
@@ -116,6 +133,12 @@ pub enum ConnectionActorStartError {
     /// The independent startup owner exited before returning its result.
     #[error("connection actor startup owner exited before reporting a result")]
     StartupOwnerLost,
+    /// Injected or unexpected panic while the supervised socket is starting.
+    #[error("supervised socket startup panicked")]
+    StartupPanicked,
+    /// The exact AppState admission or the supervised socket startup failed.
+    #[error(transparent)]
+    Socket(#[from] SocketAdmissionError),
 }
 
 /// Deterministic startup barrier used only by this dark lifecycle fixture.
@@ -147,11 +170,23 @@ pub struct ConnectionActorStartHooks {
     /// Wait after synchronous inventory reservation but before invoking the
     /// transport factory. Caller cancellation here drops the unused slot.
     pub before_factory: Option<ConnectionActorStartBarrier>,
+    /// Wait after the real socket is split but before supervised startup checks
+    /// the exact source and lifecycle authority again.
+    pub after_socket_split: Option<ConnectionActorStartBarrier>,
+    /// Panic at the post-split boundary to exercise the socket guard's Drop
+    /// cleanup path.
+    pub panic_after_socket_split: bool,
+    /// Wait after the reaper is active but before the reader is spawned.
+    pub before_inbound_spawn: Option<ConnectionActorStartBarrier>,
+    /// Wait after the reader handoff but before the writer is spawned.
+    pub between_pump_spawns: Option<ConnectionActorStartBarrier>,
     /// Wait after both pump handles have been handed to the reaper, before its
     /// ready acknowledgment returns to the actor starter.
     pub after_pumps_handed_off: Option<ConnectionActorStartBarrier>,
-    /// Wait after the Kameo actor starts, before forwarder and cleanup tasks
-    /// are registered with the exact physical inventory entry.
+    /// Panic after both pump handles are handed off, for cleanup proof.
+    pub panic_after_pumps_handed_off: bool,
+    /// Wait after the actor starts and its cleanup owner is registered, before
+    /// the input forwarder and effect task have been handed to that owner.
     pub after_actor_started: Option<ConnectionActorStartBarrier>,
 }
 
@@ -165,6 +200,11 @@ struct ConnectionActorStartContext<IsSendAfterClose, Size, IsClose> {
     effect_runner: CountableStanzaEffect,
     caller_gone: CancellationToken,
     hooks: ConnectionActorStartHooks,
+}
+
+struct CanonicalActorBehavior {
+    effect_runner: CountableStanzaEffect,
+    prebind: Option<prebind::PrebindState>,
 }
 
 async fn complete_start_under_independent_owner<F>(
@@ -363,6 +403,301 @@ where
     complete_start_under_independent_owner(startup, caller_gone).await
 }
 
+/// A test-only pre-parse gate derived from the canonical AppState. It retains
+/// no socket slot until the test upgrade extractor has succeeded.
+pub struct CanonicalActorGate<'a> {
+    gate: crate::server::state::WebSocketAdmissionGate<'a>,
+    inventory: IoCustodianInventory,
+    process_stop: CancellationToken,
+    domain: jid::BareJid,
+    auth_state: Arc<crate::server::routes::auth::AuthState>,
+}
+
+/// Capture the same AppState lifecycle and source revision as `/ws`.
+pub fn canonical_actor_gate(
+    state: &WebSocketState,
+) -> Result<CanonicalActorGate<'_>, SocketAdmissionError> {
+    Ok(CanonicalActorGate {
+        gate: state.deps.app_state.websocket_admission_gate()?,
+        inventory: state.deps.app_state.websocket_inventory.clone(),
+        process_stop: state.deps.shutdown.stop_token(),
+        auth_state: Arc::clone(&state.deps.auth_state),
+        domain: state
+            .deps
+            .auth_state
+            .xmpp_domain
+            .parse()
+            .map_err(|_| SocketAdmissionError::WrongReservation)?,
+    })
+}
+
+/// Non-cloneable exact socket reservation for the dark actor bridge.
+pub struct CanonicalActorAdmission {
+    admission: SocketAdmission,
+    inventory: IoCustodianInventory,
+    caller_gone: CancellationToken,
+    domain: jid::BareJid,
+    auth_state: Arc<crate::server::routes::auth::AuthState>,
+}
+
+impl CanonicalActorGate<'_> {
+    /// Reserve after the caller has successfully parsed its upgrade request.
+    pub fn reserve(
+        self,
+        probe: Option<Arc<ActorWriteProbe>>,
+    ) -> Result<CanonicalActorAdmission, SocketAdmissionError> {
+        let caller_gone = CancellationToken::new();
+        let admission = self
+            .gate
+            .reserve_socket_for_test(self.process_stop, caller_gone.clone())?;
+        if let Some(probe) = probe {
+            admission.install_actor_write_probe(probe);
+        }
+        Ok(CanonicalActorAdmission {
+            admission,
+            inventory: self.inventory,
+            caller_gone,
+            domain: self.domain,
+            auth_state: self.auth_state,
+        })
+    }
+}
+
+impl CanonicalActorAdmission {
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        self.admission.connection_ref()
+    }
+
+    pub fn revalidate(&self) -> Result<(), SocketAdmissionError> {
+        self.admission.revalidate()
+    }
+
+    /// Test-only observation that the original startup caller disappeared.
+    pub fn caller_gone_for_test(&self) -> CancellationToken {
+        self.caller_gone.clone()
+    }
+
+    /// Inject reaper loss to verify the no-actor startup error path.
+    pub fn inject_reaper_exit(&self, exit: super::supervised_io::ReservedReaperExitPoint) {
+        self.admission.inject_actor_reaper_exit(exit);
+    }
+
+    /// Start a synthetic actor with the actual Axum socket and canonical
+    /// admission. There is no authentication, registry or durable work.
+    pub async fn start_synthetic_sm_fixture_with_effect<Effect, EffectFuture>(
+        self,
+        socket: WebSocket,
+        limits: super::supervised_io::TransportLimits,
+        retirement_deadline: Duration,
+        lifecycle_handoff_deadline: Duration,
+        hooks: ConnectionActorStartHooks,
+        effect: Effect,
+    ) -> Result<ConnectionActorController, ConnectionActorStartError>
+    where
+        Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
+        EffectFuture: Future<Output = CountableEffectDisposition> + Send + 'static,
+    {
+        let caller_gone = self.caller_gone.clone();
+        let effect_runner: CountableStanzaEffect = Arc::new(move |input| Box::pin(effect(input)));
+        let startup = start_canonical_actor(
+            self,
+            socket,
+            limits,
+            retirement_deadline,
+            lifecycle_handoff_deadline,
+            hooks,
+            CanonicalActorBehavior {
+                effect_runner,
+                prebind: None,
+            },
+        );
+        complete_start_under_independent_owner(startup, caller_gone).await
+    }
+
+    /// Start the dark unauthenticated pre-bind fixture with scripted results.
+    pub async fn start_prebind(
+        self,
+        socket: WebSocket,
+        limits: super::supervised_io::TransportLimits,
+        retirement_deadline: Duration,
+        lifecycle_handoff_deadline: Duration,
+        hooks: ConnectionActorStartHooks,
+        attempts: mpsc::Sender<PrebindAuthAttempt>,
+    ) -> Result<ConnectionActorController, ConnectionActorStartError> {
+        let caller_gone = self.caller_gone.clone();
+        let effect_runner: CountableStanzaEffect =
+            Arc::new(|_| Box::pin(async { CountableEffectDisposition::Failed }));
+        let prebind = prebind::PrebindState::new(self.domain.clone(), attempts);
+        let startup = start_canonical_actor(
+            self,
+            socket,
+            limits,
+            retirement_deadline,
+            lifecycle_handoff_deadline,
+            hooks,
+            CanonicalActorBehavior {
+                effect_runner,
+                prebind: Some(prebind),
+            },
+        );
+        complete_start_under_independent_owner(startup, caller_gone).await
+    }
+
+    /// Start the dark pre-bind fixture with the admission's own session
+    /// validator. Attempts and their validated completions are opaque and
+    /// carry the actor-issued exact connection and nonce.
+    pub async fn start_prebind_validated(
+        self,
+        socket: WebSocket,
+        limits: super::supervised_io::TransportLimits,
+        retirement_deadline: Duration,
+        lifecycle_handoff_deadline: Duration,
+        hooks: ConnectionActorStartHooks,
+        attempts: mpsc::Sender<PrebindValidationAttempt>,
+    ) -> Result<ConnectionActorController, ConnectionActorStartError> {
+        let caller_gone = self.caller_gone.clone();
+        let effect_runner: CountableStanzaEffect =
+            Arc::new(|_| Box::pin(async { CountableEffectDisposition::Failed }));
+        let prebind = prebind::PrebindState::new_validated(
+            self.domain.clone(),
+            attempts,
+            Arc::clone(&self.auth_state),
+        );
+        let startup = start_canonical_actor(
+            self,
+            socket,
+            limits,
+            retirement_deadline,
+            lifecycle_handoff_deadline,
+            hooks,
+            CanonicalActorBehavior {
+                effect_runner,
+                prebind: Some(prebind),
+            },
+        );
+        complete_start_under_independent_owner(startup, caller_gone).await
+    }
+}
+
+async fn start_canonical_actor(
+    admission: CanonicalActorAdmission,
+    socket: WebSocket,
+    limits: super::supervised_io::TransportLimits,
+    retirement_deadline: Duration,
+    lifecycle_handoff_deadline: Duration,
+    mut hooks: ConnectionActorStartHooks,
+    behavior: CanonicalActorBehavior,
+) -> Result<ConnectionActorController, ConnectionActorStartError> {
+    let CanonicalActorBehavior {
+        effect_runner,
+        prebind,
+    } = behavior;
+    let CanonicalActorAdmission {
+        mut admission,
+        inventory,
+        caller_gone,
+        domain: _,
+        auth_state: _,
+    } = admission;
+    let connection_ref = admission.connection_ref().clone();
+    let mut state = WsConnState::new_for_connection_ref(connection_ref.clone());
+    if prebind.is_none() {
+        state
+            .sm_state
+            .enable("dark-canonical-actor".to_owned(), false, None);
+    }
+    // This hold is installed before the socket can be split or pumps spawned.
+    let auxiliary_cleanup = admission.retain_actor_cleanup()?;
+    if let Some(barrier) = hooks.before_factory.take() {
+        barrier.wait().await;
+    }
+    let mut after_socket_split = hooks.after_socket_split.take();
+    let panic_after_socket_split = hooks.panic_after_socket_split;
+    let mut before_inbound = hooks.before_inbound_spawn.take();
+    let mut between_pumps = hooks.between_pump_spawns.take();
+    let mut after_pumps = hooks.after_pumps_handed_off.take();
+    let panic_after_pumps = hooks.panic_after_pumps_handed_off;
+    let started = std::panic::AssertUnwindSafe(admission.start_socket_for_actor_with_split_hook(
+        socket,
+        limits,
+        retirement_deadline,
+        move || {
+            let barrier = after_socket_split.take();
+            async move {
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                }
+                assert!(
+                    !panic_after_socket_split,
+                    "injected post-split startup panic"
+                );
+            }
+        },
+        move |stage| {
+            let barrier = match stage {
+                super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
+                    before_inbound.take()
+                }
+                super::supervised_io::ReservedStartStage::BetweenPumpSpawns => between_pumps.take(),
+                super::supervised_io::ReservedStartStage::AfterOutboundSpawn => after_pumps.take(),
+                super::supervised_io::ReservedStartStage::AfterCommit => None,
+            };
+            async move {
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                }
+                assert!(
+                    !panic_after_pumps
+                        || stage != super::supervised_io::ReservedStartStage::AfterOutboundSpawn,
+                    "injected post-pump startup panic"
+                );
+            }
+        },
+    ))
+    .catch_unwind()
+    .await;
+    let (custodian, input, output) = match started {
+        Ok(Ok(started)) => started,
+        outcome => {
+            if inventory.observe(&connection_ref).is_some() {
+                // The reaper may already own pumps, even though no actor exists.
+                // Register a real cleanup task before completing the auxiliary hold.
+                register_no_actor_cleanup(&inventory, &connection_ref, auxiliary_cleanup)?;
+            } else {
+                drop(auxiliary_cleanup);
+            }
+            return Err(match outcome {
+                Ok(Err(error)) => error.into(),
+                Err(_) => ConnectionActorStartError::StartupPanicked,
+                Ok(Ok(_)) => unreachable!("success was handled above"),
+            });
+        }
+    };
+    if !custodian.is_for(&connection_ref) {
+        custodian.request_stop(StopReason::Requested);
+        drop(input);
+        drop(output);
+        register_no_actor_cleanup(&inventory, &connection_ref, auxiliary_cleanup)?;
+        return Err(SocketAdmissionError::WrongReservation.into());
+    }
+    launch_connection_actor(ActorStartPieces {
+        inventory,
+        state,
+        connection_ref,
+        lifecycle_handoff_deadline,
+        effect_runner,
+        caller_gone,
+        after_actor_started: hooks.after_actor_started.take(),
+        effect_capacity: limits.inbound().max_count(),
+        auxiliary_cleanup,
+        custodian,
+        inbound: ActorStartInput::WebSocket(input),
+        outbound: ActorStartOutput::WebSocket(output),
+        prebind,
+    })
+    .await
+}
+
 fn prepare_connection_actor_reservation(
     inventory: &IoCustodianInventory,
     node_lease: NodeLeaseIdentity,
@@ -420,13 +755,20 @@ where
     if let Some(barrier) = hooks.before_factory.take() {
         barrier.wait().await;
     }
+    let mut before_inbound = hooks.before_inbound_spawn.take();
+    let mut between_pumps = hooks.between_pump_spawns.take();
     let mut after_pumps_handed_off = hooks.after_pumps_handed_off.take();
     let started = reservation
         .start_with_hook_and_cancellation(config, factory, caller_gone.clone(), move |stage| {
-            let barrier = if stage == super::supervised_io::ReservedStartStage::AfterOutboundSpawn {
-                after_pumps_handed_off.take()
-            } else {
-                None
+            let barrier = match stage {
+                super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
+                    before_inbound.take()
+                }
+                super::supervised_io::ReservedStartStage::BetweenPumpSpawns => between_pumps.take(),
+                super::supervised_io::ReservedStartStage::AfterOutboundSpawn => {
+                    after_pumps_handed_off.take()
+                }
+                super::supervised_io::ReservedStartStage::AfterCommit => None,
             };
             async move {
                 if let Some(barrier) = barrier {
@@ -444,12 +786,107 @@ where
                 drop(auxiliary_cleanup);
                 return Err(error.into());
             }
-            let cleanup_task = tokio::spawn(async {});
-            let _ = inventory.register_auxiliary_task(&connection_ref, cleanup_task);
-            auxiliary_cleanup.complete();
+            register_no_actor_cleanup(&inventory, &connection_ref, auxiliary_cleanup)?;
             return Err(error.into());
         }
     };
+    launch_connection_actor(ActorStartPieces {
+        inventory,
+        state,
+        connection_ref,
+        lifecycle_handoff_deadline,
+        effect_runner,
+        caller_gone,
+        after_actor_started: hooks.after_actor_started.take(),
+        effect_capacity,
+        auxiliary_cleanup,
+        custodian,
+        inbound: ActorStartInput::Synthetic(inbound),
+        outbound: ActorStartOutput::Synthetic(outbound),
+        prebind: None,
+    })
+    .await
+}
+
+/// Complete a post-reaper startup failure only after a real no-actor cleanup
+/// owner is registered. Registration failure deliberately leaves the hold
+/// uncompleted, so it cannot be mistaken for successful cleanup.
+fn register_no_actor_cleanup(
+    inventory: &IoCustodianInventory,
+    connection_ref: &ConnectionRef,
+    auxiliary_cleanup: AuxiliaryCleanupGuard,
+) -> Result<(), ConnectionActorStartError> {
+    let task = tokio::spawn(async {});
+    match inventory.register_auxiliary_task(connection_ref, task) {
+        Ok(()) => {
+            auxiliary_cleanup.complete();
+            Ok(())
+        }
+        Err(error) => {
+            drop(auxiliary_cleanup);
+            Err(error.into())
+        }
+    }
+}
+
+enum ActorStartInput {
+    Synthetic(mpsc::Receiver<QueueItem<ConnectionWireFrame>>),
+    WebSocket(WebSocketInput<axum::Error>),
+}
+
+enum ActorStartOutput {
+    Synthetic(WriteSender<ConnectionWireFrame>),
+    WebSocket(WebSocketOutput<axum::Error>),
+}
+
+enum ActorOutbound {
+    Synthetic(WriteSender<ConnectionWireFrame>),
+    WebSocket(mpsc::Sender<ActorOutput>),
+}
+
+enum ActorOutput {
+    Acknowledgement(SmAck),
+    Prebind {
+        id: u64,
+        frame: prebind::PrebindOutput,
+    },
+}
+
+struct ActorStartPieces {
+    inventory: IoCustodianInventory,
+    state: WsConnState,
+    connection_ref: ConnectionRef,
+    lifecycle_handoff_deadline: Duration,
+    effect_runner: CountableStanzaEffect,
+    caller_gone: CancellationToken,
+    after_actor_started: Option<ConnectionActorStartBarrier>,
+    effect_capacity: usize,
+    auxiliary_cleanup: AuxiliaryCleanupGuard,
+    custodian: IoCustodianHandle,
+    inbound: ActorStartInput,
+    outbound: ActorStartOutput,
+    prebind: Option<prebind::PrebindState>,
+}
+
+async fn launch_connection_actor(
+    pieces: ActorStartPieces,
+) -> Result<ConnectionActorController, ConnectionActorStartError> {
+    let ActorStartPieces {
+        inventory,
+        state,
+        connection_ref,
+        lifecycle_handoff_deadline,
+        effect_runner,
+        caller_gone,
+        after_actor_started,
+        effect_capacity,
+        auxiliary_cleanup,
+        custodian,
+        inbound,
+        outbound,
+        prebind,
+    } = pieces;
+    let is_prebind = prebind.is_some();
     let cancellation_watch = custodian.watch_cancellation(caller_gone.clone());
     let lifecycle = Arc::new(ConnectionActorLifecycle::new());
     let stop_listener_lifecycle = Arc::clone(&lifecycle);
@@ -477,7 +914,63 @@ where
         effect_owner: Arc::clone(&effect_owner),
         handled_h_observation: handled_h_tx,
     });
-    let effect_runner_for_owner = Arc::clone(&effect_runner);
+    // Register an independent cleanup owner before spawning any actor-side
+    // task. Each handle is handed over synchronously immediately after spawn;
+    // if startup unwinds, dropping the unsent channels leaves no false join.
+    let mailbox_tracker = Arc::new(MailboxPayloadTracker::new());
+    let (actor_tx, actor_rx) = oneshot::channel();
+    let (input_tx, input_rx) = oneshot::channel();
+    let (effect_tx, effect_rx) = oneshot::channel();
+    let (output_tx, output_rx) = oneshot::channel();
+    let (registered_tx, registered_rx) = oneshot::channel();
+    let cleanup = ConnectionActorCleanup {
+        actor: actor_rx,
+        stop_signal: io_control.stop_signal.clone(),
+        input_forwarder: input_rx,
+        effect_owner: effect_rx,
+        output_driver: output_rx,
+        effect_shared: Arc::clone(&effect_owner),
+        mailbox_tracker: Arc::clone(&mailbox_tracker),
+        auxiliary_cleanup,
+    };
+    let cleanup_task = tokio::spawn(async move {
+        if registered_rx.await.is_ok() {
+            cleanup.run().await;
+        }
+    });
+    if let Err(error) = inventory.register_auxiliary_task(&connection_ref, cleanup_task) {
+        io_control.request_stop(StopReason::Requested);
+        cancellation_watch.finish().await;
+        return Err(error.into());
+    }
+    if registered_tx.send(()).is_err() {
+        io_control.request_stop(StopReason::Requested);
+        cancellation_watch.finish().await;
+        return Err(ConnectionActorStartError::StartupOwnerLost);
+    }
+    let mut startup_guard = ActorStartupGuard(Some(Arc::clone(&io_control)));
+    let (output_actor_tx, output_actor_rx) = oneshot::channel();
+    let (outbound, output_driver) = match outbound {
+        ActorStartOutput::Synthetic(sender) => (ActorOutbound::Synthetic(sender), None),
+        ActorStartOutput::WebSocket(output) => {
+            let (sender, receiver) = mpsc::channel(effect_capacity);
+            let output_control = Arc::clone(&io_control);
+            let task = tokio::spawn(drive_actor_websocket_output(
+                output,
+                receiver,
+                output_control,
+                output_actor_rx,
+            ));
+            (ActorOutbound::WebSocket(sender), Some(task))
+        }
+    };
+    if let Err(task) = output_tx.send(output_driver) {
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        return Err(ConnectionActorStartError::StartupOwnerLost);
+    }
     let actor = ConnectionActor::spawn_with_mailbox(
         ConnectionActor {
             state,
@@ -494,53 +987,80 @@ where
             active_binding_attempt: None,
             active_binding_confirmed: false,
             binding_handoff_task: None,
+            prebind,
         },
         mailbox::bounded(256),
     );
-    actor.wait_for_startup().await;
-    if let Some(barrier) = hooks.after_actor_started.take() {
+    let _ = output_actor_tx.send(actor.downgrade());
+    if actor_tx.send(actor.clone()).is_err() {
+        actor.kill();
+        let _ = actor.wait_for_shutdown_result().await;
+        return Err(ConnectionActorStartError::StartupOwnerLost);
+    }
+    // Kameo may kill an actor before it publishes startup. Do not retain the
+    // remaining cleanup handoffs while waiting on a signal that cannot arrive.
+    tokio::select! {
+        biased;
+        _ = io_control.stop_signal.cancelled() => {
+            cancellation_watch.finish().await;
+            return Err(SocketAdmissionError::Cancelled.into());
+        }
+        _ = actor.wait_for_shutdown_result() => {
+            cancellation_watch.finish().await;
+            return Err(ConnectionActorStartError::StartupOwnerLost);
+        }
+        _ = actor.wait_for_startup() => {}
+    }
+    if let Some(barrier) = after_actor_started {
         barrier.wait().await;
     }
 
     let (forwarded_tx, forwarded_rx) = watch::channel(0usize);
-    let mailbox_tracker = Arc::new(MailboxPayloadTracker::new());
     let pump_actor = actor.clone();
     let forward_tracker = Arc::clone(&mailbox_tracker);
     let input_forwarder = tokio::spawn(async move {
-        forward_inbound_frames(inbound, pump_actor, forward_tracker, forwarded_tx).await;
+        match inbound {
+            ActorStartInput::Synthetic(inbound) => {
+                forward_inbound_frames(inbound, pump_actor, forward_tracker, forwarded_tx).await;
+            }
+            ActorStartInput::WebSocket(inbound) => {
+                forward_websocket_frames(
+                    inbound,
+                    pump_actor,
+                    forward_tracker,
+                    forwarded_tx,
+                    is_prebind,
+                )
+                .await;
+            }
+        }
     });
-    let forwarder_abort = input_forwarder.abort_handle();
+    if let Err(task) = input_tx.send(input_forwarder) {
+        task.abort();
+        let _ = task.await;
+        return Err(ConnectionActorStartError::StartupOwnerLost);
+    }
     let effect_owner_task = EffectOwnerTask {
         receiver: effect_jobs_rx,
         shared: Arc::clone(&effect_owner),
         stop_signal: io_control.stop_signal.clone(),
         actor: actor.downgrade(),
         io_control: Arc::downgrade(&io_control),
-        effect_runner: effect_runner_for_owner,
+        effect_runner: Arc::clone(&effect_runner),
     };
     let effect_owner_join = tokio::spawn(effect_owner_task.run());
     let effect_owner_abort = effect_owner_join.abort_handle();
-    let cleanup_task = tokio::spawn(
-        ConnectionActorCleanup {
-            actor: actor.clone(),
-            stop_signal: io_control.stop_signal.clone(),
-            forwarder_abort,
-            input_forwarder,
-            effect_owner: effect_owner_join,
-            effect_shared: Arc::clone(&effect_owner),
-            mailbox_tracker,
-            auxiliary_cleanup,
-        }
-        .run(),
-    );
-    if let Err(error) = inventory.register_auxiliary_task(&connection_ref, cleanup_task) {
+    if let Err(task) = effect_tx.send(effect_owner_join) {
+        task.abort();
+        let _ = task.await;
+        return Err(ConnectionActorStartError::StartupOwnerLost);
+    }
+    startup_guard.0 = None;
+
+    if caller_gone.is_cancelled() || io_control.stop_signal.is_cancelled() {
         io_control.request_stop(StopReason::Requested);
         cancellation_watch.finish().await;
-        return Err(error.into());
-    }
-
-    if caller_gone.is_cancelled() {
-        io_control.request_stop(StopReason::Requested);
+        return Err(SocketAdmissionError::Cancelled.into());
     }
     cancellation_watch.finish().await;
 
@@ -580,6 +1100,176 @@ async fn forward_inbound_frames(
             forwarded.send_replace(forwarded_count);
         } else {
             drop(item);
+        }
+    }
+}
+
+/// Parse only the synthetic actor's narrow fixture protocol. Raw data stays
+/// under the pump's permits through typed conversion and actor/effect custody.
+async fn forward_websocket_frames(
+    mut input: WebSocketInput<axum::Error>,
+    actor: ActorRef<ConnectionActor>,
+    mailbox_tracker: Arc<MailboxPayloadTracker>,
+    forwarded: watch::Sender<usize>,
+    is_prebind: bool,
+) {
+    use waddle_xmpp::protocol::frame::{parse_frame_with_metadata, InboundFrame};
+    use waddle_xmpp::stream_management::SmStanza;
+    let mut forwarded_count = 0usize;
+    while let Some(item) = input.recv_retained().await {
+        let raw = match item {
+            Ok(RetainedWebSocketInput::Frame(frame)) => frame,
+            Ok(RetainedWebSocketInput::Close(frame)) => {
+                drop(frame);
+                break;
+            }
+            Err(_) => break,
+        };
+        // Axum/tungstenite queues a matching Pong for Ping and flushes it on
+        // the next socket poll. These control frames have no XMPP semantics;
+        // drop their retained inbound permits without forwarding them.
+        if is_prebind
+            && matches!(
+                &raw.value,
+                WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_)
+            )
+        {
+            continue;
+        }
+        let typed = raw.map(|frame| match frame {
+            WebSocketMessage::Text(text) => {
+                let wire_bytes = text.len();
+                if is_prebind {
+                    ConnectionWireFrame::Prebind {
+                        input: Arc::new(prebind::parse_input(text.as_str())),
+                        wire_bytes,
+                    }
+                } else if SmStanza::is_client_nonza_candidate(text.as_str()) {
+                    if matches!(SmStanza::parse(text.as_str()), Some(SmStanza::Request)) {
+                        ConnectionWireFrame::RequestAcknowledgement { wire_bytes }
+                    } else {
+                        ConnectionWireFrame::RejectedInbound { wire_bytes }
+                    }
+                } else {
+                    match parse_frame_with_metadata(text.as_str()) {
+                        Ok(parsed) => match parsed.frame {
+                            InboundFrame::Stanza(stanza) => ConnectionWireFrame::CountableStanza {
+                                stanza: Arc::new(*stanza),
+                                wire_bytes,
+                            },
+                            _ => ConnectionWireFrame::RejectedInbound { wire_bytes },
+                        },
+                        Err(_) => ConnectionWireFrame::RejectedInbound { wire_bytes },
+                    }
+                }
+            }
+            WebSocketMessage::Binary(bytes) if is_prebind => ConnectionWireFrame::Prebind {
+                input: Arc::new(prebind::PrebindInput::NonText),
+                wire_bytes: bytes.len(),
+            },
+            WebSocketMessage::Binary(bytes) => ConnectionWireFrame::RejectedInbound {
+                wire_bytes: bytes.len(),
+            },
+            _ if is_prebind => ConnectionWireFrame::Prebind {
+                input: Arc::new(prebind::PrebindInput::NonText),
+                wire_bytes: 0,
+            },
+            _ => ConnectionWireFrame::RejectedInbound { wire_bytes: 0 },
+        });
+        if matches!(
+            &typed.value,
+            ConnectionWireFrame::RequestAcknowledgement { .. }
+                | ConnectionWireFrame::CountableStanza { .. }
+                | ConnectionWireFrame::Prebind { .. }
+        ) {
+            let item = TrackedQueueItem::new(typed, Arc::clone(&mailbox_tracker));
+            if actor
+                .tell(ForwardedInboundFrame(item))
+                .send()
+                .await
+                .is_err()
+            {
+                return;
+            }
+            forwarded_count = forwarded_count.saturating_add(1);
+            forwarded.send_replace(forwarded_count);
+        }
+    }
+}
+
+/// A single bounded driver owns the fenced output adapter. The actor only
+/// performs `try_send` into this queue and never waits for socket readiness.
+async fn drive_actor_websocket_output(
+    mut output: WebSocketOutput<axum::Error>,
+    mut requests: mpsc::Receiver<ActorOutput>,
+    control: Arc<ConnectionActorIoControl>,
+    actor: oneshot::Receiver<kameo::actor::WeakActorRef<ConnectionActor>>,
+) {
+    let actor = match actor.await {
+        Ok(actor) => actor,
+        Err(_) => return,
+    };
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = control.stop_signal.cancelled() => break,
+            request = requests.recv() => match request { Some(request) => request, None => break },
+        };
+        let (id, frame) = match request {
+            ActorOutput::Acknowledgement(ack) => (
+                None,
+                output.data_frame(WebSocketMessage::Text(ack.to_xml().into())),
+            ),
+            ActorOutput::Prebind { id, frame } => (
+                Some(id),
+                match frame {
+                    prebind::PrebindOutput::Element(element) => {
+                        output.data_frame(WebSocketMessage::Text(
+                            super::transport_xml::element_to_xml(element).into(),
+                        ))
+                    }
+                    prebind::PrebindOutput::TransportClose => output.transport_close_frame(None),
+                },
+            ),
+        };
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(_) => {
+                control.request_stop(StopReason::Requested);
+                break;
+            }
+        };
+        let receipt = tokio::select! {
+            biased;
+            _ = control.stop_signal.cancelled() => break,
+            receipt = output.submit(frame) => match receipt {
+                Ok(receipt) => receipt,
+                Err(_) => { control.request_stop(StopReason::Requested); break; }
+            },
+        };
+        let progress = tokio::select! {
+            biased;
+            _ = control.stop_signal.cancelled() => break,
+            progress = receipt.wait_for_terminal() => progress,
+        };
+        if let Some(id) = id {
+            if let Some(actor) = actor.upgrade() {
+                let completed = actor
+                    .tell(prebind::PrebindWriteCompleted { id, progress })
+                    .send();
+                tokio::select! {
+                    biased;
+                    _ = control.stop_signal.cancelled() => break,
+                    result = completed => if result.is_err() { control.request_stop(StopReason::Requested); break; },
+                }
+            } else {
+                control.request_stop(StopReason::Requested);
+                break;
+            }
+        }
+        if progress != super::supervised_io::WriteProgress::Completed {
+            control.request_stop(StopReason::Requested);
+            break;
         }
     }
 }
@@ -860,12 +1550,22 @@ impl Drop for EffectOwnerTask {
     }
 }
 
+struct ActorStartupGuard(Option<Arc<ConnectionActorIoControl>>);
+
+impl Drop for ActorStartupGuard {
+    fn drop(&mut self) {
+        if let Some(control) = self.0.take() {
+            control.request_stop(StopReason::Requested);
+        }
+    }
+}
+
 struct ConnectionActorCleanup {
-    actor: ActorRef<ConnectionActor>,
+    actor: oneshot::Receiver<ActorRef<ConnectionActor>>,
     stop_signal: super::supervised_io::StopSignal,
-    forwarder_abort: AbortHandle,
-    input_forwarder: JoinHandle<()>,
-    effect_owner: JoinHandle<()>,
+    input_forwarder: oneshot::Receiver<JoinHandle<()>>,
+    effect_owner: oneshot::Receiver<JoinHandle<()>>,
+    output_driver: oneshot::Receiver<Option<JoinHandle<()>>>,
     effect_shared: Arc<EffectOwnerShared>,
     mailbox_tracker: Arc<MailboxPayloadTracker>,
     auxiliary_cleanup: AuxiliaryCleanupGuard,
@@ -874,12 +1574,24 @@ struct ConnectionActorCleanup {
 impl ConnectionActorCleanup {
     async fn run(self) {
         self.stop_signal.cancelled().await;
-        self.actor.kill();
-        self.forwarder_abort.abort();
         self.effect_shared.mark_unavailable();
-        let _ = self.input_forwarder.await;
-        let _ = self.effect_owner.await;
-        let _ = self.actor.wait_for_shutdown_result().await;
+        let actor = self.actor.await.ok();
+        if let Some(actor) = &actor {
+            actor.kill();
+        }
+        if let Ok(input_forwarder) = self.input_forwarder.await {
+            input_forwarder.abort();
+            let _ = input_forwarder.await;
+        }
+        if let Ok(effect_owner) = self.effect_owner.await {
+            let _ = effect_owner.await;
+        }
+        if let Ok(Some(output_driver)) = self.output_driver.await {
+            let _ = output_driver.await;
+        }
+        if let Some(actor) = actor {
+            let _ = actor.wait_for_shutdown_result().await;
+        }
         self.mailbox_tracker.wait_until_empty().await;
         self.auxiliary_cleanup.complete();
     }
@@ -1070,7 +1782,7 @@ impl ConnectionActorLifecycleGuard<'_> {
 pub struct ConnectionActor {
     state: WsConnState,
     io_control: Arc<ConnectionActorIoControl>,
-    outbound: WriteSender<ConnectionWireFrame>,
+    outbound: ActorOutbound,
     effect_owner: Arc<EffectOwnerShared>,
     lifecycle_handoff_deadline: Duration,
     next_handled_nonce: u64,
@@ -1082,6 +1794,7 @@ pub struct ConnectionActor {
     active_binding_attempt: Option<ConnectionActorBindingAttempt>,
     active_binding_confirmed: bool,
     binding_handoff_task: Option<JoinHandle<()>>,
+    prebind: Option<prebind::PrebindState>,
 }
 
 struct HandledOperation {
@@ -1117,10 +1830,26 @@ impl ConnectionActor {
         // enter without re-locking this actor's own gate. This is not an atomic
         // output-authority fence: a stop can race between preflight and queue
         // admission, which remains a live-cutover blocker.
-        self.outbound
-            .try_send(ConnectionWireFrame::Acknowledgement(ack), byte_len)
-            .map(|_| ())
-            .map_err(ConnectionActorError::from)
+        match &self.outbound {
+            ActorOutbound::Synthetic(outbound) => outbound
+                .try_send(ConnectionWireFrame::Acknowledgement(ack), byte_len)
+                .map(|_| ())
+                .map_err(ConnectionActorError::from),
+            ActorOutbound::WebSocket(outbound) => {
+                match outbound.try_send(ActorOutput::Acknowledgement(ack)) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.io_control.request_stop(StopReason::OutboundOverload);
+                        Err(ConnectionActorError::Admission(AdmissionError::Overloaded))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        self.io_control
+                            .request_stop(StopReason::OutboundQueueClosed);
+                        Err(ConnectionActorError::Admission(AdmissionError::Closed))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1378,6 +2107,9 @@ pub enum ConnectionActorError {
     /// The independent pump custodian has already been asked to stop.
     #[error("connection transport is stopping")]
     ConnectionStopping,
+    /// The pre-bind fixture does not support synthetic binding or SM operations.
+    #[error("operation is unavailable in the pre-bind fixture")]
+    PrebindFixtureOnly,
     /// The bounded writer queue rejected this output.
     #[error("outbound writer queue rejected the frame: {0:?}")]
     Admission(AdmissionError),
@@ -1445,6 +2177,9 @@ impl ConnectionActor {
         &mut self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorSequence, ConnectionActorError> {
+        if self.prebind.is_some() {
+            return Err(ConnectionActorError::PrebindFixtureOnly);
+        }
         let lifecycle_owner = Arc::clone(&self.io_control.lifecycle);
         let mut lifecycle = lifecycle_owner.lock_running()?;
         self.reserve_handled_operation_locked(operation_id, &mut lifecycle, true)
@@ -1798,6 +2533,9 @@ impl Message<SeedInboundCounterForTest> for ConnectionActor {
         msg: SeedInboundCounterForTest,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.prebind.is_some() {
+            return Err(ConnectionActorError::PrebindFixtureOnly);
+        }
         let _lifecycle = match self.io_control.lifecycle.lock_running() {
             Ok(lifecycle) => lifecycle,
             Err(error) => return Err(error),
@@ -1848,6 +2586,10 @@ impl Message<ForwardedInboundFrame> for ConnectionActor {
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let tracked = msg.0;
+        if self.prebind.is_some() {
+            self.handle_prebind_input(tracked);
+            return;
+        }
         let request_acknowledgement = tracked.item.as_ref().is_some_and(|item| {
             matches!(
                 &item.value,
@@ -1952,6 +2694,9 @@ impl ConnectionActor {
         &mut self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorBindingAttempt, ConnectionActorError> {
+        if self.prebind.is_some() {
+            return Err(ConnectionActorError::PrebindFixtureOnly);
+        }
         let _lifecycle = self.io_control.lifecycle.lock_running()?;
         if let Some(active) = &self.active_binding_attempt {
             if active.operation_id == operation_id {
@@ -2049,6 +2794,9 @@ impl ConnectionActor {
         &mut self,
         attempt: ConnectionActorBindingAttempt,
     ) -> Result<(), ConnectionActorError> {
+        if self.prebind.is_some() {
+            return Err(ConnectionActorError::PrebindFixtureOnly);
+        }
         let mut lifecycle = self.io_control.lifecycle.lock_running()?;
         if attempt.connection_ref != *self.state.connection_ref() {
             return Err(ConnectionActorError::BindingConnectionMismatch);

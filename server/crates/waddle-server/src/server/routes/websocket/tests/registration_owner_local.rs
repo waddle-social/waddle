@@ -20,7 +20,7 @@ use tokio::time::{timeout, Duration};
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
-use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState};
+use waddle_xmpp::registry::{ForceDetachOrigin, LocalSocketIo, SocketCleanupState};
 
 #[tokio::test]
 async fn remote_fresh_bind_interrupts_owner_local_write_in_readiness() {
@@ -118,12 +118,13 @@ where
     // fresh replacement and retire, rather than preserve, the old SM state.
     let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
     let mut pending_force_detach = Vec::new();
+    let (socket_io, _) = LocalSocketIo::new(sink, reader);
     timeout(
         Duration::from_secs(1),
         finish_connection(
             &state,
             &mut incumbent,
-            sink.uninterrupted(),
+            socket_io,
             FrameAuthority {
                 permit: &permit,
                 shutdown: &shutdown,

@@ -226,17 +226,18 @@ pub struct ForceDetachRequest {
     /// identity-gated, including on the cross-node resume path that already
     /// checked the registry's reverse index before sending.
     pub requester_bare_jid: jid::BareJid,
-    /// Answered exactly once, after the connection either force-detaches
-    /// (identity matched) or declines (identity mismatch).
+    /// Reply for this request. An unanswered or dropped sender is
+    /// inconclusive; only [`ForceDetachOutcome::Detached`] proves the
+    /// force-detach completion required by a resumer.
     pub ack: tokio::sync::oneshot::Sender<ForceDetachOutcome>,
 }
 
 /// Outcome of a [`ForceDetachRequest`], reported back to the asker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ForceDetachOutcome {
-    /// Identity matched, the connection sent `<conflict/>` and closed, AND
-    /// its subsequent XEP-0198 detach-for-resume cleanup actually persisted
-    /// a resumable snapshot (council-adjudicated fix: this is the ONLY
+    /// Identity matched, the connection followed the force-detach path (with
+    /// a bounded conflict-close attempt where possible), and XEP-0198 cleanup
+    /// persisted a resumable snapshot (council-adjudicated fix: this is the ONLY
     /// variant that authorizes the asker to proceed with
     /// `steal_for_resume` — see [`Self::NotPersisted`] for every other
     /// outcome of that same cleanup pass).
@@ -244,17 +245,12 @@ pub enum ForceDetachOutcome {
     /// The requester's bare JID did not match this connection's own bound
     /// JID — the destructive close was refused.
     IdentityMismatch,
-    /// Identity matched and the connection closed, but its detach-for
-    /// -resume cleanup did NOT end in a persisted, resumable snapshot
-    /// (council-adjudicated fix — a storage-write failure that fell back to
-    /// full cleanup, an ownership race that promoted the queue instead of
-    /// storing it, no registry ownership at all, or any other early-return
-    /// path in `cleanup_connection_shutdown`). Distinct from
-    /// [`Self::Detached`] so the asker never proceeds with
-    /// `steal_for_resume` against a snapshot that was never actually
-    /// written — the caller maps this the same as
-    /// `LocalForcedDetachOutcome::NotLiveLocally` (re-check persistence and
-    /// retry).
+    /// This request did not obtain proof of a completed force-detach and a
+    /// persisted resumable snapshot. Cleanup may have failed, or an ordinary
+    /// shutdown may have already selected its own cleanup before this request
+    /// was observed. This outcome does not prove that no snapshot exists:
+    /// callers must re-check persistence and retry rather than treating it as
+    /// [`Self::Detached`].
     NotPersisted,
 }
 
@@ -280,6 +276,8 @@ pub struct ConnectionEntry {
     // The current v4 remote registration carries only the physical source.
     // A mirror must not fabricate a source binding attempt from its own ID.
     binding_ref: Option<BindingRef>,
+    // Present only when supplied by this node's physical transport owner.
+    local_io_relinquishment: Option<super::LocalIoRelinquishment>,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
@@ -402,6 +400,19 @@ impl ConnectionEntry {
         )
     }
 
+    /// Associate this local binding with its physical socket's observer. The
+    /// caller must supply the observer created with this binding's transport;
+    /// every later binding on that socket must retain the same observer.
+    pub fn new_for_binding_with_local_io(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+        witness: super::LocalIoRelinquishment,
+    ) -> Self {
+        let mut entry = Self::new_for_binding(endpoint, binding_ref);
+        entry.local_io_relinquishment = Some(witness);
+        entry
+    }
+
     /// Create a non-admitting local binding candidate for the dark P3.1
     /// admission transition. The returned type cannot be passed to registry
     /// or UserActor publication APIs; exact activation converts it into a
@@ -434,6 +445,7 @@ impl ConnectionEntry {
             binding_id,
             connection_ref,
             binding_ref,
+            local_io_relinquishment: None,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
@@ -523,6 +535,12 @@ impl ConnectionEntry {
     /// remote-hosted mirror returns `None` instead of minting a false attempt.
     pub fn binding_ref(&self) -> Option<&BindingRef> {
         self.binding_ref.as_ref()
+    }
+
+    /// Local I/O evidence, when supplied by the actual socket owner. Remote
+    /// mirrors and entries constructed without that owner have no witness.
+    pub fn local_io_relinquishment(&self) -> Option<&super::LocalIoRelinquishment> {
+        self.local_io_relinquishment.as_ref()
     }
 
     /// Read-only observation for the WebSocket queue characterization seam.

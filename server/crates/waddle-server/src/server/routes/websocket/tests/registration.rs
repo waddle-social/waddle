@@ -68,6 +68,9 @@ mod owner_local;
 #[path = "registration_remote_retirement.rs"]
 mod remote_retirement;
 
+#[path = "connection_shutdown_order.rs"]
+mod connection_shutdown_order;
+
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn registration_reacquires_locally_when_foreign_owner_disappears_before_relay() {
@@ -1115,8 +1118,15 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
             .await
             .expect("model pre-V0013 persisted session");
     }
-    let mut conn = WsConnState::new();
-    let physical_connection_ref = conn.connection_ref.clone();
+    let admission = state
+        .deps
+        .app_state
+        .websocket_admission_gate()
+        .expect("admission gate")
+        .reserve(state.deps.shutdown.stop_token())
+        .expect("socket reservation");
+    let physical_connection_ref = admission.connection_ref().clone();
+    let mut conn = WsConnState::new_for_connection_ref(physical_connection_ref.clone());
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session);
     let (endpoint, _rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(4);
@@ -1696,11 +1706,19 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 
 #[tokio::test]
 async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control() {
+    use super::super::connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority};
+    use super::super::send::InterruptibleSink;
+    use waddle_xmpp::registry::LocalSocketIo;
     use waddle_xmpp::stream_management::{DetachedSession, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let state = create_test_websocket_state().await;
     let mut conn = WsConnState::new();
+    // The sink and receiver stand in for the same physical connection through
+    // the failed resume, fresh bind, and production shutdown tail.
+    let sink = InterruptibleSink::new(futures::sink::drain(), conn.write_interruption.clone());
+    let (socket_io, witness) = LocalSocketIo::new(sink, ());
+    conn.local_io_relinquishment = Some(witness);
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "registration-resume-gap-stream".to_string();
     let session = create_test_session(state.as_ref(), "alice").await;
@@ -1771,16 +1789,39 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
             .expect("record into claimed session");
     }
 
-    let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
     let mut pending_tx = Some(tx.clone());
     let adopted_generation = conn.occupancy_session;
-    let result = register_bound_connection_after_frame(
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let registration = register_bound_connection_after_frame(
         state.as_ref(),
         "example.com",
         &mut conn,
         &mut pending_tx,
-    )
-    .await;
+    );
+    let capture_failed_entry = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("resume entry publication");
+        let entry = state
+            .deps
+            .protocol
+            .connection_registry
+            .entry(&jid)
+            .expect("resume entry published");
+        assert!(!entry
+            .local_io_relinquishment()
+            .expect("local witness")
+            .is_relinquished());
+        release.notify_one();
+        entry
+    };
+    let (result, failed_entry) = tokio::join!(
+        super::super::registration::LOCAL_PUBLICATION_GATE
+            .scope((entered.clone(), release.clone()), registration),
+        capture_failed_entry,
+    );
 
     assert!(matches!(
         result,
@@ -1818,6 +1859,10 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
     // bind on this SAME socket waits for its own nonexistent shutdown.
     assert_ne!(conn.occupancy_session, adopted_generation);
     assert!(conn.socket_lifecycle.is_none());
+    assert!(!failed_entry
+        .local_io_relinquishment()
+        .expect("failed binding witness")
+        .is_relinquished());
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
     pending_tx = Some(tx);
     let fresh = tokio::time::timeout(
@@ -1848,6 +1893,52 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
         .is_owned_by(&jid, conn.registry_owner.as_ref().unwrap()));
     assert!(!conn.blocklist_interested);
     assert_fresh_bind_resume_control_tracks_new_stream(&state, &mut conn, &jid).await;
+
+    let fresh_entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(&jid)
+        .expect("fresh binding entry");
+    assert_eq!(failed_entry.connection_ref(), fresh_entry.connection_ref());
+    assert_ne!(
+        failed_entry.binding_ref().expect("failed binding identity"),
+        fresh_entry.binding_ref().expect("fresh binding identity")
+    );
+    assert!(!fresh_entry
+        .local_io_relinquishment()
+        .expect("fresh binding witness")
+        .is_relinquished());
+    let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let mut force_detach_rx = None;
+    let mut pending_force_detach = Vec::new();
+    finish_connection(
+        &state,
+        &mut conn,
+        socket_io,
+        FrameAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+        false,
+        ConnectionShutdownChannels {
+            outbound_rx: &mut rx,
+            handoff_rx: &mut handoff_rx,
+            force_detach_rx: &mut force_detach_rx,
+            pending_force_detach: &mut pending_force_detach,
+        },
+    )
+    .await;
+    assert!(failed_entry
+        .local_io_relinquishment()
+        .expect("failed binding witness")
+        .is_relinquished());
+    assert!(fresh_entry
+        .local_io_relinquishment()
+        .expect("fresh binding witness")
+        .is_relinquished());
 }
 
 #[tokio::test]

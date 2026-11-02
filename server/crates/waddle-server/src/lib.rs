@@ -67,3 +67,7 @@ pub mod time;
 pub mod vcard;
 
 pub use config::{ServerConfig, ServerMode};
+
+/// Supervised WebSocket transport primitives for the future connection owner.
+#[doc(hidden)]
+pub mod websocket_transport;

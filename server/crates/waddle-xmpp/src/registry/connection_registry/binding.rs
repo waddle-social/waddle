@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex, OwnedMutexGuard};
 use waddle_xmpp_core::OccupancySessionGeneration;
 
-/// Completion of the owning socket task, independent of routing publication.
+/// Binding cleanup progress, independent of physical I/O relinquishment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketCleanupState {
     Running,

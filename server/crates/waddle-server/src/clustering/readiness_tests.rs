@@ -131,6 +131,121 @@ fn only_serving_nodes_issue_admission_permits() {
         .is_ok());
 }
 
+#[test]
+fn transition_first_rejects_the_synchronous_admission_enqueue() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct CountingStartSend<'a>(&'a AtomicBool);
+
+    impl CountingStartSend<'_> {
+        fn start_send(&mut self) -> Result<(), &'static str> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let lifecycle = NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let transition_complete = std::sync::Barrier::new(2);
+
+    std::thread::scope(|scope| {
+        let transition_lifecycle = &lifecycle;
+        let transition_complete_worker = &transition_complete;
+        let transition = scope.spawn(move || {
+            transition_lifecycle.begin_fenced_recovery();
+            transition_complete_worker.wait();
+        });
+
+        // The barrier establishes that the lifecycle transition has fully
+        // completed before the sink's synchronous start_send is attempted.
+        transition_complete.wait();
+        let called = AtomicBool::new(false);
+        let mut sink = CountingStartSend(&called);
+        let result = permit.start_send_if_current(|| sink.start_send());
+
+        assert!(matches!(
+            result,
+            Err(NodeAdmissionError::NotServing(
+                NodeAdmission::FencedRecovering
+            ))
+        ));
+        assert!(!called.load(Ordering::SeqCst));
+        transition.join().expect("transition worker completes");
+    });
+}
+
+#[test]
+fn synchronous_enqueue_precedes_a_waiting_lifecycle_transition() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct BarrierStartSend<'a> {
+        entered: &'a std::sync::Barrier,
+        release: &'a std::sync::Barrier,
+        completed: &'a AtomicBool,
+    }
+
+    impl BarrierStartSend<'_> {
+        fn start_send(&mut self) -> Result<(), &'static str> {
+            self.entered.wait();
+            self.release.wait();
+            self.completed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let lifecycle = NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let start_entered = std::sync::Barrier::new(2);
+    let release_start = std::sync::Barrier::new(2);
+    let transition_attempting = std::sync::Barrier::new(2);
+    let start_completed = AtomicBool::new(false);
+    let transition_observed_start = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        let mut sink = BarrierStartSend {
+            entered: &start_entered,
+            release: &release_start,
+            completed: &start_completed,
+        };
+        let send = scope.spawn(move || permit.start_send_if_current(|| sink.start_send()));
+
+        // The fake sink's start_send is now in progress under the lifecycle
+        // read guard. The writer's nonblocking probe proves it cannot acquire
+        // the lifecycle lock before that call returns.
+        start_entered.wait();
+        let transition_lifecycle = &lifecycle;
+        let transition_attempting_worker = &transition_attempting;
+        let start_completed_worker = &start_completed;
+        let transition_observed_start_worker = &transition_observed_start;
+        let transition = scope.spawn(move || {
+            assert!(matches!(
+                transition_lifecycle.state.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            transition_attempting_worker.wait();
+            transition_lifecycle.begin_fenced_recovery();
+            transition_observed_start_worker.store(
+                start_completed_worker.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+        });
+
+        transition_attempting.wait();
+        release_start.wait();
+
+        assert!(matches!(
+            send.join().expect("send worker completes"),
+            Ok(Ok(()))
+        ));
+        transition
+            .join()
+            .expect("transition worker completes after enqueue");
+    });
+
+    assert!(transition_observed_start.load(Ordering::SeqCst));
+    assert_eq!(lifecycle.admission(), NodeAdmission::FencedRecovering);
+}
+
 #[tokio::test]
 async fn old_generation_revocation_stays_latched_after_recovery() {
     let lifecycle = NodeLifecycle::new();

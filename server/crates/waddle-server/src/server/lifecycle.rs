@@ -289,6 +289,7 @@ pub async fn start_with_config(
         permission_actor: permission_actor.clone(),
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),
+        max_websocket_connections: server_config.max_websocket_connections,
         clustering_claims: clustering_handles,
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,

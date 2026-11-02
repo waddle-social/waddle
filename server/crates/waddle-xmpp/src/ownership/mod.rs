@@ -73,6 +73,7 @@ pub use claims::EntityType;
 pub use claims::ExactReleaseOutcome;
 use claims::NodeAuthority;
 pub use claims::NodeIdentity;
+pub use claims::NodeIdentityStamp;
 use claims::RawEntity;
 pub use claims::RolloutBackoff;
 pub use claims::SharedNodeIdentity;

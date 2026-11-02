@@ -127,6 +127,46 @@ impl NodeAdmissionPermit {
         Ok(())
     }
 
+    /// Validate this exact serving generation while performing one
+    /// synchronous sink enqueue under the same read guard. This closes the
+    /// gap between a successful validation and `Sink::start_send`: a
+    /// lifecycle writer either completes first and rejects the enqueue, or
+    /// waits until the enqueue has returned.
+    ///
+    /// The closure is intentionally synchronous and must contain only the
+    /// `Sink::start_send` call. It must not await or re-enter this lifecycle.
+    /// The guard is dropped as soon as that call returns; a later flush may
+    /// still reach the underlying WebSocket after revocation as already-
+    /// authorized in-flight work.
+    pub(crate) fn start_send_if_current<E>(
+        &self,
+        start_send: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Result<(), E>, NodeAdmissionError> {
+        self.with_current(start_send)
+    }
+
+    /// Run a short synchronous local effect under this exact serving
+    /// generation. The closure must not await or re-enter the lifecycle.
+    pub(crate) fn with_current<R>(
+        &self,
+        effect: impl FnOnce() -> R,
+    ) -> Result<R, NodeAdmissionError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if !matches!(state.admission, NodeAdmission::Serving) {
+            return Err(NodeAdmissionError::NotServing(state.admission.clone()));
+        }
+        if state.generation != self.generation {
+            return Err(NodeAdmissionError::Revoked);
+        }
+
+        let result = effect();
+        drop(state);
+        Ok(result)
+    }
+
     /// Resolve as soon as the lifecycle leaves the exact serving generation
     /// that admitted this socket. The token stays cancelled after recovery,
     /// so an old transport can never become authoritative again.

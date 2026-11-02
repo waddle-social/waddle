@@ -20,7 +20,9 @@ use std::time::Duration;
 use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
 use waddle_xmpp::muc::room_registry_actor::CreateRoom;
 use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
-use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, SocketCleanupState};
+use waddle_xmpp::registry::{
+    ForceDetachOrigin, ForceDetachOutcome, LocalSocketIo, SocketCleanupState,
+};
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 #[tokio::test]
@@ -149,12 +151,13 @@ where
     );
     let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
     let mut pending = Vec::new();
+    let (socket_io, _) = LocalSocketIo::new(sink, reader);
     let (_, reply) = tokio::time::timeout(Duration::from_secs(1), async {
         tokio::join!(
             finish_connection(
                 &state,
                 &mut incumbent,
-                sink.uninterrupted(),
+                socket_io,
                 FrameAuthority {
                     permit: &permit,
                     shutdown: &shutdown,

@@ -611,7 +611,14 @@ where
     };
 
     conn.binding_ref = Some(binding_ref.clone());
-    let mut entry = waddle_xmpp::registry::ConnectionEntry::new_for_binding(tx, binding_ref);
+    let mut entry = match &conn.local_io_relinquishment {
+        Some(witness) => waddle_xmpp::registry::ConnectionEntry::new_for_binding_with_local_io(
+            tx,
+            binding_ref,
+            witness.clone(),
+        ),
+        None => waddle_xmpp::registry::ConnectionEntry::new_for_binding(tx, binding_ref),
+    };
     entry.write_interruption = conn.write_interruption.clone();
     let wired = entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone());
     debug_assert!(wired, "new connection resume control must be unbound");

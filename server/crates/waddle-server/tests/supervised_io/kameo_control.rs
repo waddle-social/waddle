@@ -271,16 +271,17 @@ async fn custodian_inventory_refuses_duplicates_and_full_entries_and_prunes_only
             .expect("join first pumps"),
         CustodianState::Joined
     );
-    assert_eq!(inventory.prune_joined(), 1);
-    assert!(inventory.observe(&first_ref).is_none());
-
     inventory
         .try_retain(&second)
-        .expect("joined entry freed its slot");
+        .expect("joined entry is reclaimed under admission pressure");
+    assert!(inventory.observe(&first_ref).is_none());
+    assert_eq!(first_observer.state(), CustodianState::Joined);
+    assert_eq!(inventory.prune_joined(), 0, "new active entry is retained");
     second.request_stop(StopReason::Requested);
     timeout(Duration::from_secs(5), second.wait_until_joined())
         .await
         .expect("join second pumps");
+    assert_eq!(inventory.prune_joined(), 1);
 }
 
 #[derive(Default)]

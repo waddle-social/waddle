@@ -16,6 +16,7 @@ futures = { workspace = true }
 
 # Web Framework
 axum = { workspace = true }
+tungstenite = { version = "0.29", default-features = false }
 axum-extra = { workspace = true }
 tower-http = { workspace = true }
 

@@ -12,17 +12,20 @@ pub mod connection_actor {
     //! Dark, test-only vertical proof for a connection actor that owns the
     //! real WebSocket connection state and its reserved physical pump pair.
     pub use crate::server::routes::websocket::connection_actor::{
-        start_connection_actor, start_connection_actor_with_effect,
-        start_connection_actor_with_hooks, AcknowledgementResult, CompleteHandledInbound,
-        CompleteHandledInboundAtLifecycleGate, CompleteHandledInboundBeforeLifecycleGate,
-        ConfirmBindingInstall, ConnectionActor, ConnectionActorBindingAttempt,
-        ConnectionActorController, ConnectionActorError, ConnectionActorGateBarrier,
-        ConnectionActorOperationId, ConnectionActorSequence, ConnectionActorSnapshot,
-        ConnectionActorStartBarrier, ConnectionActorStartError, ConnectionActorStartHooks,
-        ConnectionWireFrame, CountableEffectDisposition, CountableInboundEffect,
-        CountableStanzaEffect, InstallBinding, PanicConnectionActor, PauseConnectionActor,
+        canonical_actor_gate, start_connection_actor, start_connection_actor_with_effect,
+        start_connection_actor_with_hooks, AcknowledgementResult, CanonicalActorAdmission,
+        CanonicalActorGate, CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
+        CompleteHandledInboundBeforeLifecycleGate, CompletePrebindAuth,
+        CompleteValidatedPrebindAuth, ConfirmBindingInstall, ConnectionActor,
+        ConnectionActorBindingAttempt, ConnectionActorController, ConnectionActorError,
+        ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorSequence,
+        ConnectionActorSnapshot, ConnectionActorStartBarrier, ConnectionActorStartError,
+        ConnectionActorStartHooks, ConnectionWireFrame, CountableEffectDisposition,
+        CountableInboundEffect, CountableStanzaEffect, InstallBinding, PanicConnectionActor,
+        PauseConnectionActor, PrebindAuthAttempt, PrebindAuthOutcome, PrebindAuthToken,
+        PrebindInput, PrebindPhase, PrebindSaslInput, PrebindSnapshot, PrebindValidationAttempt,
         PrepareBinding, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
-        SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
+        SeedInboundCounterForTest, SnapshotConnection, SnapshotPrebind, StopConnectionActor,
     };
 }
 
@@ -57,6 +60,30 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     create_test_websocket_state_with_ingress_factory(
         empty_extension_manager().await,
         TestStateOverrides::default(),
+        || std::future::ready(None),
+    )
+    .await
+}
+
+/// Overrides for production WebSocket admission in in-process tests.
+#[cfg(feature = "test-support")]
+pub struct WebSocketAdmissionTestConfig {
+    pub capacity: crate::config::MaxWebSocketConnections,
+    /// `None` is standalone; `Some(None)` represents missing clustered identity.
+    pub clustered_identity: Option<Option<waddle_xmpp::ownership::SharedNodeIdentity>>,
+    pub barriers: crate::websocket_transport::AdmissionTestBarriers,
+}
+
+#[cfg(feature = "test-support")]
+pub async fn websocket_state_with_admission(
+    config: WebSocketAdmissionTestConfig,
+) -> Arc<WebSocketState> {
+    create_test_websocket_state_with_ingress_factory(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            websocket_admission: Some(config),
+            ..Default::default()
+        },
         || std::future::ready(None),
     )
     .await

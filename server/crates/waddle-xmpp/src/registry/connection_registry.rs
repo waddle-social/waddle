@@ -20,6 +20,7 @@ mod binding;
 mod connections;
 pub(super) mod endpoint;
 mod live_resume;
+mod local_io;
 mod outbound;
 mod presence;
 mod resources;
@@ -30,6 +31,7 @@ mod subscriptions;
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
 pub use endpoint::{BindingAdmissionState, SocketOutboundEndpoint};
 pub use live_resume::{LiveResumeControl, LocalResumeReply};
+pub use local_io::{LocalIoRelinquishment, LocalIoRelinquishmentOutcome, LocalSocketIo};
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,

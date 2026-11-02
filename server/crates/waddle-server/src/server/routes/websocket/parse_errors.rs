@@ -5,11 +5,25 @@ use super::{
 };
 
 pub(super) fn is_sasl_parse_failure(frame: &str, err: &ParseError) -> bool {
-    match (parse_error_root_name(frame), err) {
-        (Some("auth" | "response"), ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)) => {
+    if !matches!(
+        err,
+        ParseError::MalformedSasl(_) | ParseError::InvalidXml(_)
+    ) {
+        return false;
+    }
+    match parse_error_root_name(frame) {
+        Some("auth" | "response") => {
             raw_xml_attr_value(frame, "xmlns").unwrap_or(waddle_xmpp::ns::SASL)
                 == waddle_xmpp::ns::SASL
         }
+        Some(root) => match root.split_once(':') {
+            Some((prefix, "auth" | "response")) if !prefix.is_empty() => {
+                let namespace_attr = format!("xmlns:{prefix}");
+                decoded_raw_xml_attr_value(frame, &namespace_attr).as_deref()
+                    == Some(waddle_xmpp::ns::SASL)
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

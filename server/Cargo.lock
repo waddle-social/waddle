@@ -7800,6 +7800,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "tungstenite",
  "url",
  "urlencoding",
  "uuid",

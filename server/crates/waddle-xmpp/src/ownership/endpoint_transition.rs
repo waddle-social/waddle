@@ -210,10 +210,24 @@ pub struct PreparedEndpoint {
     candidate: EndpointCandidate,
 }
 
-/// Identifies the in-flight preparation before any external work is sent.
+/// Records the transition before the first external preparation dispatch.
 /// This in-memory token does not provide a durable dispatch fence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PreparationAttempt {
+    reconciliation: PreparationReconciliation,
+}
+
+impl PreparationAttempt {
+    /// Retain only the ability to reconcile the original preparation.
+    pub fn into_reconciliation(self) -> PreparationReconciliation {
+        self.reconciliation
+    }
+}
+
+/// Exact identity for observing the original preparation's result. This
+/// handle is not a new dispatch attempt or permission to send external work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationReconciliation {
     full_jid: FullJid,
     operation_id: EndpointOperationId,
     staged_revision: EndpointRevision,
@@ -544,6 +558,79 @@ impl EndpointSlot {
             OperationDisposition::PreparationInFlight(staged_revision),
         );
         Ok(PreparationAttempt {
+            reconciliation: PreparationReconciliation {
+                full_jid: self.full_jid.clone(),
+                operation_id,
+                staged_revision,
+                candidate: staged.candidate.clone(),
+            },
+        })
+    }
+
+    fn exact_staged(
+        &self,
+        full_jid: &FullJid,
+        operation_id: EndpointOperationId,
+        staged_revision: EndpointRevision,
+        candidate: &EndpointCandidate,
+    ) -> Result<&Staged, TransitionError> {
+        if full_jid != &self.full_jid || &candidate.full_jid != full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
+        self.staged
+            .as_ref()
+            .filter(|stage| {
+                stage.operation_id == operation_id
+                    && stage.revision == staged_revision
+                    && &stage.candidate == candidate
+            })
+            .ok_or(TransitionError::StaleOperation)
+    }
+
+    /// Reacquire only a reconciliation handle for an existing in-flight or
+    /// unresolved preparation. This read does not change state or authorize
+    /// another dispatch; the caller still needs an exact known observation.
+    pub fn recover_preparation(
+        &self,
+        full_jid: &FullJid,
+        operation_id: EndpointOperationId,
+        staged_revision: EndpointRevision,
+        candidate: &EndpointCandidate,
+    ) -> Result<PreparationReconciliation, TransitionError> {
+        let staged = self.exact_staged(full_jid, operation_id, staged_revision, candidate)?;
+        if !matches!(
+            staged.unknown_commit,
+            Some(UnknownCommit::PreparationInFlight | UnknownCommit::Preparation)
+        ) {
+            return if staged.prepared.is_some() || staged.preparation_not_committed {
+                Err(TransitionError::PreparationAlreadyFinished)
+            } else {
+                Err(TransitionError::PreparationNotStarted)
+            };
+        }
+        Ok(PreparationReconciliation {
+            full_jid: self.full_jid.clone(),
+            operation_id,
+            staged_revision,
+            candidate: staged.candidate.clone(),
+        })
+    }
+
+    /// Reacquire an exact already-prepared token, including while an
+    /// activation reply is unknown. This lookup does not dispatch activation
+    /// or establish the external result used to reconcile it.
+    pub fn recover_prepared(
+        &self,
+        full_jid: &FullJid,
+        operation_id: EndpointOperationId,
+        staged_revision: EndpointRevision,
+        candidate: &EndpointCandidate,
+    ) -> Result<PreparedEndpoint, TransitionError> {
+        let staged = self.exact_staged(full_jid, operation_id, staged_revision, candidate)?;
+        if staged.prepared.is_none() {
+            return Err(TransitionError::NotPrepared);
+        }
+        Ok(PreparedEndpoint {
             full_jid: self.full_jid.clone(),
             operation_id,
             staged_revision,
@@ -556,7 +643,7 @@ impl EndpointSlot {
     /// resolved; it is never interpreted as a failed or rolled-back commit.
     pub fn prepare(
         &mut self,
-        attempt: &PreparationAttempt,
+        attempt: &PreparationReconciliation,
         observation: CommitObservation<PreparationEvidence>,
     ) -> Result<PreparedEndpoint, TransitionError> {
         if attempt.full_jid != self.full_jid {
@@ -645,7 +732,7 @@ impl EndpointSlot {
     /// serialization-barrier disposition. This fixture cannot verify it.
     pub fn resolve_preparation_not_committed(
         &mut self,
-        attempt: &PreparationAttempt,
+        attempt: &PreparationReconciliation,
         resolution: &PreparationNonCommitResolution,
     ) -> Result<(), TransitionError> {
         if attempt.full_jid != self.full_jid {
@@ -886,7 +973,8 @@ mod tests {
     ) -> PreparedEndpoint {
         let attempt = slot
             .begin_preparation(operation, revision, candidate)
-            .expect("mark preparation in flight before dispatch");
+            .expect("mark preparation in flight before dispatch")
+            .into_reconciliation();
         slot.prepare(
             &attempt,
             CommitObservation::Known(evidence(operation, revision, candidate, predecessor)),
@@ -1021,7 +1109,8 @@ mod tests {
             .expect("stage detached resume");
         let attempt = slot
             .begin_preparation(operation, staged, &candidate)
-            .expect("mark preparation in flight");
+            .expect("mark preparation in flight")
+            .into_reconciliation();
         let good = evidence(operation, staged, &candidate, Some(&old.binding_ref));
         let mut cases = Vec::new();
         let mut wrong_operation = good.clone();
@@ -1189,7 +1278,7 @@ mod tests {
             slot.activate(&forged, CommitObservation::Known(acknowledgement(&forged))),
             Err(TransitionError::NotPrepared)
         );
-        let forged_attempt = PreparationAttempt {
+        let forged_attempt = PreparationReconciliation {
             full_jid: jid(),
             operation_id: operation,
             staged_revision: staged,
@@ -1204,7 +1293,8 @@ mod tests {
         );
         let attempt = slot
             .begin_preparation(operation, staged, &candidate)
-            .expect("mark preparation in flight");
+            .expect("mark preparation in flight")
+            .into_reconciliation();
         assert_eq!(
             slot.prepare(
                 &attempt,
@@ -1325,7 +1415,8 @@ mod tests {
                 .expect("stage resume");
             let attempt = slot
                 .begin_preparation(operation, staged, &candidate)
-                .expect("record in flight before external dispatch");
+                .expect("record in flight before external dispatch")
+                .into_reconciliation();
 
             // External work may have committed, but its caller was cancelled
             // before it could report either a success or an unknown reply.
@@ -1423,6 +1514,214 @@ mod tests {
     }
 
     #[test]
+    fn lost_preparation_attempt_is_recovered_for_known_commit() {
+        let mut slot = EndpointSlot::new(jid());
+        let candidate = EndpointCandidate::new_attempt(
+            jid(),
+            new_connection(),
+            LogicalResourceGeneration::fresh(),
+            BindKind::Fresh,
+        );
+        let operation = EndpointOperationId::fresh();
+        let staged = slot
+            .stage(slot.revision(), operation, candidate.clone())
+            .expect("stage");
+        assert_eq!(
+            slot.recover_preparation(&jid(), operation, staged, &candidate),
+            Err(TransitionError::PreparationNotStarted)
+        );
+        assert_eq!(
+            slot.recover_prepared(&jid(), operation, staged, &candidate),
+            Err(TransitionError::NotPrepared)
+        );
+        {
+            let _attempt = slot
+                .begin_preparation(operation, staged, &candidate)
+                .expect("record in flight before dispatch");
+        }
+
+        let exact_jid = jid();
+        let wrong_jid = "alice@example.test/laptop".parse().expect("full JID");
+        let wrong_candidate = EndpointCandidate::new_attempt(
+            jid(),
+            new_connection(),
+            LogicalResourceGeneration::fresh(),
+            BindKind::Fresh,
+        );
+        for (key, id, revision, supplied_candidate) in [
+            (&wrong_jid, operation, staged, &candidate),
+            (&exact_jid, EndpointOperationId::fresh(), staged, &candidate),
+            (&exact_jid, operation, EndpointRevision::INITIAL, &candidate),
+            (&exact_jid, operation, staged, &wrong_candidate),
+        ] {
+            assert_eq!(
+                slot.recover_preparation(key, id, revision, supplied_candidate),
+                Err(TransitionError::StaleOperation)
+            );
+        }
+        assert_eq!(
+            slot.disposition(operation),
+            Some(OperationDisposition::PreparationInFlight(staged))
+        );
+        let before_revision = slot.revision();
+        let recovery = slot
+            .recover_preparation(&jid(), operation, staged, &candidate)
+            .expect("reacquire correlation only");
+        assert_eq!(slot.revision(), before_revision);
+        assert_eq!(slot.active(), None);
+        assert_eq!(
+            slot.disposition(operation),
+            Some(OperationDisposition::PreparationInFlight(staged))
+        );
+        assert_eq!(
+            slot.begin_preparation(operation, staged, &candidate),
+            Err(TransitionError::CommitUnknown)
+        );
+        let acknowledgement = {
+            let prepared = slot
+                .prepare(
+                    &recovery,
+                    CommitObservation::Known(evidence(operation, staged, &candidate, None)),
+                )
+                .expect("reconcile exact known committed preparation");
+            assert_eq!(
+                slot.recover_preparation(&jid(), operation, staged, &candidate),
+                Err(TransitionError::PreparationAlreadyFinished)
+            );
+            acknowledgement(&prepared)
+        };
+
+        // A lost prepared token can be reacquired without dispatching again,
+        // including after an activation result becomes unknown.
+        for (key, id, revision, supplied_candidate) in [
+            (&wrong_jid, operation, staged, &candidate),
+            (&exact_jid, EndpointOperationId::fresh(), staged, &candidate),
+            (&exact_jid, operation, EndpointRevision::INITIAL, &candidate),
+            (&exact_jid, operation, staged, &wrong_candidate),
+        ] {
+            assert_eq!(
+                slot.recover_prepared(key, id, revision, supplied_candidate),
+                Err(TransitionError::StaleOperation)
+            );
+        }
+        {
+            let prepared = slot
+                .recover_prepared(&jid(), operation, staged, &candidate)
+                .expect("recover exact prepared token");
+            assert_eq!(slot.revision(), before_revision);
+            assert_eq!(
+                slot.disposition(operation),
+                Some(OperationDisposition::Prepared(staged))
+            );
+            assert_eq!(
+                slot.activate(
+                    &prepared,
+                    CommitObservation::Unknown {
+                        operation_id: operation,
+                    },
+                ),
+                Err(TransitionError::CommitUnknown)
+            );
+        }
+        let recovered_again = slot
+            .recover_prepared(&jid(), operation, staged, &candidate)
+            .expect("recover prepared token during unknown activation");
+        assert_eq!(
+            slot.disposition(operation),
+            Some(OperationDisposition::ActivationUnresolved(staged))
+        );
+        assert_eq!(slot.revision(), before_revision);
+        assert_eq!(
+            slot.begin_preparation(operation, staged, &candidate),
+            Err(TransitionError::CommitUnknown)
+        );
+        slot.activate(&recovered_again, CommitObservation::Known(acknowledgement))
+            .expect("reconcile exact known activation result");
+        assert_eq!(slot.active(), Some(&candidate.binding));
+        assert_eq!(
+            slot.recover_prepared(&jid(), operation, staged, &candidate),
+            Err(TransitionError::StaleOperation)
+        );
+    }
+
+    #[test]
+    fn lost_unresolved_preparation_is_recovered_for_definitive_non_commit() {
+        let mut slot = EndpointSlot::new(jid());
+        let old = binding(new_connection(), LogicalResourceGeneration::fresh());
+        publish_fresh(&mut slot, old.clone());
+        slot.detach(slot.revision(), &old, &retirement(&old.binding_ref))
+            .expect("detach");
+        let candidate = EndpointCandidate::new_attempt(
+            jid(),
+            new_connection(),
+            old.logical_generation,
+            BindKind::Resume,
+        );
+        let operation = EndpointOperationId::fresh();
+        let staged = slot
+            .stage(slot.revision(), operation, candidate.clone())
+            .expect("stage resume");
+        {
+            let attempt = slot
+                .begin_preparation(operation, staged, &candidate)
+                .expect("record in flight")
+                .into_reconciliation();
+            assert_eq!(
+                slot.prepare(
+                    &attempt,
+                    CommitObservation::Unknown {
+                        operation_id: operation,
+                    },
+                ),
+                Err(TransitionError::CommitUnknown)
+            );
+        }
+        let before_revision = slot.revision();
+        let recovery = slot
+            .recover_preparation(&jid(), operation, staged, &candidate)
+            .expect("recover unresolved original preparation");
+        assert_eq!(slot.revision(), before_revision);
+        assert_eq!(
+            slot.disposition(operation),
+            Some(OperationDisposition::PreparationUnresolved(staged))
+        );
+        assert_eq!(
+            slot.begin_preparation(operation, staged, &candidate),
+            Err(TransitionError::CommitUnknown)
+        );
+        let resolution = PreparationNonCommitResolution {
+            full_jid: jid(),
+            operation_id: operation,
+            staged_revision: staged,
+            candidate: candidate.clone(),
+            disposition: PreparationNonCommitDisposition::SerializedBarrierConfirmedNoCommit,
+        };
+        slot.resolve_preparation_not_committed(&recovery, &resolution)
+            .expect("reconcile exact definitive non-commit assumption");
+        assert_eq!(
+            slot.recover_preparation(&jid(), operation, staged, &candidate),
+            Err(TransitionError::PreparationAlreadyFinished)
+        );
+        slot.compensate(
+            operation,
+            staged,
+            &candidate,
+            PredecessorOnCompensation::DetachedAndUnchanged {
+                binding_ref: old.binding_ref.clone(),
+            },
+        )
+        .expect("compensate after known non-commit");
+        assert_eq!(
+            slot.detached().map(|resource| resource.logical_generation),
+            Some(old.logical_generation)
+        );
+        assert_eq!(
+            slot.recover_preparation(&jid(), operation, staged, &candidate),
+            Err(TransitionError::StaleOperation)
+        );
+    }
+
+    #[test]
     fn candidate_preparation_and_activation_cannot_be_replayed_across_slots() {
         let first_jid = jid();
         let other_jid: FullJid = "alice@example.test/laptop".parse().expect("full JID");
@@ -1466,10 +1765,12 @@ mod tests {
         );
         let attempt = first
             .begin_preparation(operation, staged, &candidate)
-            .expect("begin first preparation");
+            .expect("begin first preparation")
+            .into_reconciliation();
         let other_attempt = other
             .begin_preparation(operation, other_staged, &other_candidate)
-            .expect("begin other preparation");
+            .expect("begin other preparation")
+            .into_reconciliation();
         let first_evidence = evidence(operation, staged, &candidate, None);
         assert_eq!(
             other.prepare(&attempt, CommitObservation::Known(first_evidence.clone())),

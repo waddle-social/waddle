@@ -1,4 +1,4 @@
-//! Test-gated owner for bounded WebSocket I/O pumps.
+//! Bounded WebSocket I/O pumps and their independently observed owner.
 //!
 //! This module is an isolated transport boundary for #2046. The production
 //! connection loop does not instantiate it yet. It carries the physical
@@ -6,7 +6,12 @@
 //! and bytes, and reports local write progress without making an XMPP or
 //! durable-custody claim.
 
+mod relinquishment;
+
+pub use relinquishment::SplitIoRelinquishment;
+
 use futures::{Sink, SinkExt, Stream, StreamExt};
+use relinquishment::track_halves;
 use std::collections::HashMap;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
@@ -23,6 +28,24 @@ const WRITE_ATTEMPTED: u8 = 1;
 const WRITE_COMPLETED: u8 = 2;
 const WRITE_UNCERTAIN: u8 = 3;
 const WRITE_NOT_ATTEMPTED: u8 = 4;
+
+pub(crate) enum FixedTerminalText {
+    SystemShutdown,
+    Conflict,
+    FramingClose,
+}
+
+/// Reuse the active connection path's exact terminal serialization.
+pub(crate) fn fixed_terminal_text(frame: FixedTerminalText) -> axum::extract::ws::Message {
+    let xml = match frame {
+        FixedTerminalText::SystemShutdown => {
+            super::transport_xml::build_system_shutdown_stream_error()
+        }
+        FixedTerminalText::Conflict => super::transport_xml::build_conflict_stream_error(),
+        FixedTerminalText::FramingClose => super::transport_xml::websocket_stream_close_xml(),
+    };
+    axum::extract::ws::Message::Text(xml.into())
+}
 
 /// Count and total byte bounds for one direction of a transport queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +170,10 @@ impl StopSignal {
 
     /// Request pump cancellation. The first reason remains authoritative.
     pub fn cancel(&self, reason: StopReason) {
+        self.cancel_with_peer_close(reason, None);
+    }
+
+    fn cancel_with_peer_close(&self, reason: StopReason, peer_close: Option<&CancellationToken>) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -161,10 +188,17 @@ impl StopSignal {
             }
             state.reason = Some(reason);
         }
+        if let Some(peer_close) = peer_close {
+            // Publish the first stop reason before the peer-close signal wakes
+            // the writer and reaper, but wake that writer before the stop token
+            // so it can flush the automatic WebSocket close reply.
+            peer_close.cancel();
+        }
         drop(state);
         self.token.cancel();
     }
 
+    #[cfg(feature = "test-support")]
     fn set_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -217,6 +251,16 @@ impl<T> QueueItem<T> {
     pub fn into_inner(self) -> T {
         self.value
     }
+
+    /// Transform a retained item without releasing its count or byte permits.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn map<U>(self, transform: impl FnOnce(T) -> U) -> QueueItem<U> {
+        QueueItem {
+            value: transform(self.value),
+            _count_permit: self._count_permit,
+            _byte_permit: self._byte_permit,
+        }
+    }
 }
 
 /// Bounded queue sender that signals the transport before returning overload.
@@ -228,6 +272,7 @@ pub struct BoundedSender<T> {
     sender: mpsc::Sender<QueueItem<T>>,
     count: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    max_bytes: usize,
     stop: StopSignal,
     overload_reason: StopReason,
     closed_reason: StopReason,
@@ -245,10 +290,58 @@ impl<T> BoundedSender<T> {
             sender,
             count: Arc::new(Semaphore::new(limits.max_count)),
             bytes: Arc::new(Semaphore::new(limits.max_bytes)),
+            max_bytes: limits.max_bytes,
             stop,
             overload_reason,
             closed_reason,
         }
+    }
+
+    async fn acquire_capacity(
+        &self,
+        byte_len: usize,
+    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), AdmissionError> {
+        if byte_len > self.max_bytes || u32::try_from(byte_len).is_err() {
+            return Err(AdmissionError::Overloaded);
+        }
+        let count = tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => return Err(AdmissionError::Stopped),
+            _ = self.sender.closed() => return Err(AdmissionError::Closed),
+            permit = self.count.clone().acquire_owned() => permit.map_err(|_| AdmissionError::Closed)?,
+        };
+        let bytes = tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => return Err(AdmissionError::Stopped),
+            _ = self.sender.closed() => return Err(AdmissionError::Closed),
+            permit = self.bytes.clone().acquire_many_owned(byte_len as u32) => permit.map_err(|_| AdmissionError::Closed)?,
+        };
+        Ok((count, bytes))
+    }
+
+    fn send_with_capacity(
+        &self,
+        value: T,
+        (count_permit, byte_permit): (OwnedSemaphorePermit, OwnedSemaphorePermit),
+    ) -> Result<(), AdmissionError> {
+        if self.stop.is_cancelled() {
+            return Err(AdmissionError::Stopped);
+        }
+        self.sender
+            .try_send(QueueItem {
+                value,
+                _count_permit: count_permit,
+                _byte_permit: byte_permit,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => AdmissionError::Overloaded,
+                mpsc::error::TrySendError::Closed(_) => AdmissionError::Closed,
+            })
+    }
+
+    async fn send_wait(&self, value: T, byte_len: usize) -> Result<(), AdmissionError> {
+        let capacity = self.acquire_capacity(byte_len).await?;
+        self.send_with_capacity(value, capacity)
     }
 
     /// Try to admit an item without waiting for queue capacity.
@@ -299,16 +392,32 @@ impl<T> BoundedSender<T> {
     }
 }
 
+impl<T> Clone for BoundedSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            count: Arc::clone(&self.count),
+            bytes: Arc::clone(&self.bytes),
+            max_bytes: self.max_bytes,
+            stop: self.stop.clone(),
+            overload_reason: self.overload_reason,
+            closed_reason: self.closed_reason,
+        }
+    }
+}
+
 /// Locally observed progress for an admitted write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteProgress {
     Admitted,
-    /// The sink accepted `start_send`; a later flush can still be uncertain.
+    /// The sink accepted `start_send`; it may only have buffered the frame.
     Attempted,
+    /// The local sink flush completed; the peer may not have handled the frame.
     Completed,
-    /// An accepted sink write did not reach a completed local flush.
+    /// `start_send` began, but a successful local flush was not observed. A
+    /// failing or panicking call may have produced effects before returning.
     Uncertain,
-    /// The sink rejected the write before `start_send` returned success.
+    /// The frame was abandoned before `start_send`.
     NotAttempted,
 }
 
@@ -317,17 +426,27 @@ pub enum WriteProgress {
 /// A later exact transport rejection does not downgrade an already published
 /// `Attempted` milestone; it remains `Uncertain` because the receipt does not
 /// distinguish a sink-buffered frame from one that reached the transport.
+/// The attempted milestone is not evidence of an OS write or a peer ACK.
 #[derive(Debug, Clone)]
-pub struct WriteReceipt(Arc<AtomicU8>);
+pub struct WriteReceipt(Arc<ReceiptState>);
+
+#[derive(Debug)]
+struct ReceiptState {
+    progress: AtomicU8,
+    changed: Notify,
+}
 
 impl WriteReceipt {
     fn new() -> Self {
-        Self(Arc::new(AtomicU8::new(WRITE_ADMITTED)))
+        Self(Arc::new(ReceiptState {
+            progress: AtomicU8::new(WRITE_ADMITTED),
+            changed: Notify::new(),
+        }))
     }
 
     /// Current local write milestone.
     pub fn progress(&self) -> WriteProgress {
-        match self.0.load(Ordering::Acquire) {
+        match self.0.progress.load(Ordering::Acquire) {
             WRITE_ADMITTED => WriteProgress::Admitted,
             WRITE_ATTEMPTED => WriteProgress::Attempted,
             WRITE_COMPLETED => WriteProgress::Completed,
@@ -335,22 +454,80 @@ impl WriteReceipt {
             _ => WriteProgress::Uncertain,
         }
     }
+
+    fn set(&self, state: u8) {
+        self.0.progress.store(state, Ordering::Release);
+        self.0.changed.notify_waiters();
+    }
+
+    fn not_attempted_if_admitted(&self) {
+        if self
+            .0
+            .progress
+            .compare_exchange(
+                WRITE_ADMITTED,
+                WRITE_NOT_ATTEMPTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.0.changed.notify_waiters();
+        }
+    }
+
+    /// Wait until the sink has been attempted or the frame has already reached
+    /// a terminal outcome. This observes the local sink boundary, not peer delivery.
+    pub async fn wait_for_attempt(&self) -> WriteProgress {
+        loop {
+            let notified = self.0.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let progress = self.progress();
+            if progress != WriteProgress::Admitted {
+                return progress;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait for this frame's final local outcome. A completed flush is not a peer acknowledgement.
+    pub async fn wait_for_terminal(&self) -> WriteProgress {
+        loop {
+            let notified = self.0.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let progress = self.progress();
+            if matches!(
+                progress,
+                WriteProgress::Completed | WriteProgress::Uncertain | WriteProgress::NotAttempted
+            ) {
+                return progress;
+            }
+            notified.await;
+        }
+    }
 }
 
 struct WriteRequest<T> {
     value: Option<T>,
     receipt: WriteReceipt,
+    authority: Option<Arc<dyn WriteAuthority>>,
+}
+
+/// A per-request fence for the actual synchronous sink enqueue. Implementors
+/// may invoke `attempt` only while their authority holds.
+/// The generic supervised-I/O test harness does not install this fence; the
+/// WebSocket adapter supplies one for every submitted frame.
+pub(crate) trait WriteAuthority: Send + Sync {
+    fn revoked(&self) -> futures::future::BoxFuture<'_, ()>;
+    fn attempt(&self, connection_ref: &ConnectionRef, attempt: Box<dyn FnOnce() + '_>) -> bool;
 }
 
 impl<T> Drop for WriteRequest<T> {
     fn drop(&mut self) {
         if self.value.is_some() {
-            let _ = self.receipt.0.compare_exchange(
-                WRITE_ADMITTED,
-                WRITE_NOT_ATTEMPTED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            self.receipt.not_attempted_if_admitted();
         }
     }
 }
@@ -359,10 +536,62 @@ impl<T> Drop for WriteRequest<T> {
 pub struct WriteSender<T> {
     sender: BoundedSender<WriteRequest<T>>,
     admission_open: Arc<Mutex<bool>>,
+    shutdown: CancellationToken,
 }
 
 impl<T> WriteSender<T> {
+    /// Wait for capacity without treating ordinary saturation as a transport failure.
+    #[cfg(feature = "test-support")]
+    pub async fn send_wait(
+        &self,
+        value: T,
+        byte_len: usize,
+    ) -> Result<WriteReceipt, AdmissionError> {
+        self.send_wait_with_authority(value, byte_len, None).await
+    }
+
+    pub(crate) async fn send_wait_fenced(
+        &self,
+        value: T,
+        byte_len: usize,
+        authority: Arc<dyn WriteAuthority>,
+    ) -> Result<WriteReceipt, AdmissionError> {
+        self.send_wait_with_authority(value, byte_len, Some(authority))
+            .await
+    }
+
+    async fn send_wait_with_authority(
+        &self,
+        value: T,
+        byte_len: usize,
+        authority: Option<Arc<dyn WriteAuthority>>,
+    ) -> Result<WriteReceipt, AdmissionError> {
+        let capacity = tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => return Err(AdmissionError::Shutdown),
+            capacity = self.sender.acquire_capacity(byte_len) => capacity?,
+        };
+        let admission_open = match self.admission_open.lock() {
+            Ok(admission_open) => admission_open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !*admission_open {
+            return Err(AdmissionError::Shutdown);
+        }
+        let receipt = WriteReceipt::new();
+        self.sender.send_with_capacity(
+            WriteRequest {
+                value: Some(value),
+                receipt: receipt.clone(),
+                authority,
+            },
+            capacity,
+        )?;
+        Ok(receipt)
+    }
+
     /// Admit one outbound value under the queue's count and byte bounds.
+    #[cfg(feature = "test-support")]
     pub fn try_send(&self, value: T, byte_len: usize) -> Result<WriteReceipt, AdmissionError> {
         let admission_open = match self.admission_open.lock() {
             Ok(admission_open) => admission_open,
@@ -376,11 +605,29 @@ impl<T> WriteSender<T> {
             WriteRequest {
                 value: Some(value),
                 receipt: receipt.clone(),
+                authority: None,
             },
             byte_len,
         )?;
         Ok(receipt)
     }
+}
+
+impl<T> Clone for WriteSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            admission_open: Arc::clone(&self.admission_open),
+            shutdown: self.shutdown.clone(),
+        }
+    }
+}
+
+/// An ordered terminal input held separately from the bounded data queue.
+pub(crate) enum OrderedInboundTerminal<M, E> {
+    Close(M),
+    IoFailure(E),
+    Oversized { size: usize, max_bytes: usize },
 }
 
 /// How a pump ended.
@@ -390,6 +637,8 @@ pub enum InboundExit<E> {
     PeerClosed,
     Overloaded,
     IoFailure(E),
+    /// The exact I/O error was transferred to the ordered inbound stream.
+    IoFailureReported,
 }
 
 /// How the outbound pump ended.
@@ -404,6 +653,7 @@ pub enum OutboundExit<E> {
 
 /// How a supervisor retires its two pump tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "test-support")]
 pub enum RetirementMode {
     /// Send a local Close and wait for peer Close or EOF. Use
     /// `shutdown_with_deadline` when retirement must be bounded.
@@ -423,11 +673,13 @@ pub struct Joined<ReadError, WriteError> {
 
 impl<ReadError, WriteError> Joined<ReadError, WriteError> {
     /// Connection reference carried by the retired tasks.
+    #[cfg(feature = "test-support")]
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref
     }
 
     /// Whether this late completion belongs to the supplied physical socket.
+    #[cfg(feature = "test-support")]
     pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
         &self.connection_ref == connection_ref
     }
@@ -436,9 +688,14 @@ impl<ReadError, WriteError> Joined<ReadError, WriteError> {
 /// Owns the two split halves' pump tasks and their retirement signals.
 pub struct IoSupervisor<ReadError, WriteError> {
     connection_ref: ConnectionRef,
+    #[cfg(feature = "test-support")]
+    relinquishment: watch::Receiver<bool>,
     stop: StopSignal,
     force_stop: CancellationToken,
     shutdown: CancellationToken,
+    #[cfg(feature = "test-support")]
+    skip_shutdown_frame: Arc<AtomicBool>,
+    #[cfg(feature = "test-support")]
     admission_open: Arc<Mutex<bool>>,
     inbound: TaskOwner<InboundExit<ReadError>>,
     outbound: TaskOwner<OutboundExit<WriteError>>,
@@ -520,11 +777,13 @@ where
     }
 
     /// Inbound item and byte bounds configured for the reader pump.
+    #[cfg(feature = "test-support")]
     pub fn inbound_limits(&self) -> Limits {
         self.limits.inbound()
     }
 
     /// Inject reaper loss at a startup boundary for lifecycle tests.
+    #[cfg(feature = "test-support")]
     pub fn with_test_reaper_exit_point(mut self, exit_point: ReservedReaperExitPoint) -> Self {
         self.reaper_exit_point = Some(exit_point);
         self
@@ -587,6 +846,7 @@ impl CustodianSummary {
 /// The custodian runs independently of any Kameo actor and remains responsible
 /// for both JoinHandles when a caller drops this handle. Dropping the last
 /// handle requests stop; a canceled waiter does not cancel the custodian.
+#[derive(Clone)]
 pub struct IoCustodianHandle {
     client: Arc<CustodianClient>,
 }
@@ -626,8 +886,11 @@ impl Drop for CustodianCancellationWatch {
 
 struct CustodianClient {
     connection_ref: ConnectionRef,
+    relinquishment: watch::Receiver<bool>,
     stop: StopSignal,
     force_stop: CancellationToken,
+    shutdown: CancellationToken,
+    skip_shutdown_frame: Arc<AtomicBool>,
     admission_open: Arc<Mutex<bool>>,
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
@@ -645,6 +908,7 @@ struct CustodianClient {
 #[derive(Clone)]
 pub struct IoCustodianObserver {
     connection_ref: ConnectionRef,
+    relinquishment: watch::Receiver<bool>,
     stop: StopSignal,
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
@@ -715,8 +979,8 @@ enum InventoryEntry {
 ///
 /// The index does not keep a control handle alive. It lets an independent
 /// owner reacquire state after an actor loses all of its local handles, and it
-/// keeps unfinished cleanup discoverable until terminal entries with no live
-/// pump tasks are explicitly pruned.
+/// keeps unfinished cleanup discoverable. When admission reaches capacity, it
+/// can reclaim one fully joined entry to make room for a new connection.
 #[derive(Clone)]
 pub struct IoCustodianInventory {
     capacity: usize,
@@ -780,7 +1044,7 @@ impl IoCustodianInventory {
         if entries.contains_key(&connection_ref) {
             return Err(CustodianInventoryError::DuplicateConnection);
         }
-        if entries.len() >= self.capacity {
+        if entries.len() >= self.capacity && !reclaim_one_joined(&mut entries) {
             return Err(CustodianInventoryError::Full);
         }
         entries.insert(
@@ -811,7 +1075,7 @@ impl IoCustodianInventory {
         if entries.contains_key(&connection_ref) {
             return Err(CustodianInventoryError::DuplicateConnection);
         }
-        if entries.len() >= self.capacity {
+        if entries.len() >= self.capacity && !reclaim_one_joined(&mut entries) {
             return Err(CustodianInventoryError::Full);
         }
         entries.insert(
@@ -831,6 +1095,20 @@ impl IoCustodianInventory {
             auxiliary_task_registered: Arc::new(Notify::new()),
             active: true,
         })
+    }
+
+    /// Test-only snapshot of reserved identities, including legacy capacity holds.
+    #[cfg(feature = "test-support")]
+    pub fn reserved_connection_refs(&self) -> Vec<ConnectionRef> {
+        let entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry, InventoryEntry::Reserved { .. }))
+            .map(|(connection_ref, _)| connection_ref.clone())
+            .collect()
     }
 
     /// Reacquire observation by exact physical-connection identity.
@@ -883,8 +1161,8 @@ impl IoCustodianInventory {
         Ok(())
     }
 
-    /// Number of retained observations, including cleanup that is still
-    /// pending and Joined entries not yet explicitly pruned.
+    /// Number of retained observations, including pending cleanup and joined
+    /// entries that have not yet been reclaimed or explicitly pruned.
     pub fn len(&self) -> usize {
         let entries = match self.entries.lock() {
             Ok(entries) => entries,
@@ -980,6 +1258,24 @@ impl IoCustodianInventory {
     }
 }
 
+/// Reclaim at most one terminal entry while holding the inventory lock. The
+/// scan is bounded by capacity, and the same lock protects the subsequent
+/// insertion, so no saved identity can remove a later reservation.
+fn reclaim_one_joined(entries: &mut HashMap<ConnectionRef, InventoryEntry>) -> bool {
+    let candidate = entries.iter().find_map(|(connection_ref, entry)| {
+        let InventoryEntry::Active { observer, .. } = entry else {
+            return None;
+        };
+        let joined = matches!(
+            observer.state(),
+            CustodianState::Joined | CustodianState::PartialStartJoined
+        );
+        (joined && observer.auxiliary_finished.load(Ordering::Acquire))
+            .then(|| connection_ref.clone())
+    });
+    candidate.is_some_and(|connection_ref| entries.remove(&connection_ref).is_some())
+}
+
 impl IoCustodianReservation {
     /// Physical identity whose inventory slot this reservation holds.
     pub fn connection_ref(&self) -> &ConnectionRef {
@@ -1022,6 +1318,7 @@ impl Drop for IoCustodianReservation {
 impl IoCustodianReservation {
     /// Build the pump halves only after this reservation has won inventory
     /// capacity, then start both tasks under an independent reaper.
+    #[cfg(feature = "test-support")]
     pub async fn start_with<
         R,
         W,
@@ -1065,6 +1362,7 @@ impl IoCustodianReservation {
     /// Canceling this future before the first pump starts releases its unused
     /// reservation; after either spawn, the independent reaper owns every
     /// started handle and keeps the inventory slot until all have joined.
+    #[cfg(feature = "test-support")]
     pub async fn start_with_hook<
         R,
         W,
@@ -1105,11 +1403,12 @@ impl IoCustodianReservation {
         Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
         HookFuture: Future<Output = ()> + Send,
     {
-        start_reserved_supervised_io(self, config, factory, hook, None).await
+        start_reserved_supervised_io(self, config, factory, hook, None, None).await
     }
 
     /// Same as `start_with_hook`, while a caller-owned cancellation signal
     /// stops this exact connection if the outer starter is abandoned.
+    #[cfg(feature = "test-support")]
     pub async fn start_with_hook_and_cancellation<
         R,
         W,
@@ -1151,11 +1450,37 @@ impl IoCustodianReservation {
         Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
         HookFuture: Future<Output = ()> + Send,
     {
-        start_reserved_supervised_io(self, config, factory, hook, Some(cancellation)).await
+        start_reserved_supervised_io(self, config, factory, hook, Some(cancellation), None).await
     }
 }
 
 impl IoCustodianHandle {
+    /// Give the owner its bounded terminal-output window after revocation,
+    /// then stop without retaining a controlling handle during that window.
+    pub(crate) fn watch_transport_cancellation(
+        &self,
+        cancellation: CancellationToken,
+        retirement_deadline: Duration,
+    ) -> JoinHandle<()> {
+        let client = Arc::downgrade(&self.client);
+        let observer = self.observer();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    tokio::select! {
+                        _ = observer.wait_until_joined() => return,
+                        _ = tokio::time::sleep(retirement_deadline) => {}
+                    }
+                    if let Some(client) = client.upgrade() {
+                        IoCustodianHandle { client }.request_stop(StopReason::Requested);
+                    }
+                }
+                _ = observer.wait_until_joined() => {}
+            }
+        })
+    }
+
     /// Exact physical connection reference captured by the pump owner.
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.client.connection_ref
@@ -1168,6 +1493,7 @@ impl IoCustodianHandle {
 
     /// Clone the exact physical connection's first-wins stop signal for
     /// independently owned test-support tasks.
+    #[cfg(feature = "test-support")]
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
     }
@@ -1213,6 +1539,28 @@ impl IoCustodianHandle {
         summary.clone()
     }
 
+    /// Stop admitting data, send a WebSocket Close, and wait for the peer or
+    /// the custodian's retirement deadline. The independent reaper joins both pumps.
+    pub fn request_graceful_shutdown(&self) {
+        if custodian_state_is_terminal(self.state()) {
+            return;
+        }
+        let mut admission_open = match self.client.admission_open.lock() {
+            Ok(admission_open) => admission_open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *admission_open = false;
+        drop(admission_open);
+        self.client.shutdown.cancel();
+    }
+
+    pub(crate) fn request_graceful_after_local_close(&self) {
+        self.client
+            .skip_shutdown_frame
+            .store(true, Ordering::Release);
+        self.request_graceful_shutdown();
+    }
+
     /// Request an out-of-band stop without sending through an application data
     /// mailbox. Lease loss uses this to interrupt the pumps; it does not fence
     /// a write that has passed `poll_ready` and can still call `start_send`.
@@ -1231,6 +1579,7 @@ impl IoCustodianHandle {
         self.client.force_stop.cancel();
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
         self.client.stop.set_listener(listener);
     }
@@ -1239,6 +1588,7 @@ impl IoCustodianHandle {
     pub fn observer(&self) -> IoCustodianObserver {
         IoCustodianObserver {
             connection_ref: self.client.connection_ref.clone(),
+            relinquishment: self.client.relinquishment.clone(),
             stop: self.client.stop.clone(),
             state: self.client.state.clone(),
             summary: self.client.summary.clone(),
@@ -1280,6 +1630,15 @@ impl IoCustodianObserver {
         &self.connection_ref == connection_ref
     }
 
+    /// Observe both factory-supplied pump halves for this exact reference.
+    pub fn local_io_relinquishment(&self) -> SplitIoRelinquishment {
+        SplitIoRelinquishment::new(
+            self.connection_ref.clone(),
+            self.relinquishment.clone(),
+            self.state.clone(),
+        )
+    }
+
     /// First stop reason observed by this exact physical connection.
     pub fn stop_reason(&self) -> Option<StopReason> {
         self.stop.reason()
@@ -1300,6 +1659,12 @@ impl IoCustodianObserver {
     /// reserved-start handoff left to complete.
     pub fn startup_completion_is_finished(&self) -> bool {
         self.startup_completion_finished.load(Ordering::Acquire)
+    }
+
+    /// Whether a cleanup owner has been registered for this exact connection.
+    #[cfg(feature = "test-support")]
+    pub fn auxiliary_registered(&self) -> bool {
+        self.auxiliary_registered.load(Ordering::Acquire)
     }
 
     /// Whether the reaper has taken and begun awaiting the registered cleanup
@@ -1364,6 +1729,7 @@ fn custodian_state_is_terminal(state: CustodianState) -> bool {
 /// If a pump remains unfinished at that deadline, the state becomes
 /// `CleanupPending`, the remaining pump is aborted, and the custodian keeps
 /// waiting for both JoinHandles before it can publish `Joined`.
+#[cfg(feature = "test-support")]
 pub fn spawn_io_custodian<ReadError, WriteError>(
     supervisor: IoSupervisor<ReadError, WriteError>,
     retirement_deadline: Duration,
@@ -1373,8 +1739,11 @@ where
     WriteError: Send + 'static,
 {
     let connection_ref = supervisor.connection_ref.clone();
+    let relinquishment = supervisor.relinquishment.clone();
     let stop = supervisor.stop.clone();
     let force_stop = supervisor.force_stop.clone();
+    let shutdown = supervisor.shutdown.clone();
+    let skip_shutdown_frame = supervisor.skip_shutdown_frame.clone();
     let admission_open = supervisor.admission_open.clone();
     let (state_tx, state_rx) = watch::channel(CustodianState::Running);
     let summary = Arc::new(Mutex::new(None));
@@ -1407,8 +1776,11 @@ where
     IoCustodianHandle {
         client: Arc::new(CustodianClient {
             connection_ref,
+            relinquishment,
             stop,
             force_stop,
+            shutdown,
+            skip_shutdown_frame,
             admission_open,
             state: state_rx,
             summary,
@@ -1461,14 +1833,18 @@ async fn run_io_custodian<ReadError, WriteError>(
     let mut inbound = None;
     let mut outbound = None;
 
-    tokio::select! {
-        result = supervisor.inbound.join() => inbound = Some(result),
-        result = supervisor.outbound.join() => outbound = Some(result),
-        _ = supervisor.stop.cancelled() => {}
-    }
+    let graceful = tokio::select! {
+        biased;
+        _ = supervisor.stop.cancelled() => false,
+        _ = supervisor.shutdown.cancelled() => true,
+        result = supervisor.inbound.join() => { inbound = Some(result); false },
+        result = supervisor.outbound.join() => { outbound = Some(result); false },
+    };
 
     state_tx.send_replace(CustodianState::Stopping);
-    supervisor.stop.cancel(StopReason::PumpExited);
+    if !graceful {
+        supervisor.stop.cancel(StopReason::PumpExited);
+    }
 
     let deadline = tokio::time::sleep(retirement_deadline);
     tokio::pin!(deadline);
@@ -1534,9 +1910,12 @@ async fn run_io_custodian<ReadError, WriteError>(
 
 struct ReservedReaperSetup<ReadError, WriteError> {
     connection_ref: ConnectionRef,
+    #[cfg(feature = "test-support")]
+    relinquishment: watch::Receiver<bool>,
     stop: StopSignal,
     force_stop: CancellationToken,
     shutdown: CancellationToken,
+    skip_shutdown_frame: Arc<AtomicBool>,
     admission_open: Arc<Mutex<bool>>,
     retirement_deadline: Duration,
     inbound_owner_rx: oneshot::Receiver<JoinHandle<InboundExit<ReadError>>>,
@@ -1799,9 +2178,12 @@ async fn run_reserved_start<ReadError, WriteError>(
 {
     let ReservedReaperSetup {
         connection_ref,
+        #[cfg(feature = "test-support")]
+        relinquishment,
         stop,
         force_stop,
         shutdown,
+        skip_shutdown_frame,
         admission_open,
         retirement_deadline,
         inbound_owner_rx,
@@ -1824,6 +2206,8 @@ async fn run_reserved_start<ReadError, WriteError>(
         auxiliary_join_started,
         auxiliary_task_registered,
     } = setup;
+    #[cfg(not(feature = "test-support"))]
+    let _ = (&skip_shutdown_frame, &admission_open);
     if exit_point == Some(ReservedReaperExitPoint::BeforeCommit) {
         return;
     }
@@ -1845,9 +2229,14 @@ async fn run_reserved_start<ReadError, WriteError>(
                 return run_io_custodian(
                     IoSupervisor {
                         connection_ref,
+                        #[cfg(feature = "test-support")]
+                        relinquishment,
                         stop,
                         force_stop,
                         shutdown,
+                        #[cfg(feature = "test-support")]
+                        skip_shutdown_frame,
+                        #[cfg(feature = "test-support")]
                         admission_open,
                         inbound: inbound_owner,
                         outbound: outbound_owner,
@@ -1971,7 +2360,9 @@ fn summarize_inbound<E>(result: &Result<InboundExit<E>, JoinError>) -> InboundTe
         Ok(InboundExit::Stopped) => InboundTerminal::Stopped,
         Ok(InboundExit::PeerClosed) => InboundTerminal::PeerClosed,
         Ok(InboundExit::Overloaded) => InboundTerminal::Overloaded,
-        Ok(InboundExit::IoFailure(_)) => InboundTerminal::IoFailure,
+        Ok(InboundExit::IoFailure(_) | InboundExit::IoFailureReported) => {
+            InboundTerminal::IoFailure
+        }
         Err(error) if error.is_panic() => InboundTerminal::Panicked,
         Err(error) if error.is_cancelled() => InboundTerminal::Aborted,
         Err(_) => InboundTerminal::JoinFailure,
@@ -1993,21 +2384,25 @@ fn summarize_outbound<E>(result: &Result<OutboundExit<E>, JoinError>) -> Outboun
 
 impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     /// Exact physical connection reference captured at pump creation.
+    #[cfg(feature = "test-support")]
     pub fn connection_ref(&self) -> &ConnectionRef {
         &self.connection_ref
     }
 
     /// First stop reason, when either pump requested cancellation.
+    #[cfg(feature = "test-support")]
     pub fn stop_reason(&self) -> Option<StopReason> {
         self.stop.reason()
     }
 
     /// Whether the shared transport stop signal is set.
+    #[cfg(feature = "test-support")]
     pub fn is_stopped(&self) -> bool {
         self.stop.is_cancelled()
     }
 
     /// Wait for the shared transport stop signal.
+    #[cfg(feature = "test-support")]
     pub async fn stopped(&self) {
         self.stop.cancelled().await;
     }
@@ -2016,6 +2411,7 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     /// and leaves the reader active for the peer Close handshake. Inbound
     /// application frames are discarded after this point. Admitted but
     /// abandoned requests report `NotAttempted`.
+    #[cfg(feature = "test-support")]
     pub fn begin_graceful_shutdown(&self) {
         let mut admission_open = match self.admission_open.lock() {
             Ok(admission_open) => admission_open,
@@ -2027,28 +2423,33 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     }
 
     /// Whether the inbound pump task has finished.
+    #[cfg(feature = "test-support")]
     pub fn inbound_finished(&self) -> bool {
         self.inbound.is_finished()
     }
 
     /// Whether the outbound pump task has finished.
+    #[cfg(feature = "test-support")]
     pub fn outbound_finished(&self) -> bool {
         self.outbound.is_finished()
     }
 
     /// Abort the inbound task. Available only because this whole module is
     /// gated behind `test-support`.
+    #[cfg(feature = "test-support")]
     pub fn abort_inbound_for_test(&self) {
         self.inbound.abort();
     }
 
     /// Abort the outbound task. Available only because this whole module is
     /// gated behind `test-support`.
+    #[cfg(feature = "test-support")]
     pub fn abort_outbound_for_test(&self) {
         self.outbound.abort();
     }
 
     /// Stop both pumps and join them, preserving each task's independent result.
+    #[cfg(feature = "test-support")]
     pub async fn retire(mut self, mode: RetirementMode) -> Joined<ReadError, WriteError> {
         match mode {
             RetirementMode::Graceful => self.begin_graceful_shutdown(),
@@ -2063,6 +2464,7 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
 
     /// Ask the writer to send its close frame, then force-abort and join any
     /// pump that exceeds the supplied deadline.
+    #[cfg(feature = "test-support")]
     pub async fn shutdown_with_deadline(
         mut self,
         deadline: Duration,
@@ -2099,6 +2501,7 @@ impl<ReadError, WriteError> IoSupervisor<ReadError, WriteError> {
     /// Observe one pump's termination, stop its peer, and join both within the
     /// supplied bound. Peer-close reply flushing is allowed to complete until
     /// the deadline, after which the remaining task is aborted and joined.
+    #[cfg(feature = "test-support")]
     pub async fn retire_after_failure(
         mut self,
         deadline: Duration,
@@ -2161,6 +2564,7 @@ impl<T> TaskOwner<T> {
         }
     }
 
+    #[cfg(feature = "test-support")]
     fn is_finished(&self) -> bool {
         self.handle
             .as_ref()
@@ -2186,6 +2590,7 @@ impl<T> TaskOwner<T> {
         result
     }
 
+    #[cfg(feature = "test-support")]
     async fn abort_and_join(&mut self) -> Result<T, JoinError> {
         self.abort();
         self.join().await
@@ -2259,10 +2664,13 @@ fn abort_and_reap<T: Send + 'static>(handle: JoinHandle<T>) {
 type PumpFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 struct PreparedIo<M, ReadError, WriteError> {
+    #[cfg(feature = "test-support")]
     connection_ref: ConnectionRef,
+    relinquishment: watch::Receiver<bool>,
     stop: StopSignal,
     force_stop: CancellationToken,
     shutdown: CancellationToken,
+    skip_shutdown_frame: Arc<AtomicBool>,
     admission_open: Arc<Mutex<bool>>,
     inbound: PumpFuture<InboundExit<ReadError>>,
     outbound: PumpFuture<OutboundExit<WriteError>>,
@@ -2271,14 +2679,19 @@ struct PreparedIo<M, ReadError, WriteError> {
     startup_completion: Option<StartupCompletionSignal>,
 }
 
+struct ReaderPolicy<M, E, Size, IsClose> {
+    frame_size: Size,
+    is_close: IsClose,
+    terminal: Option<oneshot::Sender<OrderedInboundTerminal<M, E>>>,
+}
+
 fn prepare_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose, IsSendAfterClose>(
-    connection_ref: ConnectionRef,
+    _connection_ref: ConnectionRef,
     reader: R,
     writer: W,
     limits: TransportLimits,
     shutdown_protocol: ShutdownProtocol<M, IsSendAfterClose>,
-    frame_size: Size,
-    is_close: IsClose,
+    reader_policy: ReaderPolicy<M, ReadError, Size, IsClose>,
 ) -> PreparedIo<M, ReadError, WriteError>
 where
     R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
@@ -2290,6 +2703,7 @@ where
     IsClose: Fn(&M) -> bool + Send + 'static,
     IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
 {
+    let (reader, writer, relinquishment) = track_halves(reader, writer);
     let ShutdownProtocol {
         shutdown_frame,
         is_send_after_close,
@@ -2297,6 +2711,7 @@ where
     let stop = StopSignal::new();
     let force_stop = CancellationToken::new();
     let shutdown = CancellationToken::new();
+    let skip_shutdown_frame = Arc::new(AtomicBool::new(false));
     let peer_close = CancellationToken::new();
     let admission_open = Arc::new(Mutex::new(true));
     let (inbound, inbound_receiver) = bounded_channel(
@@ -2318,10 +2733,10 @@ where
         stop.clone(),
         shutdown.clone(),
         peer_close.clone(),
-        frame_size,
-        is_close,
+        reader_policy,
     ));
     let outbound = Box::pin(run_writer(
+        _connection_ref.clone(),
         writer,
         outbound_receiver,
         WriterSignals {
@@ -2329,29 +2744,34 @@ where
             force_stop: force_stop.clone(),
             shutdown: shutdown.clone(),
             peer_close,
+            skip_shutdown_frame: skip_shutdown_frame.clone(),
         },
         Some(shutdown_frame),
         is_send_after_close,
     ));
 
     PreparedIo {
-        connection_ref,
+        #[cfg(feature = "test-support")]
+        connection_ref: _connection_ref,
+        relinquishment,
         stop,
         force_stop,
-        shutdown,
+        shutdown: shutdown.clone(),
+        skip_shutdown_frame,
         admission_open: admission_open.clone(),
         inbound,
         outbound,
         outbound_sender: WriteSender {
             sender: outbound_queue,
             admission_open,
+            shutdown: shutdown.clone(),
         },
         inbound_receiver,
         startup_completion: None,
     }
 }
 
-async fn start_reserved_supervised_io<
+pub(crate) async fn start_reserved_supervised_io<
     R,
     W,
     M,
@@ -2370,6 +2790,7 @@ async fn start_reserved_supervised_io<
     factory: Factory,
     mut hook: Hook,
     cancellation: Option<CancellationToken>,
+    terminal: Option<oneshot::Sender<OrderedInboundTerminal<M, ReadError>>>,
 ) -> Result<
     (
         IoCustodianHandle,
@@ -2425,8 +2846,11 @@ where
         writer,
         limits,
         shutdown_protocol,
-        frame_size,
-        is_close,
+        ReaderPolicy {
+            frame_size,
+            is_close,
+            terminal,
+        },
     );
 
     let (state_tx, state_rx) = watch::channel(CustodianState::Starting);
@@ -2436,6 +2860,7 @@ where
     let handle_summary = summary.clone();
     let observer = IoCustodianObserver {
         connection_ref: connection_ref.clone(),
+        relinquishment: prepared.relinquishment.clone(),
         stop: prepared.stop.clone(),
         state: state_rx.clone(),
         summary: summary.clone(),
@@ -2476,9 +2901,12 @@ where
     let monitor_cleanup_pending_published = cleanup_pending_published.clone();
     let reaper = tokio::spawn(run_reserved_start(ReservedReaperSetup {
         connection_ref: connection_ref.clone(),
+        #[cfg(feature = "test-support")]
+        relinquishment: prepared.relinquishment.clone(),
         stop: prepared.stop.clone(),
         force_stop: prepared.force_stop.clone(),
         shutdown: prepared.shutdown.clone(),
+        skip_shutdown_frame: prepared.skip_shutdown_frame.clone(),
         admission_open: prepared.admission_open.clone(),
         retirement_deadline,
         inbound_owner_rx,
@@ -2529,8 +2957,11 @@ where
     let handle = IoCustodianHandle {
         client: Arc::new(CustodianClient {
             connection_ref,
+            relinquishment: prepared.relinquishment,
             stop: prepared.stop,
             force_stop: prepared.force_stop,
+            shutdown: prepared.shutdown,
+            skip_shutdown_frame: prepared.skip_shutdown_frame,
             admission_open: prepared.admission_open,
             state: state_rx,
             summary: handle_summary,
@@ -2595,6 +3026,7 @@ where
 }
 
 /// Split socket halves into supervised read and write pumps.
+#[cfg(feature = "test-support")]
 pub fn spawn_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose, IsSendAfterClose>(
     connection_ref: ConnectionRef,
     reader: R,
@@ -2624,8 +3056,11 @@ where
         writer,
         limits,
         shutdown_protocol,
-        frame_size,
-        is_close,
+        ReaderPolicy {
+            frame_size,
+            is_close,
+            terminal: None,
+        },
     );
     let inbound_task = tokio::spawn(prepared.inbound);
     let outbound_task = tokio::spawn(prepared.outbound);
@@ -2633,9 +3068,11 @@ where
     (
         IoSupervisor {
             connection_ref: prepared.connection_ref,
+            relinquishment: prepared.relinquishment,
             stop: prepared.stop,
             force_stop: prepared.force_stop,
             shutdown: prepared.shutdown,
+            skip_shutdown_frame: prepared.skip_shutdown_frame,
             admission_open: prepared.admission_open,
             inbound: TaskOwner::new(inbound_task),
             outbound: TaskOwner::new(outbound_task),
@@ -2664,14 +3101,18 @@ async fn run_reader<R, M, E, Size, IsClose>(
     stop: StopSignal,
     shutdown: CancellationToken,
     peer_close: CancellationToken,
-    frame_size: Size,
-    is_close: IsClose,
+    policy: ReaderPolicy<M, E, Size, IsClose>,
 ) -> InboundExit<E>
 where
     R: Stream<Item = Result<M, E>> + Unpin,
     Size: Fn(&M) -> usize,
     IsClose: Fn(&M) -> bool,
 {
+    let ReaderPolicy {
+        frame_size,
+        is_close,
+        mut terminal,
+    } = policy;
     let mut closing = false;
     loop {
         let frame = tokio::select! {
@@ -2685,14 +3126,59 @@ where
         };
         match frame {
             Some(Ok(frame)) if is_close(&frame) => {
-                peer_close.cancel();
-                stop.cancel(StopReason::PeerClosed);
-                return InboundExit::PeerClosed;
+                let size = frame_size(&frame);
+                let oversized = terminal.is_some()
+                    && (size > inbound.max_bytes || u32::try_from(size).is_err());
+                if let Some(terminal) = terminal.take() {
+                    let event = if oversized {
+                        OrderedInboundTerminal::Oversized {
+                            size,
+                            max_bytes: inbound.max_bytes,
+                        }
+                    } else {
+                        OrderedInboundTerminal::Close(frame)
+                    };
+                    let _ = terminal.send(event);
+                }
+                stop.cancel_with_peer_close(
+                    if oversized {
+                        StopReason::InboundOverload
+                    } else {
+                        StopReason::PeerClosed
+                    },
+                    Some(&peer_close),
+                );
+                return if oversized {
+                    InboundExit::Overloaded
+                } else {
+                    InboundExit::PeerClosed
+                };
             }
             Some(Ok(_frame)) if closing => {}
             Some(Ok(frame)) => {
                 let byte_len = frame_size(&frame);
-                match inbound.try_send(frame, byte_len) {
+                if terminal.is_some()
+                    && (byte_len > inbound.max_bytes || u32::try_from(byte_len).is_err())
+                {
+                    if let Some(terminal) = terminal.take() {
+                        let _ = terminal.send(OrderedInboundTerminal::Oversized {
+                            size: byte_len,
+                            max_bytes: inbound.max_bytes,
+                        });
+                    }
+                    stop.cancel(StopReason::InboundOverload);
+                    return InboundExit::Overloaded;
+                }
+                let admitted = if terminal.is_some() {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => { closing = true; continue; }
+                        result = inbound.send_wait(frame, byte_len) => result,
+                    }
+                } else {
+                    inbound.try_send(frame, byte_len)
+                };
+                match admitted {
                     Ok(()) => {}
                     Err(AdmissionError::Overloaded) => return InboundExit::Overloaded,
                     Err(
@@ -2704,6 +3190,10 @@ where
             }
             Some(Err(error)) => {
                 stop.cancel(StopReason::InboundIoFailure);
+                if let Some(terminal) = terminal.take() {
+                    let _ = terminal.send(OrderedInboundTerminal::IoFailure(error));
+                    return InboundExit::IoFailureReported;
+                }
                 return InboundExit::IoFailure(error);
             }
             None => {
@@ -2719,9 +3209,11 @@ struct WriterSignals {
     force_stop: CancellationToken,
     shutdown: CancellationToken,
     peer_close: CancellationToken,
+    skip_shutdown_frame: Arc<AtomicBool>,
 }
 
 async fn run_writer<W, M, E, IsSendAfterClose>(
+    connection_ref: ConnectionRef,
     mut writer: W,
     mut outbound: mpsc::Receiver<QueueItem<WriteRequest<M>>>,
     signals: WriterSignals,
@@ -2737,6 +3229,7 @@ where
         force_stop,
         shutdown,
         peer_close,
+        skip_shutdown_frame,
     } = signals;
     loop {
         let work = tokio::select! {
@@ -2752,6 +3245,9 @@ where
             }
             _ = stop.cancelled() => return OutboundExit::Stopped,
             _ = shutdown.cancelled() => {
+                if skip_shutdown_frame.load(Ordering::Acquire) {
+                    return OutboundExit::ShutdownClose;
+                }
                 let Some(frame) = shutdown_frame.take() else {
                     return OutboundExit::Stopped;
                 };
@@ -2777,21 +3273,27 @@ where
         match send_queued(
             &mut writer,
             work,
-            &stop,
-            &force_stop,
-            &shutdown,
-            &peer_close,
+            &QueuedWriteContext {
+                connection_ref: &connection_ref,
+                stop: &stop,
+                force_stop: &force_stop,
+                shutdown: &shutdown,
+                peer_close: &peer_close,
+            },
             &is_send_after_close,
         )
         .await
         {
-            SendOutcome::Sent => {}
+            SendOutcome::Sent | SendOutcome::AuthorityRevoked => {}
             SendOutcome::Stopped => return OutboundExit::Stopped,
             SendOutcome::PeerClosed => {
                 return flush_peer_close_reply(&mut writer, &force_stop, &is_send_after_close)
                     .await;
             }
             SendOutcome::Shutdown => {
+                if skip_shutdown_frame.load(Ordering::Acquire) {
+                    return OutboundExit::ShutdownClose;
+                }
                 let Some(frame) = shutdown_frame.take() else {
                     return OutboundExit::Stopped;
                 };
@@ -2815,24 +3317,37 @@ where
 
 enum SendOutcome<E> {
     Sent,
+    AuthorityRevoked,
     Stopped,
     PeerClosed,
     Shutdown,
     IoFailure(E),
 }
 
+struct QueuedWriteContext<'a> {
+    connection_ref: &'a ConnectionRef,
+    stop: &'a StopSignal,
+    force_stop: &'a CancellationToken,
+    shutdown: &'a CancellationToken,
+    peer_close: &'a CancellationToken,
+}
+
 async fn send_queued<W, M, E>(
     writer: &mut W,
     work: QueueItem<WriteRequest<M>>,
-    stop: &StopSignal,
-    force_stop: &CancellationToken,
-    shutdown: &CancellationToken,
-    peer_close: &CancellationToken,
+    context: &QueuedWriteContext<'_>,
     is_send_after_close: &impl Fn(&E) -> bool,
 ) -> SendOutcome<E>
 where
     W: Sink<M, Error = E> + Unpin,
 {
+    let QueuedWriteContext {
+        connection_ref,
+        stop,
+        force_stop,
+        shutdown,
+        peer_close,
+    } = *context;
     let mut request = work.value;
     let mut progress = InFlightWrite::new(request.receipt.clone());
     let ready = tokio::select! {
@@ -2841,6 +3356,7 @@ where
         _ = peer_close.cancelled() => return SendOutcome::PeerClosed,
         _ = stop.cancelled() => return SendOutcome::Stopped,
         _ = shutdown.cancelled() => return SendOutcome::Shutdown,
+        _ = authority_revoked(request.authority.as_deref()) => return SendOutcome::AuthorityRevoked,
         ready = poll_fn(|context| Pin::new(&mut *writer).poll_ready(context)) => ready,
     };
     if let Err(error) = ready {
@@ -2850,17 +3366,34 @@ where
         return SendOutcome::IoFailure(error);
     }
 
-    let value = request
-        .value
-        .take()
-        .expect("write request retains its value until first attempt");
-    progress.begin_attempt();
-    if let Err(error) = Pin::new(&mut *writer).start_send(value) {
+    let authority = request.authority.clone();
+    let mut start_result = None;
+    let mut attempt = || {
+        let value = request
+            .value
+            .take()
+            .expect("write request retains its value until first attempt");
+        progress.begin_attempt();
+        start_result = Some(Pin::new(&mut *writer).start_send(value));
+    };
+    let admitted = match authority {
+        Some(ref authority) => authority.attempt(connection_ref, Box::new(attempt)),
+        None => {
+            attempt();
+            true
+        }
+    };
+    if !admitted {
+        return SendOutcome::AuthorityRevoked;
+    }
+    let Some(result) = start_result else {
+        return SendOutcome::AuthorityRevoked;
+    };
+    if let Err(error) = result {
+        progress.uncertain();
         if is_send_after_close(&error) {
-            progress.not_attempted();
             return wait_for_peer_close_or_force(force_stop, peer_close).await;
         }
-        progress.uncertain();
         return SendOutcome::IoFailure(error);
     }
     progress.attempted();
@@ -2871,6 +3404,7 @@ where
         _ = peer_close.cancelled() => return SendOutcome::PeerClosed,
         _ = stop.cancelled() => return SendOutcome::Stopped,
         _ = shutdown.cancelled() => return SendOutcome::Shutdown,
+        _ = authority_revoked(request.authority.as_deref()) => return SendOutcome::AuthorityRevoked,
         flushed = poll_fn(|context| Pin::new(&mut *writer).poll_flush(context)) => flushed,
     };
     match flushed {
@@ -2882,6 +3416,13 @@ where
             wait_for_peer_close_or_force(force_stop, peer_close).await
         }
         Err(error) => SendOutcome::IoFailure(error),
+    }
+}
+
+async fn authority_revoked(authority: Option<&dyn WriteAuthority>) {
+    match authority {
+        Some(authority) => authority.revoked().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -2990,29 +3531,24 @@ impl InFlightWrite {
 
     fn attempted(&mut self) {
         self.attempted = true;
-        self.receipt.0.store(WRITE_ATTEMPTED, Ordering::Release);
+        self.receipt.set(WRITE_ATTEMPTED);
     }
 
     fn uncertain(&mut self) {
         self.attempted = true;
-        self.receipt.0.store(WRITE_UNCERTAIN, Ordering::Release);
+        self.receipt.set(WRITE_UNCERTAIN);
     }
 
     fn completed(&mut self) {
         self.completed = true;
-        self.receipt.0.store(WRITE_COMPLETED, Ordering::Release);
-    }
-
-    fn not_attempted(&mut self) {
-        self.attempted = false;
-        self.receipt.0.store(WRITE_NOT_ATTEMPTED, Ordering::Release);
+        self.receipt.set(WRITE_COMPLETED);
     }
 }
 
 impl Drop for InFlightWrite {
     fn drop(&mut self) {
         if self.attempted && !self.completed {
-            self.receipt.0.store(WRITE_UNCERTAIN, Ordering::Release);
+            self.receipt.set(WRITE_UNCERTAIN);
         }
     }
 }

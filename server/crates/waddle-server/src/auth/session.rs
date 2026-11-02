@@ -406,6 +406,16 @@ impl SessionManager {
 
     #[instrument(skip(self))]
     pub async fn validate_session(&self, session_id: &str) -> Result<Session, AuthError> {
+        let session = self.validate_session_without_touch(session_id).await?;
+        self.touch_session(session_id).await?;
+        Ok(session)
+    }
+
+    /// Validate a bearer session without changing its last-used timestamp.
+    pub(crate) async fn validate_session_without_touch(
+        &self,
+        session_id: &str,
+    ) -> Result<Session, AuthError> {
         let session = self
             .get_session(session_id)
             .await?
@@ -416,7 +426,6 @@ impl SessionManager {
             return Err(AuthError::SessionExpired);
         }
 
-        self.touch_session(session_id).await?;
         Ok(session)
     }
 }
