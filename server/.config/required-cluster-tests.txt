@@ -270,3 +270,11 @@ waddle-server ingress_uow::canonical_qualified_tests::acceptance::attested_direc
 # No-store acceptance must keep custody, policy receipts and retention proof
 # inside the same attested transaction, even with hostile schema shadows.
 waddle-server ingress_uow::canonical_qualified_tests::no_store::attested_no_store_acceptance_qualifies_terminalization_and_rolls_back
+
+# Inbox attachment checks the owner schema, bounded PostgreSQL waits and the
+# SQLite connection's inbox/recovery ledger shadow protections.
+waddle-server::physical_attestation inbox_runtime_attach_checks_attested_read_only_schema
+waddle-server::physical_attestation inbox_runtime_attach_bounds_lock_wait_and_releases_main_lane
+waddle-server::physical_attestation inbox_attach_timeout_setup_does_not_pin_snapshot
+waddle-server::owner_bootstrap inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair
+waddle-server inbox::runtime_attach::tests::postgres_timeout_display_units_and_invalid_values

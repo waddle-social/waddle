@@ -95,8 +95,11 @@ impl DatabaseInboxStorage {
     /// accepts the caller's existing trusted database. The snapshot checks
     /// required columns, primary keys and named indexes, but not index
     /// definitions or completion of the owner job. It does not establish
-    /// identity provenance, all grants, or future schema state. SQLite's
-    /// temporary-shadow check covers only the connection used for this check.
+    /// identity provenance, all grants, or future schema state. PostgreSQL
+    /// provisionally caps each later lock wait at 5 seconds and statement at
+    /// 10 seconds, preserving tighter session limits. These are not a total
+    /// or network deadline. SQLite checks temporary shadows of inbox and recovery
+    /// ledger relations only on the connection used for this check.
     /// This dark API is not startup wiring.
     pub async fn attach_existing(db: Database) -> Result<Self, super::InboxRuntimeAttachError> {
         super::runtime_attach::verify(&db).await?;

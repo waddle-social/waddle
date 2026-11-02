@@ -25,8 +25,10 @@ pub enum InboxRuntimeAttachError {
     MainLaneRequired,
     #[error("the active PostgreSQL schema differs from the attested schema")]
     ActiveSchemaMismatch,
-    #[error("a SQLite temporary relation shadows an inbox table")]
+    #[error("a SQLite temporary relation shadows an inbox or recovery-ledger table")]
     SqliteTemporaryShadow,
+    #[error("could not verify the PostgreSQL {setting} bound for inbox attachment")]
+    InvalidTimeoutSetting { setting: &'static str },
     #[error("failed to inspect inbox relation {relation}: {source}")]
     Relation {
         relation: &'static str,
@@ -78,6 +80,7 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
             (),
         )
         .await?;
+        bound_postgres_waits(&mut tx).await?;
         capability.attest_transaction(&mut tx).await?;
         let expected = &capability.identity().schema.name.0;
         let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
@@ -94,7 +97,8 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
         let mut rows = tx
             .query(
                 "SELECT name FROM sqlite_temp_master WHERE type IN ('table', 'view') \
-                 AND name COLLATE NOCASE IN ('inbox_entries', 'groupchat_notification_recovery')",
+                 AND name COLLATE NOCASE IN ('inbox_entries', 'groupchat_notification_recovery', \
+                     'ingress_effect_intents', 'ingress_effect_receipts')",
                 (),
             )
             .await?;
@@ -156,6 +160,58 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
     verify_critical_columns(&mut tx, db.driver(), &schema).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// SHOW and SET LOCAL do not establish the repeatable-read snapshot. Install
+/// bounds before the attestor reads identity without relaxing tighter limits.
+async fn bound_postgres_waits(tx: &mut Transaction<'_>) -> Result<(), InboxRuntimeAttachError> {
+    for (setting, show, cap, set) in [
+        (
+            "lock_timeout",
+            "SHOW lock_timeout",
+            5_000,
+            "SET LOCAL lock_timeout = '5s'",
+        ),
+        (
+            "statement_timeout",
+            "SHOW statement_timeout",
+            10_000,
+            "SET LOCAL statement_timeout = '10s'",
+        ),
+    ] {
+        let mut rows = tx.query(show, ()).await?;
+        let value: String = rows
+            .next()
+            .await?
+            .ok_or(InboxRuntimeAttachError::InvalidTimeoutSetting { setting })?
+            .get(0)?;
+        drop(rows);
+        let millis = timeout_millis(&value)
+            .ok_or(InboxRuntimeAttachError::InvalidTimeoutSetting { setting })?;
+        if millis == 0 || millis > cap {
+            tx.execute(set, ()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn timeout_millis(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(millis) = value.parse::<u64>() {
+        return Some(millis);
+    }
+    for (suffix, multiplier) in [
+        ("ms", 1),
+        ("min", 60_000),
+        ("s", 1_000),
+        ("h", 3_600_000),
+        ("d", 86_400_000),
+    ] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            return number.trim().parse::<u64>().ok()?.checked_mul(multiplier);
+        }
+    }
+    None
 }
 
 async fn verify_indexes(
@@ -321,4 +377,27 @@ async fn verify_critical_columns(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timeout_millis;
+
+    #[test]
+    fn postgres_timeout_display_units_and_invalid_values() {
+        for (value, expected) in [
+            ("0", Some(0)),
+            ("200ms", Some(200)),
+            ("1s", Some(1_000)),
+            ("2min", Some(120_000)),
+            ("3h", Some(10_800_000)),
+            ("4d", Some(345_600_000)),
+            ("18446744073709551615d", None),
+            ("-1ms", None),
+            ("1us", None),
+            ("unbounded", None),
+        ] {
+            assert_eq!(timeout_millis(value), expected, "{value}");
+        }
+    }
 }

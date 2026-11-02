@@ -1268,6 +1268,37 @@ async fn inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair()
         .execute("DROP TABLE temp.inbox_entries", ())
         .await
         .expect("remove temporary shadow");
+    drop(guard);
+    for (create, remove) in [
+        (
+            "CREATE TEMP TABLE ingress_effect_intents (shadow TEXT)",
+            "DROP TABLE temp.ingress_effect_intents",
+        ),
+        (
+            "CREATE TEMP VIEW Ingress_Effect_Receipts AS SELECT 1 AS shadow",
+            "DROP VIEW temp.ingress_effect_receipts",
+        ),
+    ] {
+        let guard = db.guard().await.expect("SQLite connection");
+        guard
+            .execute(create, ())
+            .await
+            .expect("create ledger shadow");
+        drop(guard);
+        assert!(matches!(
+            DatabaseInboxStorage::attach_existing(db.clone()).await,
+            Err(InboxRuntimeAttachError::SqliteTemporaryShadow)
+        ));
+        let guard = db.guard().await.expect("SQLite connection");
+        guard
+            .execute(remove, ())
+            .await
+            .expect("remove ledger shadow");
+    }
+    DatabaseInboxStorage::attach_existing(db.clone())
+        .await
+        .expect("attach after removing ledger shadows");
+    let guard = db.guard().await.expect("SQLite connection");
     guard
         .execute("DROP INDEX idx_inbox_entries_user_updated", ())
         .await

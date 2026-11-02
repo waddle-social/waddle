@@ -1644,6 +1644,262 @@ async fn inbox_runtime_attach_checks_attested_read_only_schema() {
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn inbox_runtime_attach_bounds_lock_wait_and_releases_main_lane() {
+    use waddle_server::inbox::{
+        bootstrap_inbox_owner_schema, DatabaseInboxStorage, InboxRuntimeAttachError,
+    };
+
+    async fn assert_main_usable(database: &Database) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut tx = database.begin().await.expect("main lane after refusal");
+            let mut rows = tx.query("SELECT 1::bigint", ()).await.expect("main query");
+            assert_eq!(
+                rows.next()
+                    .await
+                    .expect("row")
+                    .expect("value")
+                    .get::<i64>(0)
+                    .expect("integer"),
+                1
+            );
+            drop(rows);
+            tx.commit().await.expect("release main transaction");
+        })
+        .await
+        .expect("main lane must be released while owner lock remains held");
+    }
+
+    async fn assert_no_runtime_transaction(admin: &PgPool, role: &str) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let active: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity \
+                     WHERE usename = $1 AND xact_start IS NOT NULL",
+                )
+                .bind(role)
+                .fetch_one(admin)
+                .await
+                .expect("inspect runtime transactions");
+                if active == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("refusal must release the database transaction");
+    }
+
+    let check_error = |result: Result<DatabaseInboxStorage, InboxRuntimeAttachError>,
+                       code: &str| match result {
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            source: DatabaseError::Internal(sqlx::Error::Database(error)),
+        }) if error.code().as_deref() == Some(code) => {}
+        Err(error) => panic!("unexpected attachment error: {error:?}"),
+        Ok(_) => panic!("locked inbox must refuse attachment"),
+    };
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let owner = Database::from_config(
+        "inbox owner",
+        &DatabaseConfig::new(
+            DatabaseDriver::Postgres,
+            url_with_schema(&fixture.base_url, &fixture.target),
+        ),
+    )
+    .await
+    .expect("owner database");
+    bootstrap_inbox_owner_schema(&owner)
+        .await
+        .expect("owner prepares inbox");
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestor");
+    for table in ["inbox_entries", "groupchat_notification_recovery"] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{table} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant reads");
+    }
+    let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "bounded inbox",
+        attested_pool(
+            fixture.runtime_options.clone(),
+            config.clone(),
+            2,
+            Duration::from_secs(3),
+        )
+        .expect("attested pool"),
+        1,
+        1,
+    )
+    .await
+    .expect("main and ingress lanes");
+    let runtime = pool.global().clone();
+    DatabaseInboxStorage::attach_existing(runtime.clone())
+        .await
+        .expect("uncontended attachment");
+    let mut blocker = fixture.admin.begin().await.expect("owner lock transaction");
+    sqlx::query(&format!(
+        "LOCK TABLE {}.inbox_entries IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *blocker)
+    .await
+    .expect("hold conflicting owner lock");
+    let result = tokio::time::timeout(
+        Duration::from_secs(9),
+        DatabaseInboxStorage::attach_existing(runtime.clone()),
+    )
+    .await
+    .expect("default lock wait must be bounded");
+    check_error(result, "55P03");
+    assert_main_usable(&runtime).await;
+    assert_no_runtime_transaction(&fixture.admin, &fixture.runtime).await;
+
+    for (options, expected) in [
+        (
+            [("lock_timeout", "200ms"), ("statement_timeout", "0")],
+            "55P03",
+        ),
+        (
+            [("lock_timeout", "0"), ("statement_timeout", "200ms")],
+            "57014",
+        ),
+    ] {
+        let strict_pool = attested_pool(
+            fixture.runtime_options.clone().options(options),
+            config.clone(),
+            1,
+            Duration::from_secs(3),
+        )
+        .expect("attested pool with stricter session bound");
+        let strict = waddle_server::test_support::database_from_attested_postgres_pool(
+            "strict inbox",
+            strict_pool,
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            DatabaseInboxStorage::attach_existing(strict.clone()),
+        )
+        .await
+        .expect("a tighter inherited setting must not be loosened");
+        check_error(result, expected);
+        assert_main_usable(&strict).await;
+        assert_no_runtime_transaction(&fixture.admin, &fixture.runtime).await;
+        drop(strict);
+    }
+    blocker.rollback().await.expect("release owner lock");
+    DatabaseInboxStorage::attach_existing(runtime.clone())
+        .await
+        .expect("attachment after owner release");
+    drop(runtime);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn inbox_attach_timeout_setup_does_not_pin_snapshot() {
+    let Some(url) = test_url() else { return };
+    let db = PgPool::connect(&url).await.expect("PostgreSQL pool");
+    let schema = format!("inbox_snapshot_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&db)
+        .await
+        .expect("test schema");
+    sqlx::query(&format!(
+        "CREATE TABLE {schema}.probe (value integer NOT NULL)"
+    ))
+    .execute(&db)
+    .await
+    .expect("probe table");
+    sqlx::query(&format!("INSERT INTO {schema}.probe VALUES (0)"))
+        .execute(&db)
+        .await
+        .expect("seed probe");
+
+    let mut tx = db.begin().await.expect("read-only transaction");
+    for command in [
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ ONLY",
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "SHOW lock_timeout",
+        "SET LOCAL lock_timeout = '5s'",
+        "SHOW statement_timeout",
+        "SET LOCAL statement_timeout = '10s'",
+    ] {
+        if command.starts_with("SHOW ") {
+            let rows = sqlx::query(command)
+                .fetch_all(&mut *tx)
+                .await
+                .expect("attachment setting");
+            assert_eq!(rows.len(), 1);
+        } else {
+            sqlx::query(command)
+                .execute(&mut *tx)
+                .await
+                .expect("attachment setup");
+        }
+    }
+    sqlx::query(&format!("UPDATE {schema}.probe SET value = 1"))
+        .execute(&db)
+        .await
+        .expect("concurrent committed update");
+    let value: i32 = sqlx::query_scalar(&format!("SELECT value FROM {schema}.probe"))
+        .fetch_one(&mut *tx)
+        .await
+        .expect("first snapshot read");
+    assert_eq!(value, 1, "timeout setup must not pin the earlier snapshot");
+    tx.rollback().await.expect("close transaction");
+
+    sqlx::query(&format!("UPDATE {schema}.probe SET value = 0"))
+        .execute(&db)
+        .await
+        .expect("reset probe");
+    let mut control = db.begin().await.expect("control transaction");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *control)
+        .await
+        .expect("control isolation");
+    let before: i32 = sqlx::query_scalar(&format!("SELECT value FROM {schema}.probe"))
+        .fetch_one(&mut *control)
+        .await
+        .expect("pin control snapshot");
+    sqlx::query(&format!("UPDATE {schema}.probe SET value = 1"))
+        .execute(&db)
+        .await
+        .expect("concurrent control update");
+    let after: i32 = sqlx::query_scalar(&format!("SELECT value FROM {schema}.probe"))
+        .fetch_one(&mut *control)
+        .await
+        .expect("read control snapshot");
+    assert_eq!(
+        (before, after),
+        (0, 0),
+        "negative control must pin a snapshot"
+    );
+    control.rollback().await.expect("close control");
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&db)
+        .await
+        .expect("drop test schema");
+    db.close().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_capacity() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };
