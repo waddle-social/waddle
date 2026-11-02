@@ -10,6 +10,7 @@ pub mod lineage;
 mod migrations;
 pub mod physical_attestation;
 mod pool;
+pub(crate) mod read_only_timeout;
 pub mod roster;
 mod schema;
 mod value;

@@ -316,19 +316,40 @@ async fn prepare_postgres<'a>(
             .await
             .map_err(|_| DarkIngressAuthorityError::Database)?;
     }
+    prelock_epoch_relation(&mut transaction, schema).await?;
+    let epoch = read_epoch_after_prelock(&mut transaction, schema, expected_schema_oid).await?;
+    Ok(PreparedPostgres { transaction, epoch })
+}
+
+/// Acquire the relation barrier on an already-open transaction. This helper
+/// does not grant authority to use the candidate guard.
+pub(crate) async fn prelock_epoch_relation(
+    connection: &mut PgConnection,
+    schema: &str,
+) -> Result<(), DarkIngressAuthorityError> {
     let qualified = quote_identifier(schema);
     let lock = format!("LOCK TABLE ONLY {qualified}.ingress_protocol_epoch IN ACCESS SHARE MODE");
     sqlx::query(&lock)
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await
         .map_err(postgres_error)?;
+    Ok(())
+}
+
+/// Read and prove the epoch after the relation lock has been acquired.
+pub(crate) async fn read_epoch_after_prelock(
+    connection: &mut PgConnection,
+    schema: &str,
+    expected_schema_oid: u32,
+) -> Result<ProtocolEpoch, DarkIngressAuthorityError> {
+    let qualified = quote_identifier(schema);
     let read = format!(
         "SELECT epoch, (SELECT oid::bigint FROM pg_catalog.pg_namespace WHERE nspname = $1) \
          FROM {qualified}.ingress_protocol_epoch WHERE id = 1"
     );
     let row = sqlx::query(&read)
         .bind(schema)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(|_| DarkIngressAuthorityError::Database)?
         .ok_or(DarkIngressAuthorityError::MissingEpoch)?;
@@ -347,10 +368,10 @@ async fn prepare_postgres<'a>(
          pg_catalog.set_config('waddle.protocol_epoch_xid', pg_catalog.pg_current_xact_id()::text, true)",
     )
     .bind(epoch.to_storage().to_string())
-    .execute(&mut *transaction)
+    .execute(&mut *connection)
     .await
     .map_err(|_| DarkIngressAuthorityError::Database)?;
-    Ok(PreparedPostgres { transaction, epoch })
+    Ok(epoch)
 }
 
 async fn read_sqlite_epoch(

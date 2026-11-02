@@ -271,6 +271,11 @@ enum IngressColocationError {
     },
     #[error("Storage and ingress must share one durable SQLite database")]
     SqliteDatabase,
+    #[error(
+        "cannot open an independent PostgreSQL child store from a physically attested pool; \
+         use a supported shared-pool store handle"
+    )]
+    AttestedChildPoolUnsupported,
 }
 
 async fn ensure_postgres_ingress_colocation(
@@ -307,6 +312,14 @@ pub(crate) async fn create_ingress_inbox_storage(
             DatabaseInboxStorage::from_database(global.clone()).await?
         }
         DatabaseDriver::Postgres => {
+            if global.uses_attested_postgres_pool() {
+                // This factory opens an independent PostgreSQL pool and then
+                // runs owner-side schema bootstrap. The attested handle does
+                // not expose a reconnectable DSN; startup must provide a
+                // supported store that shares the attested handle after
+                // trusted owner bootstrap.
+                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
             let database_url = database_url.unwrap_or_else(|| global.database_url());
             // Opening inbox storage mutates its schema. Check the live identity
             // through a plain pool before initializing the configured database.
@@ -393,6 +406,12 @@ pub(crate) async fn create_websocket_mam_storage(
             SqlxMamStorage::from_sqlite_pool(pool.clone()).await?
         }
         DatabaseDriver::Postgres => {
+            if global_db.uses_attested_postgres_pool() {
+                // `SqlxMamStorage::open` creates its own raw PgPool, so this
+                // startup path cannot safely consume the physically attested
+                // main/ingress pool yet.
+                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
             let database_url = database_url
                 .as_deref()
                 .unwrap_or_else(|| global_db.database_url());
@@ -1765,6 +1784,13 @@ async fn ensure_ingress_storage_colocation(
             }
         }
         DatabaseDriver::Postgres => {
+            if global.uses_attested_postgres_pool() && database_url.is_some() {
+                // Do not probe a separately configured URL with an ordinary
+                // pool when the global database was opened with exact,
+                // hook-bearing connection options. With no URL, the
+                // downstream SM/pending store uses the same Database handle.
+                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+            }
             if let Some(database_url) = database_url {
                 if !database_url.starts_with("postgres://")
                     && !database_url.starts_with("postgresql://")

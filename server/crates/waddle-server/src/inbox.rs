@@ -26,6 +26,7 @@ use crate::db::Database;
 
 mod codec;
 mod open;
+mod runtime_attach;
 mod schema;
 
 use codec::{decode_row, encode_call_thread_columns, encode_kind, SELECT_COLS};
@@ -36,11 +37,14 @@ mod tests;
 
 mod implementation;
 pub(crate) use implementation::find_in_transaction;
-pub(crate) use implementation::get_in_transaction;
+pub(crate) use implementation::get_in_prepared_transaction;
 pub(crate) use implementation::insert_groupchat_notification_recovery_in_transaction;
 pub(crate) use implementation::mark_read_in_transaction;
+pub(crate) use implementation::upsert_in_prepared_transaction;
+#[cfg(test)]
 pub(crate) use implementation::upsert_in_transaction;
 pub use implementation::DatabaseInboxStorage;
 pub use implementation::InboxDecodeError;
 pub use implementation::InboxTxError;
+pub use runtime_attach::InboxRuntimeAttachError;
 pub use schema::bootstrap_schema_owner as bootstrap_inbox_owner_schema;

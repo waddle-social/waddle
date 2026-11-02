@@ -17,8 +17,9 @@ pub mod projection;
 pub mod storage;
 
 pub use storage::{
-    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
-    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
+    lock_archive_sequence_on_sqlite_connection, store_archived_message_on_connection,
+    store_archived_message_on_connection_in_schema, store_archived_message_on_sqlite_connection,
     ArchiveExpectation, InMemoryMamStorage, MamArchiveKind, MamStorage, MamStorageError,
     MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage, StoreOutcome, TerminalTombstoneOutcome,
 };

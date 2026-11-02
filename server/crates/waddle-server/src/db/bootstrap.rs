@@ -4,12 +4,16 @@
 //! verifier is not wired into normal startup until the remaining store DDL,
 //! role topology and physical attestation gates are resolved.
 
+use std::time::Duration;
+
+use sqlx::postgres::PgConnectOptions;
 use thiserror::Error;
 use tracing::info;
 
 use crate::config::LineageConfig;
 
 use super::lineage::{self, AttestedLineage, LineageAction, LineageError, LineageUuid};
+use super::physical_attestation::{attested_pool, PhysicalAttestationConfig};
 use super::{Database, DatabaseDriver, DatabaseError, MigrationRunner, Transaction};
 
 #[derive(Debug, Error)]
@@ -53,8 +57,197 @@ pub enum RuntimeAttachmentError {
     MissingExpectedPostgresIdentity,
     #[error("runtime attachment identity differs from the expected committed installation")]
     ExpectedIdentityMismatch,
+    #[error("could not verify the PostgreSQL {setting} bound for runtime attachment")]
+    InvalidTimeoutSetting { setting: &'static str },
+    #[error(
+        "verified runtime pool requests {requested} connections, exceeding the resource safety limit of {maximum}"
+    )]
+    PoolCapacityExceeded { requested: u32, maximum: u32 },
     #[error(transparent)]
     Database(#[from] DatabaseError),
+}
+
+/// Resource safety bound for this dark constructor, not a PostgreSQL limit.
+pub const MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS: u32 = 1024;
+
+/// Separate admission limits over the physically attested main pool.
+/// Main and ingress share one backend pool but cannot borrow admission from
+/// each other. Their combined size plus any control-plane pool is bounded by
+/// [`MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS`].
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimePoolLimits {
+    pub main_connections: u32,
+    pub ingress_connections: u32,
+    pub acquire_timeout: Duration,
+}
+
+/// Capacity for a separately attested control-plane pool. Its admission
+/// capacity is independent from the main and ingress lanes.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlPlanePoolLimits {
+    pub connections: u32,
+    pub acquire_timeout: Duration,
+}
+
+/// An attested global database whose lineage and migration ledger were
+/// verified before this handle was created. The ledger verification describes
+/// that transaction's snapshot. The database remains private until startup,
+/// store and runtime-authority boundaries are closed in a later slice.
+pub struct VerifiedGlobalAttachment {
+    _database: Database,
+}
+
+#[cfg(feature = "test-support")]
+impl VerifiedGlobalAttachment {
+    pub(crate) fn database_for_test(&self) -> &Database {
+        &self._database
+    }
+}
+
+/// Construct one physically attested PostgreSQL pool with independent main
+/// and ingress admission, then verify its physical capability, qualified
+/// lineage and complete migration ledger in the same read-only transaction.
+///
+/// `expected` is a separate operator-supplied installation identity; it must
+/// not be obtained from this pool or its capability. This function compares
+/// that input with the attestor configuration, but does not establish the
+/// input's provenance, audit all runtime grants, drain existing sessions or
+/// fence a PostgreSQL primary. The endpoint must retain a server session
+/// across checkout and transaction start. No schema repair, owner bootstrap
+/// or store initialization is performed.
+pub async fn attach_verified_global_runtime(
+    options: PgConnectOptions,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    attach_verified_global_runtime_inner(options, None, attestation, expected, limits).await
+}
+
+/// Attach a global runtime database with a separate physically attested
+/// control-plane pool. Both pools use the same expected physical identity,
+/// lineage, and runtime login, but retain independent connection and admission
+/// budgets. The control-plane pool is checked before this private attachment
+/// is returned; a failed checkout cannot fall back to an ordinary pool or
+/// reopen a DSN.
+///
+/// This dark constructor does not wire startup, perform owner DDL, audit all
+/// runtime grants, drain existing sessions, or fence a PostgreSQL primary.
+pub async fn attach_verified_global_runtime_with_control_plane(
+    options: PgConnectOptions,
+    control_plane_options: PgConnectOptions,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+    control_plane_limits: ControlPlanePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    attach_verified_global_runtime_inner(
+        options,
+        Some((control_plane_options, control_plane_limits)),
+        attestation,
+        expected,
+        limits,
+    )
+    .await
+}
+
+async fn attach_verified_global_runtime_inner(
+    options: PgConnectOptions,
+    control_plane: Option<(PgConnectOptions, ControlPlanePoolLimits)>,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    let total = limits
+        .main_connections
+        .checked_add(limits.ingress_connections)
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    if limits.main_connections == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "main" }.into());
+    }
+    if limits.ingress_connections == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "ingress" }.into());
+    }
+    if let Some((_, control_plane_limits)) = &control_plane {
+        if control_plane_limits.connections == 0 {
+            return Err(DatabaseError::PoolSizeZero {
+                which: "control-plane",
+            }
+            .into());
+        }
+    }
+    let total = match &control_plane {
+        Some((_, limits)) => total
+            .checked_add(limits.connections)
+            .ok_or(DatabaseError::PoolSizeOverflow)?,
+        None => total,
+    };
+    if total > MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS {
+        return Err(RuntimeAttachmentError::PoolCapacityExceeded {
+            requested: total,
+            maximum: MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
+        });
+    }
+    if expected.postgres_identity.is_none() {
+        return Err(RuntimeAttachmentError::MissingExpectedPostgresIdentity);
+    }
+    if attestation.expected_lineage() != expected {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+
+    let main_pool_size = limits
+        .main_connections
+        .checked_add(limits.ingress_connections)
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    let has_control_plane = control_plane.is_some();
+    let pool = attested_pool(
+        options,
+        attestation.clone(),
+        main_pool_size,
+        limits.acquire_timeout,
+    )
+    .map_err(DatabaseError::from)?;
+    let control_plane_pool = control_plane
+        .map(|(options, control_plane_limits)| {
+            attested_pool(
+                options,
+                attestation,
+                control_plane_limits.connections,
+                control_plane_limits.acquire_timeout,
+            )
+            .map(|pool| (pool, control_plane_limits.connections))
+            .map_err(DatabaseError::from)
+        })
+        .transpose()?;
+    let database = Database::from_attested_postgres_pool_with_ingress_and_control_plane(
+        "global",
+        pool,
+        control_plane_pool,
+        limits.main_connections,
+        limits.ingress_connections,
+    )
+    .await?;
+    let config = LineageConfig {
+        deployment_uuid: Some(expected.deployment_uuid),
+        action: None,
+    };
+    verify_global_runtime(&database, &config, expected).await?;
+    if has_control_plane {
+        let mut rows = database
+            .control_plane_guard()
+            .await?
+            .query("SELECT pg_catalog.current_database()", ())
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(DatabaseError::QueryFailed(
+                "control-plane attachment returned no database identity".to_owned(),
+            )
+            .into());
+        }
+    }
+    Ok(VerifiedGlobalAttachment {
+        _database: database,
+    })
 }
 
 /// The existing owner startup path, made explicit so a later credential split
@@ -155,7 +348,7 @@ pub async fn verify_global_runtime(
     let (mut tx, driver, lineage_table, ledger_table) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
@@ -177,12 +370,41 @@ pub async fn verify_store_lineage_runtime(
     let (mut tx, driver, lineage_table, _) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
     tx.commit().await?;
     Ok(attested)
+}
+
+async fn verify_runtime_lineage(
+    db: &Database,
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+    expected: &AttestedLineage,
+    lineage_table: &str,
+) -> Result<AttestedLineage, RuntimeAttachmentError> {
+    if let Some(capability) = db.attested_pg_writer_capability() {
+        db.verify_attested_pg_writer_capability(&capability)
+            .map_err(DatabaseError::from)?;
+        if &capability.attested_lineage_for_deployment(config.deployment_uuid)? != expected {
+            return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+        }
+        capability.attest_transaction(tx).await?;
+        Ok(
+            lineage::verify_qualified_with_attested_identity_in_transaction(
+                tx,
+                config,
+                lineage_table,
+                capability.identity(),
+            )
+            .await?,
+        )
+    } else {
+        Ok(lineage::verify_qualified_in_transaction(tx, driver, config, lineage_table).await?)
+    }
 }
 
 async fn begin_runtime_lineage_check<'a>(
@@ -216,6 +438,18 @@ async fn begin_runtime_lineage_check<'a>(
             (),
         )
         .await?;
+        if db.attested_pg_writer_capability().is_some() {
+            super::read_only_timeout::bound_postgres_waits(&mut tx)
+                .await
+                .map_err(|error| match error {
+                    super::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                        RuntimeAttachmentError::InvalidTimeoutSetting { setting }
+                    }
+                    super::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                        RuntimeAttachmentError::Database(error)
+                    }
+                })?;
+        }
         let schema = &expected
             .postgres_identity
             .as_ref()

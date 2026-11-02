@@ -134,6 +134,8 @@ pub(in crate::ingress::commit) async fn commit_attempt(
             std::time::Duration::from_millis(250),
         )
         .await?;
+    #[cfg(test)]
+    commit_hooks::apply_search_path(&mut tx).await?;
     super::super::principal::assert_admission(&mut tx, submission).await?;
     #[cfg(test)]
     commit_race_gate::after_admission(submission.digest_input.origin()).await;
@@ -153,6 +155,34 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     }
     let stream = super::super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
+    let relayed_alias = match (&submission.identity, submission.digest_input.origin()) {
+        (
+            IngressStreamIdentity::Relayed {
+                canonical, room, ..
+            },
+            Some(origin),
+        ) => {
+            if submission.sender.to_bare() != canonical.sender_bare
+                || submission.digest_input.target() != &submission.target
+                || submission.target != waddle_xmpp::ingress::NormalizedTarget::Bare(room.clone())
+            {
+                return Err(
+                    crate::ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into(),
+                );
+            }
+            CanonicalMessageRepository::assert_relayed_alias(
+                &mut tx,
+                canonical.message_key,
+                &canonical.sender_bare,
+                &submission.target,
+                origin,
+                &digest,
+            )
+            .await?;
+            Some(canonical.message_key)
+        }
+        _ => None,
+    };
     let transient_direct = super::super::storage_hint::protects_plan(&submission.plan);
     let envelope = if transient_direct {
         super::super::storage_hint::envelope(&submission.plan.sanitized_message)
@@ -161,6 +191,10 @@ pub(in crate::ingress::commit) async fn commit_attempt(
     };
     let mut rejection = super::super::rejection::planned_rejection(&submission.plan)?;
     let (key, alias) = if let Some((key, _)) = stream.as_ref().and_then(|stream| stream.bound) {
+        (key, AliasOutcomeClass::Existing)
+    } else if let Some(key) = relayed_alias {
+        // The alias was checked under both locks above. In particular a denial
+        // must never resolve a different parent or mint a replacement here.
         (key, AliasOutcomeClass::Existing)
     } else if rejection.is_some() {
         // A committed denial owns its origin id like any acceptance: the alias

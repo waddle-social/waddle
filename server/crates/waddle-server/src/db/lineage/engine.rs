@@ -404,6 +404,22 @@ pub(crate) async fn verify_qualified_in_transaction(
     verify_via_query_from(tx, driver, config, lineage_table).await
 }
 
+/// Read the qualified lineage row after the same transaction's physical
+/// connection has been checked by the restricted SECURITY DEFINER attestor.
+/// The runtime role deliberately cannot call pg_control_system() itself.
+pub(crate) async fn verify_qualified_with_attested_identity_in_transaction(
+    tx: &mut Transaction<'_>,
+    config: &LineageConfig,
+    lineage_table: &str,
+    live: &PgIdentity,
+) -> Result<AttestedLineage, DatabaseError> {
+    ensure_single_row_from(tx, lineage_table).await?;
+    let record = read_record_from(tx, DatabaseDriver::Postgres, lineage_table)
+        .await?
+        .ok_or(LineageError::MissingRow)?;
+    attested_postgres_record(record, live.clone(), config)
+}
+
 #[async_trait::async_trait]
 trait LineageQuery {
     async fn lineage_query(&mut self, sql: &str, params: Vec<Value>)

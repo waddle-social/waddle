@@ -19,8 +19,9 @@ mod tests;
 pub use error::MamStorageError;
 pub use in_memory::InMemoryMamStorage;
 pub use sqlx_store::{
-    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
-    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
+    lock_archive_sequence_on_sqlite_connection, store_archived_message_on_connection,
+    store_archived_message_on_connection_in_schema, store_archived_message_on_sqlite_connection,
     ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage,
 };
 pub use traits::{MamArchiveKind, MamStorage, StoreOutcome, TerminalTombstoneOutcome};

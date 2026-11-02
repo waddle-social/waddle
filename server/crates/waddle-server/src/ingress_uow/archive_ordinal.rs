@@ -4,7 +4,7 @@ use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey, MessageKey};
 use waddle_xmpp::mam::ArchiveOrdinal;
 
 use super::{EffectIntentRepository, IngressUowError, IngressUowTransaction};
-use crate::db::DatabaseDriver;
+use crate::ingress_substrate::{prepared_ingress_sql, PreparedIngressRelation};
 
 /// A planned archive intent whose ordinal is still unfinalized (`None`) matches
 /// the recorded intent that carries the committed ordinal: the position is
@@ -72,15 +72,13 @@ impl EffectIntentRepository {
         *recorded = Some(ordinal);
         let hash = Sha256::digest(key.storage_identity().as_bytes());
         let (kind, payload) = intent.with_encoded_v1(|kind, payload| (kind, payload.to_vec()))?;
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "UPDATE ingress_effect_intents SET payload = ? WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1"
-        } else {
-            "UPDATE ingress_effect_intents SET payload = ? WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1"
-        };
+        let (tx, prepared) = tx.prepared_parts();
+        let sql = prepared_ingress_sql(tx.driver(), prepared, PreparedIngressRelation::Effects,
+            ("UPDATE ", " SET payload = ? WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1"),
+            "UPDATE ingress_effect_intents SET payload = ? WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND payload_version = 1");
         let changed = tx
-            .transaction_mut()
             .execute(
-                sql,
+                &sql,
                 crate::db_params![
                     payload,
                     message_key.to_storage().to_string(),

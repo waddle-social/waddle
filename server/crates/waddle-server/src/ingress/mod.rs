@@ -108,6 +108,9 @@ mod offline_hardening_tests;
 mod muc_occupant_progress_tests;
 
 #[cfg(test)]
+mod relayed_origin_tests;
+
+#[cfg(test)]
 mod xep0045_room_manifest_tests;
 
 mod room_canonical;
