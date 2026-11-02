@@ -103,6 +103,90 @@ bind, and how late completion is fenced if a binding has already been replaced.
 Do not remint an old connection into a fresh node epoch merely to make a stale
 operation pass. The representation and invalidation mechanism remain open.
 
+## P3.1 failed-resume provisional endpoint gate — #2137
+
+Status: **blocking design questions; no implementation contract selected**.
+This addendum records the live #2137 failed-resume gate against source at
+`8ecc94bbd8f2bc25a1ce23bb99b874d327010bb2`. It does not authorize an actor
+cutover, endpoint DDL, activation, or a change to the existing WebSocket and
+registry authority.
+
+The [#2137 planning issue](https://github.com/waddle-social/waddle/issues/2137)
+and its [failed-resume gate comment](https://github.com/waddle-social/waddle/issues/2137#issuecomment-6560850444)
+record a local native-WebSocket reproduction: failed XEP-0198 resume published
+an entry, then the same physical socket reset before fresh bind because
+owner-gated unregister dropped the registry's only outbound sender and the
+connection loop treated `outbound_rx.recv() == None` as supersession. The
+comment reports that independent architecture review blocked sender-retention
+and queue-swap shortcuts. It attributes this to the current envelope lacking
+exact binding and pending claim-token information across direct IQ, peer
+stanza, pending-row, write-acceptance, ingress, remote-proxy and force-detach
+work. These are issue-reported local findings, not hosted or production proof.
+
+The source shows why this is a cross-route ownership boundary: the WebSocket
+task owns the split socket and `WsConnState`
+([`connection.rs:259–293`](../../server/crates/waddle-server/src/server/routes/websocket/connection.rs#L259-L293));
+its select loop consumes the published outbound channel
+([`connection.rs:582–605`](../../server/crates/waddle-server/src/server/routes/websocket/connection.rs#L582-L605));
+registration publishes a `FullJid` entry before actor confirmation and retains
+owner-gated rollback
+([`registration.rs:600–620`](../../server/crates/waddle-server/src/server/routes/websocket/registration.rs#L600-L620),
+[`registration.rs:725–744`](../../server/crates/waddle-server/src/server/routes/websocket/registration.rs#L725-L744));
+and the local registry owner fence is the pointer identity of the carbons flag
+([`connections.rs:142–170`](../../server/crates/waddle-xmpp/src/registry/connection_registry/connections.rs#L142-L170)).
+The actor mirror carries that same token, with `None` retaining unconditional
+removal semantics
+([`dual_registration.rs:33–38`](../../server/crates/waddle-server/src/server/dual_registration.rs#L33-L38),
+[`dual_registration.rs:173–212`](../../server/crates/waddle-server/src/server/dual_registration.rs#L173-L212)).
+
+The following questions block affected implementation:
+
+1. **Transport versus binding generation.** Specify how one physical transport
+   incarnation is distinguished from each published binding on it, including a
+   failed resume followed by fresh bind on the same socket. State what survives
+   resume, what is minted before bind, and how late work is fenced. Keep
+   `FullJid`, node incarnation, occupancy, SM claim and remote mirror identity
+   distinct. The current process-local `ConnectionGeneration` is an ingress
+   tag, not a durable transport CAS
+   ([`state.rs:1881–1900`](../../server/crates/waddle-server/src/server/routes/websocket/state.rs#L1881-L1900));
+   neither identity candidate above is selected.
+2. **Non-admitting provisional registration.** Define a registration state
+   that can exist while the resume claim is pending but cannot admit delivery.
+   Specify the publication and activation linearization points, the authoritative
+   actor confirmation, and how failure retires the empty provisional channel
+   and its control identity before fresh bind proceeds.
+3. **Typed route outcome.** Define a typed result that distinguishes
+   *proven not enqueued* (safe to retry) from accepted work (custody remains
+   owned), ambiguous timeout, and terminal failure. Apply and prove the same
+   semantics for local actor routing, direct IQ, pending rows, ordered relay,
+   and remote-proxy enqueue. A socket-only admission flag is insufficient if
+   any path bypasses it.
+4. **No sender transfer shortcut.** Do not retain the old sender or swap queues
+   across binding generations as a substitute for the above contracts. That
+   would transfer work without establishing exact binding and pending claim
+   ownership, and can lose, duplicate, or retarget admitted effects. If any
+   work can be admitted provisionally, define a separate exact accepted-but-
+   unwritten custody API before implementation.
+5. **Late work and retirement fence.** Specify how late actor replies,
+   unregister retries, captured force-detach controls, remote proxy sends and
+   cleanup after cancellation can neither remove nor interrupt a successor.
+   Define when cleanup is complete and which exact identity it retires; a
+   detached lifecycle marker alone is not proof that I/O tasks terminated.
+
+After those contracts are independently reviewed, the implementation test
+schedule must use deterministic barriers for: (a) native WebSocket failed
+resume then fresh bind on the same physical socket, with no reconnect; (b)
+claim success/failure and cancellation around provisional publication and
+activation; (c) each listed delivery route under provisional admission,
+backpressure, timeout and cancellation, asserting no duplicate or lost
+accepted work; (d) delayed stale cleanup and force-detach after the fresh bind,
+asserting the successor remains registered and live; (e) mailbox saturation,
+stalled writes and task panic/shutdown; and (f) supported local and remote
+owner cases, including the distributed claim path. Verify registry and actor
+views as well as socket behavior. Local actor-only tests do not establish
+distributed claims. Preserve P2 custody until its existing authority and
+rollout gates permit a separately reviewed handoff.
+
 ## Transition contract for review
 
 The middle column records current behavior at the linked seams. The final column

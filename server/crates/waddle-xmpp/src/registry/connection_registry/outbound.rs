@@ -1,4 +1,6 @@
+use super::endpoint_gate::{EndpointGate, EndpointGateError};
 use super::{mpsc, Arc, AtomicBool, Ordering, Stanza};
+use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity};
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 use crate::stream_management::SmRelayedAppendObligation;
@@ -267,6 +269,9 @@ pub struct ConnectionEntry {
     resume_control: Arc<std::sync::OnceLock<Arc<super::LiveResumeControl>>>,
     /// Bounds terminal ordering retry tasks to one per connection generation.
     terminal_ordering_retry: Arc<AtomicBool>,
+    /// Exact binding identity and its synchronous local enqueue fence.
+    binding_ref: BindingRef,
+    endpoint_gate: Arc<EndpointGate>,
     /// Channel to send stanzas to this connection
     pub sender: mpsc::Sender<OutboundStanza>,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
@@ -353,12 +358,23 @@ const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
     pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        let connection = ConnectionRef::new(NodeIdentity::local());
+        let binding_ref = connection
+            .next_binding_ref()
+            .expect("new connection reference has a binding generation");
+        Self::new_with_binding(sender, binding_ref)
+    }
+
+    /// Create an active entry for the supplied physical-connection binding.
+    pub fn new_with_binding(sender: mpsc::Sender<OutboundStanza>, binding_ref: BindingRef) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
             archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
+            endpoint_gate: Arc::new(EndpointGate::active(binding_ref.clone())),
+            binding_ref,
             sender,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),
@@ -373,6 +389,61 @@ impl ConnectionEntry {
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
             write_interruption: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// The exact physical connection and bind/resume attempt that owns this entry.
+    pub fn binding_ref(&self) -> &BindingRef {
+        &self.binding_ref
+    }
+
+    pub(super) fn with_active_endpoint<R>(
+        &self,
+        enqueue: impl FnOnce() -> R,
+    ) -> Result<R, EndpointGateError> {
+        self.endpoint_gate.with_active(&self.binding_ref, enqueue)
+    }
+
+    /// A sender permit may have been held over an await. Recheck the captured
+    /// binding and active state at the final, synchronous permit send.
+    pub(super) fn send_reserved(
+        &self,
+        binding: &BindingRef,
+        permit: mpsc::OwnedPermit<OutboundStanza>,
+        outbound: OutboundStanza,
+    ) -> Result<(), EndpointGateError> {
+        self.endpoint_gate
+            .with_active(binding, || permit.send(outbound))
+            .map(|_| ())
+    }
+
+    pub(super) async fn reserve_outbound(
+        &self,
+    ) -> Result<mpsc::OwnedPermit<OutboundStanza>, EndpointGateError> {
+        self.endpoint_gate.with_active(&self.binding_ref, || ())?;
+        tokio::select! {
+            biased;
+            _ = self.endpoint_gate.sealed().cancelled() => Err(EndpointGateError::Sealed),
+            permit = self.sender.clone().reserve_owned() => {
+                permit.map_err(|_| EndpointGateError::ChannelClosed)
+            }
+        }
+    }
+
+    pub(super) fn try_reserve_outbound(
+        &self,
+    ) -> Result<
+        Result<mpsc::OwnedPermit<OutboundStanza>, mpsc::error::TrySendError<()>>,
+        EndpointGateError,
+    > {
+        self.endpoint_gate.with_active(&self.binding_ref, || {
+            self.sender
+                .clone()
+                .try_reserve_owned()
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => mpsc::error::TrySendError::Full(()),
+                    mpsc::error::TrySendError::Closed(_) => mpsc::error::TrySendError::Closed(()),
+                })
+        })
     }
 
     /// Wire the owner-serviced control before publishing this entry.
@@ -396,6 +467,9 @@ impl ConnectionEntry {
     }
 
     pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {
+        // This synthetic identity belongs to the local proxy queue. It does
+        // not identify or fence the remote WebSocket; remote transport
+        // identity/version remains owned by the clustering bridge.
         let mut entry = Self::new(sender);
         entry.hosting = ConnectionHosting::Remote;
         entry

@@ -24,6 +24,19 @@ impl ConnectionEntry {
         &self,
         outbound: OutboundStanza,
     ) -> Result<(), TrySendError<()>> {
+        match self.with_active_endpoint(|| self.try_send_archive_ordered_active(outbound)) {
+            Ok(result) => result,
+            // A gate rejection is synchronous proof that the frame did not
+            // enter this binding's queue. Preserve the existing definitely-
+            // not-enqueued surface used for backpressure/drop accounting.
+            Err(_) => Err(TrySendError::Full(())),
+        }
+    }
+
+    fn try_send_archive_ordered_active(
+        &self,
+        outbound: OutboundStanza,
+    ) -> Result<(), TrySendError<()>> {
         if outbound.ingress_append.as_ref().is_some_and(|obligation| {
             [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
                 .iter()

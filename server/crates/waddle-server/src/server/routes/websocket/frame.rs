@@ -38,6 +38,8 @@ use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
 use xmpp_parsers::minidom::Element;
 
+mod live_request;
+
 #[derive(Debug, Clone)]
 pub(crate) enum StreamErrorFrame {
     HandledCountTooHigh { acknowledged: u32, send_count: u32 },
@@ -342,6 +344,8 @@ async fn handle_xmpp_frame_impl(
     }
 
     let WsConnState {
+        connection_ref,
+        binding_ref,
         phase,
         authenticated_session,
         occupancy_session,
@@ -384,6 +388,8 @@ async fn handle_xmpp_frame_impl(
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
+                connection_ref,
+                binding_ref,
                 phase,
                 sm_state,
                 sm_ingress_fence,
@@ -996,6 +1002,11 @@ async fn dispatch_authoritative_message(
             .muc
             .parse()
             .map_err(|_| IngressDecisionClass::Storage)?;
+        let room_target = message.type_ == xmpp_parsers::message::MessageType::Groupchat
+            || message
+                .to
+                .as_ref()
+                .is_some_and(|target| target.domain().as_str() == muc.domain().as_str());
         let digest_context = DigestContext {
             target: target.clone(),
             server_authorities: crate::ingress::submission::digest_authorities(
@@ -1062,7 +1073,24 @@ async fn dispatch_authoritative_message(
                 conn.ingress_generation,
             ),
         };
-        Ok::<_, IngressDecisionClass>(state.deps.protocol.ingress.commit(&submission).await)
+        let connection = live_request::ConnectionParts {
+            phase: &conn.phase,
+            authenticated_session: &conn.authenticated_session,
+            ingress_generation: &conn.ingress_generation,
+            sm_state: &conn.sm_state,
+            sm_ingress_fence: &conn.sm_ingress_fence,
+            sm_inbound_completion: &conn.sm_inbound_completion,
+        };
+        let decision =
+            match live_request::capture(connection, admission, sequence, room_target, submission) {
+                live_request::FrameHandoff::Provenance(request) => {
+                    request.commit(&state.deps.protocol.ingress).await
+                }
+                live_request::FrameHandoff::Legacy(submission) => {
+                    state.deps.protocol.ingress.commit(&submission).await
+                }
+            };
+        Ok::<_, IngressDecisionClass>(decision)
     });
     let (result, revoked) = match admission {
         Some((permit, shutdown)) => {

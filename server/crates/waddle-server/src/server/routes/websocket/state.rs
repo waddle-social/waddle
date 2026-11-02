@@ -1717,6 +1717,10 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
 }
 
 pub(super) struct WsConnState {
+    /// Stable identity for this physical WebSocket transport.
+    pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    /// The bind or resume attempt currently installed on this transport.
+    pub(super) binding_ref: Option<waddle_xmpp::ownership::BindingRef>,
     pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
@@ -1879,16 +1883,24 @@ pub(super) struct WsConnState {
 }
 
 impl WsConnState {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::new_for_node(waddle_xmpp::ownership::NodeIdentity::local())
+    }
+
+    pub(super) fn new_for_node(node: waddle_xmpp::ownership::NodeIdentity) -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let sm_state = StreamManagementState::new();
+        let connection_ref = waddle_xmpp::ownership::ConnectionRef::new(node);
         let write_interruption = tokio_util::sync::CancellationToken::new();
         let live_resume_control = waddle_xmpp::registry::LiveResumeControl::new(
             sm_state.resume_checkpoint(),
             write_interruption.clone(),
         );
         Self {
+            connection_ref,
+            binding_ref: None,
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
@@ -1936,6 +1948,19 @@ impl WsConnState {
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
+    }
+
+    pub(super) fn ensure_binding_ref(&mut self) -> Option<waddle_xmpp::ownership::BindingRef> {
+        if let Some(binding) = &self.binding_ref {
+            return Some(binding.clone());
+        }
+        let binding = self.connection_ref.next_binding_ref()?;
+        self.binding_ref = Some(binding.clone());
+        Some(binding)
+    }
+
+    pub(super) fn retire_binding_ref(&mut self) {
+        self.binding_ref = None;
     }
 
     /// Enter terminal non-resumable recovery without ever appending another
@@ -2154,3 +2179,40 @@ impl WsConnState {
 /// promoted, resume is rejected, and the sender must re-establish any
 /// regenerable state such as MUC presence via a fresh bind/rejoin.
 pub(super) const TERMINAL_RECOVERY_QUEUE_CAP: usize = 4096;
+
+#[cfg(test)]
+mod binding_identity_tests {
+    use super::*;
+
+    #[test]
+    fn failed_resume_attempt_consumes_a_binding_generation_on_same_transport() {
+        let node = waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-1");
+        let mut connection = WsConnState::new_for_node(node.clone());
+        let transport = connection.connection_ref.clone();
+
+        // Failed resume attempts mint an identity but do not install it as
+        // the socket's current binding. A subsequent fresh bind must advance.
+        let failed_resume = connection
+            .connection_ref
+            .next_binding_ref()
+            .expect("resume attempt generation");
+        assert_eq!(failed_resume.generation(), 1);
+        assert!(connection.binding_ref.is_none());
+
+        let fresh_bind = connection
+            .ensure_binding_ref()
+            .expect("fresh bind generation");
+        assert_eq!(fresh_bind.generation(), 2);
+        assert_eq!(fresh_bind.connection(), &transport);
+        assert_eq!(fresh_bind.connection().node(), &node);
+
+        // A later failed post-publication attempt retires the current binding
+        // without resetting the physical transport's generation counter.
+        connection.retire_binding_ref();
+        let next_bind = connection
+            .ensure_binding_ref()
+            .expect("next bind generation");
+        assert_eq!(next_bind.generation(), 3);
+        assert_eq!(next_bind.connection(), &transport);
+    }
+}

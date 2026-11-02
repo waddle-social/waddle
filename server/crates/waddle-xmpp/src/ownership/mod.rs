@@ -52,6 +52,7 @@ use std::time::Duration;
 mod tests;
 
 mod claims;
+mod connection_ref;
 pub use claims::ClaimEpoch;
 pub use claims::ClaimError;
 pub use claims::ClaimSnapshot;
@@ -68,3 +69,4 @@ pub use claims::RolloutBackoff;
 pub use claims::SharedNodeIdentity;
 pub use claims::StalePredicate;
 pub use claims::ENTITY_ID_MAX_LEN;
+pub use connection_ref::{BindingRef, ConnectionRef};
