@@ -37,12 +37,15 @@
 //!   [`in_process`]) construct one directly — exactly the loophole moving
 //!   the type down into `resume` closes.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod account_resource_transition;
 mod connection_identity;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod endpoint_transition;
 pub mod in_process;
 mod observe;
 pub mod resume;
+mod user_claim_identity;
 
 pub use connection_identity::{
     BindingAttemptId, BindingRef, ConnectionRef, NodeLeaseIdentity, PhysicalTransportGeneration,
@@ -50,6 +53,7 @@ pub use connection_identity::{
 pub use in_process::InProcessClaimStore;
 pub use observe::{observed_claim_store, ObservedClaimStore};
 pub use resume::{verify_resume_identity, ResumeIdentityProof};
+pub use user_claim_identity::{UserActorIncarnation, UserClaimIdentity};
 
 use async_trait::async_trait;
 use std::time::Duration;
