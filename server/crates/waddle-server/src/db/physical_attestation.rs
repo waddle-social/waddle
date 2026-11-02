@@ -37,6 +37,8 @@ pub enum PhysicalAttestationError {
     WrongConfiguredLogin,
     #[error("configured installer login differs from the provisioned installer login")]
     WrongInstallerLogin,
+    #[error("the runtime login has effective TEMP privilege on the attested database")]
+    RuntimeTempPrivilege,
     #[error("physical attestation capability belongs to a different PostgreSQL pool")]
     WrongPool,
     #[error("cannot bind an attested pool while a raw checkout is still active")]
@@ -426,6 +428,71 @@ pub async fn attest_connection(
     verify_identity(&snapshot, config)
 }
 
+async fn reject_runtime_temp_privilege(
+    connection: &mut PgConnection,
+) -> Result<(), PhysicalAttestationError> {
+    let can_create_temp: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_database_privilege(\
+             current_user, pg_catalog.current_database(), 'TEMP'\
+         )",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if can_create_temp {
+        return Err(PhysicalAttestationError::RuntimeTempPrivilege);
+    }
+    Ok(())
+}
+
+async fn discard_temporary_relations(
+    connection: &mut PgConnection,
+) -> Result<(), PhysicalAttestationError> {
+    // Existing TEMP relations outlive their creator's TEMP privilege. Clear
+    // them on each session checkout so unqualified application reads cannot
+    // fall through to a retained shadow when a durable relation is absent.
+    sqlx::query("DISCARD TEMP")
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn normalize_search_path(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+) -> Result<(), PhysicalAttestationError> {
+    let target = &config.postgres().schema.name.0;
+    // An omitted pg_temp is implicitly searched before every explicit schema
+    // for relations. Listing it last keeps an existing temp relation from
+    // shadowing a durable relation in the attested target schema.
+    let path = format!("{}, pg_temp", quote_identifier(target));
+    sqlx::query_scalar::<_, String>("SELECT pg_catalog.set_config('search_path', $1, false)")
+        .bind(&path)
+        .fetch_one(&mut *connection)
+        .await?;
+
+    let row = sqlx::query(
+        "SELECT pg_catalog.current_schema()::text, \
+         pg_catalog.current_schemas(false)::text[]",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let active_schema: Option<String> = row.try_get(0)?;
+    let explicit_schemas: Vec<String> = row.try_get(1)?;
+    let target_is_first = explicit_schemas
+        .first()
+        .is_some_and(|schema| schema == target);
+    let only_target_then_temp = explicit_schemas.len() <= 2
+        && explicit_schemas
+            .get(1)
+            .is_none_or(|schema| schema.starts_with("pg_temp_"));
+    if active_schema.as_deref() != Some(target) || !target_is_first || !only_target_then_temp {
+        return Err(PhysicalAttestationError::Mismatch {
+            field: "normalized search path",
+        });
+    }
+    Ok(())
+}
+
 /// A dark pool constructor: no production caller currently invokes it.
 ///
 /// The endpoint must preserve a PostgreSQL server session across the
@@ -452,7 +519,26 @@ pub fn attested_pool(
         .after_connect(move |connection, _| {
             let config = on_connect.clone();
             Box::pin(async move {
-                attest_connection(connection, &config)
+                attest_connection(connection, &config).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                reject_runtime_temp_privilege(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                discard_temporary_relations(connection).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                normalize_search_path(connection, &config)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                // Close the grant-drift window introduced by the normalization
+                // queries: the last check runs immediately before SQLx lends
+                // this newly connected session to a caller.
+                reject_runtime_temp_privilege(connection)
                     .await
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
             })
@@ -466,7 +552,23 @@ pub fn attested_pool(
                 // such transaction before reading the current lineage. A
                 // failed ROLLBACK hard-closes the connection.
                 sqlx::query("ROLLBACK").execute(&mut *connection).await?;
-                attest_connection(connection, &config)
+                attest_connection(connection, &config).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                reject_runtime_temp_privilege(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                discard_temporary_relations(connection).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                normalize_search_path(connection, &config)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                reject_runtime_temp_privilege(connection)
                     .await
                     .map(|()| true)
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))

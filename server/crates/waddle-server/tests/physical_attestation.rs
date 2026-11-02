@@ -1135,10 +1135,6 @@ async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, Physical
             "GRANT SELECT ON {}._lineage TO {}",
             fixture.target, fixture.runtime
         ),
-        format!(
-            "GRANT TEMPORARY ON DATABASE {} TO {}",
-            fixture.database_name, fixture.runtime
-        ),
     ] {
         sqlx::query(&statement)
             .execute(&fixture.admin)
@@ -1146,6 +1142,25 @@ async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, Physical
             .expect("grant disposable writer fixture privileges");
     }
     (boundary_url, config)
+}
+
+#[cfg(feature = "test-support")]
+async fn set_runtime_temp_privilege(fixture: &Fixture, granted: bool) {
+    let statement = if granted {
+        format!(
+            "GRANT TEMPORARY ON DATABASE {} TO {}",
+            fixture.database_name, fixture.runtime
+        )
+    } else {
+        format!(
+            "REVOKE TEMPORARY ON DATABASE {} FROM {}",
+            fixture.database_name, fixture.runtime
+        )
+    };
+    sqlx::query(&statement)
+        .execute(&fixture.admin)
+        .await
+        .expect("adjust disposable runtime TEMP privilege");
 }
 
 #[cfg(feature = "test-support")]
@@ -2304,6 +2319,10 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
         .acquire_for_test()
         .await
         .expect("attested runtime connection");
+    let setup_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("runtime backend PID");
     let system_identifier_privilege: bool = sqlx::query_scalar(
         "SELECT pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_control_system()', 'EXECUTE')",
     )
@@ -2319,16 +2338,21 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
         .await
         .expect("active runtime schema");
     assert_eq!(current_schema, fixture.target);
+    set_runtime_temp_privilege(&fixture, true).await;
     sqlx::query(
         "CREATE TEMP TABLE ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL)",
     )
     .execute(&mut *connection)
     .await
     .expect("create temporary epoch shadow");
-    sqlx::query("INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (1, 1)")
+    sqlx::query("INSERT INTO pg_temp.ingress_protocol_epoch (id, epoch) VALUES (1, 1)")
         .execute(&mut *connection)
         .await
         .expect("seed hostile temporary epoch shadow");
+    sqlx::query(&format!("SET search_path TO \"{}\"", fixture.target))
+        .execute(&mut *connection)
+        .await
+        .expect("restore configured schema-only path to expose implicit TEMP lookup");
     let shadow_schema: String = sqlx::query_scalar(
         "SELECT n.nspname FROM pg_catalog.pg_class c \
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -2338,6 +2362,7 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
     .await
     .expect("resolve temporary relation shadow");
     assert!(shadow_schema.starts_with("pg_temp_"));
+    set_runtime_temp_privilege(&fixture, false).await;
     connection.return_to_pool().await;
 
     let database = waddle_server::test_support::database_from_attested_postgres_pool(
@@ -2347,6 +2372,43 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
     let writer_admin = PgPool::connect_with(fixture.admin_options.clone())
         .await
         .expect("schema-qualified writer observer");
+    let normalized_guard = database.guard().await.expect("normalized attested guard");
+    let mut normalized_rows = normalized_guard
+        .query(
+            "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_schema()::text, \
+             pg_catalog.array_to_string( \
+                 pg_catalog.current_schemas(false), ','\
+             ), pg_catalog.to_regclass('pg_temp.ingress_protocol_epoch') IS NULL",
+            (),
+        )
+        .await
+        .expect("inspect reused normalized session");
+    let normalized_row = normalized_rows
+        .next()
+        .await
+        .expect("read normalized session")
+        .expect("normalized session row");
+    let normalized_pid: i32 = normalized_row.get(0).expect("normalized backend PID");
+    let normalized_schema: String = normalized_row.get(1).expect("normalized schema");
+    let normalized_path: String = normalized_row.get(2).expect("normalized path");
+    let normalized_schemas: Vec<&str> = normalized_path.split(',').collect();
+    let temp_epoch_cleared: bool = normalized_row.get(3).expect("TEMP epoch cleanup");
+    assert_eq!(
+        normalized_pid, setup_pid,
+        "reused the same physical session"
+    );
+    assert_eq!(normalized_schema, fixture.target);
+    assert_eq!(normalized_schemas.first(), Some(&fixture.target.as_str()));
+    assert!(normalized_schemas.len() <= 2);
+    assert!(normalized_schemas
+        .get(1)
+        .is_none_or(|schema| schema.starts_with("pg_temp_")));
+    assert!(
+        temp_epoch_cleared,
+        "checkout discards the retained epoch shadow"
+    );
+    drop(normalized_rows);
+    drop(normalized_guard);
 
     // The dark UoW still holds V1009's row-share lock until commit. An epoch
     // transition cannot pass the writer while it owns that lock.
@@ -2477,7 +2539,7 @@ async fn full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contract
     assert_eq!(
         ingress_message_count(&writer_admin, &fixture.target).await,
         count_before + 3,
-        "TEMP shadow cannot redirect schema-qualified epoch guarding"
+        "checkout clears the TEMP epoch shadow before writer DML"
     );
 
     assert!(
@@ -2985,25 +3047,93 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
     let pool = attested_pool(
         fixture.runtime_options.clone(),
         config,
-        2,
+        1,
         Duration::from_secs(2),
     )
     .expect("attested runtime pool");
-    let database_pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+    let mut shadow_session = pool
+        .acquire_for_test()
+        .await
+        .expect("first attested runtime session");
+    let setup_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *shadow_session)
+        .await
+        .expect("shadow-session backend PID");
+    let fresh_path: String = sqlx::query_scalar(
+        "SELECT pg_catalog.array_to_string(pg_catalog.current_schemas(false), ',')",
+    )
+    .fetch_one(&mut *shadow_session)
+    .await
+    .expect("fresh after_connect search path");
+    let fresh_schemas: Vec<&str> = fresh_path.split(',').collect();
+    assert_eq!(fresh_schemas.first(), Some(&fixture.target.as_str()));
+    assert!(fresh_schemas.len() <= 2);
+    assert!(fresh_schemas
+        .get(1)
+        .is_none_or(|schema| schema.starts_with("pg_temp_")));
+
+    set_runtime_temp_privilege(&fixture, true).await;
+    sqlx::query(
+        "CREATE TEMP TABLE users \
+         (jid TEXT, username TEXT, xmpp_localpart TEXT, localpart_key TEXT, \
+          created_at TEXT, updated_at TEXT)",
+    )
+    .execute(&mut *shadow_session)
+    .await
+    .expect("create persistent temporary users shadow");
+    sqlx::query(
+        "CREATE TEMP TABLE sessions \
+         (id TEXT, user_jid TEXT, token_hash TEXT, auth_context_id TEXT, \
+          auth_context_version BIGINT, principal_auth_epoch BIGINT, expires_at TEXT, \
+          created_at TEXT, last_used_at TEXT)",
+    )
+    .execute(&mut *shadow_session)
+    .await
+    .expect("create persistent temporary sessions shadow");
+    sqlx::query(
+        "INSERT INTO pg_temp.sessions (id, expires_at) \
+         VALUES ('temp-shadow-session', '2030-01-01T00:00:00Z')",
+    )
+    .execute(&mut *shadow_session)
+    .await
+    .expect("seed a principal-shaped temporary session row");
+    sqlx::query(&format!("SET search_path TO \"{}\"", fixture.target))
+        .execute(&mut *shadow_session)
+        .await
+        .expect("restore schema-only path to expose implicit TEMP lookup");
+    for relation in ["users", "sessions"] {
+        let shadow_schema: String = sqlx::query_scalar(&format!(
+            "SELECT n.nspname FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = pg_catalog.to_regclass('{relation}')"
+        ))
+        .fetch_one(&mut *shadow_session)
+        .await
+        .expect("resolve pre-checkout TEMP shadow");
+        assert!(shadow_schema.starts_with("pg_temp_"));
+    }
+    set_runtime_temp_privilege(&fixture, false).await;
+    shadow_session.return_to_pool().await;
+
+    let shadow_saved_sessions = format!("sessions_shadow_saved_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".sessions RENAME TO {shadow_saved_sessions}",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove durable sessions while retaining seeded TEMP twin");
+
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
         "attested-auth-session",
         pool,
-        1,
-        1,
-    )
-    .await
-    .expect("attested main and ingress lanes");
-
+    );
     assert_eq!(
-        database_pool.global().database_url(),
+        database.database_url(),
         "postgres://[attested-pool?mode=memory",
         "the non-round-trippable PgConnectOptions must not become a child-pool DSN"
     );
-    let attested_pool_url = database_pool.global().database_url();
+    let attested_pool_url = database.database_url();
     assert!(
         PgConnectOptions::from_str(attested_pool_url).is_err(),
         "the attested-pool marker must be rejected by SQLx's PostgreSQL URL parser"
@@ -3035,25 +3165,66 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
         !sqlite_fallback_path.exists(),
         "public child-store openers must not create a SQLite file from the marker"
     );
-    let connection = database_pool
-        .global()
-        .guard()
+    let writer_admin = PgPool::connect_with(fixture.admin_options.clone())
         .await
-        .expect("attested main guard");
-    let mut schema_rows = connection
-        .query("SELECT pg_catalog.current_schema()", ())
+        .expect("schema-qualified actor observer");
+    let normalized_guard = database.guard().await.expect("normalized attested guard");
+    let mut normalized_rows = normalized_guard
+        .query(
+            "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_schema()::text, \
+             pg_catalog.array_to_string( \
+                 pg_catalog.current_schemas(false), ','\
+             ), pg_catalog.to_regclass('pg_temp.users') IS NULL, \
+             pg_catalog.to_regclass('pg_temp.sessions') IS NULL",
+            (),
+        )
         .await
-        .expect("read active schema on exact attested pool");
-    let active_schema: String = schema_rows
+        .expect("inspect normalized reused actor session");
+    let normalized_row = normalized_rows
         .next()
         .await
-        .expect("read current schema row")
-        .expect("current schema row")
-        .get(0)
-        .expect("decode active schema");
-    assert_eq!(active_schema, fixture.target);
-    drop(schema_rows);
-    drop(connection);
+        .expect("read normalized session")
+        .expect("normalized session row");
+    let normalized_pid: i32 = normalized_row.get(0).expect("normalized backend PID");
+    let normalized_schema: String = normalized_row.get(1).expect("normalized schema");
+    let normalized_path: String = normalized_row.get(2).expect("normalized path");
+    let normalized_schemas: Vec<&str> = normalized_path.split(',').collect();
+    let temp_users_cleared: bool = normalized_row.get(3).expect("TEMP users cleanup");
+    let temp_sessions_cleared: bool = normalized_row.get(4).expect("TEMP sessions cleanup");
+    assert_eq!(
+        normalized_pid, setup_pid,
+        "reused the original backend after clearing its TEMP relations"
+    );
+    assert_eq!(normalized_schema, fixture.target);
+    assert_eq!(normalized_schemas.first(), Some(&fixture.target.as_str()));
+    assert!(normalized_schemas.len() <= 2);
+    assert!(normalized_schemas
+        .get(1)
+        .is_none_or(|schema| schema.starts_with("pg_temp_")));
+    assert!(temp_users_cleared);
+    assert!(temp_sessions_cleared);
+    drop(normalized_rows);
+    drop(normalized_guard);
+
+    let actor: kameo::actor::ActorRef<waddle_server::db::actor::DbActor> =
+        kameo::actor::Spawn::spawn(waddle_server::db::actor::DbActor::new(database.clone()));
+    assert!(
+        actor
+            .ask(waddle_server::db::actor::DbQueryOne {
+                sql: "SELECT expires_at FROM sessions WHERE id = ?".to_owned(),
+                params: waddle_server::db_params!["temp-shadow-session"],
+            })
+            .await
+            .is_err(),
+        "a principal-style unqualified read cannot assert from the retained TEMP row"
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".{shadow_saved_sessions} RENAME TO sessions",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("restore durable sessions after the TEMP cleanup assertion");
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let user_jid = format!("{}@auth.attested.test", uuid::Uuid::new_v4().simple());
@@ -3067,8 +3238,7 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
     let auth_context_id = uuid::Uuid::new_v4();
     let created_at = "2026-11-01T00:00:00Z".to_owned();
 
-    database_pool
-        .global_actor()
+    actor
         .ask(waddle_server::db::actor::CreateAuthSession {
             session_id: session_id.clone(),
             user_jid: user_jid.clone(),
@@ -3086,16 +3256,18 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
         .await
         .expect("Database::begin writes through attested main lane");
 
-    let row = database_pool
-        .global_actor()
+    let row: Vec<waddle_server::db::Value> = actor
         .ask(waddle_server::db::actor::DbQueryOne {
-            sql: "SELECT users.username, users.localpart_key, sessions.token_hash, \
-                  sessions.auth_context_id, sessions.auth_context_version, \
-                  sessions.principal_auth_epoch \
-                  FROM users JOIN sessions ON sessions.user_jid = users.jid \
-                  WHERE sessions.id = ?"
-                .to_owned(),
-            params: waddle_server::db_params![session_id],
+            sql: format!(
+                "SELECT users.username, users.localpart_key, sessions.token_hash, \
+                 sessions.auth_context_id, sessions.auth_context_version, \
+                 sessions.principal_auth_epoch \
+                 FROM \"{}\".users AS users \
+                 JOIN \"{}\".sessions AS sessions ON sessions.user_jid = users.jid \
+                 WHERE sessions.id = ?",
+                fixture.target, fixture.target
+            ),
+            params: waddle_server::db_params![&session_id],
         })
         .await
         .expect("actor accepts auth-session read")
@@ -3111,7 +3283,190 @@ async fn attested_database_actor_creates_and_reads_auth_session_on_one_attested_
     assert_eq!(row[4], waddle_server::db::Value::Integer(7));
     assert_eq!(row[5], waddle_server::db::Value::Integer(3));
 
-    drop(database_pool);
+    let durable_rows: (i64, i64) = sqlx::query_as(&format!(
+        "SELECT \
+             (SELECT count(*) FROM \"{}\".users WHERE jid = $1), \
+             (SELECT count(*) FROM \"{}\".sessions WHERE id = $2)",
+        fixture.target, fixture.target
+    ))
+    .bind(&user_jid)
+    .bind(&session_id)
+    .fetch_one(&writer_admin)
+    .await
+    .expect("schema-qualified durable auth-session readback");
+    assert_eq!(durable_rows, (1, 1));
+
+    let saved_users = format!("users_saved_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".users RENAME TO {saved_users}",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("remove durable users name while keeping TEMP twin");
+    let missing_users_id = uuid::Uuid::new_v4().to_string();
+    let missing_users_jid = format!("{}@auth.attested.test", uuid::Uuid::new_v4().simple());
+    let missing_users_username = format!("attested_{}", uuid::Uuid::new_v4().simple());
+    let missing_users_localpart = missing_users_username.clone();
+    let missing_users_key: jid::NodePart = jid::NodePart::new(&missing_users_localpart)
+        .expect("valid missing-users localpart")
+        .into();
+    assert!(
+        actor
+            .ask(waddle_server::db::actor::CreateAuthSession {
+                session_id: missing_users_id.clone(),
+                user_jid: missing_users_jid.clone(),
+                username: missing_users_username,
+                xmpp_localpart: missing_users_localpart,
+                localpart_key: Some(missing_users_key),
+                token_hash: "missing-users-token".to_owned(),
+                auth_context_id: uuid::Uuid::new_v4(),
+                auth_context_version: 7,
+                principal_auth_epoch: 3,
+                expires_at: None,
+                created_at: "2026-11-02T00:00:00Z".to_owned(),
+                last_used_at: "2026-11-02T00:00:00Z".to_owned(),
+            })
+            .await
+            .is_err(),
+        "qualified users INSERT fails when the durable target relation is absent"
+    );
+    let temp_users_row = actor
+        .ask(waddle_server::db::actor::DbQueryOne {
+            sql: "SELECT pg_catalog.to_regclass('pg_temp.users') IS NULL".to_owned(),
+            params: Vec::new(),
+        })
+        .await
+        .expect("inspect users shadow on the same backend")
+        .expect("users shadow count");
+    assert_eq!(temp_users_row[0], waddle_server::db::Value::Integer(1));
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".{saved_users} RENAME TO users",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("restore durable users relation");
+
+    let saved_sessions = format!("sessions_saved_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".sessions RENAME TO {saved_sessions}",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("remove durable sessions name while keeping TEMP twin");
+    let missing_sessions_id = uuid::Uuid::new_v4().to_string();
+    let missing_sessions_jid = format!("{}@auth.attested.test", uuid::Uuid::new_v4().simple());
+    let missing_sessions_username = format!("attested_{}", uuid::Uuid::new_v4().simple());
+    let missing_sessions_localpart = missing_sessions_username.clone();
+    let missing_sessions_key: jid::NodePart = jid::NodePart::new(&missing_sessions_localpart)
+        .expect("valid missing-sessions localpart")
+        .into();
+    assert!(
+        actor
+            .ask(waddle_server::db::actor::CreateAuthSession {
+                session_id: missing_sessions_id.clone(),
+                user_jid: missing_sessions_jid,
+                username: missing_sessions_username,
+                xmpp_localpart: missing_sessions_localpart,
+                localpart_key: Some(missing_sessions_key),
+                token_hash: "missing-sessions-token".to_owned(),
+                auth_context_id: uuid::Uuid::new_v4(),
+                auth_context_version: 7,
+                principal_auth_epoch: 3,
+                expires_at: None,
+                created_at: "2026-11-02T00:00:00Z".to_owned(),
+                last_used_at: "2026-11-02T00:00:00Z".to_owned(),
+            })
+            .await
+            .is_err(),
+        "qualified sessions INSERT fails when the durable target relation is absent"
+    );
+    let temp_sessions_row = actor
+        .ask(waddle_server::db::actor::DbQueryOne {
+            sql: "SELECT pg_catalog.to_regclass('pg_temp.sessions') IS NULL".to_owned(),
+            params: Vec::new(),
+        })
+        .await
+        .expect("inspect sessions shadow on the same backend")
+        .expect("sessions shadow count");
+    assert_eq!(temp_sessions_row[0], waddle_server::db::Value::Integer(1));
+    sqlx::query(&format!(
+        "ALTER TABLE \"{}\".{saved_sessions} RENAME TO sessions",
+        fixture.target
+    ))
+    .execute(&writer_admin)
+    .await
+    .expect("restore durable sessions relation");
+
+    actor.kill();
+    actor.wait_for_shutdown().await;
+    drop(database);
+    writer_admin.close().await;
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn attested_pool_rejects_temp_privilege_drift_on_fresh_and_reused_sessions() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (_boundary_url, config) = prepare_attested_writer_fixture(&fixture).await;
+
+    set_runtime_temp_privilege(&fixture, true).await;
+    let fresh_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        1,
+        Duration::from_millis(250),
+    )
+    .expect("fresh TEMP-drift pool");
+    assert!(
+        fresh_pool.acquire_for_test().await.is_err(),
+        "after_connect refuses a runtime login with effective TEMP privilege"
+    );
+    fresh_pool.close().await;
+    set_runtime_temp_privilege(&fixture, false).await;
+
+    let warm_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_millis(250),
+    )
+    .expect("warm TEMP-drift pool");
+    let mut warm_session = warm_pool
+        .acquire_for_test()
+        .await
+        .expect("initial session without TEMP privilege");
+    let original_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *warm_session)
+        .await
+        .expect("initial backend PID");
+    warm_session.return_to_pool().await;
+
+    set_runtime_temp_privilege(&fixture, true).await;
+    assert!(
+        warm_pool.acquire_for_test().await.is_err(),
+        "before_acquire refuses a warmed idle session after effective TEMP grant drift"
+    );
+    set_runtime_temp_privilege(&fixture, false).await;
+    let mut recovered_session = warm_pool
+        .acquire_for_test()
+        .await
+        .expect("pool recovers after TEMP privilege is revoked");
+    let recovered_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *recovered_session)
+        .await
+        .expect("recovered backend PID");
+    assert_ne!(
+        recovered_pid, original_pid,
+        "the session refused at checkout is discarded rather than returned unchecked"
+    );
+    recovered_session.return_to_pool().await;
+    warm_pool.close().await;
     fixture.cleanup().await;
 }
 
@@ -3141,14 +3496,6 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
             .await
             .expect("grant dark UoW writer fixture privileges");
     }
-    sqlx::query(&format!(
-        "GRANT TEMPORARY ON DATABASE {} TO {}",
-        fixture.database_name, fixture.runtime
-    ))
-    .execute(&fixture.cluster_admin)
-    .await
-    .expect("grant temp only for persistent shadow fixture");
-
     let pool = attested_pool(
         fixture.runtime_options.clone(),
         config,
@@ -3160,6 +3507,7 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
         .acquire_for_test()
         .await
         .expect("attested runtime checkout");
+    set_runtime_temp_privilege(&fixture, true).await;
     sqlx::query(
         "CREATE TEMP TABLE ingress_effect_receipts \
          (message_key UUID, kind INTEGER, semantic_identity_hash BYTEA)",
@@ -3174,6 +3522,22 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
     .execute(&mut *connection)
     .await
     .expect("create persistent temporary message shadow");
+    sqlx::query(&format!("SET search_path TO \"{}\"", fixture.target))
+        .execute(&mut *connection)
+        .await
+        .expect("restore schema-only path to expose implicit TEMP lookup");
+    for relation in ["ingress_effect_receipts", "ingress_messages"] {
+        let shadow_schema: String = sqlx::query_scalar(&format!(
+            "SELECT n.nspname FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = pg_catalog.to_regclass('{relation}')"
+        ))
+        .fetch_one(&mut *connection)
+        .await
+        .expect("resolve persistent receipt TEMP shadow");
+        assert!(shadow_schema.starts_with("pg_temp_"));
+    }
+    set_runtime_temp_privilege(&fixture, false).await;
     connection.return_to_pool().await;
 
     let database = waddle_server::test_support::database_from_attested_postgres_pool(
@@ -3184,8 +3548,8 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
         .await
         .expect("schema-qualified receipt observer");
 
-    // Existing unqualified message SQL must resolve to the target schema in
-    // the attested transaction, despite a persistent TEMP relation shadow.
+    // Checkout clears retained TEMP relations before the existing unqualified
+    // message SQL runs in the attested transaction.
     let count_before = ingress_message_count(&writer_admin, &fixture.target).await;
     waddle_server::test_support::attested_uow_candidate_write(
         &database,
@@ -3243,21 +3607,27 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
     let shadow_observer = database.guard().await.expect("attested shadow observer");
     let mut shadow_rows = shadow_observer
         .query(
-            "SELECT (SELECT count(*) FROM pg_temp.ingress_effect_receipts), \
-                (SELECT count(*) FROM pg_temp.ingress_messages)",
+            "SELECT pg_catalog.to_regclass('pg_temp.ingress_effect_receipts') IS NULL, \
+                pg_catalog.to_regclass('pg_temp.ingress_messages') IS NULL",
             (),
         )
         .await
-        .expect("inspect persistent temporary shadows");
+        .expect("inspect discarded temporary shadows");
     let shadow_row = shadow_rows
         .next()
         .await
-        .expect("read shadow counts")
-        .expect("shadow count row");
-    let shadow_receipts: i64 = shadow_row.get(0).expect("receipt shadow count");
-    let shadow_messages: i64 = shadow_row.get(1).expect("message shadow count");
-    assert_eq!(shadow_receipts, 0, "receipt SQL bypasses TEMP shadow");
-    assert_eq!(shadow_messages, 0, "message SQL bypasses TEMP shadow");
+        .expect("read shadow absence")
+        .expect("shadow absence row");
+    let shadow_receipts_cleared: bool = shadow_row.get(0).expect("receipt shadow absence");
+    let shadow_messages_cleared: bool = shadow_row.get(1).expect("message shadow absence");
+    assert!(
+        shadow_receipts_cleared,
+        "checkout discards the receipt TEMP shadow"
+    );
+    assert!(
+        shadow_messages_cleared,
+        "checkout discards the message TEMP shadow"
+    );
 
     let failed_key = MessageKey::from_storage(uuid::Uuid::new_v4());
     let failed_hash = [9_u8; 32];

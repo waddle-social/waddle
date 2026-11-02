@@ -8,6 +8,33 @@ use kameo::Actor;
 
 use super::{Database, DatabaseError};
 
+#[derive(Clone, Copy)]
+enum AuthTable {
+    Users,
+    Sessions,
+}
+
+impl AuthTable {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Users => "users",
+            Self::Sessions => "sessions",
+        }
+    }
+}
+
+fn auth_table_reference(database: &Database, table: AuthTable) -> String {
+    match database.attested_pg_writer_capability() {
+        Some(capability) => {
+            // The schema comes from PhysicalAttestationConfig's validated
+            // identifier grammar, and table names are private literals here.
+            let schema = &capability.identity().schema.name.0;
+            format!("\"{schema}\".\"{}\"", table.name())
+        }
+        None => table.name().to_owned(),
+    }
+}
+
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
     if result.is_err() {
         crate::telemetry::mark_span_error("database actor operation failed");
@@ -103,12 +130,15 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
         let principal_auth_epoch = i64::try_from(msg.principal_auth_epoch)
             .map_err(|_| DatabaseError::QueryFailed("principal auth epoch overflow".to_string()))?;
         let mut tx = self.db.begin().await?;
+        let users = auth_table_reference(&self.db, AuthTable::Users);
         tx.execute(
-            r#"
-            INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
+            &format!(
+                r#"
+            INSERT INTO {users} (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING
-            "#,
+            "#
+            ),
             crate::db_params![
                 &msg.user_jid,
                 &msg.username,
@@ -122,13 +152,16 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
 
         // The column is TEXT on both engines (index-served principal
         // resolution with one shared SQL string); bind the string form.
+        let sessions = auth_table_reference(&self.db, AuthTable::Sessions);
         tx.execute(
-            r#"
-            INSERT INTO sessions (
+            &format!(
+                r#"
+            INSERT INTO {sessions} (
                 id, user_jid, token_hash, auth_context_id, auth_context_version,
                 principal_auth_epoch, expires_at, created_at, last_used_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            "#
+            ),
             crate::db_params![
                 &msg.session_id,
                 &msg.user_jid,
