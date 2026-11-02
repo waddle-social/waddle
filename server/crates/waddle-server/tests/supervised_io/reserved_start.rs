@@ -626,6 +626,12 @@ async fn no_start_capacity_waits_for_both_socket_halves_to_drop() {
         );
         assert!(observer.startup_completion_is_finished());
         assert_eq!(inventory.len(), 0, "no-start capacity releases after Drop");
+        assert!(inventory.observe(&connection_ref).is_none());
+        let successor_reservation = inventory
+            .reserve(connection_ref.clone())
+            .expect("terminal no-start state implies its exact slot is available");
+        assert_eq!(observer.state(), CustodianState::StartupAbandoned);
+        drop(successor_reservation);
     }
 }
 

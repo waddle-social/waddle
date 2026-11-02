@@ -1277,8 +1277,9 @@ async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
             outbound: OutboundTerminal::NotStarted,
         });
         drop(retained_summary);
-        state_tx.send_replace(CustodianState::StartupAbandoned);
+        // Terminal state means this exact no-pump reservation is already gone.
         inventory.release_active_without_pumps(&connection_ref, reservation_id);
+        state_tx.send_replace(CustodianState::StartupAbandoned);
     } else {
         cleanup_pending_published.store(true, Ordering::Release);
         state_tx.send_replace(CustodianState::CleanupPending);
@@ -1423,8 +1424,8 @@ async fn run_reserved_start<ReadError, WriteError>(
             state_tx.send_replace(CustodianState::Joined);
         }
         (false, false) => {
-            state_tx.send_replace(CustodianState::StartupAbandoned);
             inventory.release_active_without_pumps(&connection_ref, reservation_id);
+            state_tx.send_replace(CustodianState::StartupAbandoned);
         }
         _ => {
             state_tx.send_replace(CustodianState::PartialStartJoined);
