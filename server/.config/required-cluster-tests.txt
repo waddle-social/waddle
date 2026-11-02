@@ -287,6 +287,7 @@ waddle-server ingress_uow::canonical_qualified_tests::post_commit_repositories::
 waddle-server::physical_attestation attested_main_lineage_registry_refuses_drift_and_recovers_after_timeout
 waddle-server::physical_attestation verified_global_attachment_checks_identity_ledger_grants_and_shared_capacity
 waddle-server::physical_attestation attestation_hooks_preserve_role_and_session_wait_limits
+waddle-server::physical_attestation attested_control_plane_lineage_registry_uses_its_restricted_pool
 
 # Relayed origin IDs must prove the exact canonical parent under both row locks.
 waddle-server ingress::relayed_origin_tests::postgres_relayed_origin_requires_exact_persisted_alias
