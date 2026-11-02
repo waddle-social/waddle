@@ -12,8 +12,8 @@
 use super::state::WsConnState;
 use super::supervised_io::{
     AdmissionError, AuxiliaryCleanupGuard, CustodianInventoryError, CustodianState,
-    IoCustodianHandle, IoCustodianInventory, IoCustodianObserver, QueueItem, ReservedIoStartConfig,
-    ReservedStartError, StopReason, WriteSender,
+    IoCustodianHandle, IoCustodianInventory, IoCustodianObserver, IoCustodianReservation,
+    QueueItem, ReservedIoStartConfig, ReservedStartError, StopReason, WriteSender,
 };
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
 use futures::future::BoxFuture;
@@ -28,8 +28,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
-use waddle_xmpp::stream_management::{SmAck, SmRequest};
+use waddle_xmpp::stream_management::SmAck;
 use waddle_xmpp::Stanza;
 
 const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
@@ -39,7 +40,7 @@ const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
 #[derive(Debug, Clone)]
 pub enum ConnectionWireFrame {
     /// A peer requested an XEP-0198 acknowledgment.
-    RequestAcknowledgement(SmRequest),
+    RequestAcknowledgement { wire_bytes: usize },
     /// An XEP-0198 acknowledgment authored by the connection actor.
     Acknowledgement(SmAck),
     /// A parsed, countable peer stanza plus its raw serialized byte length.
@@ -61,7 +62,7 @@ impl ConnectionWireFrame {
     /// boundary. Close frames have no XMPP payload.
     pub fn encoded_len(&self) -> usize {
         match self {
-            Self::RequestAcknowledgement(_) => SmRequest::to_xml().len(),
+            Self::RequestAcknowledgement { wire_bytes, .. } => *wire_bytes,
             Self::Acknowledgement(ack) => ack.to_xml().len(),
             Self::CountableStanza { wire_bytes, .. } | Self::RejectedInbound { wire_bytes } => {
                 *wire_bytes
@@ -112,6 +113,89 @@ pub enum ConnectionActorStartError {
     /// The independently owned pump pair did not complete startup.
     #[error(transparent)]
     Pumps(#[from] ReservedStartError),
+    /// The independent startup owner exited before returning its result.
+    #[error("connection actor startup owner exited before reporting a result")]
+    StartupOwnerLost,
+}
+
+/// Deterministic startup barrier used only by this dark lifecycle fixture.
+pub struct ConnectionActorStartBarrier {
+    entered: Option<oneshot::Sender<()>>,
+    release: oneshot::Receiver<()>,
+}
+
+impl ConnectionActorStartBarrier {
+    /// Create a barrier that notifies `entered` before waiting for `release`.
+    pub fn new(entered: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+        Self {
+            entered: Some(entered),
+            release,
+        }
+    }
+
+    async fn wait(mut self) {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+        }
+        let _ = self.release.await;
+    }
+}
+
+/// Pause points for deterministic cancellation tests of the startup owner.
+#[derive(Default)]
+pub struct ConnectionActorStartHooks {
+    /// Wait after synchronous inventory reservation but before invoking the
+    /// transport factory. Caller cancellation here drops the unused slot.
+    pub before_factory: Option<ConnectionActorStartBarrier>,
+    /// Wait after both pump handles have been handed to the reaper, before its
+    /// ready acknowledgment returns to the actor starter.
+    pub after_pumps_handed_off: Option<ConnectionActorStartBarrier>,
+    /// Wait after the Kameo actor starts, before forwarder and cleanup tasks
+    /// are registered with the exact physical inventory entry.
+    pub after_actor_started: Option<ConnectionActorStartBarrier>,
+}
+
+struct ConnectionActorStartContext<IsSendAfterClose, Size, IsClose> {
+    inventory: IoCustodianInventory,
+    state: WsConnState,
+    reservation: IoCustodianReservation,
+    connection_ref: ConnectionRef,
+    lifecycle_handoff_deadline: Duration,
+    config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
+    effect_runner: CountableStanzaEffect,
+    caller_gone: CancellationToken,
+    hooks: ConnectionActorStartHooks,
+}
+
+async fn complete_start_under_independent_owner<F>(
+    startup: F,
+    caller_gone: CancellationToken,
+) -> Result<ConnectionActorController, ConnectionActorStartError>
+where
+    F: Future<Output = Result<ConnectionActorController, ConnectionActorStartError>>
+        + Send
+        + 'static,
+{
+    let (mut result_tx, result_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tokio::pin!(startup);
+        let result = tokio::select! {
+            biased;
+            _ = result_tx.closed() => {
+                caller_gone.cancel();
+                startup.await
+            }
+            result = &mut startup => result,
+        };
+        if let Err(unclaimed_result) = result_tx.send(result) {
+            // Dropping a successfully built controller requests stop and
+            // leaves indexed cleanup to its independently registered owner.
+            drop(unclaimed_result);
+        }
+    });
+    result_rx
+        .await
+        .map_err(|_| ConnectionActorStartError::StartupOwnerLost)?
 }
 
 /// Start the test-only actor after reserving the exact connection identity
@@ -142,20 +226,29 @@ where
     Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
     IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
     IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
-    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
-    FactoryFuture: Future<Output = (R, W)> + Send,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send + 'static,
+    FactoryFuture: Future<Output = (R, W)> + Send + 'static,
 {
+    let (state, reservation, connection_ref) =
+        prepare_connection_actor_reservation(inventory, node_lease)?;
     let effect_runner: CountableStanzaEffect =
         Arc::new(|_| Box::pin(async { CountableEffectDisposition::Handled }));
-    start_connection_actor_inner(
-        inventory,
-        node_lease,
-        lifecycle_handoff_deadline,
-        config,
-        effect_runner,
+    let caller_gone = CancellationToken::new();
+    let startup = start_connection_actor_inner(
+        ConnectionActorStartContext {
+            inventory: inventory.clone(),
+            state,
+            reservation,
+            connection_ref,
+            lifecycle_handoff_deadline,
+            config,
+            effect_runner,
+            caller_gone: caller_gone.clone(),
+            hooks: ConnectionActorStartHooks::default(),
+        },
         factory,
-    )
-    .await
+    );
+    complete_start_under_independent_owner(startup, caller_gone).await
 }
 
 /// Start the same test-only actor with an explicit slow external effect
@@ -188,21 +281,99 @@ where
     Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
     IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
     IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
-    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
-    FactoryFuture: Future<Output = (R, W)> + Send,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send + 'static,
+    FactoryFuture: Future<Output = (R, W)> + Send + 'static,
     Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
     EffectFuture: Future<Output = CountableEffectDisposition> + Send + 'static,
 {
+    let (state, reservation, connection_ref) =
+        prepare_connection_actor_reservation(inventory, node_lease)?;
     let effect_runner: CountableStanzaEffect = Arc::new(move |input| Box::pin(effect(input)));
-    start_connection_actor_inner(
-        inventory,
-        node_lease,
-        lifecycle_handoff_deadline,
-        config,
-        effect_runner,
+    let caller_gone = CancellationToken::new();
+    let startup = start_connection_actor_inner(
+        ConnectionActorStartContext {
+            inventory: inventory.clone(),
+            state,
+            reservation,
+            connection_ref,
+            lifecycle_handoff_deadline,
+            config,
+            effect_runner,
+            caller_gone: caller_gone.clone(),
+            hooks: ConnectionActorStartHooks::default(),
+        },
         factory,
-    )
-    .await
+    );
+    complete_start_under_independent_owner(startup, caller_gone).await
+}
+
+/// Start with deterministic cancellation barriers for the dark lifecycle tests.
+pub async fn start_connection_actor_with_hooks<
+    R,
+    W,
+    ReadError,
+    WriteError,
+    Size,
+    IsClose,
+    IsSendAfterClose,
+    Factory,
+    FactoryFuture,
+    Effect,
+    EffectFuture,
+>(
+    inventory: &IoCustodianInventory,
+    node_lease: NodeLeaseIdentity,
+    lifecycle_handoff_deadline: Duration,
+    config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
+    factory: Factory,
+    effect: Effect,
+    hooks: ConnectionActorStartHooks,
+) -> Result<ConnectionActorController, ConnectionActorStartError>
+where
+    R: futures::Stream<Item = Result<ConnectionWireFrame, ReadError>> + Unpin + Send + 'static,
+    W: futures::Sink<ConnectionWireFrame, Error = WriteError> + Unpin + Send + 'static,
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+    Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
+    IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send + 'static,
+    FactoryFuture: Future<Output = (R, W)> + Send + 'static,
+    Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
+    EffectFuture: Future<Output = CountableEffectDisposition> + Send + 'static,
+{
+    let (state, reservation, connection_ref) =
+        prepare_connection_actor_reservation(inventory, node_lease)?;
+    let effect_runner: CountableStanzaEffect = Arc::new(move |input| Box::pin(effect(input)));
+    let caller_gone = CancellationToken::new();
+    let startup = start_connection_actor_inner(
+        ConnectionActorStartContext {
+            inventory: inventory.clone(),
+            state,
+            reservation,
+            connection_ref,
+            lifecycle_handoff_deadline,
+            config,
+            effect_runner,
+            caller_gone: caller_gone.clone(),
+            hooks,
+        },
+        factory,
+    );
+    complete_start_under_independent_owner(startup, caller_gone).await
+}
+
+fn prepare_connection_actor_reservation(
+    inventory: &IoCustodianInventory,
+    node_lease: NodeLeaseIdentity,
+) -> Result<(WsConnState, IoCustodianReservation, ConnectionRef), ConnectionActorStartError> {
+    let mut state = WsConnState::new_for_node_lease(node_lease);
+    state
+        .sm_state
+        .enable("dark-connection-actor".to_owned(), false, None);
+    let connection_ref = state.connection_ref().clone();
+    let reservation = inventory.reserve(connection_ref.clone())?;
+    Ok((state, reservation, connection_ref))
 }
 
 async fn start_connection_actor_inner<
@@ -216,11 +387,7 @@ async fn start_connection_actor_inner<
     Factory,
     FactoryFuture,
 >(
-    inventory: &IoCustodianInventory,
-    node_lease: NodeLeaseIdentity,
-    lifecycle_handoff_deadline: Duration,
-    config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
-    effect_runner: CountableStanzaEffect,
+    context: ConnectionActorStartContext<IsSendAfterClose, Size, IsClose>,
     factory: Factory,
 ) -> Result<ConnectionActorController, ConnectionActorStartError>
 where
@@ -231,29 +398,59 @@ where
     Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
     IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
     IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
-    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
-    FactoryFuture: Future<Output = (R, W)> + Send,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send + 'static,
+    FactoryFuture: Future<Output = (R, W)> + Send + 'static,
 {
-    let mut state = WsConnState::new_for_node_lease(node_lease);
-    state
-        .sm_state
-        .enable("dark-connection-actor".to_owned(), false, None);
-    let connection_ref = state.connection_ref().clone();
+    let ConnectionActorStartContext {
+        inventory,
+        state,
+        mut reservation,
+        connection_ref,
+        lifecycle_handoff_deadline,
+        config,
+        effect_runner,
+        caller_gone,
+        mut hooks,
+    } = context;
     let effect_capacity = config.inbound_limits().max_count();
 
-    // This is the admission boundary: no factory, pump, or reaper exists
-    // until the one physical identity owned by `state` has a slot.
-    let mut reservation = inventory.reserve(connection_ref.clone())?;
-    let auxiliary_cleanup = reservation.retain_until_auxiliary_cleanup();
-    let (custodian, outbound, inbound) = match reservation.start_with(config, factory).await {
+    // Exact state identity and bounded capacity were acquired before this
+    // independent startup owner was spawned.
+    let auxiliary_cleanup = reservation.retain_until_auxiliary_cleanup()?;
+    if let Some(barrier) = hooks.before_factory.take() {
+        barrier.wait().await;
+    }
+    let mut after_pumps_handed_off = hooks.after_pumps_handed_off.take();
+    let started = reservation
+        .start_with_hook_and_cancellation(config, factory, caller_gone.clone(), move |stage| {
+            let barrier = if stage == super::supervised_io::ReservedStartStage::AfterOutboundSpawn {
+                after_pumps_handed_off.take()
+            } else {
+                None
+            };
+            async move {
+                if let Some(barrier) = barrier {
+                    barrier.wait().await;
+                }
+            }
+        })
+        .await;
+    let (custodian, outbound, inbound) = match started {
         Ok(started) => started,
         Err(error) => {
+            if inventory.observe(&connection_ref).is_none() {
+                // Cancellation or an activation failure before any pump was
+                // started released the unused exact reservation synchronously.
+                drop(auxiliary_cleanup);
+                return Err(error.into());
+            }
             let cleanup_task = tokio::spawn(async {});
             let _ = inventory.register_auxiliary_task(&connection_ref, cleanup_task);
             auxiliary_cleanup.complete();
             return Err(error.into());
         }
     };
+    let cancellation_watch = custodian.watch_cancellation(caller_gone.clone());
     let lifecycle = Arc::new(ConnectionActorLifecycle::new());
     let stop_listener_lifecycle = Arc::clone(&lifecycle);
     let (effect_jobs_tx, effect_jobs_rx) = mpsc::channel(effect_capacity);
@@ -301,6 +498,9 @@ where
         mailbox::bounded(256),
     );
     actor.wait_for_startup().await;
+    if let Some(barrier) = hooks.after_actor_started.take() {
+        barrier.wait().await;
+    }
 
     let (forwarded_tx, forwarded_rx) = watch::channel(0usize);
     let mailbox_tracker = Arc::new(MailboxPayloadTracker::new());
@@ -335,8 +535,14 @@ where
     );
     if let Err(error) = inventory.register_auxiliary_task(&connection_ref, cleanup_task) {
         io_control.request_stop(StopReason::Requested);
+        cancellation_watch.finish().await;
         return Err(error.into());
     }
+
+    if caller_gone.is_cancelled() {
+        io_control.request_stop(StopReason::Requested);
+    }
+    cancellation_watch.finish().await;
 
     Ok(ConnectionActorController {
         actor,
@@ -358,7 +564,7 @@ async fn forward_inbound_frames(
     while let Some(item) = inbound.recv().await {
         if matches!(
             &item.value,
-            ConnectionWireFrame::RequestAcknowledgement(_)
+            ConnectionWireFrame::RequestAcknowledgement { .. }
                 | ConnectionWireFrame::CountableStanza { .. }
         ) {
             let item = TrackedQueueItem::new(item, Arc::clone(&mailbox_tracker));
@@ -605,7 +811,7 @@ impl EffectOwnerTask {
         let disposition = tokio::select! {
             biased;
             _ = stop_signal.cancelled() => None,
-            disposition = (effect_runner)(effect) => Some(disposition),
+            disposition = async { (effect_runner)(effect).await } => Some(disposition),
         };
 
         match disposition {
@@ -989,8 +1195,16 @@ impl ConnectionActorController {
             if *completed.borrow_and_update() >= count {
                 return true;
             }
-            if completed.changed().await.is_err() {
-                return false;
+            tokio::select! {
+                biased;
+                _ = self.io_control.stop_signal.cancelled() => {
+                    return *completed.borrow_and_update() >= count;
+                }
+                changed = completed.changed() => {
+                    if changed.is_err() {
+                        return *completed.borrow_and_update() >= count;
+                    }
+                }
             }
         }
     }
@@ -1635,7 +1849,10 @@ impl Message<ForwardedInboundFrame> for ConnectionActor {
     ) -> Self::Reply {
         let tracked = msg.0;
         let request_acknowledgement = tracked.item.as_ref().is_some_and(|item| {
-            matches!(&item.value, ConnectionWireFrame::RequestAcknowledgement(_))
+            matches!(
+                &item.value,
+                ConnectionWireFrame::RequestAcknowledgement { .. }
+            )
         });
         let countable_stanza = tracked
             .item

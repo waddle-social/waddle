@@ -14,7 +14,7 @@ use waddle_server::test_support::supervised_io::{
     CustodianInventoryError, CustodianState, InboundTerminal, IoCustodianHandle,
     IoCustodianInventory, IoCustodianReservation, Limits, OutboundTerminal, QueueItem,
     ReservedIoStartConfig, ReservedReaperExitPoint, ReservedStartError, ReservedStartStage,
-    ShutdownProtocol, TransportLimits, WriteSender,
+    ShutdownProtocol, StopReason, TransportLimits, WriteSender,
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 
@@ -248,6 +248,138 @@ async fn wait_for_state(
     })
     .await
     .expect("custodian publishes the expected lifecycle state")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auxiliary_registration_remains_single_assignment_while_join_handle_is_awaited() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let mut reservation = inventory
+        .reserve(connection_ref.clone())
+        .expect("reserve exact socket");
+    let cleanup = reservation
+        .retain_until_auxiliary_cleanup()
+        .expect("reserve one cleanup hold");
+    let config = ReservedIoStartConfig::new(
+        test_limits(),
+        ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+        |_| 1,
+        |_| false,
+        Duration::from_millis(100),
+    );
+    let (custodian, outbound, inbound) = reservation
+        .start_with(config, |_| async {
+            (
+                futures::stream::pending::<Result<u8, Infallible>>(),
+                futures::sink::drain::<u8>(),
+            )
+        })
+        .await
+        .expect("start both real pump tasks");
+    drop(outbound);
+    drop(inbound);
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("exact reservation has an observer");
+
+    let (task_entered_tx, task_entered_rx) = oneshot::channel();
+    let (task_release_tx, task_release_rx) = oneshot::channel();
+    let first_task = tokio::spawn(async move {
+        let _ = task_entered_tx.send(());
+        let _ = task_release_rx.await;
+    });
+    inventory
+        .register_auxiliary_task(&connection_ref, first_task)
+        .expect("first auxiliary task is retained");
+    cleanup.complete();
+    custodian.request_stop(StopReason::Requested);
+    timeout(TEST_TIMEOUT, task_entered_rx)
+        .await
+        .expect("auxiliary task started")
+        .expect("task entry signal");
+    timeout(TEST_TIMEOUT, async {
+        while !observer.auxiliary_join_started() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reaper took the first handle and is joining it");
+    assert_ne!(observer.state(), CustodianState::Joined);
+    assert_eq!(inventory.prune_joined(), 0);
+
+    let second_task = tokio::spawn(std::future::pending::<()>());
+    assert_eq!(
+        inventory.register_auxiliary_task(&connection_ref, second_task),
+        Err(CustodianInventoryError::AuxiliaryTaskAlreadyRegistered)
+    );
+    let _ = task_release_tx.send(());
+    assert_eq!(wait_terminal(&observer).await, CustodianState::Joined);
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn reservation_refuses_a_second_auxiliary_cleanup_hold() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let mut reservation = inventory
+        .reserve(connection_ref)
+        .expect("reserve exact socket");
+    let first = reservation
+        .retain_until_auxiliary_cleanup()
+        .expect("first cleanup hold");
+    assert!(matches!(
+        reservation.retain_until_auxiliary_cleanup(),
+        Err(CustodianInventoryError::AuxiliaryHoldAlreadyRetained)
+    ));
+    drop(first);
+    drop(reservation);
+    assert!(inventory.is_empty(), "unused reservation releases its slot");
+}
+
+#[tokio::test]
+async fn completed_auxiliary_guard_without_registration_stays_pending_until_task_arrives() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let mut reservation = inventory
+        .reserve(connection_ref.clone())
+        .expect("reserve exact socket");
+    let cleanup = reservation
+        .retain_until_auxiliary_cleanup()
+        .expect("retain auxiliary cleanup hold");
+    let config = ReservedIoStartConfig::new(
+        test_limits(),
+        ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+        |_| 1,
+        |_| false,
+        Duration::from_millis(40),
+    );
+    let (custodian, outbound, inbound) = reservation
+        .start_with(config, |_| async {
+            (
+                futures::stream::pending::<Result<u8, Infallible>>(),
+                futures::sink::drain::<u8>(),
+            )
+        })
+        .await
+        .expect("start both pump tasks");
+    drop(outbound);
+    drop(inbound);
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("exact reservation has an observer");
+    cleanup.complete();
+    custodian.request_stop(waddle_server::test_support::supervised_io::StopReason::Requested);
+    assert_eq!(
+        wait_for_state(&observer, CustodianState::CleanupPending).await,
+        CustodianState::CleanupPending
+    );
+    assert_eq!(inventory.prune_joined(), 0);
+
+    inventory
+        .register_auxiliary_task(&connection_ref, tokio::spawn(async {}))
+        .expect("late cleanup owner is retained and wakes the reaper");
+    assert_eq!(wait_terminal(&observer).await, CustodianState::Joined);
+    assert_eq!(inventory.prune_joined(), 1);
 }
 
 async fn panic_before_building_pump_halves() -> (

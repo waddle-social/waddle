@@ -10,10 +10,10 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::supervised_io::{
-    spawn_io_custodian, spawn_supervised_io, AdmissionError, CustodianState, InboundExit,
-    InboundTerminal, IoCustodianInventory, Limits, OutboundExit, OutboundTerminal, QueueItem,
-    RetirementMode, ShutdownProtocol, StopReason, TransportLimits, WriteProgress, WriteReceipt,
-    WriteSender,
+    spawn_io_custodian, spawn_supervised_io, AdmissionError, CustodianInventoryError,
+    CustodianState, InboundExit, InboundTerminal, IoCustodianInventory, Limits, OutboundExit,
+    OutboundTerminal, QueueItem, RetirementMode, ShutdownProtocol, StopReason, TransportLimits,
+    WriteProgress, WriteReceipt, WriteSender,
 };
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 
@@ -1100,6 +1100,36 @@ async fn independent_custodian_joins_peer_after_a_pump_panic() {
         .expect("terminal outcomes retained");
     assert_eq!(summary.inbound, InboundTerminal::Panicked);
     assert_eq!(summary.outbound, OutboundTerminal::Stopped);
+}
+
+#[tokio::test]
+async fn ordinary_custodian_rejects_auxiliary_registration_without_a_hold() {
+    let (server, mut peer) = socket_pair().await;
+    let lab = start_lab(server, Stall::Never, (2, 128), (2, 128));
+    let connection_ref = lab.supervisor.connection_ref().clone();
+    let custodian = spawn_io_custodian(lab.supervisor, TEST_TIMEOUT);
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    inventory
+        .try_retain(&custodian)
+        .expect("retain ordinary custodian");
+    let task = tokio::spawn(std::future::pending::<()>());
+
+    assert_eq!(
+        inventory.register_auxiliary_task(&connection_ref, task),
+        Err(CustodianInventoryError::AuxiliaryTaskNotRequired)
+    );
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("ordinary observer remains indexed");
+    custodian.request_stop(StopReason::Requested);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("ordinary pump pair joins"),
+        CustodianState::Joined
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+    peer_observes_drop(&mut peer).await;
 }
 
 #[tokio::test]

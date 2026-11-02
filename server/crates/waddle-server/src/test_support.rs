@@ -12,16 +12,17 @@ pub mod connection_actor {
     //! Dark, test-only vertical proof for a connection actor that owns the
     //! real WebSocket connection state and its reserved physical pump pair.
     pub use crate::server::routes::websocket::connection_actor::{
-        start_connection_actor, start_connection_actor_with_effect, AcknowledgementResult,
-        CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
-        CompleteHandledInboundBeforeLifecycleGate, ConfirmBindingInstall, ConnectionActor,
-        ConnectionActorBindingAttempt, ConnectionActorController, ConnectionActorError,
-        ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorSequence,
-        ConnectionActorSnapshot, ConnectionActorStartError, ConnectionWireFrame,
-        CountableEffectDisposition, CountableInboundEffect, CountableStanzaEffect, InstallBinding,
-        PanicConnectionActor, PauseConnectionActor, PrepareBinding, RequestAcknowledgement,
-        ReserveHandledInbound, RetireBinding, SeedInboundCounterForTest, SnapshotConnection,
-        StopConnectionActor,
+        start_connection_actor, start_connection_actor_with_effect,
+        start_connection_actor_with_hooks, AcknowledgementResult, CompleteHandledInbound,
+        CompleteHandledInboundAtLifecycleGate, CompleteHandledInboundBeforeLifecycleGate,
+        ConfirmBindingInstall, ConnectionActor, ConnectionActorBindingAttempt,
+        ConnectionActorController, ConnectionActorError, ConnectionActorGateBarrier,
+        ConnectionActorOperationId, ConnectionActorSequence, ConnectionActorSnapshot,
+        ConnectionActorStartBarrier, ConnectionActorStartError, ConnectionActorStartHooks,
+        ConnectionWireFrame, CountableEffectDisposition, CountableInboundEffect,
+        CountableStanzaEffect, InstallBinding, PanicConnectionActor, PauseConnectionActor,
+        PrepareBinding, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
+        SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
     };
 }
 

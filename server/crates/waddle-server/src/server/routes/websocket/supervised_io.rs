@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
@@ -591,6 +591,39 @@ pub struct IoCustodianHandle {
     client: Arc<CustodianClient>,
 }
 
+/// Stops the exact custodian if its startup caller disappears before handing
+/// control back. The watcher is joined by the startup owner on normal return.
+pub(crate) struct CustodianCancellationWatch {
+    client: Arc<CustodianClient>,
+    task: Option<JoinHandle<()>>,
+    settled: bool,
+}
+
+impl CustodianCancellationWatch {
+    pub(crate) async fn finish(mut self) {
+        self.settled = true;
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for CustodianCancellationWatch {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        IoCustodianHandle {
+            client: Arc::clone(&self.client),
+        }
+        .request_stop(StopReason::Requested);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 struct CustodianClient {
     connection_ref: ConnectionRef,
     stop: StopSignal,
@@ -600,18 +633,29 @@ struct CustodianClient {
     summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
     startup_completion_finished: Arc<AtomicBool>,
+    auxiliary_required: bool,
+    auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_registered: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
 }
 
 /// Observation-only view of custodian state that does not keep control alive.
 #[derive(Clone)]
 pub struct IoCustodianObserver {
     connection_ref: ConnectionRef,
+    stop: StopSignal,
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
     startup_completion_finished: Arc<AtomicBool>,
     auxiliary_required: bool,
     auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_registered: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
 }
 
 /// Refusal to retain an observation in the bounded physical-connection index.
@@ -635,6 +679,12 @@ pub enum CustodianInventoryError {
     /// This custodian already has an auxiliary cleanup task registered.
     #[error("custodian auxiliary cleanup task is already registered")]
     AuxiliaryTaskAlreadyRegistered,
+    /// This custodian has no retained auxiliary cleanup hold.
+    #[error("custodian does not require an auxiliary cleanup task")]
+    AuxiliaryTaskNotRequired,
+    /// This reservation already has an auxiliary cleanup hold.
+    #[error("custodian reservation already has an auxiliary cleanup hold")]
+    AuxiliaryHoldAlreadyRetained,
 }
 
 /// Startup failure after reservation when the independent reaper disappears.
@@ -646,6 +696,9 @@ pub enum ReservedStartError {
     /// The reaper disappeared before it acknowledged ownership readiness.
     #[error("reserved pump reaper disappeared during startup")]
     ReaperUnavailable,
+    /// Cancellation arrived before any pump or reaper was activated.
+    #[error("reserved startup was canceled before either pump started")]
+    CancelledBeforePumps,
 }
 
 enum InventoryEntry {
@@ -681,6 +734,10 @@ pub struct IoCustodianReservation {
     auxiliary_cleanup: Option<watch::Receiver<bool>>,
     auxiliary_required: bool,
     auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_registered: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
     active: bool,
 }
 
@@ -768,6 +825,10 @@ impl IoCustodianInventory {
             auxiliary_cleanup: None,
             auxiliary_required: false,
             auxiliary_task: Arc::new(Mutex::new(None)),
+            auxiliary_finished: Arc::new(AtomicBool::new(true)),
+            auxiliary_registered: Arc::new(AtomicBool::new(false)),
+            auxiliary_join_started: Arc::new(AtomicBool::new(false)),
+            auxiliary_task_registered: Arc::new(Notify::new()),
             active: true,
         })
     }
@@ -800,6 +861,14 @@ impl IoCustodianInventory {
             task.abort();
             return Err(CustodianInventoryError::ReservationLost);
         };
+        if !observer.auxiliary_required {
+            task.abort();
+            return Err(CustodianInventoryError::AuxiliaryTaskNotRequired);
+        }
+        if observer.auxiliary_registered.load(Ordering::Acquire) {
+            task.abort();
+            return Err(CustodianInventoryError::AuxiliaryTaskAlreadyRegistered);
+        }
         let mut retained = match observer.auxiliary_task.lock() {
             Ok(retained) => retained,
             Err(poisoned) => poisoned.into_inner(),
@@ -808,7 +877,9 @@ impl IoCustodianInventory {
             task.abort();
             return Err(CustodianInventoryError::AuxiliaryTaskAlreadyRegistered);
         }
+        observer.auxiliary_registered.store(true, Ordering::Release);
         *retained = Some(task);
+        observer.auxiliary_task_registered.notify_one();
         Ok(())
     }
 
@@ -844,15 +915,7 @@ impl IoCustodianInventory {
                         | CustodianState::StartupAbandoned
                         | CustodianState::PartialStartJoined
                 );
-                let auxiliary_finished = if observer.auxiliary_required {
-                    let retained = match observer.auxiliary_task.lock() {
-                        Ok(retained) => retained,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    retained.as_ref().is_some_and(JoinHandle::is_finished)
-                } else {
-                    true
-                };
+                let auxiliary_finished = observer.auxiliary_finished.load(Ordering::Acquire);
                 !(terminal && auxiliary_finished)
             }
         });
@@ -930,11 +993,20 @@ impl IoCustodianReservation {
 
     /// Keep this exact inventory entry nonterminal until auxiliary connection
     /// owners have supplied their own cleanup proof.
-    pub fn retain_until_auxiliary_cleanup(&mut self) -> AuxiliaryCleanupGuard {
+    pub fn retain_until_auxiliary_cleanup(
+        &mut self,
+    ) -> Result<AuxiliaryCleanupGuard, CustodianInventoryError> {
+        if self.auxiliary_required {
+            return Err(CustodianInventoryError::AuxiliaryHoldAlreadyRetained);
+        }
         let (joined, observer) = watch::channel(false);
         self.auxiliary_cleanup = Some(observer);
         self.auxiliary_required = true;
-        AuxiliaryCleanupGuard { joined }
+        self.auxiliary_finished = Arc::new(AtomicBool::new(false));
+        self.auxiliary_registered = Arc::new(AtomicBool::new(false));
+        self.auxiliary_join_started = Arc::new(AtomicBool::new(false));
+        self.auxiliary_task_registered = Arc::new(Notify::new());
+        Ok(AuxiliaryCleanupGuard { joined })
     }
 }
 
@@ -1033,7 +1105,53 @@ impl IoCustodianReservation {
         Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
         HookFuture: Future<Output = ()> + Send,
     {
-        start_reserved_supervised_io(self, config, factory, hook).await
+        start_reserved_supervised_io(self, config, factory, hook, None).await
+    }
+
+    /// Same as `start_with_hook`, while a caller-owned cancellation signal
+    /// stops this exact connection if the outer starter is abandoned.
+    pub async fn start_with_hook_and_cancellation<
+        R,
+        W,
+        M,
+        ReadError,
+        WriteError,
+        Size,
+        IsClose,
+        IsSendAfterClose,
+        Factory,
+        FactoryFuture,
+        Hook,
+        HookFuture,
+    >(
+        self,
+        config: ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>,
+        factory: Factory,
+        cancellation: CancellationToken,
+        hook: Hook,
+    ) -> Result<
+        (
+            IoCustodianHandle,
+            WriteSender<M>,
+            mpsc::Receiver<QueueItem<M>>,
+        ),
+        ReservedStartError,
+    >
+    where
+        R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
+        W: Sink<M, Error = WriteError> + Unpin + Send + 'static,
+        M: Send + 'static,
+        ReadError: Send + 'static,
+        WriteError: Send + 'static,
+        Size: Fn(&M) -> usize + Send + 'static,
+        IsClose: Fn(&M) -> bool + Send + 'static,
+        IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+        Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+        FactoryFuture: Future<Output = (R, W)> + Send,
+        Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
+        HookFuture: Future<Output = ()> + Send,
+    {
+        start_reserved_supervised_io(self, config, factory, hook, Some(cancellation)).await
     }
 }
 
@@ -1052,6 +1170,26 @@ impl IoCustodianHandle {
     /// independently owned test-support tasks.
     pub(crate) fn stop_signal(&self) -> StopSignal {
         self.client.stop.clone()
+    }
+
+    pub(crate) fn watch_cancellation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> CustodianCancellationWatch {
+        let client = Arc::clone(&self.client);
+        let watcher_client = Arc::clone(&client);
+        let task = tokio::spawn(async move {
+            cancellation.cancelled().await;
+            IoCustodianHandle {
+                client: watcher_client,
+            }
+            .request_stop(StopReason::Requested);
+        });
+        CustodianCancellationWatch {
+            client,
+            task: Some(task),
+            settled: false,
+        }
     }
 
     /// Current lifecycle state. `Joined` includes any required auxiliary
@@ -1101,12 +1239,17 @@ impl IoCustodianHandle {
     pub fn observer(&self) -> IoCustodianObserver {
         IoCustodianObserver {
             connection_ref: self.client.connection_ref.clone(),
+            stop: self.client.stop.clone(),
             state: self.client.state.clone(),
             summary: self.client.summary.clone(),
             cleanup_pending_published: self.client.cleanup_pending_published.clone(),
             startup_completion_finished: self.client.startup_completion_finished.clone(),
-            auxiliary_required: false,
-            auxiliary_task: Arc::new(Mutex::new(None)),
+            auxiliary_required: self.client.auxiliary_required,
+            auxiliary_task: self.client.auxiliary_task.clone(),
+            auxiliary_finished: self.client.auxiliary_finished.clone(),
+            auxiliary_registered: self.client.auxiliary_registered.clone(),
+            auxiliary_join_started: self.client.auxiliary_join_started.clone(),
+            auxiliary_task_registered: self.client.auxiliary_task_registered.clone(),
         }
     }
 
@@ -1137,6 +1280,11 @@ impl IoCustodianObserver {
         &self.connection_ref == connection_ref
     }
 
+    /// First stop reason observed by this exact physical connection.
+    pub fn stop_reason(&self) -> Option<StopReason> {
+        self.stop.reason()
+    }
+
     /// Current lifecycle state. `Joined` includes required auxiliary cleanup.
     pub fn state(&self) -> CustodianState {
         *self.state.borrow()
@@ -1152,6 +1300,12 @@ impl IoCustodianObserver {
     /// reserved-start handoff left to complete.
     pub fn startup_completion_is_finished(&self) -> bool {
         self.startup_completion_finished.load(Ordering::Acquire)
+    }
+
+    /// Whether the reaper has taken and begun awaiting the registered cleanup
+    /// task's JoinHandle. Exposed for deterministic dark lifecycle tests.
+    pub fn auxiliary_join_started(&self) -> bool {
+        self.auxiliary_join_started.load(Ordering::Acquire)
     }
 
     /// Terminal outcomes become available after all started tasks have joined.
@@ -1189,17 +1343,7 @@ impl IoCustodianObserver {
         if !self.auxiliary_required {
             return;
         }
-        loop {
-            let finished = {
-                let retained = match self.auxiliary_task.lock() {
-                    Ok(retained) => retained,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                retained.as_ref().is_some_and(JoinHandle::is_finished)
-            };
-            if finished {
-                return;
-            }
+        while !self.auxiliary_finished.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
     }
@@ -1238,15 +1382,26 @@ where
     let cleanup_pending_published = Arc::new(AtomicBool::new(false));
     let custodian_cleanup_pending_published = cleanup_pending_published.clone();
     let startup_completion_finished = Arc::new(AtomicBool::new(true));
+    let auxiliary_task = Arc::new(Mutex::new(None));
+    let auxiliary_finished = Arc::new(AtomicBool::new(true));
+    let auxiliary_join_started = Arc::new(AtomicBool::new(false));
+    let auxiliary_task_registered = Arc::new(Notify::new());
 
     tokio::spawn(run_io_custodian(
         supervisor,
-        retirement_deadline,
-        state_tx,
-        custodian_summary,
-        custodian_cleanup_pending_published,
-        None,
-        None,
+        IoCustodianRunContext {
+            retirement_deadline,
+            state_tx,
+            custodian_summary,
+            cleanup_pending_published: custodian_cleanup_pending_published,
+            startup_finished: None,
+            auxiliary_cleanup: None,
+            auxiliary_required: false,
+            auxiliary_task: auxiliary_task.clone(),
+            auxiliary_finished: auxiliary_finished.clone(),
+            auxiliary_join_started: auxiliary_join_started.clone(),
+            auxiliary_task_registered: auxiliary_task_registered.clone(),
+        },
     ));
 
     IoCustodianHandle {
@@ -1259,22 +1414,50 @@ where
             summary,
             cleanup_pending_published,
             startup_completion_finished,
+            auxiliary_required: false,
+            auxiliary_task,
+            auxiliary_finished,
+            auxiliary_registered: Arc::new(AtomicBool::new(false)),
+            auxiliary_join_started,
+            auxiliary_task_registered,
         }),
     }
 }
 
-async fn run_io_custodian<ReadError, WriteError>(
-    mut supervisor: IoSupervisor<ReadError, WriteError>,
+struct IoCustodianRunContext {
     retirement_deadline: Duration,
     state_tx: watch::Sender<CustodianState>,
     custodian_summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
     startup_finished: Option<watch::Receiver<bool>>,
     auxiliary_cleanup: Option<watch::Receiver<bool>>,
+    auxiliary_required: bool,
+    auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
+}
+
+async fn run_io_custodian<ReadError, WriteError>(
+    mut supervisor: IoSupervisor<ReadError, WriteError>,
+    context: IoCustodianRunContext,
 ) where
     ReadError: Send + 'static,
     WriteError: Send + 'static,
 {
+    let IoCustodianRunContext {
+        retirement_deadline,
+        state_tx,
+        custodian_summary,
+        cleanup_pending_published,
+        startup_finished,
+        auxiliary_cleanup,
+        auxiliary_required,
+        auxiliary_task,
+        auxiliary_finished,
+        auxiliary_join_started,
+        auxiliary_task_registered,
+    } = context;
     let mut inbound = None;
     let mut outbound = None;
 
@@ -1321,10 +1504,17 @@ async fn run_io_custodian<ReadError, WriteError>(
         wait_for_startup_completion(&mut startup_finished).await;
     }
     wait_for_auxiliary_cleanup(
-        auxiliary_cleanup,
+        AuxiliaryCleanupWait {
+            completion: auxiliary_cleanup,
+            required: auxiliary_required,
+            task: auxiliary_task,
+            finished: auxiliary_finished,
+            join_started: auxiliary_join_started,
+            task_registered: auxiliary_task_registered,
+            retirement_deadline,
+        },
         &state_tx,
         &cleanup_pending_published,
-        retirement_deadline,
     )
     .await;
     let joined = supervisor.joined(inbound, outbound);
@@ -1363,6 +1553,11 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     exit_point: Option<ReservedReaperExitPoint>,
     cleanup_pending_published: Arc<AtomicBool>,
     auxiliary_cleanup: Option<watch::Receiver<bool>>,
+    auxiliary_required: bool,
+    auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
 }
 
 /// Completes startup only after the prepared reader and writer futures have
@@ -1403,22 +1598,46 @@ async fn wait_for_startup_completion(startup_finished: &mut watch::Receiver<bool
     }
 }
 
+struct AuxiliaryCleanupWait {
+    completion: Option<watch::Receiver<bool>>,
+    required: bool,
+    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    finished: Arc<AtomicBool>,
+    join_started: Arc<AtomicBool>,
+    task_registered: Arc<Notify>,
+    retirement_deadline: Duration,
+}
+
 async fn wait_for_auxiliary_cleanup(
-    mut auxiliary_cleanup: Option<watch::Receiver<bool>>,
+    wait: AuxiliaryCleanupWait,
     state_tx: &watch::Sender<CustodianState>,
     cleanup_pending_published: &AtomicBool,
-    retirement_deadline: Duration,
 ) {
-    let Some(mut joined) = auxiliary_cleanup.take() else {
-        return;
-    };
-    if *joined.borrow_and_update() {
+    let AuxiliaryCleanupWait {
+        mut completion,
+        required,
+        task: auxiliary_task,
+        finished: auxiliary_finished,
+        join_started: auxiliary_join_started,
+        task_registered: auxiliary_task_registered,
+        retirement_deadline,
+    } = wait;
+    if !required {
         return;
     }
+    let Some(mut joined) = completion.take() else {
+        cleanup_pending_published.store(true, Ordering::Release);
+        state_tx.send_replace(CustodianState::CleanupPending);
+        return std::future::pending::<()>().await;
+    };
 
     let deadline = tokio::time::sleep(retirement_deadline);
     tokio::pin!(deadline);
+    let mut cleanup_pending = false;
     loop {
+        if *joined.borrow_and_update() {
+            break;
+        }
         tokio::select! {
             changed = joined.changed() => {
                 if changed.is_err() {
@@ -1428,24 +1647,61 @@ async fn wait_for_auxiliary_cleanup(
                     state_tx.send_replace(CustodianState::CleanupPending);
                     std::future::pending::<()>().await;
                 }
-                if *joined.borrow_and_update() {
-                    return;
+            }
+            _ = &mut deadline, if !cleanup_pending => {
+                cleanup_pending = true;
+                cleanup_pending_published.store(true, Ordering::Release);
+                state_tx.send_replace(CustodianState::CleanupPending);
+            }
+        }
+    }
+
+    // The completion signal is emitted at the end of cleanup, but only the
+    // JoinHandle result proves the cleanup task itself has returned. Keep the
+    // slot in CleanupPending until that join has completed.
+    let mut task = loop {
+        let registered = auxiliary_task_registered.notified();
+        if let Some(task) = take_auxiliary_task(&auxiliary_task) {
+            break task;
+        }
+        if !cleanup_pending {
+            tokio::select! {
+                _ = &mut deadline => {
+                    cleanup_pending = true;
+                    cleanup_pending_published.store(true, Ordering::Release);
+                    state_tx.send_replace(CustodianState::CleanupPending);
                 }
+                _ = registered => {}
+            }
+        } else {
+            registered.await;
+        }
+    };
+    auxiliary_join_started.store(true, Ordering::Release);
+
+    if !cleanup_pending {
+        tokio::select! {
+            result = &mut task => {
+                let _ = result;
             }
             _ = &mut deadline => {
                 cleanup_pending_published.store(true, Ordering::Release);
                 state_tx.send_replace(CustodianState::CleanupPending);
-                loop {
-                    if *joined.borrow_and_update() {
-                        return;
-                    }
-                    if joined.changed().await.is_err() {
-                        std::future::pending::<()>().await;
-                    }
-                }
+                let _ = task.await;
             }
         }
+    } else {
+        let _ = task.await;
     }
+    auxiliary_finished.store(true, Ordering::Release);
+}
+
+fn take_auxiliary_task(auxiliary_task: &Mutex<Option<JoinHandle<()>>>) -> Option<JoinHandle<()>> {
+    let mut retained = match auxiliary_task.lock() {
+        Ok(retained) => retained,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    retained.take()
 }
 
 struct ReaperMonitorSetup {
@@ -1460,6 +1716,11 @@ struct ReaperMonitorSetup {
     started_pump_count: Arc<AtomicU8>,
     cleanup_pending_published: Arc<AtomicBool>,
     auxiliary_cleanup: Option<watch::Receiver<bool>>,
+    auxiliary_required: bool,
+    auxiliary_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    auxiliary_finished: Arc<AtomicBool>,
+    auxiliary_join_started: Arc<AtomicBool>,
+    auxiliary_task_registered: Arc<Notify>,
     retirement_deadline: Duration,
 }
 
@@ -1479,6 +1740,11 @@ async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
         started_pump_count,
         cleanup_pending_published,
         auxiliary_cleanup,
+        auxiliary_required,
+        auxiliary_task,
+        auxiliary_finished,
+        auxiliary_join_started,
+        auxiliary_task_registered,
         retirement_deadline,
     } = setup;
     let _ = reaper.await;
@@ -1493,10 +1759,17 @@ async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
 
     if started_pump_count.load(Ordering::Acquire) == 0 {
         wait_for_auxiliary_cleanup(
-            auxiliary_cleanup,
+            AuxiliaryCleanupWait {
+                completion: auxiliary_cleanup,
+                required: auxiliary_required,
+                task: auxiliary_task,
+                finished: auxiliary_finished,
+                join_started: auxiliary_join_started,
+                task_registered: auxiliary_task_registered,
+                retirement_deadline,
+            },
             &state_tx,
             &cleanup_pending_published,
-            retirement_deadline,
         )
         .await;
         let mut retained_summary = match summary.lock() {
@@ -1545,6 +1818,11 @@ async fn run_reserved_start<ReadError, WriteError>(
         exit_point,
         cleanup_pending_published,
         auxiliary_cleanup,
+        auxiliary_required,
+        auxiliary_task,
+        auxiliary_finished,
+        auxiliary_join_started,
+        auxiliary_task_registered,
     } = setup;
     if exit_point == Some(ReservedReaperExitPoint::BeforeCommit) {
         return;
@@ -1574,12 +1852,19 @@ async fn run_reserved_start<ReadError, WriteError>(
                         inbound: inbound_owner,
                         outbound: outbound_owner,
                     },
-                    retirement_deadline,
-                    state_tx,
-                    summary,
-                    cleanup_pending_published,
-                    Some(startup_finished),
-                    auxiliary_cleanup,
+                    IoCustodianRunContext {
+                        retirement_deadline,
+                        state_tx,
+                        custodian_summary: summary,
+                        cleanup_pending_published,
+                        startup_finished: Some(startup_finished),
+                        auxiliary_cleanup,
+                        auxiliary_required,
+                        auxiliary_task,
+                        auxiliary_finished,
+                        auxiliary_join_started,
+                        auxiliary_task_registered,
+                    },
                 )
                 .await;
             }
@@ -1634,10 +1919,17 @@ async fn run_reserved_start<ReadError, WriteError>(
     }
     wait_for_startup_completion(&mut startup_finished).await;
     wait_for_auxiliary_cleanup(
-        auxiliary_cleanup,
+        AuxiliaryCleanupWait {
+            completion: auxiliary_cleanup,
+            required: auxiliary_required,
+            task: auxiliary_task,
+            finished: auxiliary_finished,
+            join_started: auxiliary_join_started,
+            task_registered: auxiliary_task_registered,
+            retirement_deadline,
+        },
         &state_tx,
         &cleanup_pending_published,
-        retirement_deadline,
     )
     .await;
     let inbound_terminal = inbound_result
@@ -2077,6 +2369,7 @@ async fn start_reserved_supervised_io<
     config: ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>,
     factory: Factory,
     mut hook: Hook,
+    cancellation: Option<CancellationToken>,
 ) -> Result<
     (
         IoCustodianHandle,
@@ -2108,7 +2401,24 @@ where
         reaper_exit_point,
     } = config;
     let connection_ref = reservation.connection_ref.clone();
-    let (reader, writer) = factory(&connection_ref).await;
+    if cancellation
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        return Err(ReservedStartError::CancelledBeforePumps);
+    }
+    let factory_future = factory(&connection_ref);
+    let (reader, writer) = if let Some(cancellation) = cancellation.as_ref() {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(ReservedStartError::CancelledBeforePumps);
+            }
+            halves = factory_future => halves,
+        }
+    } else {
+        factory_future.await
+    };
     let mut prepared = prepare_supervised_io(
         connection_ref.clone(),
         reader,
@@ -2126,12 +2436,17 @@ where
     let handle_summary = summary.clone();
     let observer = IoCustodianObserver {
         connection_ref: connection_ref.clone(),
+        stop: prepared.stop.clone(),
         state: state_rx.clone(),
         summary: summary.clone(),
         cleanup_pending_published: cleanup_pending_published.clone(),
         startup_completion_finished: startup_completion_finished.clone(),
         auxiliary_required: reservation.auxiliary_required,
         auxiliary_task: reservation.auxiliary_task.clone(),
+        auxiliary_finished: reservation.auxiliary_finished.clone(),
+        auxiliary_registered: reservation.auxiliary_registered.clone(),
+        auxiliary_join_started: reservation.auxiliary_join_started.clone(),
+        auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
     };
     let inventory = reservation.inventory.clone();
     let reservation_id = reservation.reservation_id;
@@ -2180,6 +2495,11 @@ where
         exit_point: reaper_exit_point,
         cleanup_pending_published: cleanup_pending_published.clone(),
         auxiliary_cleanup: reservation.auxiliary_cleanup.clone(),
+        auxiliary_required: reservation.auxiliary_required,
+        auxiliary_task: reservation.auxiliary_task.clone(),
+        auxiliary_finished: reservation.auxiliary_finished.clone(),
+        auxiliary_join_started: reservation.auxiliary_join_started.clone(),
+        auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
     }));
     tokio::spawn(monitor_reserved_reaper(ReaperMonitorSetup {
         reaper,
@@ -2193,6 +2513,11 @@ where
         started_pump_count: monitor_started_pump_count,
         cleanup_pending_published: monitor_cleanup_pending_published,
         auxiliary_cleanup: reservation.auxiliary_cleanup.clone(),
+        auxiliary_required: reservation.auxiliary_required,
+        auxiliary_task: reservation.auxiliary_task.clone(),
+        auxiliary_finished: reservation.auxiliary_finished.clone(),
+        auxiliary_join_started: reservation.auxiliary_join_started.clone(),
+        auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
         retirement_deadline,
     }));
 
@@ -2211,8 +2536,16 @@ where
             summary: handle_summary,
             cleanup_pending_published,
             startup_completion_finished,
+            auxiliary_required: reservation.auxiliary_required,
+            auxiliary_task: reservation.auxiliary_task.clone(),
+            auxiliary_finished: reservation.auxiliary_finished.clone(),
+            auxiliary_registered: reservation.auxiliary_registered.clone(),
+            auxiliary_join_started: reservation.auxiliary_join_started.clone(),
+            auxiliary_task_registered: reservation.auxiliary_task_registered.clone(),
         }),
     };
+    let cancellation_watch =
+        cancellation.map(|cancellation| handle.watch_cancellation(cancellation));
 
     hook(ReservedStartStage::BeforeInboundSpawn).await;
     let inbound_task = tokio::spawn(async move {
@@ -2236,16 +2569,27 @@ where
 
     hook(ReservedStartStage::AfterOutboundSpawn).await;
     if commit_tx.send(()).is_err() {
+        handle.request_stop(StopReason::Requested);
         failure_cleanup_pending_published.store(true, Ordering::Release);
         failure_state_tx.send_replace(CustodianState::CleanupPending);
+        if let Some(cancellation_watch) = cancellation_watch {
+            cancellation_watch.finish().await;
+        }
         return Err(ReservedStartError::ReaperUnavailable);
     }
     if ready_rx.await.is_err() {
+        handle.request_stop(StopReason::Requested);
         failure_cleanup_pending_published.store(true, Ordering::Release);
         failure_state_tx.send_replace(CustodianState::CleanupPending);
+        if let Some(cancellation_watch) = cancellation_watch {
+            cancellation_watch.finish().await;
+        }
         return Err(ReservedStartError::ReaperUnavailable);
     }
     hook(ReservedStartStage::AfterCommit).await;
+    if let Some(cancellation_watch) = cancellation_watch {
+        cancellation_watch.finish().await;
+    }
 
     Ok((handle, prepared.outbound_sender, prepared.inbound_receiver))
 }

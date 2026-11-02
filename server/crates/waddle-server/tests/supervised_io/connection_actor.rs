@@ -1,6 +1,7 @@
 use futures::{Sink, SinkExt, StreamExt};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -11,10 +12,11 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::connection_actor::{
-    start_connection_actor, start_connection_actor_with_effect, CompleteHandledInbound,
-    CompleteHandledInboundAtLifecycleGate, CompleteHandledInboundBeforeLifecycleGate,
-    ConfirmBindingInstall, ConnectionActorError, ConnectionActorGateBarrier,
-    ConnectionActorOperationId, ConnectionActorStartError, ConnectionWireFrame,
+    start_connection_actor, start_connection_actor_with_effect, start_connection_actor_with_hooks,
+    CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
+    CompleteHandledInboundBeforeLifecycleGate, ConfirmBindingInstall, ConnectionActorError,
+    ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorStartBarrier,
+    ConnectionActorStartError, ConnectionActorStartHooks, ConnectionWireFrame,
     CountableEffectDisposition, CountableInboundEffect, InstallBinding, PanicConnectionActor,
     PauseConnectionActor, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
     RetireBinding, SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
@@ -23,7 +25,7 @@ use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
-use waddle_xmpp::ownership::NodeLeaseIdentity;
+use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame, ParseError};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, SmStanza};
 use xmpp_parsers::minidom::Element;
@@ -91,7 +93,7 @@ where
 
     fn start_send(mut self: Pin<&mut Self>, frame: ConnectionWireFrame) -> Result<(), Self::Error> {
         let message = match frame {
-            ConnectionWireFrame::RequestAcknowledgement(_) => {
+            ConnectionWireFrame::RequestAcknowledgement { .. } => {
                 Message::Text(SmRequest::to_xml().into())
             }
             ConnectionWireFrame::Acknowledgement(ack) => Message::Text(ack.to_xml().into()),
@@ -273,6 +275,151 @@ where
     (controller, client, entered_rx)
 }
 
+async fn spawn_actor_start_with_hooks(
+    inventory: IoCustodianInventory,
+    hooks: ConnectionActorStartHooks,
+) -> (
+    tokio::task::JoinHandle<()>,
+    ClientSocket,
+    oneshot::Receiver<ConnectionRef>,
+) {
+    let (server, client) = super::pumps::socket_pair().await;
+    let (connection_ref_tx, connection_ref_rx) = oneshot::channel();
+    let (flush_entered_tx, _flush_entered_rx) = oneshot::channel();
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let config = ReservedIoStartConfig::new(
+        test_transport_limits(2, 2048, 2, 256),
+        ShutdownProtocol::new(ConnectionWireFrame::Close, |error: &Error| {
+            matches!(error, Error::Protocol(ProtocolError::SendAfterClosing))
+        }),
+        ConnectionWireFrame::encoded_len,
+        ConnectionWireFrame::is_close,
+        Duration::from_millis(500),
+    );
+    let start_task = tokio::spawn(async move {
+        let result = start_connection_actor_with_hooks(
+            &inventory,
+            NodeLeaseIdentity::local_process(),
+            HANDLED_OPERATION_DEADLINE,
+            config,
+            move |connection_ref| {
+                let _ = connection_ref_tx.send(connection_ref.clone());
+                async move {
+                    let (writer, reader) = server.split();
+                    let reader = reader
+                        .filter_map(|incoming| async move {
+                            match incoming {
+                                Ok(Message::Text(text)) => {
+                                    Some(Ok(connection_frame_from_text(text.as_str())))
+                                }
+                                Ok(Message::Binary(bytes)) => {
+                                    Some(Ok(ConnectionWireFrame::RejectedInbound {
+                                        wire_bytes: bytes.len(),
+                                    }))
+                                }
+                                Ok(Message::Close(_)) => Some(Ok(ConnectionWireFrame::Close)),
+                                Ok(_) => None,
+                                Err(error) => Some(Err(error)),
+                            }
+                        })
+                        .boxed();
+                    let writer = GatedFlushSink {
+                        inner: writer,
+                        gate,
+                        entered: Some(flush_entered_tx),
+                        pending_flush: false,
+                    };
+                    (reader, writer)
+                }
+            },
+            |_| async { CountableEffectDisposition::Handled },
+            hooks,
+        )
+        .await;
+        drop(result);
+    });
+    (start_task, client, connection_ref_rx)
+}
+
+struct DropNotification(Option<oneshot::Sender<()>>);
+
+impl Drop for DropNotification {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+struct BlockingDropStream<S> {
+    inner: S,
+    id: u8,
+    dropped: mpsc::UnboundedSender<u8>,
+    release: std_mpsc::Receiver<()>,
+}
+
+impl<S> Drop for BlockingDropStream<S> {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(self.id);
+        let _ = self.release.recv();
+    }
+}
+
+impl<S: futures::Stream + Unpin> futures::Stream for BlockingDropStream<S> {
+    type Item = S::Item;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+struct BlockingDropSink<S> {
+    inner: S,
+    id: u8,
+    dropped: mpsc::UnboundedSender<u8>,
+    release: std_mpsc::Receiver<()>,
+}
+
+impl<S> Drop for BlockingDropSink<S> {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(self.id);
+        let _ = self.release.recv();
+    }
+}
+
+impl<S: Sink<Message> + Unpin> Sink<Message> for BlockingDropSink<S> {
+    type Error = S::Error;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_ready(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        Pin::new(&mut self.inner).start_send(item)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
 fn test_transport_limits(
     inbound_count: usize,
     inbound_bytes: usize,
@@ -294,7 +441,7 @@ fn connection_frame_from_text(text: &str) -> ConnectionWireFrame {
         },
         Err(ParseError::UnknownRoot(root)) if root == "r" => {
             if matches!(SmStanza::parse(text), Some(SmStanza::Request)) {
-                ConnectionWireFrame::RequestAcknowledgement(SmRequest)
+                ConnectionWireFrame::RequestAcknowledgement { wire_bytes }
             } else {
                 ConnectionWireFrame::RejectedInbound { wire_bytes }
             }
@@ -1934,9 +2081,9 @@ async fn reservation_is_indexed_before_the_actor_pump_factory_runs() {
                         match incoming {
                             Ok(Message::Text(text)) => {
                                 matches!(SmStanza::parse(text.as_str()), Some(SmStanza::Request))
-                                    .then_some(Ok(ConnectionWireFrame::RequestAcknowledgement(
-                                        SmRequest,
-                                    )))
+                                    .then_some(Ok(ConnectionWireFrame::RequestAcknowledgement {
+                                        wire_bytes: text.len(),
+                                    }))
                             }
                             Ok(Message::Close(_)) => Some(Ok(ConnectionWireFrame::Close)),
                             Ok(_) => None,
@@ -2013,9 +2160,9 @@ async fn failed_reservation_does_not_call_the_connection_pump_factory() {
                     match incoming {
                         Ok(Message::Text(text)) => {
                             matches!(SmStanza::parse(text.as_str()), Some(SmStanza::Request))
-                                .then_some(Ok(ConnectionWireFrame::RequestAcknowledgement(
-                                    SmRequest,
-                                )))
+                                .then_some(Ok(ConnectionWireFrame::RequestAcknowledgement {
+                                    wire_bytes: text.len(),
+                                }))
                         }
                         Ok(Message::Close(_)) => Some(Ok(ConnectionWireFrame::Close)),
                         Ok(_) => None,
@@ -2132,6 +2279,163 @@ async fn real_countable_stanza_keeps_h_behind_a_hole_while_peer_control_progress
         controller.wait_until_joined().await,
         Some(CustodianState::Joined)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_real_countable_effects_are_serialized_while_peer_ack_reports_the_prefix() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (effect_started_tx, mut effect_started_rx) = mpsc::unbounded_channel();
+    let (effect_release_tx, effect_release_rx) = watch::channel(0u32);
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(3, 2048, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        move |effect| {
+            let effect_started = effect_started_tx.clone();
+            let mut release = effect_release_rx.clone();
+            async move {
+                let sequence = effect.sequence.sequence_number();
+                let _ = effect_started.send(sequence);
+                loop {
+                    if *release.borrow_and_update() >= sequence {
+                        return CountableEffectDisposition::Handled;
+                    }
+                    if release.changed().await.is_err() {
+                        return CountableEffectDisposition::Uncertain;
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    send_stanza(&mut peer, "<message><body>first</body></message>").await;
+    assert_eq!(
+        timeout(TEST_TIMEOUT, effect_started_rx.recv())
+            .await
+            .expect("first effect starts")
+            .expect("first effect token"),
+        1
+    );
+    send_stanza(&mut peer, "<presence/>").await;
+    assert!(controller.wait_for_inbound_forwarded(2).await);
+    let _ = controller
+        .actor()
+        .ask(SnapshotConnection)
+        .send()
+        .await
+        .expect("actor processed both countable frames");
+    assert!(
+        matches!(
+            effect_started_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ),
+        "the serialized effect owner does not start stanza two while stanza one is unresolved"
+    );
+
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 0);
+    effect_release_tx.send_replace(1);
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(1))
+            .await
+            .expect("first effect and actor completion finish")
+    );
+    assert_eq!(
+        timeout(TEST_TIMEOUT, effect_started_rx.recv())
+            .await
+            .expect("second effect starts after first completion")
+            .expect("second effect token"),
+        2
+    );
+    assert_eq!(controller.handled_h(), 1);
+
+    effect_release_tx.send_replace(2);
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(2))
+            .await
+            .expect("second effect and actor completion finish")
+    );
+    assert_eq!(controller.handled_h(), 2);
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 2);
+    controller.request_stop(StopReason::Requested);
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(2))
+            .await
+            .expect("completed effect target is retained after stop")
+    );
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_drops_the_active_effect_before_auxiliary_join_and_prune() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (effect_started_tx, effect_started_rx) = oneshot::channel();
+    let (effect_dropped_tx, effect_dropped_rx) = oneshot::channel();
+    let effect_started_tx = Arc::new(Mutex::new(Some(effect_started_tx)));
+    let effect_dropped_tx = Arc::new(Mutex::new(Some(effect_dropped_tx)));
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(2, 2048, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        move |_| {
+            let started = effect_started_tx
+                .lock()
+                .expect("effect start notifier lock")
+                .take();
+            let dropped = effect_dropped_tx
+                .lock()
+                .expect("effect drop notifier lock")
+                .take();
+            async move {
+                if let Some(started) = started {
+                    let _ = started.send(());
+                }
+                let _drop_notification = DropNotification(dropped);
+                std::future::pending::<CountableEffectDisposition>().await
+            }
+        },
+    )
+    .await;
+
+    send_stanza(&mut peer, "<message><body>blocked effect</body></message>").await;
+    timeout(TEST_TIMEOUT, effect_started_rx)
+        .await
+        .expect("effect started before stop")
+        .expect("effect start signal");
+    controller.request_stop(StopReason::LeaseLost);
+    timeout(TEST_TIMEOUT, effect_dropped_rx)
+        .await
+        .expect("stop cancels the active external effect")
+        .expect("effect Drop signal");
+    assert!(
+        !timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(2))
+            .await
+            .expect("stop resolves an unreachable completion wait"),
+        "an unreachable effect count is false after stop"
+    );
+    assert_eq!(
+        inventory.len(),
+        1,
+        "joined proof still owns inventory capacity"
+    );
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(inventory.prune_joined(), 1);
 }
 
 #[tokio::test]
@@ -2366,4 +2670,292 @@ async fn oversized_inbound_stanza_is_rejected_before_sequence_reservation() {
     assert_eq!(controller.stop_reason(), Some(StopReason::InboundOverload));
     assert_eq!(controller.handled_h(), 0);
     assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn padded_peer_sm_request_uses_actual_raw_bytes_for_inbound_budget() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let canonical_request = SmRequest::to_xml();
+    let padded_request = "<r xmlns='urn:xmpp:sm:3'                              />";
+    assert!(padded_request.len() > canonical_request.len());
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(2, canonical_request.len(), 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        |_| async { CountableEffectDisposition::Handled },
+    )
+    .await;
+
+    send_stanza(&mut peer, padded_request).await;
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("raw padded request exceeds the configured inbound byte budget"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::InboundOverload));
+    assert_eq!(controller.handled_h(), 0);
+    assert!(!controller.wait_for_inbound_forwarded(1).await);
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn caller_cancellation_before_factory_releases_the_reserved_slot_without_invoking_factory() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let hooks = ConnectionActorStartHooks {
+        before_factory: Some(ConnectionActorStartBarrier::new(entered_tx, release_rx)),
+        ..ConnectionActorStartHooks::default()
+    };
+    let (start_task, client, connection_ref_rx) =
+        spawn_actor_start_with_hooks(inventory.clone(), hooks).await;
+
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("startup reached the pre-factory barrier")
+        .expect("barrier entry");
+    assert_eq!(
+        inventory.len(),
+        1,
+        "owner already consumes one reserved slot"
+    );
+    start_task.abort();
+    let _ = start_task.await;
+    let _ = release_tx.send(());
+
+    timeout(TEST_TIMEOUT, async {
+        while !inventory.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("canceled pre-factory owner releases its unused reservation");
+    assert!(
+        connection_ref_rx.await.is_err(),
+        "factory callback was not invoked"
+    );
+    drop(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn caller_cancellation_during_pending_factory_drops_factory_and_its_socket_halves() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let (server, client) = super::pumps::socket_pair().await;
+    let (factory_entered_tx, factory_entered_rx) = oneshot::channel();
+    let (half_dropped_tx, mut half_dropped_rx) = mpsc::unbounded_channel();
+    let (release_writer_tx, release_writer_rx) = std_mpsc::sync_channel(1);
+    let (release_reader_tx, release_reader_rx) = std_mpsc::sync_channel(1);
+    let (flush_entered_tx, _flush_entered_rx) = oneshot::channel();
+    let gate = Arc::new(FlushGate::new());
+    let config = ReservedIoStartConfig::new(
+        test_transport_limits(2, 2048, 2, 256),
+        ShutdownProtocol::new(ConnectionWireFrame::Close, |error: &Error| {
+            matches!(error, Error::Protocol(ProtocolError::SendAfterClosing))
+        }),
+        ConnectionWireFrame::encoded_len,
+        ConnectionWireFrame::is_close,
+        Duration::from_millis(500),
+    );
+    let owner_inventory = inventory.clone();
+    let start_task = tokio::spawn(async move {
+        let result = start_connection_actor_with_hooks(
+            &owner_inventory,
+            NodeLeaseIdentity::local_process(),
+            HANDLED_OPERATION_DEADLINE,
+            config,
+            move |_| {
+                let (writer, reader) = server.split();
+                let writer = BlockingDropSink {
+                    inner: writer,
+                    id: 0,
+                    dropped: half_dropped_tx.clone(),
+                    release: release_writer_rx,
+                };
+                let reader = BlockingDropStream {
+                    inner: reader,
+                    id: 1,
+                    dropped: half_dropped_tx,
+                    release: release_reader_rx,
+                };
+                async move {
+                    let _ = factory_entered_tx.send(());
+                    std::future::pending::<()>().await;
+                    let reader = reader
+                        .filter_map(|incoming| async move {
+                            incoming.ok().map(|_| {
+                                Ok::<ConnectionWireFrame, Error>(ConnectionWireFrame::Close)
+                            })
+                        })
+                        .boxed();
+                    let writer = GatedFlushSink {
+                        inner: writer,
+                        gate,
+                        entered: Some(flush_entered_tx),
+                        pending_flush: false,
+                    };
+                    (reader, writer)
+                }
+            },
+            |_| async { CountableEffectDisposition::Handled },
+            ConnectionActorStartHooks::default(),
+        )
+        .await;
+        drop(result);
+    });
+
+    timeout(TEST_TIMEOUT, factory_entered_rx)
+        .await
+        .expect("factory future started")
+        .expect("factory entry signal");
+    assert_eq!(
+        inventory.len(),
+        1,
+        "pending factory is bounded by its reservation"
+    );
+    start_task.abort();
+    let _ = start_task.await;
+    let first_half = timeout(TEST_TIMEOUT, half_dropped_rx.recv())
+        .await
+        .expect("first captured socket half begins dropping")
+        .expect("first half drop ID");
+    assert_eq!(
+        inventory.len(),
+        1,
+        "capacity remains held during first half Drop"
+    );
+    match first_half {
+        0 => {
+            let _ = release_writer_tx.send(());
+        }
+        1 => {
+            let _ = release_reader_tx.send(());
+        }
+        other => panic!("unexpected socket half ID {other}"),
+    }
+    let second_half = timeout(TEST_TIMEOUT, half_dropped_rx.recv())
+        .await
+        .expect("second captured socket half begins dropping")
+        .expect("second half drop ID");
+    assert_ne!(first_half, second_half);
+    assert_eq!(
+        inventory.len(),
+        1,
+        "capacity remains held during second half Drop"
+    );
+    match second_half {
+        0 => {
+            let _ = release_writer_tx.send(());
+        }
+        1 => {
+            let _ = release_reader_tx.send(());
+        }
+        other => panic!("unexpected socket half ID {other}"),
+    }
+    timeout(TEST_TIMEOUT, async {
+        while !inventory.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pre-activation cancellation releases inventory capacity");
+    drop(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn caller_cancellation_after_pump_handoff_keeps_inventory_until_both_pumps_join() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let hooks = ConnectionActorStartHooks {
+        after_pumps_handed_off: Some(ConnectionActorStartBarrier::new(entered_tx, release_rx)),
+        ..ConnectionActorStartHooks::default()
+    };
+    let (start_task, client, connection_ref_rx) =
+        spawn_actor_start_with_hooks(inventory.clone(), hooks).await;
+
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("both pump handles reached the reaper handoff barrier")
+        .expect("barrier entry");
+    let connection_ref = timeout(TEST_TIMEOUT, connection_ref_rx)
+        .await
+        .expect("factory ran after reservation")
+        .expect("exact connection identity");
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("active exact connection remains indexed");
+    start_task.abort();
+    let _ = start_task.await;
+    timeout(TEST_TIMEOUT, async {
+        while observer.stop_reason() != Some(StopReason::Requested) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("caller loss requests stop for the exact physical connection");
+    assert_eq!(
+        inventory.prune_joined(),
+        0,
+        "unjoined pumps retain capacity"
+    );
+    assert!(inventory.observe(&connection_ref).is_some());
+    let _ = release_tx.send(());
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("both started pump handles join"),
+        CustodianState::Joined
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+    drop(client);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn caller_cancellation_after_actor_start_joins_registered_auxiliary_cleanup() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let hooks = ConnectionActorStartHooks {
+        after_actor_started: Some(ConnectionActorStartBarrier::new(entered_tx, release_rx)),
+        ..ConnectionActorStartHooks::default()
+    };
+    let (start_task, client, connection_ref_rx) =
+        spawn_actor_start_with_hooks(inventory.clone(), hooks).await;
+
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("Kameo actor started before cleanup registration")
+        .expect("barrier entry");
+    let connection_ref = timeout(TEST_TIMEOUT, connection_ref_rx)
+        .await
+        .expect("factory ran after reservation")
+        .expect("exact connection identity");
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("active exact connection remains indexed");
+    start_task.abort();
+    let _ = start_task.await;
+    timeout(TEST_TIMEOUT, async {
+        while observer.stop_reason() != Some(StopReason::Requested) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("caller loss requests stop while actor startup is paused");
+    assert_eq!(inventory.prune_joined(), 0, "cleanup is still unregistered");
+    let _ = release_tx.send(());
+    assert_eq!(
+        timeout(TEST_TIMEOUT, observer.wait_until_joined())
+            .await
+            .expect("registered cleanup task and both pumps join"),
+        CustodianState::Joined
+    );
+    assert!(observer.auxiliary_join_started());
+    assert_eq!(inventory.prune_joined(), 1);
+    drop(client);
 }
