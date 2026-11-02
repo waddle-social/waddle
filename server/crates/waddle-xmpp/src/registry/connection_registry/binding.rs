@@ -98,11 +98,11 @@ impl ConnectionBindGuard {
     /// resume must retain its room membership while retiring the old token.
     pub fn retain_actor_retirement(&mut self, lifecycle: Arc<SocketLifecycle>) {
         if let Some(guard) = self.guard.as_mut() {
-            let owner = lifecycle.entry.carbons_handle();
+            let owner = lifecycle.entry.binding_id();
             if !guard
                 .actor_retirements
                 .iter()
-                .any(|pending| Arc::ptr_eq(&pending.entry.carbons_handle(), &owner))
+                .any(|pending| pending.entry.binding_id() == owner)
             {
                 guard.actor_retirements.push(lifecycle);
             }
@@ -118,10 +118,10 @@ impl ConnectionBindGuard {
 
     pub fn complete_actor_retirement(&mut self, lifecycle: &Arc<SocketLifecycle>) {
         if let Some(guard) = self.guard.as_mut() {
-            let owner = lifecycle.entry.carbons_handle();
+            let owner = lifecycle.entry.binding_id();
             guard
                 .actor_retirements
-                .retain(|pending| !Arc::ptr_eq(&pending.entry.carbons_handle(), &owner));
+                .retain(|pending| pending.entry.binding_id() != owner);
         }
     }
 

@@ -1,20 +1,23 @@
 use super::{
-    debug, instrument, mpsc, Arc, AtomicBool, ConnectionEntry, ConnectionRegistry, FullJid,
-    Ordering, OutboundStanza,
+    debug, instrument, mpsc, ConnectionEntry, ConnectionRegistry, FullJid,
+    LocalConnectionBindingId, Ordering, OutboundStanza,
 };
 use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
     /// Register a connection with its outbound channel.
     ///
-    /// Returns a handle to the carbons_enabled flag that the WebSocket C2S adapter
-    /// can use to update the carbons status when enable/disable IQs are received.
+    /// Returns the local identity of the published binding.
     ///
     /// If a connection with the same JID already exists, it will be replaced.
     /// This handles reconnection scenarios where a client reconnects with
     /// the same resource before the old connection is cleaned up.
     #[instrument(skip(self, sender, jid), fields(jid = %jid))]
-    pub fn register(&self, jid: FullJid, sender: mpsc::Sender<OutboundStanza>) -> Arc<AtomicBool> {
+    pub fn register(
+        &self,
+        jid: FullJid,
+        sender: mpsc::Sender<OutboundStanza>,
+    ) -> LocalConnectionBindingId {
         self.register_with_carbons(jid, sender, false)
     }
 
@@ -28,7 +31,7 @@ impl ConnectionRegistry {
         jid: FullJid,
         sender: mpsc::Sender<OutboundStanza>,
         carbons_enabled: bool,
-    ) -> Arc<AtomicBool> {
+    ) -> LocalConnectionBindingId {
         self.register_with_stream_state(jid, sender, carbons_enabled, false, false)
     }
 
@@ -41,7 +44,7 @@ impl ConnectionRegistry {
         carbons_enabled: bool,
         roster_interested: bool,
         blocklist_interested: bool,
-    ) -> Arc<AtomicBool> {
+    ) -> LocalConnectionBindingId {
         let entry = ConnectionEntry::new(sender);
         if carbons_enabled {
             entry.carbons_enabled.store(true, Ordering::Relaxed);
@@ -63,8 +66,8 @@ impl ConnectionRegistry {
     /// actor-backed full-JID routing both drain into the remote-resource
     /// forwarder.
     #[instrument(skip(self, entry, jid), fields(jid = %jid))]
-    pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> Arc<AtomicBool> {
-        let carbons_handle = entry.carbons_handle();
+    pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> LocalConnectionBindingId {
+        let binding_id = entry.binding_id();
         match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 if occupied.get().sm_stream_id() != entry.sm_stream_id() {
@@ -79,7 +82,7 @@ impl ConnectionRegistry {
                 debug!("Registered new connection");
             }
         }
-        carbons_handle
+        binding_id
     }
 
     /// Register a prebuilt entry only when the full-JID slot is empty or still
@@ -88,15 +91,15 @@ impl ConnectionRegistry {
         &self,
         jid: FullJid,
         entry: ConnectionEntry,
-        owner: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
     ) -> bool {
-        if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
+        if entry.binding_id() != *owner {
             debug!("Skipped register: entry owner does not match guard owner");
             return false;
         }
         match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
-                if !Arc::ptr_eq(&occupied.get().carbons_enabled, owner) {
+                if occupied.get().binding_id() != *owner {
                     debug!("Skipped register: ownership moved to replacement connection");
                     return false;
                 }
@@ -123,11 +126,11 @@ impl ConnectionRegistry {
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered connection");
         } else {
             debug!("Connection was not registered");
@@ -136,33 +139,33 @@ impl ConnectionRegistry {
     }
 
     /// Whether the current registry entry for `jid` still belongs to the
-    /// connection holding `carbons_handle` (its ownership token). A
+    /// connection holding `owner` (its local binding identity). A
     /// connection that lost its slot to a same-FullJID replacement must not
     /// perform FullJID-keyed writes such as a MUC join (#1703).
-    pub fn is_owned_by(&self, jid: &FullJid, carbons_handle: &Arc<AtomicBool>) -> bool {
+    pub fn is_owned_by(&self, jid: &FullJid, owner: &LocalConnectionBindingId) -> bool {
         self.connections
             .get(jid)
-            .is_some_and(|entry| Arc::ptr_eq(&entry.carbons_enabled, carbons_handle))
+            .is_some_and(|entry| entry.binding_id() == *owner)
     }
 
     /// Unregister a connection only if the current registry entry belongs to
-    /// the provided carbons handle (i.e. this actor still owns the slot).
-    #[instrument(skip(self, carbons_handle, jid), fields(jid = %jid))]
+    /// the provided local binding identity (i.e. this actor still owns the slot).
+    #[instrument(skip(self, owner, jid), fields(jid = %jid))]
     pub fn unregister_if_owner(
         &self,
         jid: &FullJid,
-        carbons_handle: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
     ) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
-            if !Arc::ptr_eq(&entry.carbons_enabled, carbons_handle) {
+            if entry.binding_id() != *owner {
                 return false;
             }
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered owned connection");
         } else {
             debug!("Skipped unregister: ownership moved to replacement connection");
@@ -191,11 +194,11 @@ impl ConnectionRegistry {
                 return false;
             }
             Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            Self::remove_retired_presence(&self.presence_states, jid);
             true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
             debug!("Unregistered SM-owned connection at expiry");
         } else {
             debug!("Skipped expiry unregister: entry belongs to a different session or is absent");
@@ -207,10 +210,10 @@ impl ConnectionRegistry {
     pub fn entry_if_owner(
         &self,
         jid: &FullJid,
-        carbons_handle: &Arc<AtomicBool>,
+        owner: &LocalConnectionBindingId,
     ) -> Option<ConnectionEntry> {
         self.connections.get(jid).and_then(|entry| {
-            if Arc::ptr_eq(&entry.carbons_enabled, carbons_handle) {
+            if entry.binding_id() == *owner {
                 Some(entry.clone())
             } else {
                 None

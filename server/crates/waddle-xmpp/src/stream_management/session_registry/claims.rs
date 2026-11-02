@@ -14,6 +14,27 @@ use super::core::{
 };
 use super::{DetachedSession, SmClaimCompletion, SmRegistryError};
 
+#[cfg(feature = "test-utils")]
+impl InMemorySmSessionRegistry {
+    /// Mark a claimed session as having lost replay history for a focused
+    /// cross-process WebSocket test. Production builds do not expose this.
+    pub fn set_claimed_replay_gap_for_test(
+        &self,
+        stream_id: &str,
+        replay_gap_through: u32,
+    ) -> Result<bool, SmRegistryError> {
+        let mut claimed = self
+            .claimed_sessions
+            .write()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+        let Some(session) = claimed.get_mut(stream_id) else {
+            return Ok(false);
+        };
+        session.replay_gap_through = Some(replay_gap_through);
+        Ok(true)
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum ClaimSessionOutcome {
     Claimed(Box<DetachedSession>),

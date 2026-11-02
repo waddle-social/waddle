@@ -489,7 +489,7 @@ pub async fn register_test_connection(
     state: &WebSocketState,
     jid: &jid::FullJid,
     sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
-) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+) -> waddle_xmpp::registry::LocalConnectionBindingId {
     let owner = state
         .deps
         .protocol

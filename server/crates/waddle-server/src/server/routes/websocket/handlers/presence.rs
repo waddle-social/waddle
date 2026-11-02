@@ -79,7 +79,7 @@ pub async fn handle_presence(
     state: &WebSocketState,
     phase: &ConnectionPhase,
     _authenticated_session: Option<&Session>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) -> Vec<String> {
     // Present the generation the connection's join recorded (see
     // `tests::current_test_occupancy_session`), not a fresh mint: a fresh
@@ -113,7 +113,7 @@ pub async fn handle_presence_with_occupancy_session(
     authenticated_session: Option<&Session>,
     connection: (
         waddle_xmpp_core::OccupancySessionGeneration,
-        Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     ),
 ) -> Vec<String> {
     let (occupancy_session, registry_owner) = connection;

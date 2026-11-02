@@ -1,10 +1,29 @@
 use crate::server::routes::interpret::OrderedRelayRouteOrigin;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static RESOURCE_METADATA_WRITE_GATE: (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    );
+}
+
+#[cfg(test)]
+pub(super) async fn wait_before_resource_metadata_write() {
+    if let Ok((entered, release)) = RESOURCE_METADATA_WRITE_GATE
+        .try_with(|(entered, release)| (entered.clone(), release.clone()))
+    {
+        entered.notify_one();
+        release.notified().await;
+    }
+}
+
 pub struct IqConnState<'a> {
     pub carbons_enabled: &'a mut bool,
     pub roster_interested: &'a mut bool,
     pub blocklist_interested: &'a mut bool,
     pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
-    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     /// Per-connection [`waddle_xmpp::protocol::XmppStateMachine`].
     /// Required so XEP-0191 block/unblock IQs can mirror their
     /// effect into the dispatcher's session-state snapshot — without

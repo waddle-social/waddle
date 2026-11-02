@@ -168,15 +168,24 @@ async fn handle_sans_io_iq_with_relay_override(
             }
         }
         if let Some(enabled) = carbons_toggle {
+            #[cfg(test)]
+            super::conn_state::wait_before_resource_metadata_write().await;
+            let Some(owner) = conn_state.registry_owner.filter(|owner| {
+                state
+                    .deps
+                    .protocol
+                    .connection_registry
+                    .set_carbons_enabled_if_owner(full_jid, owner, enabled)
+            }) else {
+                return Some(vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    service_unavailable_iq_error("Resource binding unavailable."),
+                )]);
+            };
             *conn_state.carbons_enabled = enabled;
-            let _ = state
-                .deps
-                .protocol
-                .connection_registry
-                .set_carbons_enabled(full_jid, enabled);
-            if let Some(owner) = conn_state.registry_owner {
-                mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
-            }
+            mirror_remote_carbons_update(state, full_jid, owner, enabled).await;
         }
         let muji_terminate_room = super::jingle_muji_gate::muji_session_terminate_room(iq);
         // A Muji initiate from this connection must still hold the room's
@@ -1157,7 +1166,7 @@ struct IqReplyAddressing<'a> {
 async fn mirror_remote_carbons_update(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     enabled: bool,
 ) {
     if let Some(bridge) = state
@@ -1181,7 +1190,7 @@ async fn mirror_remote_carbons_update(
 async fn mirror_remote_carbons_update(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     _enabled: bool,
 ) {
 }

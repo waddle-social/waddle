@@ -21,7 +21,7 @@ const RECOVERY_PAGE_SIZE: usize = 64;
 
 struct RecoveryTarget {
     resource: FullJid,
-    owner: Arc<std::sync::atomic::AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
     session: Option<SmSessionId>,
     priority: i8,
 }
@@ -180,7 +180,7 @@ impl PendingRecovery {
             }
             let target = RecoveryTarget {
                 resource: resource.clone(),
-                owner: entry.carbons_handle(),
+                owner: entry.binding_id(),
                 session: entry.sm_stream_id(),
                 priority: entry.presence_priority(),
             };

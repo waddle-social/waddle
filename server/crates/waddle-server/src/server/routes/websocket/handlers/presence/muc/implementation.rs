@@ -71,7 +71,7 @@ pub async fn handle_muc_join(
 pub(in crate::server::routes::websocket::handlers::presence::muc) fn join_connection_still_owns_slot(
     state: &WebSocketState,
     sender_jid: &FullJid,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) -> bool {
     registry_owner.is_none_or(|owner| {
         state
@@ -90,7 +90,7 @@ pub struct MucJoinConnectionContext<'a> {
     /// before the join is committed (locally or relayed): a connection that
     /// lost its slot during the join's awaits must not install itself over
     /// the replacement (#1703). `None` for server-originated joins.
-    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
 }
 
 pub struct MucJoinRequest<'a> {
@@ -101,7 +101,7 @@ pub struct MucJoinRequest<'a> {
     pub presence_show: Option<NotificationPresenceShow>,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: Option<&'a Session>,
-    pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub registry_owner: Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     pub ordered_relay_origin: Option<OrderedRelayRouteOrigin>,
 }
 
@@ -115,7 +115,7 @@ pub(in crate::server::routes::websocket::handlers::presence::muc) struct MucJoin
     pub(in crate::server::routes::websocket::handlers::presence::muc) occupancy_session:
         waddle_xmpp_core::OccupancySessionGeneration,
     pub(in crate::server::routes::websocket::handlers::presence::muc) registry_owner:
-        Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        Option<&'a waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(in crate::server::routes::websocket::handlers::presence::muc) authenticated_session:
         Option<&'a Session>,
     pub(in crate::server::routes::websocket::handlers::presence::muc) ordered_relay_origin:

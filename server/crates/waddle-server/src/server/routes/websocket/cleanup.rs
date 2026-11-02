@@ -94,7 +94,7 @@ where
 async fn unregister_remote_user_resource_if_owner(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> RemoteResourceUnregisterOutcome {
     if let Some(bridge) = state
         .deps
@@ -114,7 +114,7 @@ async fn unregister_remote_user_resource_if_owner(
 async fn unregister_remote_user_resource_if_owner(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> () {
 }
 
@@ -1211,7 +1211,7 @@ async fn cleanup_connection_shutdown_inner(
                         crate::server::dual_registration::mirror_unregister(
                             &state.deps.protocol.user_registry,
                             &jid,
-                            Some(std::sync::Arc::clone(owner)),
+                            Some(*owner),
                         )
                         .await;
                     }
@@ -1248,7 +1248,7 @@ async fn cleanup_connection_shutdown_inner(
                                 .ask(
                                     waddle_xmpp::registry::user_registry::UnregisterAndReleaseIfEmptyWithoutPendingRecord {
                                         jid: jid.clone(),
-                                        owner: Some(std::sync::Arc::clone(owner)),
+                                        owner: Some(*owner),
                                     },
                                 )
                                 .mailbox_timeout(std::time::Duration::from_secs(2))
@@ -1267,7 +1267,7 @@ async fn cleanup_connection_shutdown_inner(
                                     .user_registry
                                     .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
                                         jid: jid.clone(),
-                                        owner: Some(std::sync::Arc::clone(owner)),
+                                        owner: Some(*owner),
                                     })
                                     .mailbox_timeout(std::time::Duration::from_secs(2))
                                     .reply_timeout(std::time::Duration::from_secs(2))
@@ -1291,7 +1291,7 @@ async fn cleanup_connection_shutdown_inner(
                                     .user_registry
                                     .ask(waddle_xmpp::registry::RecordPendingUserUnregister {
                                         jid: jid.clone(),
-                                        owner: Some(std::sync::Arc::clone(owner)),
+                                        owner: Some(*owner),
                                     })
                                     .mailbox_timeout(std::time::Duration::from_secs(2))
                                     .reply_timeout(std::time::Duration::from_secs(2))
@@ -1334,7 +1334,7 @@ async fn cleanup_connection_shutdown_inner(
                     warn!(jid = %jid, error = %err, "Failed to detach SM session; falling back to full cleanup");
                     // Owned copy so the terminal-promotion fallback below can
                     // borrow `conn` mutably while the arm keeps its owner token.
-                    let owner_token = std::sync::Arc::clone(owner);
+                    let owner_token = *owner;
                     let owner = &owner_token;
                     // Unregister the route BEFORE the awaited shadow drain:
                     // this receiver is never drained or promoted again, so
@@ -1470,7 +1470,7 @@ async fn cleanup_connection_shutdown_inner(
                         crate::server::dual_registration::mirror_unregister(
                             &state.deps.protocol.user_registry,
                             &jid,
-                            Some(std::sync::Arc::clone(owner)),
+                            Some(*owner),
                         )
                         .await;
                         unregister_remote_user_resource_if_owner(state, &jid, owner).await;
@@ -1513,7 +1513,7 @@ async fn cleanup_connection_shutdown_inner(
             .protocol
             .connection_registry
             .unregister_if_owner(&jid, owner)
-            .map(|entry| (entry, std::sync::Arc::clone(owner)))
+            .map(|entry| (entry, *owner))
     });
     if let Some((removed_entry, owner)) = removed {
         // Capture presence availability from the entry we just owned and
@@ -1551,7 +1551,7 @@ async fn cleanup_connection_shutdown_inner(
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             &jid,
-            Some(std::sync::Arc::clone(&owner)),
+            Some(owner),
         )
         .await;
         unregister_remote_user_resource_if_owner(state, &jid, &owner).await;
@@ -1657,7 +1657,7 @@ async fn forget_terminal_ingress_stream_and_wait(
 /// teardown.
 enum TerminalRouteRemoval {
     NotAttempted,
-    Attempted(Option<(bool, std::sync::Arc<std::sync::atomic::AtomicBool>)>),
+    Attempted(Option<(bool, waddle_xmpp::registry::LocalConnectionBindingId)>),
 }
 
 struct TerminalRecoverySessionResult<'a> {
@@ -1840,7 +1840,7 @@ async fn promote_terminal_recovery_inner(
                 .protocol
                 .connection_registry
                 .unregister_if_owner(jid, owner)
-                .map(|entry| (entry.is_presence_available(), std::sync::Arc::clone(owner)))
+                .map(|entry| (entry.is_presence_available(), *owner))
         })?
     });
     // Settle released rows BEFORE any incremental promotion can run: the
@@ -1893,7 +1893,7 @@ async fn promote_terminal_recovery_inner(
 #[derive(Clone)]
 struct LivePendingFlushTarget {
     resource: FullJid,
-    owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
     sm_session: Option<waddle_xmpp::pending_delivery::SmSessionId>,
 }
 
@@ -1930,7 +1930,7 @@ fn preferred_live_pending_flush_target(
             }
             Some(LivePendingFlushTarget {
                 resource,
-                owner: std::sync::Arc::clone(&entry.carbons_enabled),
+                owner: entry.binding_id(),
                 sm_session: entry.sm_stream_id(),
             })
         })
@@ -2626,7 +2626,7 @@ async fn refuse_detach_without_principal(
                     .protocol
                     .connection_registry
                     .unregister_if_owner(jid, owner)
-                    .map(|entry| (entry.is_presence_available(), std::sync::Arc::clone(owner)))
+                    .map(|entry| (entry.is_presence_available(), *owner))
             })?
         }),
         TerminalRouteRemoval::Attempted(removed) => removed,
@@ -2771,7 +2771,7 @@ async fn refuse_detach_without_principal(
         crate::server::dual_registration::mirror_unregister(
             &state.deps.protocol.user_registry,
             jid,
-            Some(std::sync::Arc::clone(&owner)),
+            Some(owner),
         )
         .await;
         outbound_rx.close();
@@ -3655,7 +3655,7 @@ fn clustered_user_actor_cleanup_origin(jid: &FullJid) -> Option<OrderedRelayRout
 async fn clustered_cleanup_origin(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Option<OrderedRelayRouteOrigin> {
     if let Some(bridge) = state
         .deps
@@ -3683,7 +3683,7 @@ async fn clustered_cleanup_origin(
 async fn clustered_cleanup_origin(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Option<OrderedRelayRouteOrigin> {
     None
 }
@@ -3825,7 +3825,7 @@ async fn cleanup_remote_muc_presence(
 pub(super) async fn cleanup_invalidated_detached_session(
     state: &WebSocketState,
     detached: waddle_xmpp::stream_management::DetachedSession,
-    replacement_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    replacement_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) {
     // Terminal invalidation: this stream can never resume, so its ingress-
     // shadow enrollment gate must not outlive it (a fresh bind mints a new
@@ -3870,10 +3870,10 @@ pub(super) async fn cleanup_invalidated_detached_session(
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 &detached.jid,
-                Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                Some(entry.binding_id()),
             )
             .await;
-            unregister_remote_user_resource_if_owner(state, &detached.jid, &entry.carbons_enabled)
+            unregister_remote_user_resource_if_owner(state, &detached.jid, &entry.binding_id())
                 .await;
         }
         // XEP-0115 §6: clear the resource→ver mapping AND any stuck
@@ -5148,7 +5148,8 @@ mod local_departure_cleanup_tests {
             // A failed post-resume remote registration leaves this unset;
             // an ownership race retains a token that no longer owns the slot.
             if stale_owner {
-                conn.registry_owner = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+                conn.registry_owner =
+                    Some(waddle_xmpp::registry::LocalConnectionBindingId::fresh());
             }
             if live_fence {
                 drop(

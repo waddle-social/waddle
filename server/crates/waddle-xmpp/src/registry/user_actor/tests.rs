@@ -126,24 +126,24 @@ async fn test_register_if_owner_or_absent_refuses_replacement_owner() {
     let jid = full("alice", "phone");
 
     let (entry1, _rx1) = entry();
-    let owner1 = std::sync::Arc::clone(&entry1.carbons_enabled);
+    let owner1 = entry1.binding_id();
     let registered: bool = actor
         .ask(RegisterConnectionIfOwnerOrAbsent {
             jid: jid.clone(),
             entry: entry1,
-            owner: owner1.clone(),
+            owner: owner1,
         })
         .await
         .expect("guarded register empty slot");
     assert!(registered);
 
     let (entry2, _rx2) = entry();
-    let owner2 = std::sync::Arc::clone(&entry2.carbons_enabled);
+    let owner2 = entry2.binding_id();
     let registered: bool = actor
         .ask(RegisterConnectionIfOwnerOrAbsent {
             jid: jid.clone(),
             entry: entry2,
-            owner: owner2.clone(),
+            owner: owner2,
         })
         .await
         .expect("guarded register occupied slot");
@@ -154,8 +154,8 @@ async fn test_register_if_owner_or_absent_refuses_replacement_owner() {
         .await
         .expect("entry lookup")
         .expect("entry remains registered");
-    assert!(std::sync::Arc::ptr_eq(&current.carbons_enabled, &owner1));
-    assert!(!std::sync::Arc::ptr_eq(&current.carbons_enabled, &owner2));
+    assert_eq!(current.binding_id(), owner1);
+    assert_ne!(current.binding_id(), owner2);
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn test_unregister_is_owner_gated() {
     let jid = full("alice", "phone");
 
     let (old_entry, _old_rx) = entry();
-    let old_owner = std::sync::Arc::clone(&old_entry.carbons_enabled);
+    let old_owner = old_entry.binding_id();
     actor
         .ask(RegisterConnection {
             jid: jid.clone(),
@@ -204,7 +204,7 @@ async fn test_unregister_is_owner_gated() {
     // A replacement session takes over the same full JID with a fresh entry
     // (distinct ownership token).
     let (new_entry, _new_rx) = entry();
-    let new_owner = std::sync::Arc::clone(&new_entry.carbons_enabled);
+    let new_owner = new_entry.binding_id();
     actor
         .ask(RegisterConnection {
             jid: jid.clone(),

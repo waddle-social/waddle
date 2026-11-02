@@ -7634,7 +7634,7 @@ async fn join_from_a_superseded_connection_is_ignored() {
         .expect("create room");
     let (tx, _rx) = mpsc::channel::<OutboundStanza>(4);
     let current_owner = register_test_connection(state.as_ref(), &alice, tx).await;
-    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stale_owner = waddle_xmpp::registry::LocalConnectionBindingId::fresh();
     let phase = waddle_xmpp::protocol::ConnectionPhase::ready(alice.clone(), false);
 
     let frames = handlers::presence::handle_presence_with_occupancy_session(

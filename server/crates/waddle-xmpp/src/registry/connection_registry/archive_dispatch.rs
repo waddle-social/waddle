@@ -199,7 +199,7 @@ mod tests {
         let owner = registry
             .entry(&resource)
             .expect("registered recipient resource")
-            .carbons_enabled;
+            .binding_id();
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         for outbound in [a.clone(), b, a] {
@@ -236,7 +236,7 @@ mod tests {
         let owner = registry
             .entry(&resource)
             .expect("registered recipient resource")
-            .carbons_enabled;
+            .binding_id();
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         assert_eq!(

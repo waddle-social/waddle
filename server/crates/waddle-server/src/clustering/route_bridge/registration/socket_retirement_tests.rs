@@ -66,7 +66,7 @@ async fn fresh_remote_retirement_fixture() -> (
     services
         .connection_registry
         .register_entry(jid.clone(), entry.clone());
-    let registration_id = track_remote_socket_for_test(&bridge, &jid, entry.carbons_handle()).await;
+    let registration_id = track_remote_socket_for_test(&bridge, &jid, &entry).await;
     let request = RelayForceDetachRemoteUserResource {
         jid: jid.clone(),
         registration_id,
@@ -182,7 +182,7 @@ async fn fresh_remote_retirement_does_not_interrupt_a_successor_owner() {
     ));
     assert!(services
         .connection_registry
-        .entry_if_owner(&request.jid, &successor.carbons_handle())
+        .entry_if_owner(&request.jid, &successor.binding_id())
         .is_some());
 }
 

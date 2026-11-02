@@ -1661,7 +1661,7 @@ async fn force_detach_cleanup_returns_not_persisted_when_remote_owner_unregister
     bridge
         .test_insert_remote_socket_registration(
             jid.clone(),
-            Arc::clone(&owner),
+            owner,
             NodeId::new("missing-owner-node".to_string()),
         )
         .await;
@@ -8440,7 +8440,7 @@ async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect()
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let (sender, _receiver) = mpsc::channel(8);
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
-    conn.registry_owner = Some(owner.clone());
+    conn.registry_owner = Some(owner);
     let report =
         finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
@@ -8578,7 +8578,7 @@ async fn sm_resume_ack_survives_failed_completion_then_expiry_and_reconnect() {
     assert!(conn.pending_resume_claim.is_some());
     let (sender, _receiver) = mpsc::channel(8);
     let owner = register_test_connection(state.as_ref(), &jid, sender).await;
-    conn.registry_owner = Some(owner.clone());
+    conn.registry_owner = Some(owner);
     let report =
         finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
     let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
@@ -9956,13 +9956,30 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     let alice_jid: FullJid = "alice@example.com/web".parse().expect("alice jid");
     let mut bob = WsConnState::new();
     bob.phase = ConnectionPhase::ready(bob_jid.clone(), false);
-    let _ = handle_xmpp_frame(
+    let (bob_tx, _bob_rx) = mpsc::channel(8);
+    let bob_owner = state
+        .deps
+        .protocol
+        .connection_registry
+        .register(bob_jid.clone(), bob_tx);
+    bob.registry_owner = Some(bob_owner);
+    let roster_reply = handle_xmpp_frame(
             r#"<iq xmlns="jabber:client" type="get" id="bob-roster"><query xmlns="jabber:iq:roster"/></iq>"#,
             "example.com",
             state.as_ref(),
             &mut bob,
         )
         .await;
+    assert!(roster_reply
+        .iter()
+        .any(|frame| frame.contains("type='result'")));
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .unregister_if_owner(&bob_jid, &bob_owner)
+        .is_some());
+    bob.registry_owner = None;
     let _ = handle_xmpp_frame(
         r#"<presence xmlns="jabber:client" type="subscribe" to="alice@example.com"/>"#,
         "example.com",
@@ -10189,6 +10206,12 @@ async fn sm_resume_with_unknown_stream_id_fails() {
     assert!(conn.phase.is_authenticated());
     assert!(!conn.phase.is_ready());
     assert!(!conn.phase.is_resumed());
+    assert_eq!(conn.resume_binding_attempts.len(), 1);
+    assert_eq!(
+        conn.resume_binding_attempts[0].connection_ref(),
+        &conn.connection_ref
+    );
+    assert!(conn.binding_ref.is_none());
     // Write-gated accounting: the failure is staged for the main loop to
     // record once the batch carrying the <failed/> frame is written; frame
     // handling alone must not have counted it.
@@ -12976,7 +12999,6 @@ mod terminal_ordering_release_tests {
             let state = state.clone();
             let resource = resource.clone();
             let session = session.clone();
-            let owner = owner.clone();
             tokio::spawn(async move {
                 let resolver = crate::pending_delivery::MamArchiveResolver {
                     mam_storage: state.deps.protocol.mam_storage.clone(),
@@ -13487,7 +13509,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
             .await
             .expect("enabled stream claim"),
     );
-    let old_owner = old.registry_owner.clone().expect("old owner");
+    let old_owner = old.registry_owner.expect("old owner");
     let lifecycle = old.socket_lifecycle.clone().expect("old socket lifecycle");
     let generation = old.occupancy_session;
     let mut detach_requests = lifecycle

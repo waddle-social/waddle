@@ -111,11 +111,7 @@ fn try_queue_entry(
         .deps
         .protocol
         .connection_registry
-        .try_send_outbound_if_owner(
-            resource,
-            &entry.carbons_handle(),
-            OutboundStanza::new(stanza),
-        )
+        .try_send_outbound_if_owner(resource, &entry.binding_id(), OutboundStanza::new(stanza))
         == BroadcastOutcome::Delivered)
         .then_some(Delivery::LocalQueueAccepted)
 }

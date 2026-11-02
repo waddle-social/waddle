@@ -11,7 +11,7 @@ use crate::db::Database;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -122,7 +122,20 @@ pub(crate) async fn remote_registration_request(
     socket_node: NodeId,
 ) -> RelayRegisterRemoteUserResource {
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    let entry = ConnectionEntry::new(tx);
+    let socket_identity = bridge
+        .services
+        .get()
+        .expect("wired test bridge")
+        .node_lease
+        .unexpired_node_identity(&socket_node)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| NodeIdentity::new(socket_node.as_str(), "fixture-epoch"));
+    let connection_ref = waddle_xmpp::ownership::ConnectionRef::fresh(
+        waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&socket_identity),
+    );
+    let entry = ConnectionEntry::new_for_connection(tx, connection_ref);
     let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
     *entry.occupancy_session.lock().expect("occupancy mutex") = Some(generation);
     crate::occupancy_authority::publish(
@@ -180,7 +193,7 @@ pub(crate) async fn wire_for_test(
 pub(crate) async fn track_remote_socket_for_test(
     bridge: &OrderedRelayDeliveryBridge,
     jid: &jid::FullJid,
-    owner: Arc<AtomicBool>,
+    entry: &ConnectionEntry,
 ) -> RemoteResourceRegistrationId {
     let registration_id = RemoteResourceRegistrationId::fresh();
     bridge.remote_socket_resources.lock().await.insert(
@@ -188,7 +201,8 @@ pub(crate) async fn track_remote_socket_for_test(
         RemoteSocketRegistration {
             registration_id,
             socket_generation: RemoteResourceSocketGeneration::next(None),
-            owner,
+            connection_ref: entry.connection_ref().clone(),
+            owner: entry.binding_id(),
             user_owner: NodeId::new("owner-node".to_owned()),
         },
     );
@@ -244,13 +258,21 @@ pub struct OrderedRelayDeliveryBridge {
     /// (Full JID, socket-owner identity) → dirty flag for resyncs in
     /// flight (#1680): a failed/stale state update schedules exactly one
     /// repair loop instead of killing the live socket. Keyed per socket
-    /// incarnation (the owner flag's pointer identity) so a replacement
+    /// incarnation (its local binding identity) so a replacement
     /// socket's repair is never suppressed by a predecessor's; a failure
     /// arriving while a loop runs sets the dirty flag, which the loop
     /// consumes as another repair round before releasing the key — a
     /// failure landing after the final convergence recheck is therefore
     /// never dropped.
-    remote_state_resyncs_in_flight: Mutex<HashMap<(jid::FullJid, usize), bool>>,
+    remote_state_resyncs_in_flight: Mutex<
+        HashMap<
+            (
+                jid::FullJid,
+                waddle_xmpp::registry::LocalConnectionBindingId,
+            ),
+            bool,
+        >,
+    >,
     /// Owner side (#1685 interim): arrival-order fence for
     /// `remote_resource_update` handlers, per exact registration.
     remote_resource_update_order: RemoteResourceUpdateOrder,
@@ -348,15 +370,22 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) async fn test_insert_remote_socket_registration(
         &self,
         jid: jid::FullJid,
-        owner: Arc<AtomicBool>,
+        owner: waddle_xmpp::registry::LocalConnectionBindingId,
         user_owner: NodeId,
     ) -> RemoteResourceRegistrationId {
         let registration_id = RemoteResourceRegistrationId::fresh();
+        let services = self.services.get().expect("wired test bridge");
+        let entry = services
+            .connection_registry
+            .entry_if_owner(&jid, &owner)
+            .expect("test registration must point at the exact current socket entry");
+        let connection_ref = entry.connection_ref().clone();
         self.remote_socket_resources.lock().await.insert(
             jid.clone(),
             RemoteSocketRegistration {
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
+                connection_ref,
                 owner,
                 user_owner,
             },
@@ -375,11 +404,16 @@ impl OrderedRelayDeliveryBridge {
             RemoteOwnerRegistration {
                 occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 socket_identity: NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id: RemoteResourceRegistrationId::fresh(),
                 socket_node,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
-                owner: Arc::new(AtomicBool::new(false)),
+                owner: waddle_xmpp::registry::LocalConnectionBindingId::fresh(),
             },
         );
     }

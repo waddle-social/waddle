@@ -11,7 +11,7 @@ use super::{
     ask_error_allows_target_refresh, ask_error_is_unseen, caller_delivery_outcome,
     channel_diversion_for_ask_error, mpsc, outcome_for_ask_error, outcome_for_nack,
     remote_registration_request, remote_registration_request_from_entry,
-    replies_for_origin_handoff, validate_claims, AtomicBool, BroadcastOutcome, CancellationToken,
+    replies_for_origin_handoff, validate_claims, BroadcastOutcome, CancellationToken,
     ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, FullJidDeliveryOutcome,
     LocalMediaGrantReassertion, LocalResourcePresence, MucProxyOrigin, Mutex, NackChannelAction,
     OrderedRelayClaimRole, OrderedRelayDeliveryBridge, OrderedRelayDiversion,
@@ -43,11 +43,25 @@ use crate::clustering::ordered_relay::OrderedRelaySequence;
 use kameo::actor::Spawn;
 use libp2p::PeerId;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use waddle_xmpp::ownership::{ClaimEpoch, ClaimError, InProcessClaimStore, NodeIdentity};
 use xmpp_parsers::message::{Lang, Message};
 
+pub(crate) fn connection_entry_for_current_node(
+    sender: mpsc::Sender<waddle_xmpp::registry::OutboundStanza>,
+    services: &OrderedRelayDeliveryServices,
+) -> ConnectionEntry {
+    let identity = services.node_identity.current();
+    ConnectionEntry::new_for_connection(
+        sender,
+        waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&identity),
+        ),
+    )
+}
+
 #[derive(Clone)]
-enum SocketLeaseRead {
+pub(crate) enum SocketLeaseRead {
     Present(NodeIdentity),
     Gone,
     Failed,
@@ -61,10 +75,10 @@ enum SocketLeaseRead {
     },
 }
 
-struct StaticNodeLease {
-    socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
-    origin: NodeIdentity,
-    peer_id: String,
+pub(crate) struct StaticNodeLease {
+    pub(crate) socket_read: Option<Arc<std::sync::Mutex<SocketLeaseRead>>>,
+    pub(crate) origin: NodeIdentity,
+    pub(crate) peer_id: String,
 }
 
 #[async_trait::async_trait]

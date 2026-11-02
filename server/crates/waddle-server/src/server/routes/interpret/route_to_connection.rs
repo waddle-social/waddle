@@ -60,3 +60,25 @@ pub(super) use implementation::retry_unqueued_detached_as_live;
 pub(crate) use implementation::route_to_connection;
 pub(crate) use implementation::undeliverable_iq_reply;
 pub(crate) use implementation::DetachedQueueOutcome;
+
+/// A frozen MUC invitation has one live attempt per selected resource. The
+/// registered remote gateway is eligible only after definite local
+/// unavailability; an uncertain local result must keep its original custody.
+pub(crate) async fn deliver_frozen_invitation_resource(
+    deps: &Deps<'_>,
+    target: &FullJid,
+    stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    let local = deliver_direct_to_full_locally(deps, target, stanza).await;
+    if local != FullJidDeliveryOutcome::Unavailable {
+        return local;
+    }
+    deliver_registered_remote_resource(
+        deps,
+        target,
+        stanza,
+        waddle_xmpp::registry::DeliveryKind::DirectFrame,
+    )
+    .await
+    .unwrap_or(FullJidDeliveryOutcome::Unavailable)
+}

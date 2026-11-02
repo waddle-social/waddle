@@ -169,3 +169,46 @@ waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_
 # controls require the disposable PostgreSQL service in the publish lane.
 waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
 waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
+
+# W1.3 / P3.2 precursor (#2046): same-JID replacement must not inherit a
+# stale IQ metadata update or lose its presence to a prior connection's cleanup.
+waddle-server server::routes::websocket::tests::iq::replaced_binding_cannot_apply_resource_iq_metadata
+waddle-server server::routes::websocket::tests::iq::resource_iq_metadata_requires_a_binding_and_marks_current_blocklist_interest
+waddle-server server::routes::websocket::tests::xep0280_carbons_destination::superseded_carbons_control_returns_error_without_changing_the_successor
+waddle-xmpp registry::connection_registry::tests::resource_metadata_rejects_stale_and_absent_bindings
+waddle-xmpp registry::connection_registry::tests::retiring_connection_keeps_slot_locked_until_presence_is_removed
+
+# P3.1 (#2137/#2046): a physical transport reference survives rebind on one
+# socket, differs across sockets, and fences remote mirrors after node rotation.
+waddle-server clustering::route_bridge::registration::owner::tests::remote_registration_rejects_replayed_generation_with_a_different_transport_ref
+waddle-server clustering::route_bridge::registration::owner::tests::source_lease_rotation_after_actor_admission_preserves_the_successor
+waddle-server clustering::route_bridge::registration::owner_update::tests::delayed_remote_state_update_rejects_rotated_source_lease_before_mutation
+waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
+waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
+
+# Reserved pending-flush commits recheck their exact binding after capacity
+# waits and serialize with a test-only seal before consuming the permit.
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_wait
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_commit_and_test_seal_have_one_order
+
+# Dark endpoint transition model: logical lifetime and exact seal/commit
+# outcomes are characterized before a durable repository or runtime cutover.
+waddle-xmpp ownership::endpoint_transition::tests::successful_cross_node_resume_keeps_logical_generation_and_changes_transport
+waddle-xmpp ownership::endpoint_transition::tests::failed_resume_then_fresh_bind_reuses_physical_socket_not_binding_or_logical_state
+waddle-xmpp ownership::endpoint_transition::tests::slow_reserved_enqueue_rechecks_after_seal_and_never_runs
+waddle-xmpp ownership::endpoint_transition::tests::unknown_reply_requires_journal_resolution_not_assumed_rollback
+waddle-xmpp ownership::endpoint_transition::tests::cancelled_prepare_stays_sealed_until_exact_compensation
+
+# P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
+# native loopback, bounded overload, exact completion and both-pump joins.
+waddle-server::supervised_io pumps::outbound_count_and_byte_overload_stops_before_retirement
+waddle-server::supervised_io pumps::stalled_shutdown_aborts_then_joins_before_peer_observes_drop
+waddle-server::supervised_io pumps::completion_keeps_its_exact_connection_reference_for_late_fencing
+waddle-server::supervised_io pumps::reader_panic_is_preserved_while_its_writer_is_stopped_and_joined
+waddle-server::supervised_io pumps::graceful_shutdown_seals_admission_and_marks_abandoned_receipts_not_attempted
+waddle-server::supervised_io pumps::peer_close_flushes_the_queued_reply_before_bounded_retirement
+waddle-server::supervised_io pumps::peer_close_during_local_close_flush_still_gets_a_server_close
+waddle-server::supervised_io pumps::send_after_closing_waits_for_peer_close_then_flushes_reply
+waddle-server::supervised_io pumps::forced_retirement_interrupts_a_stalled_peer_close_reply
+waddle-server::supervised_io kameo_control::full_256_entry_kameo_mailbox_requires_an_independent_interrupt_path

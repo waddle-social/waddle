@@ -138,6 +138,8 @@ use community_items::handle_community_items;
 use community_publish::handle_community_publish;
 use community_retract::handle_community_retract;
 pub use conn_state::IqConnState;
+#[cfg(test)]
+pub(crate) use conn_state::RESOURCE_METADATA_WRITE_GATE;
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
 use extension_forms::{

@@ -85,6 +85,8 @@ mod send;
 mod session_init;
 mod state;
 mod stream_management;
+#[cfg(feature = "test-support")]
+pub mod supervised_io;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_state;
 mod timers;

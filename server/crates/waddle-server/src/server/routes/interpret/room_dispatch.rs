@@ -19,6 +19,8 @@ use super::{
 };
 
 #[cfg(feature = "clustering")]
+use super::room_routing::{ImmediateRoomRoute, PlannedRoomRoute, RoomMessageRoute};
+#[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::MucProxyOrigin;
 #[cfg(feature = "clustering")]
 use crate::clustering::ordered_relay::OrderedRelayMucProxyKind;
@@ -212,33 +214,16 @@ pub(super) async fn dispatch_to_room(
     }
 
     #[cfg(feature = "clustering")]
-    if let Some(origin) = deps
-        .ordered_relay_origin
-        .as_ref()
-        .filter(|_| !deps.effects.is_planning())
-    {
-        if let Some(bridge) = state
-            .deps
-            .app_state
-            .clustering_claims
-            .ordered_relay_delivery_bridge
-            .as_ref()
-        {
+    if !deps.effects.is_planning() {
+        let route = RoomMessageRoute {
+            room: &room_jid,
+            message: &incoming,
+        };
+        if let ImmediateRoomRoute::Decision(decision) = route.execute(deps).await {
             use crate::clustering::route_bridge::{
                 MucProxyRouteDecision, OrderedRelayMucProxyOutcome,
             };
-            let stanza = Stanza::Message(incoming.clone());
-            match bridge
-                .try_proxy_muc_remote_decision(
-                    &room_jid,
-                    &stanza,
-                    OrderedRelayMucProxyKind::GroupchatMessage,
-                    MucProxyOrigin::Server,
-                    origin,
-                    None,
-                )
-                .await
-            {
+            match decision {
                 MucProxyRouteDecision::Attempted(attempt) => match attempt.outcome {
                     OrderedRelayMucProxyOutcome::Delivered(replies) => {
                         debug!(room_claim_epoch = ?attempt.room_fence.as_ref().map(|fence| fence.epoch), "remote room delivery settled");
@@ -1177,33 +1162,14 @@ async fn plan_remote_room(
     sender: &FullJid,
     outcome: &mut InterpretOutcome,
 ) -> bool {
-    let Some(state) = deps.web_socket_state else {
-        return false;
-    };
-    let clustering = &state.deps.app_state.clustering_claims;
     let Some(origin) = deps.ordered_relay_origin.as_ref() else {
         return false;
     };
-    let Some(store) = clustering.claim_store.as_ref() else {
-        return false;
-    };
-    let entity = waddle_xmpp::ownership::Entity::new(
-        waddle_xmpp::ownership::EntityType::RoomActor,
-        room.to_string(),
-    );
-    use super::effects::PlanFailure;
-    let claim = store
-        .current_claim(&entity)
-        .await
-        .map_err(|_| PlanFailure::OwnershipLookup)
-        .and_then(|claim| match claim {
-            Some(claim) if !claim.owner_lease_fresh => Err(PlanFailure::RoomClaimStale),
-            claim => Ok(claim),
-        });
-    let claim = match claim {
-        Ok(None) => return false,
-        Ok(Some(claim)) => claim,
-        Err(failure) => {
+    let route = RoomMessageRoute { room, message };
+    let relay_target = match route.plan(deps).await {
+        PlannedRoomRoute::Local => return false,
+        PlannedRoomRoute::Remote(relay_target) => relay_target,
+        PlannedRoomRoute::Unavailable(failure) => {
             deps.effects.fail_plan(failure);
             push_sender_error_reply(
                 deps,
@@ -1216,14 +1182,6 @@ async fn plan_remote_room(
             return true;
         }
     };
-    if clustering
-        .node_identity
-        .as_ref()
-        .is_some_and(|identity| identity.current() == claim.owner)
-    {
-        return false;
-    }
-    let relay_target = RelayTargetIdentity::owner_node(claim.owner.node_id, claim.owner.node_epoch);
     deps.effects
         .set_room_execution(super::effects::RoomExecutionPath::Remote {
             room: room.clone(),

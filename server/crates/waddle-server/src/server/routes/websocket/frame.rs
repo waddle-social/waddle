@@ -342,6 +342,10 @@ async fn handle_xmpp_frame_impl(
     }
 
     let WsConnState {
+        connection_ref,
+        binding_ref,
+        #[cfg(test)]
+        resume_binding_attempts,
         phase,
         authenticated_session,
         occupancy_session,
@@ -384,6 +388,10 @@ async fn handle_xmpp_frame_impl(
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
+                connection_ref,
+                binding_ref,
+                #[cfg(test)]
+                resume_binding_attempts,
                 phase,
                 sm_state,
                 sm_ingress_fence,
@@ -751,7 +759,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {
@@ -812,7 +820,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {

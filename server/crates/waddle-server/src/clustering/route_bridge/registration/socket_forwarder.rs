@@ -263,7 +263,6 @@ mod tests {
     use crate::clustering::relay::RelayRemoteResourceForceDetachStatus;
     use crate::clustering::route_bridge::RemoteOwnerRegistration;
     use crate::config::ClusteringMessagingConfig;
-    use std::sync::atomic::AtomicBool;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
@@ -293,11 +292,16 @@ mod tests {
             RemoteOwnerRegistration {
                 occupancy_session: generation,
                 socket_identity: NodeIdentity::new("socket", "epoch"),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(socket_node.as_str(), "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_node: socket_node.clone(),
                 socket_generation: RemoteResourceSocketGeneration::next(None),
-                owner: Arc::new(AtomicBool::new(false)),
+                owner: waddle_xmpp::registry::LocalConnectionBindingId::fresh(),
             },
         );
         let (relay_tx, mut relay_rx) = mpsc::channel(1);

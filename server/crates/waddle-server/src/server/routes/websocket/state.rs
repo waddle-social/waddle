@@ -1718,6 +1718,13 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
 
 pub(super) struct WsConnState {
     pub(super) ingress_generation: waddle_xmpp::ingress::ConnectionGeneration,
+    /// Physical transport identity, retained across bind/resume attempts on
+    /// this WebSocket and kept separate from ingress and durable SM generations.
+    pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    /// The current bind or resume attempt, separate from registry ownership.
+    pub(super) binding_ref: Option<waddle_xmpp::ownership::BindingRef>,
+    #[cfg(test)]
+    pub(super) resume_binding_attempts: Vec<waddle_xmpp::ownership::BindingRef>,
     pub(super) phase: ConnectionPhase,
     /// Semantic state: the frame dispatcher has handled the client's current
     /// RFC 7395 `<open/>`. This resets on an actual XMPP stream close or
@@ -1787,7 +1794,7 @@ pub(super) struct WsConnState {
     pub(super) post_sm_finalization_test_hook:
         Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     /// Ownership handle for the current connection-registry entry.
-    pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
     pub(super) write_interruption: tokio_util::sync::CancellationToken,
     /// Resume preflight is serviced only by this connection's owning task,
@@ -1879,7 +1886,14 @@ pub(super) struct WsConnState {
 }
 
 impl WsConnState {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::new_for_node_lease(waddle_xmpp::ownership::NodeLeaseIdentity::local_process())
+    }
+
+    pub(super) fn new_for_node_lease(
+        node_lease: waddle_xmpp::ownership::NodeLeaseIdentity,
+    ) -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let sm_state = StreamManagementState::new();
@@ -1892,6 +1906,10 @@ impl WsConnState {
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ),
+            connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(node_lease),
+            binding_ref: None,
+            #[cfg(test)]
+            resume_binding_attempts: Vec::new(),
             phase: ConnectionPhase::new(),
             stream_open_handled: false,
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
@@ -1936,6 +1954,10 @@ impl WsConnState {
             state_machine: None,
             keepalive_config: waddle_xmpp::protocol::KeepaliveConfig::default(),
         }
+    }
+
+    pub(super) fn retire_binding_ref(&mut self) {
+        self.binding_ref = None;
     }
 
     /// Enter terminal non-resumable recovery without ever appending another
