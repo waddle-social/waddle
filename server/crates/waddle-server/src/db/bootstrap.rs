@@ -59,6 +59,12 @@ pub enum RuntimeAttachmentError {
     ExpectedIdentityMismatch,
     #[error("could not verify the PostgreSQL {setting} bound for runtime attachment")]
     InvalidTimeoutSetting { setting: &'static str },
+    #[cfg(feature = "test-support")]
+    #[error("MAM runtime role or privileges do not match the restricted attachment")]
+    UnsafeMamRuntime,
+    #[cfg(feature = "test-support")]
+    #[error("MAM schema does not match the owner-installed contract")]
+    MamSchema,
     #[error(
         "verified runtime pool requests {requested} connections, exceeding the resource safety limit of {maximum}"
     )]
@@ -357,6 +363,171 @@ pub async fn verify_global_runtime(
         .await?;
     tx.commit().await?;
     Ok(attested)
+}
+
+/// Snapshot-only MAM attachment proof on the same admitted global database.
+/// This performs no initialization and exposes no connection or pool. The
+/// caller still has to fence old writers and privileged DDL/ACL changes.
+#[cfg(feature = "test-support")]
+pub(crate) async fn verify_mam_runtime_attachment(
+    db: &Database,
+    owner: &super::DarkMigrationOwnerConfig,
+) -> Result<(), RuntimeAttachmentError> {
+    if db.driver() != DatabaseDriver::Postgres || db.attested_pg_writer_capability().is_none() {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+    let expected = owner.expected_lineage();
+    let expected_schema = &expected
+        .postgres_identity
+        .as_ref()
+        .ok_or(RuntimeAttachmentError::MissingExpectedPostgresIdentity)?
+        .schema
+        .name
+        .0;
+    super::physical_attestation::validate_identifier(expected_schema, "MAM schema")
+        .map_err(|_| RuntimeAttachmentError::ExpectedIdentityMismatch)?;
+    let config = LineageConfig {
+        deployment_uuid: Some(expected.deployment_uuid),
+        action: None,
+    };
+    let (mut tx, driver, lineage_table, ledger_table) =
+        begin_runtime_lineage_check(db, &config, expected).await?;
+    let schema = &expected
+        .postgres_identity
+        .as_ref()
+        .ok_or(RuntimeAttachmentError::MissingExpectedPostgresIdentity)?
+        .schema
+        .name
+        .0;
+    let mut rows = tx
+        .query(
+            "SELECT session_user::text = r.rolname AND current_user::text = r.rolname \
+         AND r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreaterole \
+         AND NOT r.rolcreatedb AND NOT r.rolreplication AND NOT r.rolbypassrls \
+         AND NOT o.rolcanlogin AND NOT o.rolsuper AND NOT o.rolcreaterole \
+         AND NOT o.rolcreatedb AND NOT o.rolreplication AND NOT o.rolbypassrls \
+         AND n.nspowner = o.oid AND r.oid <> d.datdba AND o.oid <> d.datdba \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid) \
+         AND NOT pg_catalog.pg_has_role(r.oid, o.oid, 'SET') \
+         AND NOT pg_catalog.has_database_privilege(r.oid, d.oid, 'CREATE,TEMP') \
+         AND NOT pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE') \
+         AND NOT pg_catalog.has_parameter_privilege(r.oid, 'session_replication_role', 'SET') \
+         AND pg_catalog.current_setting('session_replication_role') = 'origin' \
+         FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_roles o ON o.rolname = ? \
+         JOIN pg_catalog.pg_namespace n ON n.nspname = ? \
+         JOIN pg_catalog.pg_database d ON d.datname = pg_catalog.current_database() \
+         WHERE r.rolname = ?",
+            crate::db_params![
+                owner.owner().as_str(),
+                schema.as_str(),
+                owner.runtime().as_str()
+            ],
+        )
+        .await?;
+    let role_ok = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    if !role_ok {
+        return Err(RuntimeAttachmentError::UnsafeMamRuntime);
+    }
+    verify_mam_runtime_acl(&mut tx, schema, owner.runtime().as_str()).await?;
+    let attested =
+        verify_runtime_lineage(db, &mut tx, driver, &config, expected, &lineage_table).await?;
+    if &attested != expected {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+    MigrationRunner::single()
+        .verify_complete_in_transaction(&mut tx, driver, &ledger_table)
+        .await?;
+    let connection = tx
+        .postgres_connection()
+        .ok_or(RuntimeAttachmentError::MamSchema)?;
+    waddle_xmpp::mam::SqlxMamStorage::verify_postgres_schema_on_connection(
+        connection,
+        schema,
+        owner.owner().as_str(),
+    )
+    .await
+    .map_err(|_| RuntimeAttachmentError::MamSchema)?;
+    tx.rollback().await?;
+    Ok(())
+}
+
+/// Check effective privileges and direct PUBLIC ACLs on the relations used by
+/// this dark attachment. This is not an audit of unrelated roles or definer
+/// functions. ACLs and role membership must remain quiescent after the check.
+#[cfg(feature = "test-support")]
+pub(crate) async fn verify_mam_runtime_acl(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    runtime: &str,
+) -> Result<(), RuntimeAttachmentError> {
+    let mut rows = tx.query(
+        r#"WITH runtime AS (
+             SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ?
+           ), relations AS (
+             SELECT c.* FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = ? AND c.relkind = 'r'
+               AND c.relname IN ('mam_messages','mam_archive_sequences','_lineage','_migrations')
+           )
+           SELECT (SELECT count(*) FROM relations) = 4 AND COALESCE((
+             SELECT pg_catalog.bool_and(
+               c.relowner <> r.oid
+               AND pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT')
+               AND NOT pg_catalog.has_table_privilege(r.oid,c.oid,'DELETE, TRUNCATE, REFERENCES, TRIGGER')
+               AND NOT pg_catalog.has_any_column_privilege(r.oid,c.oid,'REFERENCES')
+               AND NOT pg_catalog.has_table_privilege(r.oid,c.oid,
+                 'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION, UPDATE WITH GRANT OPTION, DELETE WITH GRANT OPTION, TRUNCATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION, TRIGGER WITH GRANT OPTION')
+               AND NOT pg_catalog.has_any_column_privilege(r.oid,c.oid,
+                 'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION, UPDATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION')
+               AND CASE WHEN pg_catalog.current_setting('server_version_num')::integer >= 170000
+                 THEN NOT pg_catalog.has_table_privilege(r.oid,c.oid,'MAINTAIN') ELSE true END
+               AND NOT EXISTS (
+                 SELECT 1 FROM pg_catalog.aclexplode(
+                   CASE WHEN pg_catalog.cardinality(c.relacl) > 0 THEN c.relacl
+                        ELSE pg_catalog.acldefault('r', c.relowner) END
+                 ) a WHERE a.grantee = 0
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM pg_catalog.pg_attribute a
+                 CROSS JOIN LATERAL pg_catalog.aclexplode(
+                   CASE WHEN pg_catalog.cardinality(a.attacl) > 0 THEN a.attacl
+                        ELSE pg_catalog.acldefault('r', c.relowner) END
+                 ) acl
+                 WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                   AND acl.grantee = 0
+               )
+               AND CASE c.relname
+                 WHEN 'mam_messages' THEN
+                   pg_catalog.has_table_privilege(r.oid,c.oid,'INSERT')
+                   AND NOT pg_catalog.has_any_column_privilege(r.oid,c.oid,'UPDATE')
+                 WHEN 'mam_archive_sequences' THEN
+                   pg_catalog.has_table_privilege(r.oid,c.oid,'INSERT')
+                   AND NOT pg_catalog.has_table_privilege(r.oid,c.oid,'UPDATE')
+                   AND pg_catalog.has_column_privilege(r.oid,c.oid,'next_seq','UPDATE')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM pg_catalog.pg_attribute a
+                     WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                       AND a.attname <> 'next_seq'
+                       AND pg_catalog.has_column_privilege(r.oid,c.oid,a.attnum,'UPDATE')
+                   )
+                 ELSE NOT pg_catalog.has_table_privilege(r.oid,c.oid,'INSERT, UPDATE')
+                   AND NOT pg_catalog.has_any_column_privilege(r.oid,c.oid,'INSERT, UPDATE')
+                 END
+             ) FROM relations c CROSS JOIN runtime r
+           ), false)"#,
+        crate::db_params![runtime, schema],
+    ).await?;
+    let safe = match rows.next().await? {
+        Some(row) => row.get::<bool>(0)?,
+        None => false,
+    };
+    if !safe {
+        return Err(RuntimeAttachmentError::UnsafeMamRuntime);
+    }
+    Ok(())
 }
 
 /// Verify only the committed lineage and physical identity of an already

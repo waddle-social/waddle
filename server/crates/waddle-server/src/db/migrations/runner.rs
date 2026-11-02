@@ -260,10 +260,41 @@ impl MigrationRunner {
         let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
         self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
-        self.validate_ledger(&applied_rows, driver, false)?;
+        self.verify_complete_rows(&applied_rows, driver)
+    }
+
+    /// Verify the same catalog on a dedicated PostgreSQL owner session.
+    /// A complete ledger necessarily contains both owned namespaces, so the
+    /// bootstrap-only sentinel check cannot authorize additional work here.
+    pub(super) async fn verify_complete_on_postgres_connection(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        ledger_table: &str,
+    ) -> Result<(), DatabaseError> {
+        let sql =
+            format!("SELECT version, description, checksum FROM {ledger_table} ORDER BY version");
+        let rows: Vec<(i64, String, Option<String>)> =
+            sqlx::query_as(&sql).fetch_all(connection).await?;
+        let applied_rows = rows
+            .into_iter()
+            .map(|(version, description, checksum)| LedgerRow {
+                version,
+                description,
+                checksum,
+            })
+            .collect::<Vec<_>>();
+        self.verify_complete_rows(&applied_rows, DatabaseDriver::Postgres)
+    }
+
+    fn verify_complete_rows(
+        &self,
+        applied_rows: &[LedgerRow],
+        driver: DatabaseDriver,
+    ) -> Result<(), DatabaseError> {
+        self.validate_ledger(applied_rows, driver, false)?;
 
         let mut seen = HashSet::new();
-        for row in &applied_rows {
+        for row in applied_rows {
             if self.owns_version(row.version) && !seen.insert(row.version) {
                 return Err(MigrationLedgerError::DuplicateVersion {
                     version: row.version,

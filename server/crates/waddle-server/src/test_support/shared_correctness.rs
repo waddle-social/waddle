@@ -67,6 +67,27 @@ impl SharedCorrectnessFixture {
         )?))
     }
 
+    /// Attach to an owner-initialized PostgreSQL MAM schema without DDL.
+    /// The schema observation is a snapshot; fencing old sessions and DDL is
+    /// still an external prerequisite. The returned fixture exposes no pool.
+    pub async fn attach_postgres_mam_from_pool(
+        pool: &DatabasePool,
+        config: &IngressConfig,
+        lineage: LineageConfig,
+        owner: &crate::db::DarkMigrationOwnerConfig,
+        #[cfg(feature = "clustering")] node_identity: Option<SharedNodeIdentity>,
+    ) -> anyhow::Result<Self> {
+        let fixture = Self::from_pool(
+            pool,
+            config,
+            lineage,
+            #[cfg(feature = "clustering")]
+            node_identity,
+        )?;
+        crate::db::bootstrap::verify_mam_runtime_attachment(pool.global(), owner).await?;
+        Ok(fixture)
+    }
+
     pub async fn submit(
         &self,
         submission: &IngressSubmission,
@@ -93,4 +114,40 @@ impl SharedCorrectnessFixture {
     ) -> anyhow::Result<Option<ArchivedMessage>> {
         Ok(self.0.lookup_archive_or_stanza_id(stanza).await?)
     }
+}
+
+/// Probe PUBLIC privileges inside transactions that are rolled back.
+/// The caller supplies a disposable administrator database; no grant commits.
+pub async fn probe_public_mam_acl_rollback(
+    database: &crate::db::Database,
+    owner: &crate::db::DarkMigrationOwnerConfig,
+) -> anyhow::Result<bool> {
+    let schema = &owner
+        .expected_lineage()
+        .postgres_identity
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PostgreSQL identity required"))?
+        .schema
+        .name
+        .0;
+    crate::db::physical_attestation::validate_identifier(schema, "MAM schema")?;
+    let relation = format!(
+        "{}.mam_messages",
+        crate::db::physical_attestation::quote_identifier(schema)
+    );
+    for privilege in ["SELECT", "SELECT (body)", "TRUNCATE"] {
+        let mut tx = database.begin().await?;
+        tx.execute(&format!("GRANT {privilege} ON {relation} TO PUBLIC"), ())
+            .await?;
+        let refused = matches!(
+            crate::db::bootstrap::verify_mam_runtime_acl(&mut tx, schema, owner.runtime().as_str())
+                .await,
+            Err(crate::db::bootstrap::RuntimeAttachmentError::UnsafeMamRuntime)
+        );
+        tx.rollback().await?;
+        if !refused {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

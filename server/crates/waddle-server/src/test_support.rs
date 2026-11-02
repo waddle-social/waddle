@@ -14,7 +14,9 @@ pub use relation_guard_lab::verify_disposable_relation_guard_chain;
 #[cfg(feature = "test-support")]
 mod shared_correctness;
 #[cfg(feature = "test-support")]
-pub use shared_correctness::{SharedCorrectnessFixture, SharedCorrectnessSubmitError};
+pub use shared_correctness::{
+    probe_public_mam_acl_rollback, SharedCorrectnessFixture, SharedCorrectnessSubmitError,
+};
 
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;

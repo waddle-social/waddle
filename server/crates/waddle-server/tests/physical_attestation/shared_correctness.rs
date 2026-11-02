@@ -9,7 +9,8 @@ use uuid::Uuid;
 use waddle_server::config::{IngressConfig, LineageConfig};
 use waddle_server::db::physical_attestation::{attested_pool, install};
 use waddle_server::db::{
-    Database, DatabaseConfig, DatabaseDriver, DatabasePool, MigrationRunner, PoolConfig,
+    bootstrap_dark_postgres_mam_owner, DarkMigrationOwnerConfig, Database, DatabaseConfig,
+    DatabaseDriver, DatabasePool, MigrationRunner, PoolConfig,
 };
 use waddle_server::ingress::effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind};
 use waddle_server::ingress::effects::direct::DurableDirectEffect;
@@ -26,7 +27,7 @@ use waddle_xmpp::ingress::{
     ConnectionGeneration, DigestContext, DigestInput, EffectMessageIdentity, IngressEffectIntent,
     NormalizedTarget, TransportGeneration,
 };
-use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage, SqlxMamStorage};
+use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
 use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
 
 use super::{test_url, Fixture, CATALOG_GRANT_LOCK};
@@ -414,12 +415,21 @@ async fn exercise_postgres(
         .run(&owner_db)
         .await
         .expect("owner migrations");
-    let mam = SqlxMamStorage::open(owner_url.as_str())
+    let owner_config = DarkMigrationOwnerConfig::new(
+        fixture.lineage.clone(),
+        waddle_server::db::physical_attestation::PgRoleName::new(owner).expect("owner role"),
+        waddle_server::db::physical_attestation::PgRoleName::new(&fixture.runtime)
+            .expect("runtime role"),
+    )
+    .expect("owner config");
+    let migrator_role =
+        waddle_server::db::physical_attestation::PgRoleName::new(migrator).expect("migrator role");
+    let migrator_options = fixture.admin_options.clone().username(migrator);
+    bootstrap_dark_postgres_mam_owner(&migrator_options, &owner_config, &migrator_role)
         .await
-        .expect("owner creates actual MAM schema");
+        .expect("separate owner MAM bootstrap");
     let principal = principal();
     seed_principal(&owner_db, &principal).await;
-    drop(mam);
     drop(owner_db);
     let (relation_owner, owner_login): (String, bool) = sqlx::query_as(
         "SELECT r.rolname::text, r.rolcanlogin FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname='mam_messages'"
@@ -476,6 +486,8 @@ async fn exercise_postgres(
         ("ingress_delivery_receipts", "SELECT"),
         ("mam_archive_sequences", "SELECT, INSERT"),
         ("mam_messages", "SELECT, INSERT"),
+        ("_lineage", "SELECT"),
+        ("_migrations", "SELECT"),
     ] {
         sqlx::query(&format!(
             "GRANT {privileges} ON {}.{table} TO {}",
@@ -556,13 +568,371 @@ async fn exercise_postgres(
         .is_err(),
         "incorrect reserved-lane budget must be refused"
     );
-    let facade = Arc::new(facade(
+    let ingress_config = IngressConfig {
+        pool_size: 1,
+        retry_attempts: 2,
+    };
+    let lineage_config = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let mut wrong_lineage = fixture.lineage.clone();
+    wrong_lineage.deployment_uuid.0 = Uuid::new_v4();
+    let wrong_config = DarkMigrationOwnerConfig::new(
+        wrong_lineage,
+        waddle_server::db::physical_attestation::PgRoleName::new(owner).expect("owner role"),
+        waddle_server::db::physical_attestation::PgRoleName::new(&fixture.runtime)
+            .expect("runtime role"),
+    )
+    .expect("wrong config");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &wrong_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "mismatched lineage must be refused"
+    );
+    let mut malformed_lineage = fixture.lineage.clone();
+    malformed_lineage
+        .postgres_identity
+        .as_mut()
+        .expect("PostgreSQL identity")
+        .schema
+        .name
+        .0 = "invalid\"schema".to_owned();
+    let malformed_config = DarkMigrationOwnerConfig::new(
+        malformed_lineage,
+        waddle_server::db::physical_attestation::PgRoleName::new(owner).expect("owner role"),
+        waddle_server::db::physical_attestation::PgRoleName::new(&fixture.runtime)
+            .expect("runtime role"),
+    )
+    .expect("malformed config");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &malformed_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "malformed schema must be refused before SQL"
+    );
+    sqlx::query(&format!("ALTER ROLE {owner} LOGIN"))
+        .execute(&fixture.admin)
+        .await
+        .expect("temporarily unsafe owner");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "owner LOGIN must be refused"
+    );
+    sqlx::query(&format!("ALTER ROLE {owner} NOLOGIN"))
+        .execute(&fixture.admin)
+        .await
+        .expect("restore NOLOGIN owner");
+    sqlx::query(&format!(
+        "DROP INDEX {}.idx_mam_room_archive_seq",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove MAM ordinal index");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "missing MAM ordinal index must be refused"
+    );
+    sqlx::query(&format!(
+        "CREATE UNIQUE INDEX idx_mam_room_archive_seq ON {}.mam_messages(room_jid,archive_seq)",
+        fixture.target,
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore MAM ordinal index");
+    let facade = Arc::new(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .expect("read-only MAM attachment"),
+    );
+
+    // Role-specific grants affect only this disposable database.
+    for (table, privilege) in [
+        ("mam_messages", "UPDATE"),
+        ("mam_messages", "DELETE"),
+        ("mam_messages", "TRUNCATE"),
+        ("mam_messages", "TRIGGER"),
+        ("mam_messages", "REFERENCES"),
+        ("_lineage", "UPDATE"),
+        ("_migrations", "INSERT"),
+    ] {
+        sqlx::query(&format!(
+            "GRANT {privilege} ON {}.{table} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant negative privilege");
+        assert!(
+            SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+                &pool,
+                &ingress_config,
+                lineage_config.clone(),
+                &owner_config,
+                #[cfg(feature = "clustering")]
+                None,
+            )
+            .await
+            .is_err(),
+            "{privilege} on {table} must be refused"
+        );
+        sqlx::query(&format!(
+            "REVOKE {privilege} ON {}.{table} FROM {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("revoke negative privilege");
+    }
+    for (table, column) in [
+        ("mam_archive_sequences", "archive_jid"),
+        ("_lineage", "deployment_uuid"),
+    ] {
+        sqlx::query(&format!(
+            "GRANT UPDATE ({column}) ON {}.{table} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant negative column privilege");
+        assert!(
+            SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+                &pool,
+                &ingress_config,
+                lineage_config.clone(),
+                &owner_config,
+                #[cfg(feature = "clustering")]
+                None,
+            )
+            .await
+            .is_err(),
+            "UPDATE({column}) on {table} must be refused"
+        );
+        sqlx::query(&format!(
+            "REVOKE UPDATE ({column}) ON {}.{table} FROM {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("revoke negative column privilege");
+    }
+    sqlx::query(&format!(
+        "GRANT TRUNCATE ON {}.mam_messages TO {}",
+        fixture.target, fixture.outsider
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant inherited privilege");
+    sqlx::query(&format!(
+        "GRANT {} TO {} WITH INHERIT TRUE, SET TRUE, ADMIN FALSE",
+        fixture.outsider, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant runtime membership");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "inherited privileges must be refused"
+    );
+    sqlx::query(&format!(
+        "REVOKE {} FROM {}",
+        fixture.outsider, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke runtime membership");
+    sqlx::query(&format!(
+        "REVOKE TRUNCATE ON {}.mam_messages FROM {}",
+        fixture.target, fixture.outsider
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke inherited privilege");
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}.mam_messages TO {} WITH GRANT OPTION",
+        fixture.target, fixture.runtime,
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant delegation option");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "grant options must be refused"
+    );
+    sqlx::query(&format!(
+        "REVOKE GRANT OPTION FOR SELECT ON {}.mam_messages FROM {}",
+        fixture.target, fixture.runtime,
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke delegation option");
+    let version: i32 =
+        sqlx::query_scalar("SELECT pg_catalog.current_setting('server_version_num')::integer")
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("PostgreSQL version");
+    if version >= 170000 {
+        sqlx::query(&format!(
+            "GRANT MAINTAIN ON {}.mam_messages TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant MAINTAIN");
+        assert!(
+            SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+                &pool,
+                &ingress_config,
+                lineage_config.clone(),
+                &owner_config,
+                #[cfg(feature = "clustering")]
+                None,
+            )
+            .await
+            .is_err(),
+            "MAINTAIN must be refused"
+        );
+        sqlx::query(&format!(
+            "REVOKE MAINTAIN ON {}.mam_messages FROM {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("revoke MAINTAIN");
+    }
+    let admin_db = Database::from_config(
+        "rollback-only PUBLIC ACL probe",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, &fixture.base_url),
+    )
+    .await
+    .expect("fixture admin database");
+    assert!(
+        waddle_server::test_support::probe_public_mam_acl_rollback(&admin_db, &owner_config)
+            .await
+            .expect("PUBLIC ACL probe")
+    );
+    assert!(
+        waddle_server::test_support::probe_public_mam_acl_rollback(&admin_db, &malformed_config)
+            .await
+            .is_err(),
+        "PUBLIC probe must reject malformed schema before SQL"
+    );
+    drop(admin_db);
+    let public_acl: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+         CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a \
+         WHERE n.nspname=$1 AND c.relname='mam_messages' AND a.grantee=0)",
+    ).bind(&fixture.target).fetch_one(&fixture.admin).await.expect("PUBLIC ACL after rollback");
+    assert!(!public_acl, "PUBLIC probe left no committed grant");
+
+    for role in [fixture.runtime.as_str(), owner] {
+        sqlx::query(&format!(
+            "REVOKE ALL PRIVILEGES ON {}.mam_messages FROM {role}",
+            fixture.target,
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("remove relation ACL entry");
+    }
+    let empty_acl: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.cardinality(c.relacl) = 0 FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = 'mam_messages'",
+    )
+    .bind(&fixture.target)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("observe explicit empty ACL");
+    assert!(empty_acl);
+    let error = SharedCorrectnessFixture::attach_postgres_mam_from_pool(
         &pool,
-        LineageConfig {
-            deployment_uuid: Some(fixture.lineage.deployment_uuid),
-            action: None,
-        },
+        &ingress_config,
+        lineage_config.clone(),
+        &owner_config,
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await
+    .err()
+    .expect("empty ACL must be refused");
+    assert!(matches!(
+        error.downcast_ref::<waddle_server::db::bootstrap::RuntimeAttachmentError>(),
+        Some(waddle_server::db::bootstrap::RuntimeAttachmentError::UnsafeMamRuntime)
     ));
+    sqlx::query(&format!(
+        "GRANT ALL PRIVILEGES ON {}.mam_messages TO {owner}",
+        fixture.target,
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore owner ACL");
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT ON {}.mam_messages TO {}",
+        fixture.target, fixture.runtime,
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore runtime ACL");
 
     let mut runtime = sqlx::PgConnection::connect_with(&fixture.runtime_options)
         .await
@@ -582,6 +952,13 @@ async fn exercise_postgres(
         .execute(&mut runtime)
         .await
         .is_err());
+    assert!(sqlx::query(&format!(
+        "ALTER TABLE {}.mam_messages ADD COLUMN forbidden integer",
+        fixture.target,
+    ))
+    .execute(&mut runtime)
+    .await
+    .is_err());
     for table in [
         "ingress_messages",
         "ingress_origin_aliases",
@@ -698,6 +1075,55 @@ async fn exercise_postgres(
     assert_eq!(committed, (1, 1, 2, 1, 1, 1, 1, 1, 0, 0, 0));
 
     sqlx::query(&format!(
+        "UPDATE {}.mam_archive_sequences SET next_seq=0",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("make counter stale");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "stale counter must be refused"
+    );
+    sqlx::query(&format!(
+        "DELETE FROM {}.mam_archive_sequences",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove counter");
+    assert!(
+        SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+            &pool,
+            &ingress_config,
+            lineage_config.clone(),
+            &owner_config,
+            #[cfg(feature = "clustering")]
+            None,
+        )
+        .await
+        .is_err(),
+        "missing counter must be refused"
+    );
+    sqlx::query(&format!(
+        "INSERT INTO {}.mam_archive_sequences (archive_jid,next_seq) VALUES ($1,1)",
+        fixture.target,
+    ))
+    .bind("bob@example.test")
+    .execute(&fixture.admin)
+    .await
+    .expect("restore counter");
+
+    sqlx::query(&format!(
         "REVOKE INSERT ON {}.mam_messages FROM {}",
         fixture.target, fixture.runtime
     ))
@@ -774,6 +1200,22 @@ async fn exercise_postgres(
     );
 
     let main_hold = pool.global().begin().await.expect("occupy main");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+                &pool,
+                &ingress_config,
+                lineage_config.clone(),
+                &owner_config,
+                #[cfg(feature = "clustering")]
+                None,
+            )
+        )
+        .await
+        .is_err(),
+        "MAM attachment must wait for main admission"
+    );
     assert!(tokio::time::timeout(
         Duration::from_millis(100),
         facade.lookup_archive_or_stanza_id(&stamp)
@@ -795,6 +1237,17 @@ async fn exercise_postgres(
         .is_some());
     let lane = pool.ingress();
     let ingress_hold = lane.begin().await.expect("occupy ingress");
+    let second_attachment = SharedCorrectnessFixture::attach_postgres_mam_from_pool(
+        &pool,
+        &ingress_config,
+        lineage_config.clone(),
+        &owner_config,
+        #[cfg(feature = "clustering")]
+        None,
+    )
+    .await
+    .expect("MAM attachment uses main while ingress is occupied");
+    drop(second_attachment);
     assert!(facade
         .lookup_archive_or_stanza_id(&stamp)
         .await

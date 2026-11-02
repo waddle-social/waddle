@@ -4,6 +4,7 @@ mod impls;
 mod lookup;
 mod query;
 mod schema;
+mod schema_verify;
 mod tx_write;
 mod write;
 
@@ -21,10 +22,12 @@ pub use allocation::{
     lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
     lock_archive_sequence_on_sqlite_connection,
 };
+pub use schema::MamSchemaBootstrapError;
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
 };
+pub use schema_verify::MamSchemaVerificationError;
 pub use tx_write::{
     store_archived_message_on_connection, store_archived_message_on_connection_in_schema,
     store_archived_message_on_sqlite_connection, ArchiveExpectation, MamTxStoreError,

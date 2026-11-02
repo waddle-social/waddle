@@ -19,6 +19,9 @@ use waddle_server::db::{
 #[path = "migration_owner_lab/epoch_acl.rs"]
 mod epoch_acl;
 #[cfg(feature = "test-support")]
+#[path = "migration_owner_lab/mam.rs"]
+mod mam;
+#[cfg(feature = "test-support")]
 #[path = "migration_owner_lab/transition.rs"]
 mod transition;
 

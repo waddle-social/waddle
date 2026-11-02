@@ -20,8 +20,9 @@ pub use storage::{
     lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
     lock_archive_sequence_on_sqlite_connection, store_archived_message_on_connection,
     store_archived_message_on_connection_in_schema, store_archived_message_on_sqlite_connection,
-    ArchiveExpectation, InMemoryMamStorage, MamArchiveKind, MamStorage, MamStorageError,
-    MamTxStoreError, MamTxStoreOutcome, SqlxMamStorage, StoreOutcome, TerminalTombstoneOutcome,
+    ArchiveExpectation, InMemoryMamStorage, MamArchiveKind, MamSchemaBootstrapError,
+    MamSchemaVerificationError, MamStorage, MamStorageError, MamTxStoreError, MamTxStoreOutcome,
+    SqlxMamStorage, StoreOutcome, TerminalTombstoneOutcome,
 };
 pub use waddle_xmpp_core::mam::{
     archived_inner_message, build_fin_iq, build_query_form_iq, build_result_messages, is_mam_query,
