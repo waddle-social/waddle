@@ -380,6 +380,14 @@ impl<'a> IngressUowTransaction<'a> {
             .map(PreparedAttestedReceiptWriter::schema)
     }
 
+    /// Keep the prepared identity and its transaction together when canonical
+    /// repositories choose their schema-qualified PostgreSQL statements.
+    fn canonical_parts(
+        &mut self,
+    ) -> (&mut Transaction<'a>, Option<&PreparedAttestedReceiptWriter>) {
+        (&mut self.transaction, self.prepared_receipt_writer.as_ref())
+    }
+
     pub(crate) fn room_observers_enabled(&self) -> bool {
         self.observations
     }
@@ -448,6 +456,9 @@ mod tests;
 
 #[cfg(test)]
 mod lock_timeout_tests;
+
+#[cfg(test)]
+mod canonical_qualified_tests;
 
 #[cfg(test)]
 mod raw_writer_tests;

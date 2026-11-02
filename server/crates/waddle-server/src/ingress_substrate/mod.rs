@@ -25,6 +25,9 @@ pub use authority::{
     receipts_complete, record_receipt, record_receipt_pooled, record_room_canonical_envelope,
     EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
+pub(crate) use authority::{
+    load_envelope_in_prepared_transaction, record_room_envelope_in_prepared_transaction,
+};
 pub(crate) use authority::{receipts_complete_in_schema, record_receipt_in_prepared_transaction};
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -65,7 +68,6 @@ use substrate::discard_database_error;
 pub use substrate::gc_expired_aliases;
 use substrate::gc_retained_child_sql;
 pub use substrate::insert_sm_ref;
-use substrate::lock_message_for_child;
 pub(crate) use substrate::prepare_attested_receipt_transaction;
 pub(crate) use substrate::quote_postgres_identifier;
 pub use substrate::record_delivery;
@@ -88,3 +90,7 @@ pub(crate) use substrate::PreparedAttestedReceiptWriter;
 pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;
+pub(crate) use substrate::{
+    canonical_relation, record_message_in_prepared_transaction,
+    resolve_alias_in_prepared_transaction, CanonicalRelation,
+};

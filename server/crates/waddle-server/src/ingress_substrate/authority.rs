@@ -1,10 +1,14 @@
 use super::quote_postgres_identifier;
 use super::substrate::acquire_supported_epoch_lock_first;
+use super::substrate::{
+    acquire_supported_epoch_in_prepared_transaction, canonical_relation,
+    lock_message_for_child_in_prepared_transaction, CanonicalRelation,
+    PreparedAttestedReceiptWriter,
+};
 use super::{
     acquire_epoch_lock_first, decode_stored_alias, dialect_sql, discard_database_error,
-    lock_message_for_child, supported_protocol_epoch, Database, DatabaseDriver, IngressOrdinal,
-    IngressSubstrateError, MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid,
-    WireHandledCount,
+    supported_protocol_epoch, Database, DatabaseDriver, IngressOrdinal, IngressSubstrateError,
+    MessageKey, SemanticDigest, SmIngressId, Transaction, Uuid, WireHandledCount,
 };
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::DatabaseError;
@@ -294,11 +298,20 @@ pub async fn record_room_canonical_envelope(
     key: MessageKey,
     envelope: &MessageEnvelope,
 ) -> Result<(), IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, key).await? {
+    record_room_envelope_in_prepared_transaction(tx, None, key, envelope).await
+}
+
+pub(crate) async fn record_room_envelope_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    key: MessageKey,
+    envelope: &MessageEnvelope,
+) -> Result<(), IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, key).await? {
         return Err(IngressSubstrateError::MessageContentConflict);
     }
-    let stored = load_envelope(tx, key)
+    let stored = load_envelope_in_prepared_transaction(tx, prepared, key)
         .await?
         .ok_or(IngressSubstrateError::MessageContentConflict)?;
     if stored.room_manifest().is_some() && envelope.message() != stored.message() {
@@ -326,8 +339,22 @@ pub async fn record_room_canonical_envelope(
     const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid";
     const SQLITE: &str =
         "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?";
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "UPDATE {} SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid",
+            canonical_relation(prepared, CanonicalRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        POSTGRES
+    };
     tx.execute(
-        dialect_sql(tx.driver(), POSTGRES, SQLITE),
+        if tx.driver() == DatabaseDriver::Postgres {
+            postgres
+        } else {
+            SQLITE
+        },
         crate::db_params![
             updated.version().to_storage(),
             serialize_envelope(&updated)?,
@@ -515,13 +542,35 @@ pub async fn load_envelope(
     tx: &mut Transaction<'_>,
     key: MessageKey,
 ) -> Result<Option<MessageEnvelope>, IngressSubstrateError> {
+    load_envelope_in_prepared_transaction(tx, None, key).await
+}
+
+pub(crate) async fn load_envelope_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    key: MessageKey,
+) -> Result<Option<MessageEnvelope>, IngressSubstrateError> {
     const POSTGRES: &str =
         "SELECT envelope_version::int, envelope FROM ingress_messages WHERE message_key = ?::uuid";
     const SQLITE: &str =
         "SELECT envelope_version, envelope FROM ingress_messages WHERE message_key = ?";
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "SELECT envelope_version::int, envelope FROM {} WHERE message_key = ?::uuid",
+            canonical_relation(prepared, CanonicalRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        POSTGRES
+    };
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), POSTGRES, SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                SQLITE
+            },
             crate::db_params![key.to_storage().to_string()],
         )
         .await
@@ -985,6 +1034,7 @@ async fn exact_receipt_exists(
 /// The canonical lock makes envelope completion and concurrent retries atomic.
 pub(super) async fn complete_message_envelope(
     tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
@@ -992,9 +1042,23 @@ pub(super) async fn complete_message_envelope(
     const POSTGRES: &str = "SELECT message_key::text, digest_version, digest FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE";
     const SQLITE: &str =
         "SELECT message_key, digest_version, digest FROM ingress_messages WHERE message_key = ?";
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "SELECT message_key::text, digest_version, digest FROM {} WHERE message_key = ?::uuid FOR UPDATE",
+            canonical_relation(prepared, CanonicalRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        POSTGRES
+    };
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), POSTGRES, SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                SQLITE
+            },
             crate::db_params![key.to_storage().to_string()],
         )
         .await
@@ -1011,7 +1075,7 @@ pub(super) async fn complete_message_envelope(
     let Some(envelope) = envelope else {
         return Ok(());
     };
-    if let Some(stored) = load_envelope(tx, key).await? {
+    if let Some(stored) = load_envelope_in_prepared_transaction(tx, prepared, key).await? {
         return if stored.version() == envelope.version()
             && serialize_envelope(&stored)? == serialize_envelope(envelope)?
         {
@@ -1022,8 +1086,22 @@ pub(super) async fn complete_message_envelope(
     }
     const WRITE_POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid AND envelope IS NULL";
     const WRITE_SQLITE: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ? AND envelope IS NULL";
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "UPDATE {} SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid AND envelope IS NULL",
+            canonical_relation(prepared, CanonicalRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        WRITE_POSTGRES
+    };
     tx.execute(
-        dialect_sql(tx.driver(), WRITE_POSTGRES, WRITE_SQLITE),
+        if tx.driver() == DatabaseDriver::Postgres {
+            postgres
+        } else {
+            WRITE_SQLITE
+        },
         crate::db_params![
             envelope.version().to_storage(),
             serialize_envelope(envelope)?,

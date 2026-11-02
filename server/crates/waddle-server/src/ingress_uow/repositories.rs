@@ -281,14 +281,23 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.canonical_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT 1 FROM {} WHERE message_key = ?::uuid FOR UPDATE",
+                ingress_substrate::canonical_relation(
+                    prepared,
+                    ingress_substrate::CanonicalRelation::Messages
+                )
+            )
+        } else {
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?".to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         Ok(rows.next().await?.is_some())
     }
@@ -298,14 +307,24 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-            "SELECT 1 FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.canonical_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT 1 FROM {} WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+                ingress_substrate::canonical_relation(
+                    prepared,
+                    ingress_substrate::CanonicalRelation::Messages
+                )
+            )
+        } else {
+            "SELECT 1 FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL"
+                .to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         Ok(rows.next().await?.is_some())
     }
@@ -316,8 +335,10 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         envelope: Option<&MessageEnvelope>,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_message(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.canonical_parts();
+        ingress_substrate::record_message_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             digest,
             envelope,
@@ -357,8 +378,10 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
         envelope: &MessageEnvelope,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_room_canonical_envelope(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.canonical_parts();
+        ingress_substrate::record_room_envelope_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             envelope,
         )
@@ -370,7 +393,8 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Option<MessageEnvelope>, IngressUowError> {
-        ingress_substrate::load_envelope(transaction.transaction_mut(), message_key)
+        let (tx, prepared) = transaction.canonical_parts();
+        ingress_substrate::load_envelope_in_prepared_transaction(tx, prepared, message_key)
             .await
             .map_err(Into::into)
     }
@@ -380,14 +404,20 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<DateTime<Utc>, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM ingress_messages WHERE message_key = ?::uuid",
-            "SELECT created_at FROM ingress_messages WHERE message_key = ?",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.canonical_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM {} WHERE message_key = ?::uuid",
+                ingress_substrate::canonical_relation(prepared, ingress_substrate::CanonicalRelation::Messages)
+            )
+        } else {
+            "SELECT created_at FROM ingress_messages WHERE message_key = ?".to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         let row = rows
             .next()
@@ -407,13 +437,9 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         mint: impl FnOnce() -> MessageKey,
     ) -> Result<AliasResolution, IngressUowError> {
-        ingress_substrate::resolve_and_record_alias(
-            transaction.transaction_mut(),
-            sender,
-            target,
-            origin_id,
-            digest,
-            mint,
+        let (tx, prepared) = transaction.canonical_parts();
+        ingress_substrate::resolve_alias_in_prepared_transaction(
+            tx, prepared, sender, target, origin_id, digest, mint,
         )
         .await
         .map_err(Into::into)
@@ -427,15 +453,20 @@ impl CanonicalMessageRepository {
         if !Self::lock(transaction, message_key).await? {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
-        let sql = dialect_sql(
-            transaction,
-            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL",
-        );
-        transaction
-            .transaction_mut()
-            .execute(sql, crate::db_params![message_key.to_storage().to_string()])
-            .await?;
+        let (tx, prepared) = transaction.canonical_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "UPDATE {} SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+                ingress_substrate::canonical_relation(prepared, ingress_substrate::CanonicalRelation::Messages)
+            )
+        } else {
+            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL".to_owned()
+        };
+        tx.execute(
+            &sql,
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
         Ok(())
     }
 
