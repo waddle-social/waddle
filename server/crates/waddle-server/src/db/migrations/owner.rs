@@ -20,8 +20,15 @@ use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use crate::ingress_substrate::supported_protocol_epoch;
 
 mod epoch_acl;
+#[cfg(feature = "test-support")]
+mod transition_lab;
 
 pub use epoch_acl::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
+#[cfg(feature = "test-support")]
+pub use transition_lab::{
+    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    DisposableEpochTransitionError, DisposableEpochTransitionFault,
+};
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 const COMMIT_DEADLINE: Duration = Duration::from_secs(15);

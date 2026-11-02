@@ -29,5 +29,10 @@ pub use owner::{
     inspect_dark_postgres_epoch_acl, run_dark_postgres_owner, DarkEpochAclStage,
     DarkMigrationOwnerConfig, DarkMigrationOwnerError,
 };
+#[cfg(feature = "test-support")]
+pub use owner::{
+    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    DisposableEpochTransitionError, DisposableEpochTransitionFault,
+};
 pub use runner::MigrationRunner;
 pub use types::Migration;

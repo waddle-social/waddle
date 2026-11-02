@@ -15,7 +15,8 @@ use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
 
 // The candidate is a laboratory asset, not a registered migration. Its single
 // source is shared with the tests and included in the release source fileset.
-const RELATION_GUARD_CANDIDATE: &str = include_str!("ingress_epoch_relation_guard_candidate.sql");
+pub(super) const RELATION_GUARD_CANDIDATE: &str =
+    include_str!("ingress_epoch_relation_guard_candidate.sql");
 
 /// An observation of installed guards and scoped epoch ACLs over a scan.
 ///
@@ -204,28 +205,42 @@ async fn inspect_in_transaction(
     }
 
     correlate_runtime(&mut tx, config, runtime_pid, nonce).await?;
-    check_runtime_role(&mut tx, config, schema).await?;
-    check_epoch_shape(&mut tx, config, schema).await?;
+    let stage = inspect_catalog_in_transaction(&mut tx, config, schema, &quoted).await?;
+    if self::runtime_pid(runtime_tx, config, nonce).await? != runtime_pid {
+        return Err(DarkMigrationOwnerError::RuntimeSessionUnverified);
+    }
+    correlate_runtime(&mut tx, config, runtime_pid, nonce).await?;
+    // A fresh READ COMMITTED statement catches a transition committed while
+    // the first epoch query waited. It does not fence a subsequent transition.
+    check_epoch_zero(&mut tx, &quoted).await?;
+    tx.rollback().await?;
+    Ok(stage)
+}
+
+// Shared by the read-only diagnostic and the test-only owner transition lab.
+// The caller owns the transaction and must independently establish identity,
+// role separation and any needed operational quiescence.
+pub(super) async fn inspect_catalog_in_transaction(
+    tx: &mut Transaction<'_>,
+    config: &DarkMigrationOwnerConfig,
+    schema: &str,
+    quoted: &str,
+) -> Result<DarkEpochAclStage, DarkMigrationOwnerError> {
+    check_runtime_role(tx, config, schema).await?;
+    check_epoch_shape(tx, config, schema).await?;
     super::MigrationRunner::single()
         .verify_complete_in_transaction(
-            &mut tx,
+            tx,
             DatabaseDriver::Postgres,
             &format!("{quoted}._migrations"),
         )
         .await?;
 
-    let dml = function_source(&mut tx, config, schema, "waddle_ingress_epoch_guard").await?;
-    let epoch = function_source(
-        &mut tx,
-        config,
-        schema,
-        "waddle_ingress_protocol_epoch_guard",
-    )
-    .await?;
-    let truncate =
-        function_source(&mut tx, config, schema, "waddle_ingress_truncate_guard").await?;
+    let dml = function_source(tx, config, schema, "waddle_ingress_epoch_guard").await?;
+    let epoch = function_source(tx, config, schema, "waddle_ingress_protocol_epoch_guard").await?;
+    let truncate = function_source(tx, config, schema, "waddle_ingress_truncate_guard").await?;
     let manifest = function_source(
-        &mut tx,
+        tx,
         config,
         schema,
         "waddle_ingress_epoch_guard_manifest_append_only",
@@ -252,7 +267,7 @@ async fn inspect_in_transaction(
     };
 
     check_trigger_pair(
-        &mut tx,
+        tx,
         config,
         schema,
         "ingress_protocol_epoch",
@@ -265,7 +280,7 @@ async fn inspect_in_transaction(
     )
     .await?;
     check_trigger_pair(
-        &mut tx,
+        tx,
         config,
         schema,
         "ingress_epoch_guard_manifest",
@@ -300,7 +315,7 @@ async fn inspect_in_transaction(
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ? AND pg_catalog.left(c.relname, 8) = 'ingress_' \
                AND c.relkind NOT IN ('i', 'I') ORDER BY c.relname",
-            crate::db_params![schema.as_str()],
+            crate::db_params![schema],
         )
         .await?;
     let mut live_relations = Vec::new();
@@ -323,7 +338,7 @@ async fn inspect_in_transaction(
     }
     for table in EPOCH_GUARDED_TABLES {
         check_trigger_pair(
-            &mut tx,
+            tx,
             config,
             schema,
             table,
@@ -343,17 +358,9 @@ async fn inspect_in_transaction(
         "_lineage",
         "ingress_epoch_guard_manifest",
     ] {
-        check_acl(&mut tx, config, schema, table, stage).await?;
+        check_acl(tx, config, schema, table, stage).await?;
     }
-    check_epoch_zero(&mut tx, &quoted).await?;
-    if self::runtime_pid(runtime_tx, config, nonce).await? != runtime_pid {
-        return Err(DarkMigrationOwnerError::RuntimeSessionUnverified);
-    }
-    correlate_runtime(&mut tx, config, runtime_pid, nonce).await?;
-    // A fresh READ COMMITTED statement catches a transition committed while
-    // the first epoch query waited. It does not fence a subsequent transition.
-    check_epoch_zero(&mut tx, &quoted).await?;
-    tx.rollback().await?;
+    check_epoch_zero(tx, quoted).await?;
     Ok(stage)
 }
 
@@ -374,7 +381,7 @@ async fn check_epoch_zero(
     .await
 }
 
-async fn runtime_pid(
+pub(super) async fn runtime_pid(
     runtime: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     config: &DarkMigrationOwnerConfig,
     nonce: &str,
@@ -394,7 +401,7 @@ async fn runtime_pid(
     Ok(pid)
 }
 
-async fn correlate_runtime(
+pub(super) async fn correlate_runtime(
     tx: &mut Transaction<'_>,
     config: &DarkMigrationOwnerConfig,
     pid: i32,

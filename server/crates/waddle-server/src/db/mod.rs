@@ -33,6 +33,11 @@ pub use migrations::{
     DarkEpochAclStage, DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError,
     MigrationNamespace, MigrationRunner, WADDLE_NAMESPACE_START,
 };
+#[cfg(feature = "test-support")]
+pub use migrations::{
+    run_disposable_epoch_transition_lab, DisposableEpochTransitionConfig,
+    DisposableEpochTransitionError, DisposableEpochTransitionFault,
+};
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};
 pub use value::{row_value, DbDecode, IntoParams, Row, Rows, Value, ValueExt};
