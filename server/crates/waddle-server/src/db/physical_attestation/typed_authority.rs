@@ -384,7 +384,10 @@ async fn read_sqlite_epoch(
     tx: &mut crate::db::Transaction<'_>,
 ) -> Result<ProtocolEpoch, DarkIngressAuthorityError> {
     let mut rows = tx
-        .query("SELECT epoch FROM ingress_protocol_epoch WHERE id = 1", ())
+        .query(
+            "SELECT epoch FROM main.ingress_protocol_epoch WHERE id = 1",
+            (),
+        )
         .await
         .map_err(|_| DarkIngressAuthorityError::Database)?;
     let row = rows

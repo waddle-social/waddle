@@ -251,6 +251,69 @@ async fn sqlite_epoch_and_one_slot_immediate_are_bounded() {
     ));
 }
 
+#[tokio::test]
+async fn sqlite_temp_epoch_cannot_mask_future_or_missing_main_epoch() {
+    let (db, lab) = sqlite_fixture().await;
+    sqlite_exec(
+        &db,
+        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+    )
+    .await;
+    let key = uuid::Uuid::new_v4().to_string();
+    seed_sqlite(&db, &key, Some(now() - ALIAS_RETENTION)).await;
+    let guard = db.guard().await.expect("one-slot runtime guard");
+    guard.execute("CREATE TEMP TABLE ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL)", ()).await.expect("temporary epoch shadow");
+    guard
+        .execute(
+            "INSERT INTO temp.ingress_protocol_epoch (id, epoch) VALUES (1, 0)",
+            (),
+        )
+        .await
+        .expect("supported shadow epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
+    drop(guard);
+
+    assert!(matches!(
+        lab.collect(now(), 1).await,
+        Err(DarkIngressAuthorityError::UnsupportedEpoch)
+    ));
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_deliveries",
+    ] {
+        assert_eq!(
+            sqlite_count(&db, &format!("SELECT COUNT(*) FROM main.{table}")).await,
+            1,
+            "future main epoch protects {table}"
+        );
+    }
+    sqlite_exec(&db, "DELETE FROM main.ingress_protocol_epoch WHERE id = 1").await;
+    assert!(matches!(
+        lab.collect(now(), 1).await,
+        Err(DarkIngressAuthorityError::MissingEpoch)
+    ));
+    for table in [
+        "ingress_messages",
+        "ingress_origin_aliases",
+        "ingress_deliveries",
+    ] {
+        assert_eq!(
+            sqlite_count(&db, &format!("SELECT COUNT(*) FROM main.{table}")).await,
+            1,
+            "missing main epoch protects {table}"
+        );
+    }
+    assert_eq!(
+        sqlite_count(
+            &db,
+            "SELECT COUNT(*) FROM temp.ingress_protocol_epoch WHERE id = 1 AND epoch = 0"
+        )
+        .await,
+        1
+    );
+}
+
 async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, RetentionLab) {
     let (config, key) = typed_authority_fixture(fixture).await;
     let mut seed = pg_seed_transaction(fixture).await;
