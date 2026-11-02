@@ -5,25 +5,28 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::connection_actor::{
-    start_connection_actor, CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
-    CompleteHandledInboundBeforeLifecycleGate, ConfirmBindingInstall, ConnectionActorError,
-    ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorStartError,
-    ConnectionWireFrame, InstallBinding, PanicConnectionActor, PauseConnectionActor,
-    PrepareBinding, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
-    SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
+    start_connection_actor, start_connection_actor_with_effect, CompleteHandledInbound,
+    CompleteHandledInboundAtLifecycleGate, CompleteHandledInboundBeforeLifecycleGate,
+    ConfirmBindingInstall, ConnectionActorError, ConnectionActorGateBarrier,
+    ConnectionActorOperationId, ConnectionActorStartError, ConnectionWireFrame,
+    CountableEffectDisposition, CountableInboundEffect, InstallBinding, PanicConnectionActor,
+    PauseConnectionActor, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
+    RetireBinding, SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
 };
 use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
 use waddle_xmpp::ownership::NodeLeaseIdentity;
+use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame, ParseError};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, SmStanza};
+use xmpp_parsers::minidom::Element;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDLED_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
@@ -92,6 +95,13 @@ where
                 Message::Text(SmRequest::to_xml().into())
             }
             ConnectionWireFrame::Acknowledgement(ack) => Message::Text(ack.to_xml().into()),
+            ConnectionWireFrame::CountableStanza { .. }
+            | ConnectionWireFrame::RejectedInbound { .. } => {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "inbound-only frame cannot be written",
+                )));
+            }
             ConnectionWireFrame::Close => Message::Close(None),
         };
         self.pending_flush = true;
@@ -181,13 +191,42 @@ async fn start_actor_with_inbound_limit(
     ClientSocket,
     oneshot::Receiver<()>,
 ) {
+    start_actor_with_inbound_limits_and_effect(
+        inventory,
+        test_transport_limits(
+            max_inbound_count,
+            2048,
+            max_outbound_count,
+            max_outbound_bytes,
+        ),
+        gate,
+        retirement_deadline,
+        handled_operation_deadline,
+        |_| async { CountableEffectDisposition::Handled },
+    )
+    .await
+}
+
+async fn start_actor_with_inbound_limits_and_effect<Effect, EffectFuture>(
+    inventory: &IoCustodianInventory,
+    limits: TransportLimits,
+    gate: Arc<FlushGate>,
+    retirement_deadline: Duration,
+    handled_operation_deadline: Duration,
+    effect: Effect,
+) -> (
+    waddle_server::test_support::connection_actor::ConnectionActorController,
+    ClientSocket,
+    oneshot::Receiver<()>,
+)
+where
+    Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
+    EffectFuture: std::future::Future<Output = CountableEffectDisposition> + Send + 'static,
+{
     let (server, client) = super::pumps::socket_pair().await;
     let (entered_tx, entered_rx) = oneshot::channel();
     let config = ReservedIoStartConfig::new(
-        TransportLimits::new(
-            Limits::new(max_inbound_count, 2048).expect("inbound bounds"),
-            Limits::new(max_outbound_count, max_outbound_bytes).expect("outbound bounds"),
-        ),
+        limits,
         ShutdownProtocol::new(ConnectionWireFrame::Close, |error: &Error| {
             matches!(error, Error::Protocol(ProtocolError::SendAfterClosing))
         }),
@@ -195,7 +234,7 @@ async fn start_actor_with_inbound_limit(
         ConnectionWireFrame::is_close,
         retirement_deadline,
     );
-    let controller = start_connection_actor(
+    let controller = start_connection_actor_with_effect(
         inventory,
         NodeLeaseIdentity::local_process(),
         handled_operation_deadline,
@@ -205,12 +244,14 @@ async fn start_actor_with_inbound_limit(
             let reader = reader
                 .filter_map(|incoming| async move {
                     match incoming {
-                        Ok(Message::Text(text)) => match SmStanza::parse(text.as_str()) {
-                            Some(SmStanza::Request) => {
-                                Some(Ok(ConnectionWireFrame::RequestAcknowledgement(SmRequest)))
-                            }
-                            _ => None,
-                        },
+                        Ok(Message::Text(text)) => {
+                            Some(Ok(connection_frame_from_text(text.as_str())))
+                        }
+                        Ok(Message::Binary(bytes)) => {
+                            Some(Ok(ConnectionWireFrame::RejectedInbound {
+                                wire_bytes: bytes.len(),
+                            }))
+                        }
                         Ok(Message::Close(_)) => Some(Ok(ConnectionWireFrame::Close)),
                         Ok(_) => None,
                         Err(error) => Some(Err(error)),
@@ -225,10 +266,41 @@ async fn start_actor_with_inbound_limit(
             };
             (reader, writer)
         },
+        effect,
     )
     .await
     .expect("reserved connection actor starts");
     (controller, client, entered_rx)
+}
+
+fn test_transport_limits(
+    inbound_count: usize,
+    inbound_bytes: usize,
+    outbound_count: usize,
+    outbound_bytes: usize,
+) -> TransportLimits {
+    TransportLimits::new(
+        Limits::new(inbound_count, inbound_bytes).expect("inbound bounds"),
+        Limits::new(outbound_count, outbound_bytes).expect("outbound bounds"),
+    )
+}
+
+fn connection_frame_from_text(text: &str) -> ConnectionWireFrame {
+    let wire_bytes = text.len();
+    match parse_frame(text) {
+        Ok(InboundFrame::Stanza(stanza)) => ConnectionWireFrame::CountableStanza {
+            stanza: Arc::new(*stanza),
+            wire_bytes,
+        },
+        Err(ParseError::UnknownRoot(root)) if root == "r" => {
+            if matches!(SmStanza::parse(text), Some(SmStanza::Request)) {
+                ConnectionWireFrame::RequestAcknowledgement(SmRequest)
+            } else {
+                ConnectionWireFrame::RejectedInbound { wire_bytes }
+            }
+        }
+        _ => ConnectionWireFrame::RejectedInbound { wire_bytes },
+    }
 }
 
 async fn read_ack(peer: &mut ClientSocket) -> SmAck {
@@ -250,6 +322,27 @@ async fn send_request(peer: &mut ClientSocket) {
     peer.send(Message::Text(SmRequest::to_xml().into()))
         .await
         .expect("send XEP-0198 request over loopback WebSocket");
+}
+
+async fn send_stanza(peer: &mut ClientSocket, xml: &str) {
+    peer.send(Message::Text(xml.to_owned().into()))
+        .await
+        .expect("send countable XMPP stanza over loopback WebSocket");
+}
+
+fn message_with_body(body: &str) -> String {
+    let stanza = Element::builder("message", waddle_xmpp::protocol::frame::CLIENT_STANZA_NS)
+        .append(
+            Element::builder("body", waddle_xmpp::protocol::frame::CLIENT_STANZA_NS)
+                .append(body.to_owned())
+                .build(),
+        )
+        .build();
+    let mut bytes = Vec::new();
+    stanza
+        .write_to(&mut bytes)
+        .expect("serialize typed stanza fixture");
+    String::from_utf8(bytes).expect("serialized XML is UTF-8")
 }
 
 async fn actor_ack(
@@ -945,26 +1038,11 @@ async fn orphaned_install_deadline_stops_old_socket_and_requires_a_fresh_connect
         Some(CustodianState::Joined)
     );
     assert_eq!(controller.stop_reason(), Some(StopReason::Requested));
-    assert_eq!(
-        actor
-            .ask(ConfirmBindingInstall(attempt.clone()))
-            .send()
-            .await
-            .expect_err("a late confirmation cannot revive the stopped stream")
-            .err()
-            .expect("typed stop rejection"),
-        ConnectionActorError::ConnectionStopping
+    assert!(
+        actor.wait_for_shutdown_result().await.is_ok(),
+        "the independent stop kills the actor, so a late token cannot revive it"
     );
-    assert_eq!(
-        actor
-            .ask(PrepareBinding::new(new_operation_id()))
-            .send()
-            .await
-            .expect_err("the stopped physical connection cannot accept a fresh binding")
-            .err()
-            .expect("typed same-socket rejection"),
-        ConnectionActorError::ConnectionStopping
-    );
+    assert_eq!(controller.handled_h(), 0);
     assert_eq!(inventory.prune_joined(), 1);
 
     let fresh_gate = Arc::new(FlushGate::new());
@@ -1144,27 +1222,16 @@ async fn stopped_transport_rejects_late_handled_completion_without_advancing_h()
             .expect("lease-loss stop joins both pumps"),
         Some(CustodianState::Joined)
     );
-    assert_eq!(
+    assert!(
         controller
             .actor()
             .ask(CompleteHandledInbound(token))
             .send()
             .await
-            .expect_err("late completion is rejected after transport stop")
-            .err()
-            .expect("typed stopped transport rejection"),
-        ConnectionActorError::ConnectionStopping
+            .is_err(),
+        "the stopped actor rejects late completion"
     );
-    assert_eq!(
-        controller
-            .actor()
-            .ask(SnapshotConnection)
-            .send()
-            .await
-            .expect("snapshot confirms no late protocol progress")
-            .handled_h,
-        0
-    );
+    assert_eq!(controller.handled_h(), 0);
     assert_eq!(inventory.prune_joined(), 1);
 }
 
@@ -1300,13 +1367,7 @@ async fn external_stop_signal_waits_for_an_in_progress_completion_gate() {
     );
     assert_eq!(controller.stop_reason(), Some(StopReason::LeaseLost));
     assert_eq!(
-        controller
-            .actor()
-            .ask(SnapshotConnection)
-            .send()
-            .await
-            .expect("snapshot after stop")
-            .handled_h,
+        controller.handled_h(),
         1,
         "completion wins because it already owns the lifecycle gate"
     );
@@ -1351,24 +1412,16 @@ async fn deadline_that_wins_before_completion_keeps_h_unchanged() {
         Some(CustodianState::Joined)
     );
     let _ = release_tx.send(());
-    assert_eq!(
-        timeout(TEST_TIMEOUT, completion)
-            .await
-            .expect("completion returns after the deadline")
-            .expect("completion ask returns")
-            .expect_err("deadline won the lifecycle gate")
-            .err()
-            .expect("typed stopping result"),
-        ConnectionActorError::ConnectionStopping
+    let late_completion = timeout(TEST_TIMEOUT, completion)
+        .await
+        .expect("completion request finishes after the deadline")
+        .expect("completion task joins");
+    assert!(
+        late_completion.is_err(),
+        "the stopped actor rejects late work"
     );
     assert_eq!(
-        controller
-            .actor()
-            .ask(SnapshotConnection)
-            .send()
-            .await
-            .expect("snapshot stopped state")
-            .handled_h,
+        controller.handled_h(),
         0,
         "a stop winner prevents the late handler from advancing h"
     );
@@ -1398,27 +1451,16 @@ async fn pump_initiated_peer_close_wins_the_lifecycle_gate_before_late_completio
         Some(CustodianState::Joined)
     );
     assert_eq!(controller.stop_reason(), Some(StopReason::PeerClosed));
-    assert_eq!(
+    assert!(
         controller
             .actor()
             .ask(CompleteHandledInbound(token))
             .send()
             .await
-            .expect_err("pump-initiated stop rejects late protocol completion")
-            .err()
-            .expect("typed stop rejection"),
-        ConnectionActorError::ConnectionStopping
+            .is_err(),
+        "pump stop kills the actor before late completion can run"
     );
-    assert_eq!(
-        controller
-            .actor()
-            .ask(SnapshotConnection)
-            .send()
-            .await
-            .expect("snapshot after peer stop")
-            .handled_h,
-        0
-    );
+    assert_eq!(controller.handled_h(), 0);
     assert_eq!(inventory.prune_joined(), 1);
 }
 
@@ -1727,6 +1769,7 @@ async fn inbound_permit_stays_held_while_actor_mailbox_is_paused() {
         HANDLED_OPERATION_DEADLINE,
     )
     .await;
+    let retained_actor = controller.actor().clone();
 
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -1763,14 +1806,17 @@ async fn inbound_permit_stays_held_while_actor_mailbox_is_paused() {
         Some(StopReason::InboundOverload),
         "the first item's count and byte permits remain held in the paused mailbox"
     );
-
+    assert_eq!(
+        inventory.len(),
+        1,
+        "the exact inventory slot remains held through actor mailbox cleanup"
+    );
+    assert!(
+        retained_actor.wait_for_shutdown_result().await.is_ok(),
+        "stop kills the paused actor even though an ActorRef is retained"
+    );
     let _ = release_tx.send(());
-    controller
-        .actor()
-        .ask(SnapshotConnection)
-        .send()
-        .await
-        .expect("paused actor resumes and drains its retained item");
+    assert_eq!(inventory.prune_joined(), 1);
 }
 
 #[tokio::test]
@@ -2003,4 +2049,321 @@ async fn failed_reservation_does_not_call_the_connection_pump_factory() {
         first.wait_until_joined().await,
         Some(CustodianState::Joined)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_countable_stanza_keeps_h_behind_a_hole_while_peer_control_progresses() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (effect_started_tx, mut effect_started_rx) = mpsc::unbounded_channel();
+    let (effect_release_tx, effect_release_rx) = watch::channel(false);
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(2, 2048, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        move |effect| {
+            let effect_started = effect_started_tx.clone();
+            let mut release = effect_release_rx.clone();
+            async move {
+                let _ = effect_started.send(effect);
+                loop {
+                    if *release.borrow_and_update() {
+                        return CountableEffectDisposition::Handled;
+                    }
+                    if release.changed().await.is_err() {
+                        return CountableEffectDisposition::Uncertain;
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    send_stanza(&mut peer, "<message><body>slow effect</body></message>").await;
+    let started = timeout(TEST_TIMEOUT, effect_started_rx.recv())
+        .await
+        .expect("typed stanza reaches external effect owner")
+        .expect("effect start signal");
+    assert_eq!(started.sequence.sequence_number(), 1);
+
+    let later = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve later operation behind the running effect");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(later))
+            .send()
+            .await
+            .expect("complete out of order operation"),
+        0,
+        "later handled work cannot advance across the stanza effect hole"
+    );
+
+    send_request(&mut peer).await;
+    assert_eq!(
+        read_ack(&mut peer).await.h,
+        0,
+        "peer control is acknowledged with the pre-hole handled prefix"
+    );
+    assert_eq!(controller.handled_h(), 0);
+
+    effect_release_tx
+        .send(true)
+        .expect("release the synthetic external effect");
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(1))
+            .await
+            .expect("effect completion and actor ask finish"),
+        "effect owner completes the exact current token"
+    );
+    assert_eq!(controller.handled_h(), 2);
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 2);
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn message_presence_iq_are_counted_and_malformed_xml_does_not_reserve_h() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+
+    send_stanza(&mut peer, "not well-formed XML").await;
+    send_stanza(&mut peer, "<message type='chat'><body>m</body></message>").await;
+    send_stanza(&mut peer, "<presence/>").await;
+    send_stanza(
+        &mut peer,
+        "<iq type='get' id='ping'><ping xmlns='urn:xmpp:ping'/></iq>",
+    )
+    .await;
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_effects_completed(3))
+            .await
+            .expect("all three typed stanzas complete"),
+        "message, presence and IQ each cross the countable effect boundary"
+    );
+    assert_eq!(controller.handled_h(), 3);
+
+    send_request(&mut peer).await;
+    assert_eq!(
+        read_ack(&mut peer).await.h,
+        3,
+        "malformed XML did not consume a handled-prefix sequence"
+    );
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_item_limit_fails_closed_when_peer_requests_ack_during_slow_effect() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (effect_started_tx, mut effect_started_rx) = mpsc::unbounded_channel();
+    let (effect_release_tx, effect_release_rx) = watch::channel(false);
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(1, 2048, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        move |effect| {
+            let effect_started = effect_started_tx.clone();
+            let mut release = effect_release_rx.clone();
+            async move {
+                let _ = effect_started.send(effect);
+                loop {
+                    if *release.borrow_and_update() {
+                        return CountableEffectDisposition::Handled;
+                    }
+                    if release.changed().await.is_err() {
+                        return CountableEffectDisposition::Uncertain;
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    send_stanza(&mut peer, "<message><body>held</body></message>").await;
+    let _started = timeout(TEST_TIMEOUT, effect_started_rx.recv())
+        .await
+        .expect("slow stanza enters effect owner")
+        .expect("effect start signal");
+    send_request(&mut peer).await;
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("saturated control ingress stops the connection"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::InboundOverload));
+    assert_eq!(controller.handled_h(), 0);
+    assert!(
+        !controller.wait_for_inbound_forwarded(2).await,
+        "the saturated `<r/>` never reaches the actor and cannot receive a fabricated ACK"
+    );
+    assert_eq!(inventory.len(), 1, "joined exact identity remains indexed");
+    let _ = effect_release_tx.send(true);
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inbound_byte_budget_includes_the_stanza_held_by_a_slow_effect() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (effect_started_tx, mut effect_started_rx) = mpsc::unbounded_channel();
+    let (effect_release_tx, effect_release_rx) = watch::channel(false);
+    let first = message_with_body(&"a".repeat(40));
+    let second = message_with_body(&"b".repeat(20));
+    let byte_limit = first.len() + 1;
+    assert!(second.len() <= byte_limit);
+    assert!(first.len() + second.len() > byte_limit);
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(2, byte_limit, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        move |effect| {
+            let effect_started = effect_started_tx.clone();
+            let mut release = effect_release_rx.clone();
+            async move {
+                let _ = effect_started.send(effect);
+                loop {
+                    if *release.borrow_and_update() {
+                        return CountableEffectDisposition::Handled;
+                    }
+                    if release.changed().await.is_err() {
+                        return CountableEffectDisposition::Uncertain;
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    send_stanza(&mut peer, &first).await;
+    let _started = timeout(TEST_TIMEOUT, effect_started_rx.recv())
+        .await
+        .expect("first stanza enters the effect owner")
+        .expect("effect start signal");
+    send_stanza(&mut peer, &second).await;
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("second item exceeds bytes still held by the first effect"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::InboundOverload));
+    assert_eq!(controller.handled_h(), 0);
+    let _ = effect_release_tx.send(true);
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn effect_owner_loss_during_reserved_admission_stops_without_losing_the_hole() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    controller.pause_effect_admission_for_test(entered_tx, Arc::clone(&barrier));
+
+    send_stanza(&mut peer, "<message><body>race</body></message>").await;
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("actor owns a slot before assigning h")
+        .expect("admission barrier signal");
+    controller.abort_effect_owner_for_test();
+    barrier.release();
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("effect owner loss is observed and pumps/actor are joined"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.handled_h(), 0);
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn failed_or_uncertain_effect_stops_without_advancing_h() {
+    for disposition in [
+        CountableEffectDisposition::Failed,
+        CountableEffectDisposition::Uncertain,
+    ] {
+        let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+        let gate = Arc::new(FlushGate::new());
+        gate.release();
+        let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+            &inventory,
+            test_transport_limits(2, 2048, 4, 256),
+            gate,
+            TEST_TIMEOUT,
+            HANDLED_OPERATION_DEADLINE,
+            move |_| async move { disposition },
+        )
+        .await;
+
+        send_stanza(&mut peer, "<message><body>unknown outcome</body></message>").await;
+        assert_eq!(
+            timeout(TEST_TIMEOUT, controller.wait_until_joined())
+                .await
+                .expect("failed effect stops the exact connection"),
+            Some(CustodianState::Joined)
+        );
+        assert_eq!(controller.handled_h(), 0);
+        assert_eq!(inventory.prune_joined(), 1);
+    }
+}
+
+#[tokio::test]
+async fn oversized_inbound_stanza_is_rejected_before_sequence_reservation() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor_with_inbound_limits_and_effect(
+        &inventory,
+        test_transport_limits(2, 64, 4, 256),
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+        |_| async { CountableEffectDisposition::Handled },
+    )
+    .await;
+    let oversized = message_with_body(&"x".repeat(128));
+    send_stanza(&mut peer, &oversized).await;
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("oversized raw frame exceeds the inbound byte bound"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::InboundOverload));
+    assert_eq!(controller.handled_h(), 0);
+    assert_eq!(inventory.prune_joined(), 1);
 }

@@ -5,14 +5,18 @@
 //! WebSocket loop, perform authentication or publish a registry binding. The
 //! fixture begins with non-resumable XEP-0198 state so it can exercise the
 //! existing handled-prefix tracker and the typed `<r/>` → `<a h='N'/>` path.
+//! Its synthetic effect boundary does not perform production routing or
+//! storage, and the fixture does not preserve parser metadata such as a
+//! message's `xml:lang`; this proves sequencing and custody only.
 
 use super::state::WsConnState;
 use super::supervised_io::{
-    AdmissionError, CustodianInventoryError, CustodianState, IoCustodianHandle,
-    IoCustodianInventory, IoCustodianObserver, QueueItem, ReservedIoStartConfig,
+    AdmissionError, AuxiliaryCleanupGuard, CustodianInventoryError, CustodianState,
+    IoCustodianHandle, IoCustodianInventory, IoCustodianObserver, QueueItem, ReservedIoStartConfig,
     ReservedStartError, StopReason, WriteSender,
 };
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
+use futures::future::BoxFuture;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::mailbox;
 use kameo::message::{Context, Message};
@@ -22,21 +26,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::sleep;
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::stream_management::{SmAck, SmRequest};
+use waddle_xmpp::Stanza;
 
 const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
 
 /// Typed input and output carried by the isolated connection transport.
 /// Serialization stays in the caller's transport sink adapter.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ConnectionWireFrame {
     /// A peer requested an XEP-0198 acknowledgment.
     RequestAcknowledgement(SmRequest),
     /// An XEP-0198 acknowledgment authored by the connection actor.
     Acknowledgement(SmAck),
+    /// A parsed, countable peer stanza plus its raw serialized byte length.
+    /// The dark fixture uses this for sequencing and custody; it does not
+    /// carry all live parser metadata or imply routing parity.
+    CountableStanza {
+        stanza: Arc<Stanza>,
+        wire_bytes: usize,
+    },
+    /// A malformed or non-stanza peer frame retained only long enough for
+    /// the reader's byte bound to reject it. It never consumes an SM sequence.
+    RejectedInbound { wire_bytes: usize },
     /// Transport close marker used by the supervised writer.
     Close,
 }
@@ -48,6 +63,9 @@ impl ConnectionWireFrame {
         match self {
             Self::RequestAcknowledgement(_) => SmRequest::to_xml().len(),
             Self::Acknowledgement(ack) => ack.to_xml().len(),
+            Self::CountableStanza { wire_bytes, .. } | Self::RejectedInbound { wire_bytes } => {
+                *wire_bytes
+            }
             Self::Close => 0,
         }
     }
@@ -57,6 +75,33 @@ impl ConnectionWireFrame {
         matches!(self, Self::Close)
     }
 }
+
+/// Typed disposition returned by the isolated slow external effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountableEffectDisposition {
+    /// External work reached its handled boundary; the actor may complete h.
+    Handled,
+    /// The effect failed definitively; the connection stops with the h hole.
+    Failed,
+    /// The effect's outcome is uncertain; the connection stops with the h hole.
+    Uncertain,
+}
+
+/// Input to the test-only external effect. The token carries the exact
+/// connection, binding, sequence, and nonce generation that completion must
+/// match.
+#[derive(Debug, Clone)]
+pub struct CountableInboundEffect {
+    /// Parsed countable XMPP stanza.
+    pub stanza: Arc<Stanza>,
+    /// Exact actor-issued completion capability.
+    pub sequence: ConnectionActorSequence,
+}
+
+/// Test-only effect runner. The actor never awaits this future.
+pub type CountableStanzaEffect = Arc<
+    dyn Fn(CountableInboundEffect) -> BoxFuture<'static, CountableEffectDisposition> + Send + Sync,
+>;
 
 /// Failure to start the reserved physical pumps for a connection actor.
 #[derive(Debug, thiserror::Error)]
@@ -100,32 +145,148 @@ where
     Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
     FactoryFuture: Future<Output = (R, W)> + Send,
 {
+    let effect_runner: CountableStanzaEffect =
+        Arc::new(|_| Box::pin(async { CountableEffectDisposition::Handled }));
+    start_connection_actor_inner(
+        inventory,
+        node_lease,
+        lifecycle_handoff_deadline,
+        config,
+        effect_runner,
+        factory,
+    )
+    .await
+}
+
+/// Start the same test-only actor with an explicit slow external effect
+/// boundary for parsed countable inbound stanzas.
+pub async fn start_connection_actor_with_effect<
+    R,
+    W,
+    ReadError,
+    WriteError,
+    Size,
+    IsClose,
+    IsSendAfterClose,
+    Factory,
+    FactoryFuture,
+    Effect,
+    EffectFuture,
+>(
+    inventory: &IoCustodianInventory,
+    node_lease: NodeLeaseIdentity,
+    lifecycle_handoff_deadline: Duration,
+    config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
+    factory: Factory,
+    effect: Effect,
+) -> Result<ConnectionActorController, ConnectionActorStartError>
+where
+    R: futures::Stream<Item = Result<ConnectionWireFrame, ReadError>> + Unpin + Send + 'static,
+    W: futures::Sink<ConnectionWireFrame, Error = WriteError> + Unpin + Send + 'static,
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+    Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
+    IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+    FactoryFuture: Future<Output = (R, W)> + Send,
+    Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
+    EffectFuture: Future<Output = CountableEffectDisposition> + Send + 'static,
+{
+    let effect_runner: CountableStanzaEffect = Arc::new(move |input| Box::pin(effect(input)));
+    start_connection_actor_inner(
+        inventory,
+        node_lease,
+        lifecycle_handoff_deadline,
+        config,
+        effect_runner,
+        factory,
+    )
+    .await
+}
+
+async fn start_connection_actor_inner<
+    R,
+    W,
+    ReadError,
+    WriteError,
+    Size,
+    IsClose,
+    IsSendAfterClose,
+    Factory,
+    FactoryFuture,
+>(
+    inventory: &IoCustodianInventory,
+    node_lease: NodeLeaseIdentity,
+    lifecycle_handoff_deadline: Duration,
+    config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
+    effect_runner: CountableStanzaEffect,
+    factory: Factory,
+) -> Result<ConnectionActorController, ConnectionActorStartError>
+where
+    R: futures::Stream<Item = Result<ConnectionWireFrame, ReadError>> + Unpin + Send + 'static,
+    W: futures::Sink<ConnectionWireFrame, Error = WriteError> + Unpin + Send + 'static,
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+    Size: Fn(&ConnectionWireFrame) -> usize + Send + 'static,
+    IsClose: Fn(&ConnectionWireFrame) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+    FactoryFuture: Future<Output = (R, W)> + Send,
+{
     let mut state = WsConnState::new_for_node_lease(node_lease);
     state
         .sm_state
         .enable("dark-connection-actor".to_owned(), false, None);
     let connection_ref = state.connection_ref().clone();
+    let effect_capacity = config.inbound_limits().max_count();
 
     // This is the admission boundary: no factory, pump, or reaper exists
     // until the one physical identity owned by `state` has a slot.
-    let reservation = inventory.reserve(connection_ref.clone())?;
-    let (custodian, outbound, inbound) = reservation.start_with(config, factory).await?;
+    let mut reservation = inventory.reserve(connection_ref.clone())?;
+    let auxiliary_cleanup = reservation.retain_until_auxiliary_cleanup();
+    let (custodian, outbound, inbound) = match reservation.start_with(config, factory).await {
+        Ok(started) => started,
+        Err(error) => {
+            let cleanup_task = tokio::spawn(async {});
+            let _ = inventory.register_auxiliary_task(&connection_ref, cleanup_task);
+            auxiliary_cleanup.complete();
+            return Err(error.into());
+        }
+    };
     let lifecycle = Arc::new(ConnectionActorLifecycle::new());
     let stop_listener_lifecycle = Arc::clone(&lifecycle);
+    let (effect_jobs_tx, effect_jobs_rx) = mpsc::channel(effect_capacity);
+    let (effect_completed_tx, effect_completed_rx) = watch::channel(0usize);
+    let (handled_h_tx, handled_h_rx) = watch::channel(0u32);
+    let effect_owner = Arc::new(EffectOwnerShared {
+        phase: Mutex::new(EffectOwnerPhase::Running),
+        sender: effect_jobs_tx,
+        completed: effect_completed_tx,
+        admission_barrier: Mutex::new(None),
+    });
+    let stop_listener_effects = Arc::clone(&effect_owner);
+    let stop_signal = custodian.stop_signal();
     custodian.set_stop_listener(Arc::new(move |reason| {
         stop_listener_lifecycle.observe_pump_stop(reason);
+        stop_listener_effects.mark_unavailable();
     }));
     let io_control = Arc::new(ConnectionActorIoControl {
         custodian,
         inventory: inventory.clone(),
         connection_ref: connection_ref.clone(),
         lifecycle,
+        stop_signal,
+        effect_owner: Arc::clone(&effect_owner),
+        handled_h_observation: handled_h_tx,
     });
+    let effect_runner_for_owner = Arc::clone(&effect_runner);
     let actor = ConnectionActor::spawn_with_mailbox(
         ConnectionActor {
             state,
             io_control: Arc::clone(&io_control),
             outbound,
+            effect_owner: Arc::clone(&effect_owner),
             lifecycle_handoff_deadline,
             next_handled_nonce: 1,
             handled_operations: HashMap::new(),
@@ -142,29 +303,67 @@ where
     actor.wait_for_startup().await;
 
     let (forwarded_tx, forwarded_rx) = watch::channel(0usize);
+    let mailbox_tracker = Arc::new(MailboxPayloadTracker::new());
     let pump_actor = actor.clone();
+    let forward_tracker = Arc::clone(&mailbox_tracker);
     let input_forwarder = tokio::spawn(async move {
-        forward_inbound_frames(inbound, pump_actor, forwarded_tx).await;
+        forward_inbound_frames(inbound, pump_actor, forward_tracker, forwarded_tx).await;
     });
+    let forwarder_abort = input_forwarder.abort_handle();
+    let effect_owner_task = EffectOwnerTask {
+        receiver: effect_jobs_rx,
+        shared: Arc::clone(&effect_owner),
+        stop_signal: io_control.stop_signal.clone(),
+        actor: actor.downgrade(),
+        io_control: Arc::downgrade(&io_control),
+        effect_runner: effect_runner_for_owner,
+    };
+    let effect_owner_join = tokio::spawn(effect_owner_task.run());
+    let effect_owner_abort = effect_owner_join.abort_handle();
+    let cleanup_task = tokio::spawn(
+        ConnectionActorCleanup {
+            actor: actor.clone(),
+            stop_signal: io_control.stop_signal.clone(),
+            forwarder_abort,
+            input_forwarder,
+            effect_owner: effect_owner_join,
+            effect_shared: Arc::clone(&effect_owner),
+            mailbox_tracker,
+            auxiliary_cleanup,
+        }
+        .run(),
+    );
+    if let Err(error) = inventory.register_auxiliary_task(&connection_ref, cleanup_task) {
+        io_control.request_stop(StopReason::Requested);
+        return Err(error.into());
+    }
 
     Ok(ConnectionActorController {
         actor,
         io_control,
-        _input_forwarder: input_forwarder,
         inbound_forwarded: forwarded_rx,
+        effect_completed: effect_completed_rx,
+        handled_h_observation: handled_h_rx,
+        effect_owner_abort,
     })
 }
 
 async fn forward_inbound_frames(
     mut inbound: mpsc::Receiver<QueueItem<ConnectionWireFrame>>,
     actor: ActorRef<ConnectionActor>,
+    mailbox_tracker: Arc<MailboxPayloadTracker>,
     forwarded: watch::Sender<usize>,
 ) {
     let mut forwarded_count = 0usize;
     while let Some(item) = inbound.recv().await {
-        if matches!(item.value, ConnectionWireFrame::RequestAcknowledgement(_)) {
+        if matches!(
+            &item.value,
+            ConnectionWireFrame::RequestAcknowledgement(_)
+                | ConnectionWireFrame::CountableStanza { .. }
+        ) {
+            let item = TrackedQueueItem::new(item, Arc::clone(&mailbox_tracker));
             if actor
-                .tell(ForwardedRequestAcknowledgement(item))
+                .tell(ForwardedInboundFrame(item))
                 .send()
                 .await
                 .is_err()
@@ -179,11 +378,315 @@ async fn forward_inbound_frames(
     }
 }
 
+struct MailboxPayloadTracker {
+    count: Mutex<usize>,
+    changed: watch::Sender<usize>,
+}
+
+impl MailboxPayloadTracker {
+    fn new() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            count: Mutex::new(0),
+            changed,
+        }
+    }
+
+    fn register(self: &Arc<Self>) -> MailboxPayloadGuard {
+        let mut count = match self.count.lock() {
+            Ok(count) => count,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *count = count.saturating_add(1);
+        self.changed.send_replace(*count);
+        MailboxPayloadGuard {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    fn release(&self) {
+        let mut count = match self.count.lock() {
+            Ok(count) => count,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *count = count.saturating_sub(1);
+        self.changed.send_replace(*count);
+    }
+
+    async fn wait_until_empty(&self) {
+        let mut changed = self.changed.subscribe();
+        loop {
+            if *changed.borrow_and_update() == 0 {
+                return;
+            }
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+struct MailboxPayloadGuard {
+    tracker: Arc<MailboxPayloadTracker>,
+}
+
+impl Drop for MailboxPayloadGuard {
+    fn drop(&mut self) {
+        self.tracker.release();
+    }
+}
+
+struct TrackedQueueItem {
+    item: Option<QueueItem<ConnectionWireFrame>>,
+    _mailbox_payload: MailboxPayloadGuard,
+}
+
+impl TrackedQueueItem {
+    fn new(item: QueueItem<ConnectionWireFrame>, tracker: Arc<MailboxPayloadTracker>) -> Self {
+        Self {
+            item: Some(item),
+            _mailbox_payload: tracker.register(),
+        }
+    }
+}
+
+struct EffectJob {
+    item: QueueItem<ConnectionWireFrame>,
+    token: ConnectionActorSequence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectOwnerPhase {
+    Running,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectOwnerAdmissionError {
+    Full,
+    Closed,
+    Unavailable,
+}
+
+struct EffectOwnerShared {
+    phase: Mutex<EffectOwnerPhase>,
+    sender: mpsc::Sender<EffectJob>,
+    completed: watch::Sender<usize>,
+    admission_barrier: Mutex<Option<EffectAdmissionBarrier>>,
+}
+
+struct EffectAdmissionBarrier {
+    entered: oneshot::Sender<()>,
+    barrier: Arc<ConnectionActorGateBarrier>,
+}
+
+struct EffectOwnerAdmission<'a> {
+    _phase: MutexGuard<'a, EffectOwnerPhase>,
+    permit: mpsc::OwnedPermit<EffectJob>,
+}
+
+impl EffectOwnerAdmission<'_> {
+    fn send(self, job: EffectJob) {
+        let Self { _phase, permit } = self;
+        permit.send(job);
+        drop(_phase);
+    }
+}
+
+impl EffectOwnerShared {
+    fn try_reserve(&self) -> Result<EffectOwnerAdmission<'_>, EffectOwnerAdmissionError> {
+        let phase = match self.phase.lock() {
+            Ok(phase) => phase,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *phase != EffectOwnerPhase::Running {
+            return Err(EffectOwnerAdmissionError::Unavailable);
+        }
+        let permit = self
+            .sender
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => EffectOwnerAdmissionError::Full,
+                mpsc::error::TrySendError::Closed(_) => EffectOwnerAdmissionError::Closed,
+            })?;
+        Ok(EffectOwnerAdmission {
+            _phase: phase,
+            permit,
+        })
+    }
+
+    fn mark_unavailable(&self) {
+        let mut phase = match self.phase.lock() {
+            Ok(phase) => phase,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *phase = EffectOwnerPhase::Unavailable;
+    }
+
+    fn record_completed(&self) {
+        let next = self.completed.borrow().saturating_add(1);
+        self.completed.send_replace(next);
+    }
+
+    fn take_admission_barrier(&self) -> Option<EffectAdmissionBarrier> {
+        let mut barrier = match self.admission_barrier.lock() {
+            Ok(barrier) => barrier,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        barrier.take()
+    }
+}
+
+struct EffectOwnerTask {
+    receiver: mpsc::Receiver<EffectJob>,
+    shared: Arc<EffectOwnerShared>,
+    stop_signal: super::supervised_io::StopSignal,
+    actor: kameo::actor::WeakActorRef<ConnectionActor>,
+    io_control: std::sync::Weak<ConnectionActorIoControl>,
+    effect_runner: CountableStanzaEffect,
+}
+
+impl EffectOwnerTask {
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.stop_signal.cancelled() => break,
+                job = self.receiver.recv() => match job {
+                    Some(job) => {
+                        Self::run_effect_job(
+                            job,
+                            Arc::clone(&self.shared),
+                            self.stop_signal.clone(),
+                            self.actor.clone(),
+                            self.io_control.clone(),
+                            Arc::clone(&self.effect_runner),
+                        ).await;
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        // Serialize producer closure with actor admission before closing the
+        // receiver. A pre-acquired permit can no longer submit after this gate
+        // changes, and Drop invokes stop only after releasing this mutex.
+        self.shared.mark_unavailable();
+        self.receiver.close();
+        while let Some(job) = self.receiver.recv().await {
+            drop(job);
+        }
+    }
+
+    async fn run_effect_job(
+        job: EffectJob,
+        shared: Arc<EffectOwnerShared>,
+        stop_signal: super::supervised_io::StopSignal,
+        actor: kameo::actor::WeakActorRef<ConnectionActor>,
+        io_control: std::sync::Weak<ConnectionActorIoControl>,
+        effect_runner: CountableStanzaEffect,
+    ) {
+        let stanza = match &job.item.value {
+            ConnectionWireFrame::CountableStanza { stanza, .. } => Arc::clone(stanza),
+            _ => {
+                if let Some(io_control) = io_control.upgrade() {
+                    io_control.request_stop(StopReason::Requested);
+                }
+                drop(job);
+                shared.record_completed();
+                return;
+            }
+        };
+        let effect = CountableInboundEffect {
+            stanza,
+            sequence: job.token.clone(),
+        };
+        let disposition = tokio::select! {
+            biased;
+            _ = stop_signal.cancelled() => None,
+            disposition = (effect_runner)(effect) => Some(disposition),
+        };
+
+        match disposition {
+            Some(CountableEffectDisposition::Handled) => {
+                let Some(actor) = actor.upgrade() else {
+                    if let Some(io_control) = io_control.upgrade() {
+                        io_control.request_stop(StopReason::Requested);
+                    }
+                    drop(job);
+                    shared.record_completed();
+                    return;
+                };
+                let completion = actor.ask(CompleteHandledInbound(job.token.clone())).send();
+                let accepted = tokio::select! {
+                    biased;
+                    _ = stop_signal.cancelled() => false,
+                    result = completion => result.is_ok(),
+                };
+                if !accepted {
+                    if let Some(io_control) = io_control.upgrade() {
+                        io_control.request_stop(StopReason::Requested);
+                    }
+                }
+            }
+            Some(CountableEffectDisposition::Failed | CountableEffectDisposition::Uncertain)
+            | None => {
+                if let Some(io_control) = io_control.upgrade() {
+                    io_control.request_stop(StopReason::Requested);
+                }
+            }
+        }
+        drop(job);
+        shared.record_completed();
+    }
+}
+
+impl Drop for EffectOwnerTask {
+    fn drop(&mut self) {
+        // Drop runs before the receiver field is destroyed. Marking the shared
+        // admission phase first makes every later permit submission fail or
+        // become a stopped, unhandled hole.
+        self.shared.mark_unavailable();
+        if let Some(io_control) = self.io_control.upgrade() {
+            io_control.request_stop(StopReason::Requested);
+        }
+    }
+}
+
+struct ConnectionActorCleanup {
+    actor: ActorRef<ConnectionActor>,
+    stop_signal: super::supervised_io::StopSignal,
+    forwarder_abort: AbortHandle,
+    input_forwarder: JoinHandle<()>,
+    effect_owner: JoinHandle<()>,
+    effect_shared: Arc<EffectOwnerShared>,
+    mailbox_tracker: Arc<MailboxPayloadTracker>,
+    auxiliary_cleanup: AuxiliaryCleanupGuard,
+}
+
+impl ConnectionActorCleanup {
+    async fn run(self) {
+        self.stop_signal.cancelled().await;
+        self.actor.kill();
+        self.forwarder_abort.abort();
+        self.effect_shared.mark_unavailable();
+        let _ = self.input_forwarder.await;
+        let _ = self.effect_owner.await;
+        let _ = self.actor.wait_for_shutdown_result().await;
+        self.mailbox_tracker.wait_until_empty().await;
+        self.auxiliary_cleanup.complete();
+    }
+}
+
 struct ConnectionActorIoControl {
     custodian: IoCustodianHandle,
     inventory: IoCustodianInventory,
     connection_ref: ConnectionRef,
     lifecycle: Arc<ConnectionActorLifecycle>,
+    stop_signal: super::supervised_io::StopSignal,
+    effect_owner: Arc<EffectOwnerShared>,
+    handled_h_observation: watch::Sender<u32>,
 }
 
 impl ConnectionActorIoControl {
@@ -362,6 +865,7 @@ pub struct ConnectionActor {
     state: WsConnState,
     io_control: Arc<ConnectionActorIoControl>,
     outbound: WriteSender<ConnectionWireFrame>,
+    effect_owner: Arc<EffectOwnerShared>,
     lifecycle_handoff_deadline: Duration,
     next_handled_nonce: u64,
     handled_operations: HashMap<ConnectionActorOperationId, HandledOperation>,
@@ -419,8 +923,10 @@ impl ConnectionActor {
 pub struct ConnectionActorController {
     actor: ActorRef<ConnectionActor>,
     io_control: Arc<ConnectionActorIoControl>,
-    _input_forwarder: JoinHandle<()>,
     inbound_forwarded: watch::Receiver<usize>,
+    effect_completed: watch::Receiver<usize>,
+    handled_h_observation: watch::Receiver<u32>,
+    effect_owner_abort: AbortHandle,
 }
 
 impl ConnectionActorController {
@@ -449,6 +955,11 @@ impl ConnectionActorController {
         self.io_control.custodian.stop_reason()
     }
 
+    /// Last actor-published handled-prefix count, retained after actor stop.
+    pub fn handled_h(&self) -> u32 {
+        *self.handled_h_observation.borrow()
+    }
+
     /// Wait for the indexed custodian to join every pump it started.
     pub async fn wait_until_joined(&self) -> Option<CustodianState> {
         let observer = self.observer()?;
@@ -470,6 +981,39 @@ impl ConnectionActorController {
         }
     }
 
+    /// Wait until the serialized effect owner has completed this many jobs,
+    /// including the actor completion request for handled outcomes.
+    pub async fn wait_for_effects_completed(&self, count: usize) -> bool {
+        let mut completed = self.effect_completed.clone();
+        loop {
+            if *completed.borrow_and_update() >= count {
+                return true;
+            }
+            if completed.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    /// Inject abrupt effect-owner loss at the bounded admission handoff.
+    pub fn abort_effect_owner_for_test(&self) {
+        self.effect_owner_abort.abort();
+    }
+
+    /// Pause one actor admission after a work slot is reserved but before the
+    /// handled sequence is assigned or the job is submitted.
+    pub fn pause_effect_admission_for_test(
+        &self,
+        entered: oneshot::Sender<()>,
+        barrier: Arc<ConnectionActorGateBarrier>,
+    ) {
+        let mut admission_barrier = match self.io_control.effect_owner.admission_barrier.lock() {
+            Ok(admission_barrier) => admission_barrier,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *admission_barrier = Some(EffectAdmissionBarrier { entered, barrier });
+    }
+
     /// Wait until a pump or control caller enters the shared StopSignal
     /// callback. This synchronization point is for lifecycle race tests.
     pub async fn wait_for_stop_signal_callbacks(&self, count: u64) -> bool {
@@ -487,11 +1031,10 @@ impl ConnectionActorController {
 
 impl Drop for ConnectionActorController {
     fn drop(&mut self) {
-        // Controller retirement is a stop request, never join proof. Abort the
-        // forwarding adapter so it cannot keep the actor address alive while
-        // the independently indexed custodian stops and joins its pumps.
+        // The independently indexed cleanup task kills the retained actor,
+        // aborts and joins the forwarder, joins the serialized effect owner,
+        // and observes mailbox payload drops.
         self.io_control.request_stop(StopReason::Requested);
-        self._input_forwarder.abort();
     }
 }
 
@@ -612,6 +1155,9 @@ pub enum ConnectionActorError {
     /// Local completion-token nonce cannot safely advance further.
     #[error("handled completion token nonce is exhausted")]
     SequenceNonceExhausted,
+    /// Pump-owned operation identifier source is exhausted.
+    #[error("handled operation identifier source is exhausted")]
+    OperationIdExhausted,
     /// Caller replayed or delivered an unseen operation ID out of order.
     #[error("handled operation ID is not strictly increasing")]
     OperationIdNotIncreasing,
@@ -685,13 +1231,24 @@ impl ConnectionActor {
         &mut self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorSequence, ConnectionActorError> {
-        let mut lifecycle = self.io_control.lifecycle.lock_running()?;
+        let lifecycle_owner = Arc::clone(&self.io_control.lifecycle);
+        let mut lifecycle = lifecycle_owner.lock_running()?;
+        self.reserve_handled_operation_locked(operation_id, &mut lifecycle, true)
+    }
+
+    fn reserve_handled_operation_locked(
+        &mut self,
+        operation_id: ConnectionActorOperationId,
+        lifecycle: &mut ConnectionActorLifecycleGuard<'_>,
+        caller_operation: bool,
+    ) -> Result<ConnectionActorSequence, ConnectionActorError> {
         if let Some(operation) = self.handled_operations.get(&operation_id) {
             return Ok(operation.token.clone());
         }
-        if self
-            .highest_handled_operation_id
-            .is_some_and(|highest| operation_id.0 <= highest)
+        if caller_operation
+            && self
+                .highest_handled_operation_id
+                .is_some_and(|highest| operation_id.0 <= highest)
         {
             return Err(ConnectionActorError::OperationIdNotIncreasing);
         }
@@ -732,8 +1289,84 @@ impl ConnectionActor {
             },
         );
         self.next_handled_nonce = next_nonce;
-        self.highest_handled_operation_id = Some(operation_id.0);
+        if caller_operation {
+            self.highest_handled_operation_id = Some(operation_id.0);
+        }
         Ok(token)
+    }
+
+    fn admit_countable_inbound(&mut self, mut item: TrackedQueueItem) {
+        let Some(queue_item) = item.item.as_ref() else {
+            return;
+        };
+        if !matches!(
+            &queue_item.value,
+            ConnectionWireFrame::CountableStanza { .. }
+        ) {
+            return;
+        }
+
+        let lifecycle_owner = Arc::clone(&self.io_control.lifecycle);
+        let mut lifecycle = match lifecycle_owner.lock_running() {
+            Ok(lifecycle) => lifecycle,
+            Err(_) => return,
+        };
+        if !self.state.sm_state.enabled {
+            drop(lifecycle);
+            return;
+        }
+        let effect_owner = Arc::clone(&self.effect_owner);
+        let admission = match effect_owner.try_reserve() {
+            Ok(admission) => admission,
+            Err(error) => {
+                drop(lifecycle);
+                if error != EffectOwnerAdmissionError::Unavailable {
+                    self.io_control.request_stop(StopReason::InboundOverload);
+                }
+                return;
+            }
+        };
+        if let Some(barrier) = effect_owner.take_admission_barrier() {
+            barrier.barrier.wait(barrier.entered);
+        }
+        let operation_id = match ConnectionActorOperationId::fresh() {
+            Some(operation_id) => operation_id,
+            None => {
+                drop(admission);
+                drop(lifecycle);
+                self.io_control.request_stop(StopReason::InboundOverload);
+                return;
+            }
+        };
+        let token = match self.reserve_handled_operation_locked(operation_id, &mut lifecycle, false)
+        {
+            Ok(token) => token,
+            Err(error) => {
+                drop(admission);
+                drop(lifecycle);
+                if matches!(
+                    error,
+                    ConnectionActorError::HandledInboundFull
+                        | ConnectionActorError::SequenceNonceExhausted
+                ) {
+                    self.io_control.request_stop(StopReason::InboundOverload);
+                }
+                return;
+            }
+        };
+        let Some(queue_item) = item.item.take() else {
+            drop(admission);
+            drop(lifecycle);
+            self.io_control.request_stop(StopReason::Requested);
+            return;
+        };
+        admission.send(EffectJob {
+            item: queue_item,
+            token,
+        });
+        drop(lifecycle);
+        // The actor mailbox envelope is gone, while its QueueItem and both
+        // permits now remain with the sequential effect owner.
     }
 }
 
@@ -931,7 +1564,11 @@ impl ConnectionActor {
                 operation.expiry_task.abort();
             }
         }
-        Ok(self.state.sm_state.inbound_count())
+        let handled_h = self.state.sm_state.inbound_count();
+        self.io_control
+            .handled_h_observation
+            .send_replace(handled_h);
+        Ok(handled_h)
     }
 }
 
@@ -960,6 +1597,7 @@ impl Message<SeedInboundCounterForTest> for ConnectionActor {
         self.handled_operations.clear();
         self.state.sm_inbound_completion.reset();
         self.state.sm_state.inbound_count = msg.0;
+        self.io_control.handled_h_observation.send_replace(msg.0);
         Ok(())
     }
 }
@@ -983,23 +1621,31 @@ impl Message<RequestAcknowledgement> for ConnectionActor {
     }
 }
 
-/// Forward one inbound transport frame while retaining its count and byte
-/// permits through actor mailbox waiting and handling.
-pub struct ForwardedRequestAcknowledgement(QueueItem<ConnectionWireFrame>);
+/// Forward one accepted inbound transport item while retaining its count and
+/// byte permits through actor mailbox waiting and handling.
+pub struct ForwardedInboundFrame(TrackedQueueItem);
 
-impl Message<ForwardedRequestAcknowledgement> for ConnectionActor {
+impl Message<ForwardedInboundFrame> for ConnectionActor {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        msg: ForwardedRequestAcknowledgement,
+        msg: ForwardedInboundFrame,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let item = msg.0;
-        if matches!(item.value, ConnectionWireFrame::RequestAcknowledgement(_)) {
+        let tracked = msg.0;
+        let request_acknowledgement = tracked.item.as_ref().is_some_and(|item| {
+            matches!(&item.value, ConnectionWireFrame::RequestAcknowledgement(_))
+        });
+        let countable_stanza = tracked
+            .item
+            .as_ref()
+            .is_some_and(|item| matches!(&item.value, ConnectionWireFrame::CountableStanza { .. }));
+        if request_acknowledgement {
             let _ = self.enqueue_acknowledgement();
+        } else if countable_stanza {
+            self.admit_countable_inbound(tracked);
         }
-        drop(item);
     }
 }
 
