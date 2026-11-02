@@ -457,7 +457,7 @@ async fn check_marker(
                               ) a WHERE a.grantee <> c.relowner)
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
                               CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) a
-                              WHERE col.attrelid = c.oid AND col.attnum > 0
+                              WHERE col.attrelid = c.oid
                                 AND a.grantee <> c.relowner)
            FROM pg_catalog.pg_class c
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace

@@ -458,6 +458,7 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
         for (privileges, grant_option) in [
             ("INSERT, UPDATE, DELETE", ""),
             ("SELECT", " WITH GRANT OPTION"),
+            ("SELECT (tableoid)", " WITH GRANT OPTION"),
             ("UPDATE (checksum)", " WITH GRANT OPTION"),
             ("INSERT (version, checksum)", ""),
         ] {
@@ -480,6 +481,23 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
                     assert_eq!(sqlx::query(&statement).execute(&mut *write_tx).await.expect("outsider marker write").rows_affected(), 1);
                 }
                 write_tx.rollback().await.expect("discard outsider writes");
+            }
+            if role == &outsider && privileges == "SELECT (tableoid)" {
+                sqlx::query(&format!(
+                    "SELECT tableoid FROM {}.waddle_epoch_transition_lab_marker",
+                    fixture.schema
+                ))
+                .fetch_all(&mut outsider_login)
+                .await
+                .expect("fourth login can read the granted system column");
+                let grantable: bool = sqlx::query_scalar(
+                    "SELECT pg_catalog.has_column_privilege(current_user, $1, 'tableoid', 'SELECT WITH GRANT OPTION')",
+                )
+                .bind(format!("{}.waddle_epoch_transition_lab_marker", fixture.schema))
+                .fetch_one(&mut outsider_login)
+                .await
+                .expect("system-column grant option");
+                assert!(grantable);
             }
             assert!(
                 matches!(

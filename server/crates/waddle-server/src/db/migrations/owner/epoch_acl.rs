@@ -661,7 +661,7 @@ async fn check_acl(
                    THEN pg_catalog.has_column_privilege(r.oid, c.oid, 'id', 'UPDATE')
                    ELSE NOT pg_catalog.has_any_column_privilege(r.oid, c.oid, 'UPDATE') END)
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
-                              WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+                              WHERE a.attrelid = c.oid AND a.attnum <> 0 AND NOT a.attisdropped
                                 AND (a.attname <> 'id' OR ? = 0)
                                 AND pg_catalog.has_column_privilege(r.oid, c.oid, a.attnum, 'UPDATE'))
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
@@ -671,7 +671,7 @@ async fn check_acl(
                                     AND (a.is_grantable OR a.privilege_type <> 'SELECT')))
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
                               CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) a
-                              WHERE col.attrelid = c.oid AND col.attnum > 0
+                              WHERE col.attrelid = c.oid
                                 AND (a.grantee = 0 OR (a.grantee = r.oid AND
                                     (a.is_grantable OR (a.privilege_type <> 'SELECT' AND NOT
                                         (? <> 0 AND col.attname = 'id' AND a.privilege_type = 'UPDATE'))))))

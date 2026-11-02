@@ -47,6 +47,65 @@ async fn inspect(fixture: &Fixture) -> Result<DarkEpochAclStage, DarkMigrationOw
     .await
 }
 
+async fn assert_system_column_acls_rejected(fixture: &Fixture, stage: DarkEpochAclStage) {
+    let table = format!("{}.ingress_protocol_epoch", fixture.schema);
+    for (grant, revoke) in [
+        (
+            format!("GRANT SELECT (tableoid) ON {table} TO PUBLIC"),
+            format!("REVOKE SELECT (tableoid) ON {table} FROM PUBLIC"),
+        ),
+        (
+            format!("GRANT UPDATE (tableoid) ON {table} TO {}", fixture.runtime),
+            format!(
+                "REVOKE UPDATE (tableoid) ON {table} FROM {}",
+                fixture.runtime
+            ),
+        ),
+        (
+            format!(
+                "GRANT UPDATE (tableoid) ON {table} TO {} WITH GRANT OPTION",
+                fixture.runtime
+            ),
+            format!(
+                "REVOKE UPDATE (tableoid) ON {table} FROM {}",
+                fixture.runtime
+            ),
+        ),
+        (
+            format!(
+                "GRANT SELECT (tableoid) ON {table} TO {} WITH GRANT OPTION",
+                fixture.runtime
+            ),
+            format!(
+                "REVOKE SELECT (tableoid) ON {table} FROM {}",
+                fixture.runtime
+            ),
+        ),
+    ] {
+        admin(fixture, &grant).await;
+        let (attnum, has_acl): (i16, bool) = sqlx::query_as(
+            "SELECT attnum, attacl IS NOT NULL FROM pg_catalog.pg_attribute \
+             WHERE attrelid = pg_catalog.to_regclass($1) AND attname = 'tableoid'",
+        )
+        .bind(&table)
+        .fetch_one(&fixture.admin)
+        .await
+        .expect("observe system-column grant");
+        assert_eq!(attnum, -6);
+        assert!(has_acl, "no system-column ACL after {grant}");
+        assert!(
+            matches!(inspect(fixture).await, Err(DarkMigrationOwnerError::Roles)),
+            "accepted {grant} at {stage:?}"
+        );
+        admin(fixture, &revoke).await;
+        assert_eq!(
+            inspect(fixture).await.expect("restored system-column ACL"),
+            stage,
+            "after {revoke}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn exact_guard_stages_have_distinct_effective_acl_and_real_login_behavior() {
     let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
@@ -63,6 +122,7 @@ async fn exact_guard_stages_have_distinct_effective_acl_and_real_login_behavior(
         inspect(&fixture).await.expect("V1009 observation"),
         DarkEpochAclStage::V1009EpochZero
     );
+    assert_system_column_acls_rejected(&fixture, DarkEpochAclStage::V1009EpochZero).await;
     assert!(matches!(
         run_dark_postgres_owner(&fixture.owner_options, &fixture.config()).await,
         Err(DarkMigrationOwnerError::Roles)
@@ -159,6 +219,7 @@ async fn exact_guard_stages_have_distinct_effective_acl_and_real_login_behavior(
         inspect(&fixture).await.expect("relation-guard observation"),
         DarkEpochAclStage::RelationGuardEpochZero
     );
+    assert_system_column_acls_rejected(&fixture, DarkEpochAclStage::RelationGuardEpochZero).await;
     let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
         .await
         .expect("runtime login");
