@@ -1380,6 +1380,270 @@ async fn restricted_attested_runtime_verifies_lineage_without_control_system_gra
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
+async fn inbox_runtime_attach_checks_attested_read_only_schema() {
+    use waddle_server::inbox::{
+        bootstrap_inbox_owner_schema, DatabaseInboxStorage, InboxRuntimeAttachError,
+    };
+    use waddle_xmpp::inbox::storage::InboxStorage;
+
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let owner = Database::from_config(
+        "inbox owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
+    )
+    .await
+    .expect("owner connection");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(owner.clone()).await,
+        Err(InboxRuntimeAttachError::AttestedPostgresPoolRequired)
+    ));
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install physical attestor");
+    let attested = attested_pool(
+        fixture.runtime_options.clone(),
+        config.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("restricted attested pool");
+    let pool = waddle_server::test_support::database_pool_from_attested_postgres_pool(
+        "inbox runtime",
+        attested,
+        1,
+        1,
+    )
+    .await
+    .expect("main and ingress lanes");
+    let runtime = pool.global().clone();
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(pool.ingress()).await,
+        Err(InboxRuntimeAttachError::MainLaneRequired)
+    ));
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            ..
+        })
+    ));
+    bootstrap_inbox_owner_schema(&owner)
+        .await
+        .expect("owner provisions inbox schema");
+    for table in ["inbox_entries", "groupchat_notification_recovery"] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{table} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant inbox runtime reads");
+    }
+    let owner_guard = owner.guard().await.expect("owner checkout");
+    owner_guard
+        .execute(
+            "INSERT INTO inbox_entries \
+             (user_jid, partner_jid, kind, last_stanza_id, last_updated) \
+             VALUES ('alice@example.test', 'bob@example.test', 'direct', 'stanza-1', 1)",
+            (),
+        )
+        .await
+        .expect("owner seeds inbox entry");
+    drop(owner_guard);
+    let guard = runtime.guard().await.expect("restricted checkout");
+    assert!(
+        guard
+            .execute("CREATE TABLE forbidden_inbox_ddl (id INTEGER)", ())
+            .await
+            .is_err(),
+        "runtime login cannot create schema objects"
+    );
+    drop(guard);
+    let storage = DatabaseInboxStorage::attach_existing(runtime.clone())
+        .await
+        .expect("attach owner-prepared inbox without DDL");
+    let user = "alice@example.test".parse().expect("valid user JID");
+    let entries = storage.list(&user).await.expect("inbox read");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].partner.to_string(), "bob@example.test");
+    drop(storage);
+
+    sqlx::query(&format!(
+        "DROP INDEX {}.idx_inbox_entries_user_updated",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove required index");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::MissingIndex {
+            table: "inbox_entries",
+            index: "idx_inbox_entries_user_updated"
+        })
+    ));
+    let missing: bool = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.to_regclass('{}.idx_inbox_entries_user_updated') IS NULL",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect missing index");
+    assert!(missing, "runtime attachment must not recreate the index");
+    bootstrap_inbox_owner_schema(&owner)
+        .await
+        .expect("owner repairs index");
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries DROP COLUMN call_duration",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove required column");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            ..
+        })
+    ));
+    let missing: bool = sqlx::query_scalar(&format!(
+        "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = '{}' AND table_name = 'inbox_entries' \
+           AND column_name = 'call_duration')",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect missing column");
+    assert!(missing, "runtime attachment must not add the column");
+    bootstrap_inbox_owner_schema(&owner)
+        .await
+        .expect("owner repairs column");
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ALTER COLUMN last_updated TYPE INTEGER",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore legacy timestamp width");
+    // A reused SQLx connection can reject the old prepared projection before
+    // the catalog check. Either path must refuse attachment.
+    match DatabaseInboxStorage::attach_existing(runtime.clone()).await {
+        Err(InboxRuntimeAttachError::InvalidColumn {
+            table: "inbox_entries",
+            column: "last_updated",
+            ..
+        }) => {}
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            source: DatabaseError::Internal(sqlx::Error::Database(error)),
+        }) if error.code().as_deref() == Some("0A000") => {}
+        Err(error) => panic!("unexpected timestamp-width error: {error:?}"),
+        Ok(_) => panic!("legacy timestamp width must refuse attachment"),
+    }
+    let fresh_pool = attested_pool(
+        fixture.runtime_options.clone(),
+        config,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("fresh attested connection after owner DDL");
+    let fresh_database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "fresh inbox runtime",
+        fresh_pool,
+    );
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(fresh_database.clone()).await,
+        Err(InboxRuntimeAttachError::InvalidColumn {
+            table: "inbox_entries",
+            column: "last_updated",
+            ..
+        })
+    ));
+    drop(fresh_database);
+    bootstrap_inbox_owner_schema(&owner)
+        .await
+        .expect("owner widens timestamp");
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}.groupchat_notification_recovery ALTER COLUMN message_key DROP NOT NULL",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("weaken recovery message key");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::InvalidColumn {
+            table: "groupchat_notification_recovery",
+            column: "message_key",
+            ..
+        })
+    ));
+    sqlx::query(&format!(
+        "ALTER TABLE {}.groupchat_notification_recovery ALTER COLUMN message_key SET NOT NULL",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore recovery message key");
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries DROP CONSTRAINT inbox_entries_pkey",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove inbox primary key");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::InvalidPrimaryKey {
+            table: "inbox_entries"
+        })
+    ));
+    sqlx::query(&format!(
+        "ALTER TABLE {}.inbox_entries ADD PRIMARY KEY (user_jid, partner_jid, thread_id)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore inbox primary key");
+
+    sqlx::query(&format!(
+        "REVOKE SELECT ON {}.inbox_entries FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke required relation read");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(runtime.clone()).await,
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            ..
+        })
+    ));
+
+    drop(runtime);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
 async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_capacity() {
     let _serial = CATALOG_GRANT_LOCK.lock().await;
     let Some(url) = test_url() else { return };

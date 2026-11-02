@@ -82,11 +82,25 @@ impl From<InboxDecodeError> for InboxStorageError {
 }
 
 impl DatabaseInboxStorage {
-    /// Share the ingress database for transactional projections and their reads.
+    /// Share the ingress database for transactional projections and their reads,
+    /// running the existing owner-side schema bootstrap first.
     pub async fn from_database(db: Database) -> Result<Self, InboxStorageError> {
         let storage = Self { db };
         schema::bootstrap_schema_owner(&storage.db).await?;
         Ok(storage)
+    }
+
+    /// Attach to an already owner-prepared inbox without running schema DDL.
+    /// PostgreSQL requires the main lane of a physically attested pool; SQLite
+    /// accepts the caller's existing trusted database. The snapshot checks
+    /// required columns, primary keys and named indexes, but not index
+    /// definitions or completion of the owner job. It does not establish
+    /// identity provenance, all grants, or future schema state. SQLite's
+    /// temporary-shadow check covers only the connection used for this check.
+    /// This dark API is not startup wiring.
+    pub async fn attach_existing(db: Database) -> Result<Self, super::InboxRuntimeAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(Self { db })
     }
 
     pub fn database(&self) -> Database {
