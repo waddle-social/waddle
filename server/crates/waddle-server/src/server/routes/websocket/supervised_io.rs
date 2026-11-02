@@ -545,6 +545,7 @@ struct CustodianClient {
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
+    startup_completion_finished: Arc<AtomicBool>,
 }
 
 /// Observation-only view of custodian state that does not keep control alive.
@@ -554,6 +555,7 @@ pub struct IoCustodianObserver {
     state: watch::Receiver<CustodianState>,
     summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
+    startup_completion_finished: Arc<AtomicBool>,
 }
 
 /// Refusal to retain an observation in the bounded physical-connection index.
@@ -962,6 +964,7 @@ impl IoCustodianHandle {
             state: self.client.state.clone(),
             summary: self.client.summary.clone(),
             cleanup_pending_published: self.client.cleanup_pending_published.clone(),
+            startup_completion_finished: self.client.startup_completion_finished.clone(),
         }
     }
 
@@ -1000,6 +1003,13 @@ impl IoCustodianObserver {
     /// Whether this custodian ever published `CleanupPending`.
     pub fn cleanup_pending_was_published(&self) -> bool {
         self.cleanup_pending_published.load(Ordering::Acquire)
+    }
+
+    /// Whether reserved startup has relinquished any unstarted socket halves.
+    /// Ordinary, already-started custodians report true because there is no
+    /// reserved-start handoff left to complete.
+    pub fn startup_completion_is_finished(&self) -> bool {
+        self.startup_completion_finished.load(Ordering::Acquire)
     }
 
     /// Terminal outcomes become available after all started tasks have joined.
@@ -1061,6 +1071,7 @@ where
     let custodian_summary = summary.clone();
     let cleanup_pending_published = Arc::new(AtomicBool::new(false));
     let custodian_cleanup_pending_published = cleanup_pending_published.clone();
+    let startup_completion_finished = Arc::new(AtomicBool::new(true));
 
     tokio::spawn(run_io_custodian(
         supervisor,
@@ -1068,6 +1079,7 @@ where
         state_tx,
         custodian_summary,
         custodian_cleanup_pending_published,
+        None,
     ));
 
     IoCustodianHandle {
@@ -1079,6 +1091,7 @@ where
             state: state_rx,
             summary,
             cleanup_pending_published,
+            startup_completion_finished,
         }),
     }
 }
@@ -1089,6 +1102,7 @@ async fn run_io_custodian<ReadError, WriteError>(
     state_tx: watch::Sender<CustodianState>,
     custodian_summary: Arc<Mutex<Option<CustodianSummary>>>,
     cleanup_pending_published: Arc<AtomicBool>,
+    startup_finished: Option<watch::Receiver<bool>>,
 ) where
     ReadError: Send + 'static,
     WriteError: Send + 'static,
@@ -1135,6 +1149,9 @@ async fn run_io_custodian<ReadError, WriteError>(
         Some(result) => result,
         None => supervisor.outbound.join().await,
     };
+    if let Some(mut startup_finished) = startup_finished {
+        wait_for_startup_completion(&mut startup_finished).await;
+    }
     let joined = supervisor.joined(inbound, outbound);
     let summary = CustodianSummary {
         connection_ref: joined.connection_ref.clone(),
@@ -1160,6 +1177,7 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     inbound_owner_rx: oneshot::Receiver<JoinHandle<InboundExit<ReadError>>>,
     outbound_owner_rx: oneshot::Receiver<JoinHandle<OutboundExit<WriteError>>>,
     commit_rx: oneshot::Receiver<()>,
+    startup_finished: watch::Receiver<bool>,
     ready_tx: oneshot::Sender<()>,
     inbound_start_tx: oneshot::Sender<()>,
     outbound_start_tx: oneshot::Sender<()>,
@@ -1171,27 +1189,46 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     cleanup_pending_published: Arc<AtomicBool>,
 }
 
-/// Lets the fallback monitor wait until cancellation or panic has dropped all
-/// remaining startup handoffs before deciding inventory capacity.
-struct StartupCompletionGuard(Option<oneshot::Sender<()>>);
+/// Completes startup only after the prepared reader and writer futures have
+/// dropped or moved into their independently owned pump tasks. This is the
+/// final `PreparedIo` field so its signal follows any unstarted halves' Drop.
+struct StartupCompletionSignal {
+    sender: Option<watch::Sender<bool>>,
+    finished: Arc<AtomicBool>,
+}
 
-impl StartupCompletionGuard {
-    fn new(completed: oneshot::Sender<()>) -> Self {
-        Self(Some(completed))
+impl StartupCompletionSignal {
+    fn new(completed: watch::Sender<bool>, finished: Arc<AtomicBool>) -> Self {
+        Self {
+            sender: Some(completed),
+            finished,
+        }
     }
 }
 
-impl Drop for StartupCompletionGuard {
+impl Drop for StartupCompletionSignal {
     fn drop(&mut self) {
-        if let Some(completed) = self.0.take() {
-            let _ = completed.send(());
+        if let Some(completed) = self.sender.take() {
+            completed.send_replace(true);
+            self.finished.store(true, Ordering::Release);
+        }
+    }
+}
+
+async fn wait_for_startup_completion(startup_finished: &mut watch::Receiver<bool>) {
+    loop {
+        if *startup_finished.borrow_and_update() {
+            return;
+        }
+        if startup_finished.changed().await.is_err() {
+            return;
         }
     }
 }
 
 struct ReaperMonitorSetup {
     reaper: JoinHandle<()>,
-    startup_finished: oneshot::Receiver<()>,
+    startup_finished: watch::Receiver<bool>,
     connection_ref: ConnectionRef,
     state: watch::Receiver<CustodianState>,
     state_tx: watch::Sender<CustodianState>,
@@ -1219,7 +1256,8 @@ async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
         cleanup_pending_published,
     } = setup;
     let _ = reaper.await;
-    let _ = startup_finished.await;
+    let mut startup_finished = startup_finished;
+    wait_for_startup_completion(&mut startup_finished).await;
 
     let current_state = *state.borrow();
     if custodian_state_is_terminal(current_state) || current_state == CustodianState::CleanupPending
@@ -1262,6 +1300,7 @@ async fn run_reserved_start<ReadError, WriteError>(
         inbound_owner_rx,
         outbound_owner_rx,
         commit_rx,
+        mut startup_finished,
         ready_tx,
         inbound_start_tx,
         outbound_start_tx,
@@ -1304,6 +1343,7 @@ async fn run_reserved_start<ReadError, WriteError>(
                     state_tx,
                     summary,
                     cleanup_pending_published,
+                    Some(startup_finished),
                 )
                 .await;
             }
@@ -1356,6 +1396,7 @@ async fn run_reserved_start<ReadError, WriteError>(
             outbound_result = Some(owner.join().await);
         }
     }
+    wait_for_startup_completion(&mut startup_finished).await;
     let inbound_terminal = inbound_result
         .as_ref()
         .map(summarize_inbound)
@@ -1692,6 +1733,7 @@ struct PreparedIo<M, ReadError, WriteError> {
     outbound: PumpFuture<OutboundExit<WriteError>>,
     outbound_sender: WriteSender<M>,
     inbound_receiver: mpsc::Receiver<QueueItem<M>>,
+    startup_completion: Option<StartupCompletionSignal>,
 }
 
 fn prepare_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose, IsSendAfterClose>(
@@ -1770,6 +1812,7 @@ where
             admission_open,
         },
         inbound_receiver,
+        startup_completion: None,
     }
 }
 
@@ -1823,7 +1866,7 @@ where
     } = config;
     let connection_ref = reservation.connection_ref.clone();
     let (reader, writer) = factory(&connection_ref).await;
-    let prepared = prepare_supervised_io(
+    let mut prepared = prepare_supervised_io(
         connection_ref.clone(),
         reader,
         writer,
@@ -1836,12 +1879,14 @@ where
     let (state_tx, state_rx) = watch::channel(CustodianState::Starting);
     let summary = Arc::new(Mutex::new(None));
     let cleanup_pending_published = Arc::new(AtomicBool::new(false));
+    let startup_completion_finished = Arc::new(AtomicBool::new(false));
     let handle_summary = summary.clone();
     let observer = IoCustodianObserver {
         connection_ref: connection_ref.clone(),
         state: state_rx.clone(),
         summary: summary.clone(),
         cleanup_pending_published: cleanup_pending_published.clone(),
+        startup_completion_finished: startup_completion_finished.clone(),
     };
     let inventory = reservation.inventory.clone();
     let reservation_id = reservation.reservation_id;
@@ -1852,8 +1897,11 @@ where
     let (ready_tx, ready_rx) = oneshot::channel();
     let (inbound_start_tx, inbound_start_rx) = oneshot::channel();
     let (outbound_start_tx, outbound_start_rx) = oneshot::channel();
-    let (startup_finished_tx, startup_finished_rx) = oneshot::channel();
-    let _startup_completion_guard = StartupCompletionGuard::new(startup_finished_tx);
+    let (startup_finished_tx, startup_finished_rx) = watch::channel(false);
+    prepared.startup_completion = Some(StartupCompletionSignal::new(
+        startup_finished_tx,
+        startup_completion_finished.clone(),
+    ));
     let started_pump_count = Arc::new(AtomicU8::new(0));
 
     // The reservation remains armed until the reaper exists and has the
@@ -1876,6 +1924,7 @@ where
         inbound_owner_rx,
         outbound_owner_rx,
         commit_rx,
+        startup_finished: startup_finished_rx.clone(),
         ready_tx,
         inbound_start_tx,
         outbound_start_tx,
@@ -1913,6 +1962,7 @@ where
             state: state_rx,
             summary: handle_summary,
             cleanup_pending_published,
+            startup_completion_finished,
         }),
     };
 

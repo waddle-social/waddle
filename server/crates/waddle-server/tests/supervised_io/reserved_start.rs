@@ -2,10 +2,11 @@ use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::{oneshot, Barrier as AsyncBarrier};
+use tokio::sync::{mpsc as tokio_mpsc, oneshot, Barrier as AsyncBarrier};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
@@ -26,6 +27,63 @@ type Started = (
 );
 type StartTask = tokio::task::JoinHandle<Result<Started, ReservedStartError>>;
 type StageFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+struct DropGatedStart {
+    task: StartTask,
+    entered: oneshot::Receiver<()>,
+    release: oneshot::Sender<()>,
+    dropped_half: tokio_mpsc::UnboundedReceiver<u8>,
+    drop_releases: [std_mpsc::SyncSender<()>; 2],
+}
+
+struct BlockingDropHalf {
+    id: u8,
+    entered: tokio_mpsc::UnboundedSender<u8>,
+    release: std_mpsc::Receiver<()>,
+}
+
+impl Drop for BlockingDropHalf {
+    fn drop(&mut self) {
+        let _ = self.entered.send(self.id);
+        let _ = self.release.recv();
+    }
+}
+
+struct BlockingDropReader {
+    _drop_gate: BlockingDropHalf,
+}
+
+impl Stream for BlockingDropReader {
+    type Item = Result<u8, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+struct BlockingDropWriter {
+    _drop_gate: BlockingDropHalf,
+}
+
+impl Sink<u8> for BlockingDropWriter {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _item: u8) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
 
 fn test_limits() -> TransportLimits {
     TransportLimits::new(
@@ -88,6 +146,67 @@ fn paused_start_with_reaper_exit(
         },
     ));
     (task, entered_rx, release_tx)
+}
+
+fn paused_start_with_blocking_drops(
+    reservation: IoCustodianReservation,
+    exit_point: Option<ReservedReaperExitPoint>,
+) -> DropGatedStart {
+    let (drop_entered_tx, drop_entered_rx) = tokio_mpsc::unbounded_channel();
+    let (reader_release_tx, reader_release_rx) = std_mpsc::sync_channel(1);
+    let (writer_release_tx, writer_release_rx) = std_mpsc::sync_channel(1);
+    let reader = BlockingDropReader {
+        _drop_gate: BlockingDropHalf {
+            id: 0,
+            entered: drop_entered_tx.clone(),
+            release: reader_release_rx,
+        },
+    };
+    let writer = BlockingDropWriter {
+        _drop_gate: BlockingDropHalf {
+            id: 1,
+            entered: drop_entered_tx,
+            release: writer_release_rx,
+        },
+    };
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let barrier = Arc::new(Mutex::new(Some((entered_tx, release_rx))));
+    let config = ReservedIoStartConfig::new(
+        test_limits(),
+        ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+        |_| 1,
+        |_| false,
+        Duration::from_millis(40),
+    );
+    let config = match exit_point {
+        Some(exit_point) => config.with_test_reaper_exit_point(exit_point),
+        None => config,
+    };
+    let task = tokio::spawn(reservation.start_with_hook(
+        config,
+        move |_| async move { (reader, writer) },
+        move |stage| {
+            let pause = if stage == ReservedStartStage::BeforeInboundSpawn {
+                barrier.lock().expect("stage barrier lock").take()
+            } else {
+                None
+            };
+            Box::pin(async move {
+                if let Some((entered, release)) = pause {
+                    let _ = entered.send(());
+                    let _ = release.await;
+                }
+            }) as StageFuture
+        },
+    ));
+    DropGatedStart {
+        task,
+        entered: entered_rx,
+        release: release_tx,
+        dropped_half: drop_entered_rx,
+        drop_releases: [reader_release_tx, writer_release_tx],
+    }
 }
 
 async fn inventory_observer(
@@ -432,6 +551,82 @@ async fn reaper_loss_then_starter_cancellation_finishes_no_start_and_retains_par
         Some(CustodianInventoryError::Full)
     );
     assert_eq!(inventory.prune_joined(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn no_start_capacity_waits_for_both_socket_halves_to_drop() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+
+    for exit_point in [None, Some(ReservedReaperExitPoint::BeforeCommit)] {
+        let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        let reservation = inventory
+            .reserve(connection_ref.clone())
+            .expect("reserve no-start connection");
+        let DropGatedStart {
+            task: start,
+            entered: start_entered,
+            release: start_release,
+            mut dropped_half,
+            drop_releases,
+        } = paused_start_with_blocking_drops(reservation, exit_point);
+        timeout(TEST_TIMEOUT, start_entered)
+            .await
+            .expect("starter reaches the first-pump barrier")
+            .expect("first-pump barrier notification");
+        let observer = inventory_observer(&inventory, &connection_ref).await;
+        start.abort();
+        let _ = start_release.send(());
+
+        let first_drop = timeout(TEST_TIMEOUT, dropped_half.recv())
+            .await
+            .expect("one physical half starts dropping")
+            .expect("drop event");
+        assert!(
+            !observer.startup_completion_is_finished(),
+            "startup completion cannot publish while either Drop is blocked"
+        );
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory
+                .reserve(ConnectionRef::fresh(NodeLeaseIdentity::local_process()))
+                .err(),
+            Some(CustodianInventoryError::Full),
+            "inventory remains occupied while the first half's Drop blocks"
+        );
+        let _ = drop_releases[usize::from(first_drop)].send(());
+
+        let second_drop = timeout(TEST_TIMEOUT, dropped_half.recv())
+            .await
+            .expect("the other physical half starts dropping")
+            .expect("second drop event");
+        assert_ne!(first_drop, second_drop);
+        assert!(
+            !observer.startup_completion_is_finished(),
+            "startup completion waits until both half destructors return"
+        );
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory
+                .reserve(ConnectionRef::fresh(NodeLeaseIdentity::local_process()))
+                .err(),
+            Some(CustodianInventoryError::Full),
+            "inventory remains occupied while the second half's Drop blocks"
+        );
+        let _ = drop_releases[usize::from(second_drop)].send(());
+
+        assert!(timeout(TEST_TIMEOUT, start)
+            .await
+            .expect("canceled startup finishes after both Drop gates open")
+            .err()
+            .expect("starter was canceled")
+            .is_cancelled());
+        assert_eq!(
+            wait_terminal(&observer).await,
+            CustodianState::StartupAbandoned
+        );
+        assert!(observer.startup_completion_is_finished());
+        assert_eq!(inventory.len(), 0, "no-start capacity releases after Drop");
+    }
 }
 
 #[tokio::test]
