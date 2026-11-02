@@ -1900,12 +1900,15 @@ async fn pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_
 }
 
 #[test]
-fn pending_flush_reservation_commit_and_test_seal_have_one_order() {
+fn pending_flush_reservation_commit_and_binding_seal_have_one_order() {
     for _ in 0..32 {
         let registry = ConnectionRegistry::new();
         let jid = test_jid("reserved");
         let (sender, mut receiver) = mpsc::channel(1);
-        let owner = registry.register(jid.clone(), sender.clone());
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(sender.clone(), binding_ref.clone());
+        let owner = registry.register_entry(jid.clone(), entry);
         assert!(registry.update_presence(&jid, true, 0));
         let entry = registry.entry(&jid).expect("original binding");
         let reservation = registry
@@ -1923,7 +1926,7 @@ fn pending_flush_reservation_commit_and_test_seal_have_one_order() {
             });
             let seal = scope.spawn(|| {
                 barrier.wait();
-                seal_pending_binding_for_test(&entry);
+                assert!(entry.seal_binding(owner, &binding_ref));
             });
             seal.join().expect("seal thread");
             commit.join().expect("commit thread")
