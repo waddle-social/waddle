@@ -12,7 +12,7 @@ pub(crate) async fn invalidate_retention(
     invalidate_retention_in_prepared_transaction(tx, None, message_key).await
 }
 
-pub(super) async fn invalidate_retention_in_prepared_transaction(
+pub(crate) async fn invalidate_retention_in_prepared_transaction(
     tx: &mut Transaction<'_>,
     prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,

@@ -17,16 +17,25 @@ use tracing::info;
 
 use super::MamStorageError;
 pub use allocation::{
-    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
+    lock_archive_sequence_on_sqlite_connection,
 };
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
 };
 pub use tx_write::{
-    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
-    ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome,
+    store_archived_message_on_connection, store_archived_message_on_connection_in_schema,
+    store_archived_message_on_sqlite_connection, ArchiveExpectation, MamTxStoreError,
+    MamTxStoreOutcome,
 };
+
+fn postgres_relation(schema: Option<&str>, relation: &str) -> String {
+    match schema {
+        Some(schema) => format!("\"{}\".{relation}", schema.replace('"', "\"\"")),
+        None => relation.to_owned(),
+    }
+}
 
 #[derive(Clone)]
 pub(super) enum MamDatabaseBackend {

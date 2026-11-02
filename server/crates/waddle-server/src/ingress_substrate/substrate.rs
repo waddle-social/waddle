@@ -750,17 +750,27 @@ pub async fn record_delivery(
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, message_key).await? {
+    record_delivery_in_prepared_transaction(tx, None, delivery_key, message_key).await
+}
+
+pub(crate) async fn record_delivery_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    delivery_key: DeliveryKey,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
+    let insert = prepared_ingress_sql(
+        tx.driver(), prepared, PreparedIngressRelation::Deliveries,
+        ("INSERT INTO ", " (delivery_key, message_key) VALUES (?::uuid, ?::uuid) ON CONFLICT (delivery_key) DO NOTHING"),
+        INSERT_DELIVERY_SQLITE,
+    );
     let inserted = tx
         .execute(
-            dialect_sql(
-                tx.driver(),
-                INSERT_DELIVERY_POSTGRES,
-                INSERT_DELIVERY_SQLITE,
-            ),
+            &insert,
             crate::db_params![
                 delivery_key.to_storage().to_string(),
                 message_key.to_storage().to_string(),
@@ -771,9 +781,19 @@ pub async fn record_delivery(
     if inserted == 1 {
         return Ok(MessageWriteOutcome::Recorded);
     }
+    let read = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Deliveries,
+        (
+            "SELECT message_key::text FROM ",
+            " WHERE delivery_key = ?::uuid",
+        ),
+        READ_DELIVERY_SQLITE,
+    );
     let existing = stored_child_message_key(
         tx,
-        dialect_sql(tx.driver(), READ_DELIVERY_POSTGRES, READ_DELIVERY_SQLITE),
+        &read,
         crate::db_params![delivery_key.to_storage().to_string()],
     )
     .await?;
@@ -1507,6 +1527,13 @@ pub(crate) enum PreparedIngressRelation {
     SmRefs,
     SmStreams,
     Sessions,
+    Effects,
+    Deliveries,
+    DeliveryReceipts,
+    #[cfg(feature = "clustering")]
+    Claims,
+    InboxEntries,
+    ArchiveDispatch,
 }
 
 /// Only a prepared transaction can supply a schema; callers cannot pass an
@@ -1522,6 +1549,13 @@ pub(crate) fn prepared_ingress_relation(
         PreparedIngressRelation::SmRefs => "ingress_sm_refs",
         PreparedIngressRelation::SmStreams => "ingress_sm_streams",
         PreparedIngressRelation::Sessions => "sessions",
+        PreparedIngressRelation::Effects => "ingress_effect_intents",
+        PreparedIngressRelation::Deliveries => "ingress_deliveries",
+        PreparedIngressRelation::DeliveryReceipts => "ingress_delivery_receipts",
+        #[cfg(feature = "clustering")]
+        PreparedIngressRelation::Claims => "clustering_claims",
+        PreparedIngressRelation::InboxEntries => "inbox_entries",
+        PreparedIngressRelation::ArchiveDispatch => "ingress_archive_dispatch",
     };
     match prepared {
         Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),
@@ -2119,18 +2153,11 @@ pub(in crate::ingress_substrate) const READ_SM_REF_SQLITE: &str = r#"
         SELECT message_key FROM ingress_sm_refs
         WHERE sm_ingress_id = ? AND ingress_ordinal = ?
         "#;
-pub(in crate::ingress_substrate) const INSERT_DELIVERY_POSTGRES: &str = r#"
-            INSERT INTO ingress_deliveries (delivery_key, message_key)
-            VALUES (?::uuid, ?::uuid)
-            ON CONFLICT (delivery_key) DO NOTHING
-            "#;
 pub(in crate::ingress_substrate) const INSERT_DELIVERY_SQLITE: &str = r#"
             INSERT INTO ingress_deliveries (delivery_key, message_key)
             VALUES (?, ?)
             ON CONFLICT (delivery_key) DO NOTHING
             "#;
-pub(in crate::ingress_substrate) const READ_DELIVERY_POSTGRES: &str =
-    r#"SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid"#;
 pub(in crate::ingress_substrate) const READ_DELIVERY_SQLITE: &str =
     r#"SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?"#;
 pub(in crate::ingress_substrate) const TERMINALIZE_MESSAGE_POSTGRES: &str = r#"

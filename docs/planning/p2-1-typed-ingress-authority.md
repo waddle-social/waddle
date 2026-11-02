@@ -25,6 +25,17 @@ atomic alias, message, stream-management, archive, and receipt writes still
 need a reviewed set of closed domain operations or another design that preserves
 their shared commit without exposing raw transactions or arbitrary async work.
 
+The prepared PostgreSQL UOW now carries its attested schema through a direct
+message's archive and inbox acceptance path, including intent reconciliation,
+archive sequence and row, inbox projection and delivery marker, archive
+dispatch, SM claim and delivery-progress statements. MAM's cross-crate
+adapters take the schema from the prepared UOW; raw PostgreSQL and SQLite use
+their existing paths. The factory and repositories still expose legacy
+transactions. Other message shapes, including no-store terminalization, and
+post-commit and recovery paths still require conversion. This does not make
+the service closed, connect normal startup to the attested pool, or establish
+production authority.
+
 ## Migration and review
 
 1. Provide a lexical authority and focused real PostgreSQL and SQLite tests,

@@ -142,9 +142,13 @@ impl DatabaseInboxStorage {
 /// non-anchor reply upsert (which carries no call metadata) does not
 /// wipe the anchor's kind/media or the ended summary.
 pub(in crate::inbox) fn upsert_sql() -> String {
+    upsert_sql_for_relation("inbox_entries")
+}
+
+fn upsert_sql_for_relation(relation: &str) -> String {
     format!(
         r#"
-        INSERT INTO inbox_entries (
+        INSERT INTO {relation} (
             user_jid, partner_jid, thread_id, kind, last_stanza_id, last_updated,
             unread, preview, thread_title, reply_count, author,
             call_thread_kind, call_thread_media, call_ended_at, call_duration
@@ -270,10 +274,24 @@ pub(crate) async fn upsert_in_transaction(
     entry: InboxEntry,
     increment_unread: bool,
 ) -> Result<InboxEntry, InboxTxError> {
+    upsert_in_prepared_transaction(tx, None, user, entry, increment_unread).await
+}
+
+pub(crate) async fn upsert_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&crate::ingress_substrate::PreparedAttestedReceiptWriter>,
+    user: &BareJid,
+    entry: InboxEntry,
+    increment_unread: bool,
+) -> Result<InboxEntry, InboxTxError> {
     let increment = i64::from(u8::from(increment_unread));
     let thread_id = entry.thread_id.as_deref().unwrap_or("");
     let is_thread = i64::from(u8::from(!thread_id.is_empty()));
-    let sql = upsert_sql();
+    let relation = crate::ingress_substrate::prepared_ingress_relation(
+        prepared,
+        crate::ingress_substrate::PreparedIngressRelation::InboxEntries,
+    );
+    let sql = upsert_sql_for_relation(&relation);
     let mut rows = tx
         .query(&sql, upsert_params(user, &entry, increment, is_thread))
         .await?;
@@ -320,13 +338,18 @@ pub(crate) async fn find_in_transaction(
 }
 
 /// Read the current projection without replaying unread or reply increments.
-pub(crate) async fn get_in_transaction(
+pub(crate) async fn get_in_prepared_transaction(
     tx: &mut Transaction<'_>,
+    prepared: Option<&crate::ingress_substrate::PreparedAttestedReceiptWriter>,
     user: &BareJid,
     entry: &InboxEntry,
 ) -> Result<InboxEntry, InboxTxError> {
+    let relation = crate::ingress_substrate::prepared_ingress_relation(
+        prepared,
+        crate::ingress_substrate::PreparedIngressRelation::InboxEntries,
+    );
     let mut rows = tx.query(
-        &format!("SELECT {SELECT_COLS} FROM inbox_entries WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?"),
+        &format!("SELECT {SELECT_COLS} FROM {relation} WHERE user_jid = ? AND partner_jid = ? AND thread_id = ?"),
         crate::db_params![user.to_string(), entry.partner.to_string(), entry.thread_id.clone().unwrap_or_default()],
     ).await?;
     let row = rows

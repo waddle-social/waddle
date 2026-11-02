@@ -181,18 +181,16 @@ impl ArchiveDispatchRepository {
         ordinal: ArchiveOrdinal,
         obligations: &[ArchiveDispatchObligation],
     ) -> Result<(), IngressUowError> {
-        let postgres = tx.transaction_mut().driver() == DatabaseDriver::Postgres;
-        let insert = if postgres {
-            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        } else {
-            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        };
-        let select = if postgres {
-            "SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?"
-        } else {
-            "SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?"
-        };
         validate_registration(tx, key, archive, ordinal, obligations).await?;
+        let (transaction, prepared) = tx.prepared_parts();
+        let insert = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+            crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
+            ("INSERT INTO ", " (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"),
+            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING");
+        let select = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+            crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
+            ("SELECT archive_seq FROM ", " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?"),
+            "SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ? AND resource = ? AND pending_row_id = ?");
         for obligation in obligations {
             // Empty is a storage-only wildcard; protocol boundaries remain typed.
             let resource = match &obligation.target {
@@ -204,9 +202,9 @@ impl ArchiveDispatchRepository {
                 _ => "",
             };
             let receipt = &obligation.receipt;
-            tx.transaction_mut()
+            transaction
                 .execute(
-                    insert,
+                    &insert,
                     crate::db_params![
                         archive.to_string(),
                         ordinal.to_storage(),
@@ -218,10 +216,9 @@ impl ArchiveDispatchRepository {
                     ],
                 )
                 .await?;
-            let mut rows = tx
-                .transaction_mut()
+            let mut rows = transaction
                 .query(
-                    select,
+                    &select,
                     crate::db_params![
                         archive.to_string(),
                         key.to_storage().to_string(),
@@ -346,11 +343,11 @@ async fn validate_registration(
     ordinal: ArchiveOrdinal,
     obligations: &[ArchiveDispatchObligation],
 ) -> Result<(), IngressUowError> {
-    let query = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-        "SELECT archive_seq, resource, pending_row_id FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"
-    } else {
-        "SELECT archive_seq, resource, pending_row_id FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ?"
-    };
+    let (transaction, prepared) = tx.prepared_parts();
+    let query = crate::ingress_substrate::prepared_ingress_sql(transaction.driver(), prepared,
+        crate::ingress_substrate::PreparedIngressRelation::ArchiveDispatch,
+        ("SELECT archive_seq, resource, pending_row_id FROM ", " WHERE archive_jid = ? AND message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"),
+        "SELECT archive_seq, resource, pending_row_id FROM ingress_archive_dispatch WHERE archive_jid = ? AND message_key = ? AND kind = ? AND semantic_identity_hash = ?");
     for (index, obligation) in obligations.iter().enumerate() {
         if obligations[..index]
             .iter()
@@ -369,10 +366,9 @@ async fn validate_registration(
             && expected
                 .iter()
                 .all(|target| matches!(target, DispatchTarget::Resource(_)));
-        let mut rows = tx
-            .transaction_mut()
+        let mut rows = transaction
             .query(
-                query,
+                &query,
                 crate::db_params![
                     archive.to_string(),
                     key.to_storage().to_string(),

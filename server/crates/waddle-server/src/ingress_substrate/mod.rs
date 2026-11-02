@@ -14,7 +14,8 @@ pub use maintenance::{
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
 };
 pub(crate) use retention::{
-    invalidate_retention, refresh_retention, refresh_retention_with_db_clock,
+    invalidate_retention, invalidate_retention_in_prepared_transaction, refresh_retention,
+    refresh_retention_with_db_clock,
 };
 #[cfg(test)]
 mod authority_tests;
@@ -94,6 +95,6 @@ pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;
 pub(crate) use substrate::{
     insert_sm_ref_in_prepared_transaction, prepared_ingress_relation, prepared_ingress_sql,
-    record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
-    PreparedIngressRelation,
+    record_delivery_in_prepared_transaction, record_message_in_prepared_transaction,
+    resolve_alias_in_prepared_transaction, PreparedIngressRelation,
 };

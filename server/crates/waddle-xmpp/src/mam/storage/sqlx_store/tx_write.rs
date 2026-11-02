@@ -147,9 +147,31 @@ pub async fn store_archived_message_on_connection(
     message: &ArchivedMessage,
     expectation: ArchiveExpectation,
 ) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    store_postgres(conn, None, archive, message, expectation).await
+}
+
+/// Store an ingress archive on the caller's transaction using a fixed PostgreSQL schema.
+pub async fn store_archived_message_on_connection_in_schema(
+    conn: &mut PgConnection,
+    schema: &str,
+    archive: &BareJid,
+    message: &ArchivedMessage,
+    expectation: ArchiveExpectation,
+) -> Result<MamTxStoreOutcome, MamTxStoreError> {
+    store_postgres(conn, Some(schema), archive, message, expectation).await
+}
+
+async fn store_postgres(
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    archive: &BareJid,
+    message: &ArchivedMessage,
+    expectation: ArchiveExpectation,
+) -> Result<MamTxStoreOutcome, MamTxStoreError> {
     let (message, stanza_id) = expected_message(archive, message, &expectation)?;
     let existing = sqlx::query(&format!(
-        "SELECT {SELECT_COLUMNS}, timestamp = $2 AS matches_timestamp FROM mam_messages WHERE id = $1"
+        "SELECT {SELECT_COLUMNS}, timestamp = $2 AS matches_timestamp FROM {} WHERE id = $1",
+        super::postgres_relation(schema, "mam_messages")
     ))
     .bind(&stanza_id.id)
     .bind(message.timestamp)
@@ -189,7 +211,7 @@ pub async fn store_archived_message_on_connection(
         }
         return Ok(MamTxStoreOutcome::Existing { stanza_id, ordinal });
     }
-    if let Some(id) = find_origin_tombstone_postgres(conn, archive, &message).await? {
+    if let Some(id) = find_origin_tombstone_postgres(conn, archive, &message, schema).await? {
         return Ok(MamTxStoreOutcome::TombstoneHit(StanzaId::new(
             id,
             archive.clone().into(),
@@ -211,10 +233,10 @@ pub async fn store_archived_message_on_connection(
             ordinal: Some(ordinal),
             ..
         } => {
-            preserve_postgres(conn, archive, *ordinal).await?;
+            preserve_postgres(conn, archive, *ordinal, schema).await?;
             *ordinal
         }
-        _ => allocate_postgres(conn, archive).await?,
+        _ => allocate_postgres(conn, archive, schema).await?,
     };
     if insert_postgres_message_on_connection(
         conn,
@@ -227,6 +249,7 @@ pub async fn store_archived_message_on_connection(
             ordinal,
         },
         InsertConflict::DoNothing,
+        schema,
     )
     .await
     .map_err(|error| match &expectation {

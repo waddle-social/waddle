@@ -134,6 +134,8 @@ pub(in crate::ingress::commit) async fn commit_attempt(
             std::time::Duration::from_millis(250),
         )
         .await?;
+    #[cfg(test)]
+    commit_hooks::apply_search_path(&mut tx).await?;
     super::super::principal::assert_admission(&mut tx, submission).await?;
     #[cfg(test)]
     commit_race_gate::after_admission(submission.digest_input.origin()).await;
