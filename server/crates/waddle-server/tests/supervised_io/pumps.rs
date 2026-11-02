@@ -270,7 +270,7 @@ fn start_lab(
     }
 }
 
-async fn socket_pair() -> (
+pub(super) async fn socket_pair() -> (
     WebSocketStream<TcpStream>,
     WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) {

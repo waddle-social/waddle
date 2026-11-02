@@ -8,12 +8,12 @@
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
-use std::future::poll_fn;
+use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::ConnectionRef;
@@ -400,6 +400,9 @@ pub struct IoSupervisor<ReadError, WriteError> {
 /// Lifecycle state published by the independent physical-connection custodian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustodianState {
+    /// Inventory admitted this exact connection, but its pump pair is not
+    /// fully started yet.
+    Starting,
     /// The custodian owns both pump handles and has not begun retirement.
     Running,
     /// Stop was requested or one pump ended; the custodian is joining both.
@@ -409,12 +412,60 @@ pub enum CustodianState {
     CleanupPending,
     /// Both pump JoinHandles returned, including cancellation or panic results.
     Joined,
+    /// Startup ended before any pump task started; no task remains to join.
+    StartupAbandoned,
+    /// Every pump that did start returned, but one member of the pair never
+    /// started. This is deliberately distinct from two-pump `Joined`.
+    PartialStartJoined,
+}
+
+/// Observable stages in the reserved pair-start sequence, exposed so tests
+/// can hold or cancel startup at ownership boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedStartStage {
+    BeforeInboundSpawn,
+    BetweenPumpSpawns,
+    AfterOutboundSpawn,
+    AfterCommit,
+}
+
+/// Validated bounds and pump behavior for one reserved physical connection.
+pub struct ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose> {
+    limits: TransportLimits,
+    shutdown_protocol: ShutdownProtocol<M, IsSendAfterClose>,
+    frame_size: Size,
+    is_close: IsClose,
+    retirement_deadline: Duration,
+}
+
+impl<M, IsSendAfterClose, Size, IsClose> ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>
+where
+    Size: Fn(&M) -> usize,
+    IsClose: Fn(&M) -> bool,
+{
+    /// Build a startup configuration for a previously reserved connection.
+    pub fn new(
+        limits: TransportLimits,
+        shutdown_protocol: ShutdownProtocol<M, IsSendAfterClose>,
+        frame_size: Size,
+        is_close: IsClose,
+        retirement_deadline: Duration,
+    ) -> Self {
+        Self {
+            limits,
+            shutdown_protocol,
+            frame_size,
+            is_close,
+            retirement_deadline,
+        }
+    }
 }
 
 /// Terminal outcome of the inbound pump, summarized without retaining its
 /// generic I/O error value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundTerminal {
+    NotStarted,
     Stopped,
     PeerClosed,
     Overloaded,
@@ -428,6 +479,7 @@ pub enum InboundTerminal {
 /// generic I/O error value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundTerminal {
+    NotStarted,
     Stopped,
     ShutdownClose,
     PeerClosedReplyFlushed,
@@ -438,7 +490,7 @@ pub enum OutboundTerminal {
     JoinFailure,
 }
 
-/// Bounded, typed evidence retained after both pump JoinHandles return.
+/// Bounded, typed evidence retained after every started pump task has joined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustodianSummary {
     connection_ref: ConnectionRef,
@@ -498,18 +550,45 @@ pub enum CustodianInventoryError {
     /// Every inventory slot is occupied by a custodian not yet joined.
     #[error("custodian inventory is full")]
     Full,
+    /// Reservation bookkeeping exhausted its unique token space.
+    #[error("custodian reservation identifiers are exhausted")]
+    ReservationIdExhausted,
+    /// The inventory no longer contains this reservation's exact token.
+    #[error("custodian reservation is no longer active")]
+    ReservationLost,
+}
+
+enum InventoryEntry {
+    Reserved {
+        reservation_id: u64,
+    },
+    Active {
+        reservation_id: Option<u64>,
+        observer: IoCustodianObserver,
+    },
 }
 
 /// Bounded, observation-only index of physical-connection custodians.
 ///
 /// The index does not keep a control handle alive. It lets an independent
 /// owner reacquire state after an actor loses all of its local handles, and it
-/// keeps unfinished cleanup discoverable until an explicit prune of Joined
-/// entries.
+/// keeps unfinished cleanup discoverable until terminal entries with no live
+/// pump tasks are explicitly pruned.
 #[derive(Clone)]
 pub struct IoCustodianInventory {
     capacity: usize,
-    entries: Arc<Mutex<HashMap<ConnectionRef, IoCustodianObserver>>>,
+    entries: Arc<Mutex<HashMap<ConnectionRef, InventoryEntry>>>,
+}
+
+static NEXT_CUSTODIAN_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One noncloneable admission to start the exact physical connection's pump
+/// pair. Dropping an unused reservation returns its inventory slot.
+pub struct IoCustodianReservation {
+    inventory: IoCustodianInventory,
+    connection_ref: ConnectionRef,
+    reservation_id: u64,
+    active: bool,
 }
 
 impl IoCustodianInventory {
@@ -538,8 +617,47 @@ impl IoCustodianInventory {
         if entries.len() >= self.capacity {
             return Err(CustodianInventoryError::Full);
         }
-        entries.insert(connection_ref, custodian.observer());
+        entries.insert(
+            connection_ref,
+            InventoryEntry::Active {
+                reservation_id: None,
+                observer: custodian.observer(),
+            },
+        );
         Ok(())
+    }
+
+    /// Reserve capacity for this exact physical connection before invoking a
+    /// pump factory, starting either pump, or spawning its independent reaper.
+    pub fn reserve(
+        &self,
+        connection_ref: ConnectionRef,
+    ) -> Result<IoCustodianReservation, CustodianInventoryError> {
+        let reservation_id = NEXT_CUSTODIAN_RESERVATION_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| CustodianInventoryError::ReservationIdExhausted)?;
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if entries.contains_key(&connection_ref) {
+            return Err(CustodianInventoryError::DuplicateConnection);
+        }
+        if entries.len() >= self.capacity {
+            return Err(CustodianInventoryError::Full);
+        }
+        entries.insert(
+            connection_ref.clone(),
+            InventoryEntry::Reserved { reservation_id },
+        );
+        Ok(IoCustodianReservation {
+            inventory: self.clone(),
+            connection_ref,
+            reservation_id,
+            active: true,
+        })
     }
 
     /// Reacquire observation by exact physical-connection identity.
@@ -548,7 +666,10 @@ impl IoCustodianInventory {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
         };
-        entries.get(connection_ref).cloned()
+        match entries.get(connection_ref) {
+            Some(InventoryEntry::Active { observer, .. }) => Some(observer.clone()),
+            Some(InventoryEntry::Reserved { .. }) | None => None,
+        }
     }
 
     /// Number of retained observations, including cleanup that is still
@@ -566,7 +687,7 @@ impl IoCustodianInventory {
         self.len() == 0
     }
 
-    /// Remove only entries whose two pump handles are confirmed Joined.
+    /// Remove entries only after every started pump task has returned.
     /// CleanupPending and all other unfinished states remain discoverable.
     pub fn prune_joined(&self) -> usize {
         let mut entries = match self.entries.lock() {
@@ -574,8 +695,184 @@ impl IoCustodianInventory {
             Err(poisoned) => poisoned.into_inner(),
         };
         let before = entries.len();
-        entries.retain(|_, observer| observer.state() != CustodianState::Joined);
+        entries.retain(|_, entry| match entry {
+            InventoryEntry::Reserved { .. } => true,
+            InventoryEntry::Active { observer, .. } => !matches!(
+                observer.state(),
+                CustodianState::Joined
+                    | CustodianState::StartupAbandoned
+                    | CustodianState::PartialStartJoined
+            ),
+        });
         before - entries.len()
+    }
+
+    fn release_reservation(&self, connection_ref: &ConnectionRef, reservation_id: u64) {
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if matches!(
+            entries.get(connection_ref),
+            Some(InventoryEntry::Reserved {
+                reservation_id: current
+            }) if *current == reservation_id
+        ) {
+            entries.remove(connection_ref);
+        }
+    }
+
+    fn activate_reservation(
+        &self,
+        connection_ref: &ConnectionRef,
+        reservation_id: u64,
+        observer: IoCustodianObserver,
+    ) -> Result<(), CustodianInventoryError> {
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match entries.get(connection_ref) {
+            Some(InventoryEntry::Reserved {
+                reservation_id: current,
+            }) if *current == reservation_id => {}
+            _ => return Err(CustodianInventoryError::ReservationLost),
+        }
+        entries.insert(
+            connection_ref.clone(),
+            InventoryEntry::Active {
+                reservation_id: Some(reservation_id),
+                observer,
+            },
+        );
+        Ok(())
+    }
+
+    fn release_active_without_pumps(&self, connection_ref: &ConnectionRef, reservation_id: u64) {
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if matches!(
+            entries.get(connection_ref),
+            Some(InventoryEntry::Active {
+                reservation_id: Some(current),
+                ..
+            }) if *current == reservation_id
+        ) {
+            entries.remove(connection_ref);
+        }
+    }
+}
+
+impl IoCustodianReservation {
+    /// Physical identity whose inventory slot this reservation holds.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    /// Whether this reservation belongs to the supplied exact connection.
+    pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
+        &self.connection_ref == connection_ref
+    }
+}
+
+impl Drop for IoCustodianReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.inventory
+                .release_reservation(&self.connection_ref, self.reservation_id);
+        }
+    }
+}
+
+impl IoCustodianReservation {
+    /// Build the pump halves only after this reservation has won inventory
+    /// capacity, then start both tasks under an independent reaper.
+    pub async fn start_with<
+        R,
+        W,
+        M,
+        ReadError,
+        WriteError,
+        Size,
+        IsClose,
+        IsSendAfterClose,
+        Factory,
+        FactoryFuture,
+    >(
+        self,
+        config: ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>,
+        factory: Factory,
+    ) -> Result<
+        (
+            IoCustodianHandle,
+            WriteSender<M>,
+            mpsc::Receiver<QueueItem<M>>,
+        ),
+        CustodianInventoryError,
+    >
+    where
+        R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
+        W: Sink<M, Error = WriteError> + Unpin + Send + 'static,
+        M: Send + 'static,
+        ReadError: Send + 'static,
+        WriteError: Send + 'static,
+        Size: Fn(&M) -> usize + Send + 'static,
+        IsClose: Fn(&M) -> bool + Send + 'static,
+        IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+        Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+        FactoryFuture: Future<Output = (R, W)> + Send,
+    {
+        self.start_with_hook(config, factory, |_| std::future::ready(()))
+            .await
+    }
+
+    /// Start with deterministic asynchronous barriers for lifecycle tests.
+    /// Canceling this future before the first pump starts releases its unused
+    /// reservation; after either spawn, the independent reaper owns every
+    /// started handle and keeps the inventory slot until all have joined.
+    pub async fn start_with_hook<
+        R,
+        W,
+        M,
+        ReadError,
+        WriteError,
+        Size,
+        IsClose,
+        IsSendAfterClose,
+        Factory,
+        FactoryFuture,
+        Hook,
+        HookFuture,
+    >(
+        self,
+        config: ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>,
+        factory: Factory,
+        hook: Hook,
+    ) -> Result<
+        (
+            IoCustodianHandle,
+            WriteSender<M>,
+            mpsc::Receiver<QueueItem<M>>,
+        ),
+        CustodianInventoryError,
+    >
+    where
+        R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
+        W: Sink<M, Error = WriteError> + Unpin + Send + 'static,
+        M: Send + 'static,
+        ReadError: Send + 'static,
+        WriteError: Send + 'static,
+        Size: Fn(&M) -> usize + Send + 'static,
+        IsClose: Fn(&M) -> bool + Send + 'static,
+        IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+        Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+        FactoryFuture: Future<Output = (R, W)> + Send,
+        Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
+        HookFuture: Future<Output = ()> + Send,
+    {
+        start_reserved_supervised_io(self, config, factory, hook).await
     }
 }
 
@@ -601,7 +898,8 @@ impl IoCustodianHandle {
         self.client.stop.reason()
     }
 
-    /// Terminal results become available after both pump handles have joined.
+    /// Terminal outcomes become available after every started pump task joins.
+    /// `state()` distinguishes a full pair from an abandoned partial start.
     pub fn terminal_summary(&self) -> Option<CustodianSummary> {
         let summary = match self.client.summary.lock() {
             Ok(summary) => summary,
@@ -615,7 +913,7 @@ impl IoCustodianHandle {
     /// a write that has passed `poll_ready` and can still call `start_send`.
     /// Any live cutover needs an authority gate at that effect boundary.
     pub fn request_stop(&self, reason: StopReason) {
-        if self.state() == CustodianState::Joined {
+        if custodian_state_is_terminal(self.state()) {
             return;
         }
         let mut admission_open = match self.client.admission_open.lock() {
@@ -637,8 +935,8 @@ impl IoCustodianHandle {
         }
     }
 
-    /// Wait until both pump handles have returned. Canceling this future only
-    /// cancels the waiter; the independent custodian keeps joining the pumps.
+    /// Wait until every started pump task has returned. Canceling this future
+    /// only cancels the waiter; the independent custodian keeps joining tasks.
     pub async fn wait_until_joined(&self) -> CustodianState {
         self.observer().wait_until_joined().await
     }
@@ -646,7 +944,7 @@ impl IoCustodianHandle {
 
 impl Drop for IoCustodianHandle {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.client) == 1 && self.state() != CustodianState::Joined {
+        if Arc::strong_count(&self.client) == 1 && !custodian_state_is_terminal(self.state()) {
             self.request_stop(StopReason::Requested);
         }
     }
@@ -669,8 +967,8 @@ impl IoCustodianObserver {
         *self.state.borrow()
     }
 
-    /// Terminal results become available after the custodian has joined both
-    /// pump handles. The summary retains typed outcomes, not error payloads.
+    /// Terminal outcomes become available after all started tasks have joined.
+    /// The summary retains typed outcomes, not error payloads.
     pub fn terminal_summary(&self) -> Option<CustodianSummary> {
         let summary = match self.summary.lock() {
             Ok(summary) => summary,
@@ -679,14 +977,14 @@ impl IoCustodianObserver {
         summary.clone()
     }
 
-    /// Wait until both pump handles have returned. If the custodian task itself
-    /// exits unexpectedly, the last published state is returned instead of
-    /// claiming that physical termination was joined.
+    /// Wait until every started pump task has returned. If the custodian task
+    /// exits unexpectedly, the last state is returned without claiming a
+    /// successful join.
     pub async fn wait_until_joined(&self) -> CustodianState {
         let mut state = self.state.clone();
         loop {
             let current = *state.borrow_and_update();
-            if current == CustodianState::Joined {
+            if custodian_state_is_terminal(current) {
                 return current;
             }
             if state.changed().await.is_err() {
@@ -696,6 +994,15 @@ impl IoCustodianObserver {
     }
 }
 
+fn custodian_state_is_terminal(state: CustodianState) -> bool {
+    matches!(
+        state,
+        CustodianState::Joined
+            | CustodianState::StartupAbandoned
+            | CustodianState::PartialStartJoined
+    )
+}
+
 /// Move both real pump handles into an independent lifecycle custodian.
 ///
 /// The retirement deadline starts only after a stop request or a pump exit.
@@ -703,7 +1010,7 @@ impl IoCustodianObserver {
 /// `CleanupPending`, the remaining pump is aborted, and the custodian keeps
 /// waiting for both JoinHandles before it can publish `Joined`.
 pub fn spawn_io_custodian<ReadError, WriteError>(
-    mut supervisor: IoSupervisor<ReadError, WriteError>,
+    supervisor: IoSupervisor<ReadError, WriteError>,
     retirement_deadline: Duration,
 ) -> IoCustodianHandle
 where
@@ -718,62 +1025,12 @@ where
     let summary = Arc::new(Mutex::new(None));
     let custodian_summary = summary.clone();
 
-    tokio::spawn(async move {
-        let mut inbound = None;
-        let mut outbound = None;
-
-        tokio::select! {
-            result = supervisor.inbound.join() => inbound = Some(result),
-            result = supervisor.outbound.join() => outbound = Some(result),
-            _ = supervisor.stop.cancelled() => {}
-        }
-
-        state_tx.send_replace(CustodianState::Stopping);
-        supervisor.stop.cancel(StopReason::PumpExited);
-
-        let deadline = tokio::time::sleep(retirement_deadline);
-        tokio::pin!(deadline);
-        while inbound.is_none() || outbound.is_none() {
-            tokio::select! {
-                result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
-                result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
-                _ = &mut deadline => break,
-            }
-        }
-
-        if inbound.is_none() || outbound.is_none() {
-            state_tx.send_replace(CustodianState::CleanupPending);
-            supervisor.stop.cancel(StopReason::ShutdownDeadline);
-            supervisor.force_stop.cancel();
-        }
-        if inbound.is_none() {
-            supervisor.inbound.abort();
-        }
-        if outbound.is_none() {
-            supervisor.outbound.abort();
-        }
-        let inbound = match inbound {
-            Some(result) => result,
-            None => supervisor.inbound.join().await,
-        };
-        let outbound = match outbound {
-            Some(result) => result,
-            None => supervisor.outbound.join().await,
-        };
-        let joined = supervisor.joined(inbound, outbound);
-        let summary = CustodianSummary {
-            connection_ref: joined.connection_ref.clone(),
-            inbound: summarize_inbound(&joined.inbound),
-            outbound: summarize_outbound(&joined.outbound),
-        };
-        let mut retained_summary = match custodian_summary.lock() {
-            Ok(retained_summary) => retained_summary,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *retained_summary = Some(summary);
-        drop(retained_summary);
-        state_tx.send_replace(CustodianState::Joined);
-    });
+    tokio::spawn(run_io_custodian(
+        supervisor,
+        retirement_deadline,
+        state_tx,
+        custodian_summary,
+    ));
 
     IoCustodianHandle {
         client: Arc::new(CustodianClient {
@@ -785,6 +1042,219 @@ where
             summary,
         }),
     }
+}
+
+async fn run_io_custodian<ReadError, WriteError>(
+    mut supervisor: IoSupervisor<ReadError, WriteError>,
+    retirement_deadline: Duration,
+    state_tx: watch::Sender<CustodianState>,
+    custodian_summary: Arc<Mutex<Option<CustodianSummary>>>,
+) where
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+{
+    let mut inbound = None;
+    let mut outbound = None;
+
+    tokio::select! {
+        result = supervisor.inbound.join() => inbound = Some(result),
+        result = supervisor.outbound.join() => outbound = Some(result),
+        _ = supervisor.stop.cancelled() => {}
+    }
+
+    state_tx.send_replace(CustodianState::Stopping);
+    supervisor.stop.cancel(StopReason::PumpExited);
+
+    let deadline = tokio::time::sleep(retirement_deadline);
+    tokio::pin!(deadline);
+    while inbound.is_none() || outbound.is_none() {
+        tokio::select! {
+            result = supervisor.inbound.join(), if inbound.is_none() => inbound = Some(result),
+            result = supervisor.outbound.join(), if outbound.is_none() => outbound = Some(result),
+            _ = &mut deadline => break,
+        }
+    }
+
+    if inbound.is_none() || outbound.is_none() {
+        state_tx.send_replace(CustodianState::CleanupPending);
+        supervisor.stop.cancel(StopReason::ShutdownDeadline);
+        supervisor.force_stop.cancel();
+    }
+    if inbound.is_none() {
+        supervisor.inbound.abort();
+    }
+    if outbound.is_none() {
+        supervisor.outbound.abort();
+    }
+    let inbound = match inbound {
+        Some(result) => result,
+        None => supervisor.inbound.join().await,
+    };
+    let outbound = match outbound {
+        Some(result) => result,
+        None => supervisor.outbound.join().await,
+    };
+    let joined = supervisor.joined(inbound, outbound);
+    let summary = CustodianSummary {
+        connection_ref: joined.connection_ref.clone(),
+        inbound: summarize_inbound(&joined.inbound),
+        outbound: summarize_outbound(&joined.outbound),
+    };
+    let mut retained_summary = match custodian_summary.lock() {
+        Ok(retained_summary) => retained_summary,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *retained_summary = Some(summary);
+    drop(retained_summary);
+    state_tx.send_replace(CustodianState::Joined);
+}
+
+struct ReservedReaperSetup<ReadError, WriteError> {
+    connection_ref: ConnectionRef,
+    stop: StopSignal,
+    force_stop: CancellationToken,
+    shutdown: CancellationToken,
+    admission_open: Arc<Mutex<bool>>,
+    retirement_deadline: Duration,
+    inbound_owner_rx: oneshot::Receiver<JoinHandle<InboundExit<ReadError>>>,
+    outbound_owner_rx: oneshot::Receiver<JoinHandle<OutboundExit<WriteError>>>,
+    commit_rx: oneshot::Receiver<()>,
+    inbound_start_tx: oneshot::Sender<()>,
+    outbound_start_tx: oneshot::Sender<()>,
+    state_tx: watch::Sender<CustodianState>,
+    summary: Arc<Mutex<Option<CustodianSummary>>>,
+    inventory: IoCustodianInventory,
+    reservation_id: u64,
+}
+
+async fn run_reserved_start<ReadError, WriteError>(
+    setup: ReservedReaperSetup<ReadError, WriteError>,
+) where
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+{
+    let ReservedReaperSetup {
+        connection_ref,
+        stop,
+        force_stop,
+        shutdown,
+        admission_open,
+        retirement_deadline,
+        inbound_owner_rx,
+        outbound_owner_rx,
+        commit_rx,
+        inbound_start_tx,
+        outbound_start_tx,
+        state_tx,
+        summary,
+        inventory,
+        reservation_id,
+    } = setup;
+    let (inbound_handle, outbound_handle, committed) =
+        tokio::join!(inbound_owner_rx, outbound_owner_rx, commit_rx);
+    let mut inbound = inbound_handle.ok().map(TaskOwner::new);
+    let mut outbound = outbound_handle.ok().map(TaskOwner::new);
+
+    if committed.is_ok() {
+        match (inbound.take(), outbound.take()) {
+            (Some(inbound_owner), Some(outbound_owner)) => {
+                let _ = inbound_start_tx.send(());
+                let _ = outbound_start_tx.send(());
+                state_tx.send_replace(CustodianState::Running);
+                return run_io_custodian(
+                    IoSupervisor {
+                        connection_ref,
+                        stop,
+                        force_stop,
+                        shutdown,
+                        admission_open,
+                        inbound: inbound_owner,
+                        outbound: outbound_owner,
+                    },
+                    retirement_deadline,
+                    state_tx,
+                    summary,
+                )
+                .await;
+            }
+            (inbound_owner, outbound_owner) => {
+                inbound = inbound_owner;
+                outbound = outbound_owner;
+            }
+        }
+    }
+
+    state_tx.send_replace(CustodianState::Stopping);
+    stop.cancel(StopReason::Requested);
+    force_stop.cancel();
+    if let Some(inbound) = inbound.as_ref() {
+        inbound.abort();
+    }
+    if let Some(outbound) = outbound.as_ref() {
+        outbound.abort();
+    }
+    let mut inbound_result = None;
+    let mut outbound_result = None;
+    let deadline = tokio::time::sleep(retirement_deadline);
+    tokio::pin!(deadline);
+    while (inbound.is_some() && inbound_result.is_none())
+        || (outbound.is_some() && outbound_result.is_none())
+    {
+        tokio::select! {
+            result = join_owned(&mut inbound),
+                if inbound.is_some() && inbound_result.is_none() => inbound_result = Some(result),
+            result = join_owned(&mut outbound),
+                if outbound.is_some() && outbound_result.is_none() => outbound_result = Some(result),
+            _ = &mut deadline => break,
+        }
+    }
+    if inbound_result.is_none() || outbound_result.is_none() {
+        state_tx.send_replace(CustodianState::CleanupPending);
+        stop.cancel(StopReason::ShutdownDeadline);
+        force_stop.cancel();
+    }
+    if inbound_result.is_none() {
+        if let Some(owner) = inbound.as_mut() {
+            inbound_result = Some(owner.join().await);
+        }
+    }
+    if outbound_result.is_none() {
+        if let Some(owner) = outbound.as_mut() {
+            outbound_result = Some(owner.join().await);
+        }
+    }
+    let inbound_terminal = inbound_result
+        .as_ref()
+        .map(summarize_inbound)
+        .unwrap_or(InboundTerminal::NotStarted);
+    let outbound_terminal = outbound_result
+        .as_ref()
+        .map(summarize_outbound)
+        .unwrap_or(OutboundTerminal::NotStarted);
+    let terminal_summary = CustodianSummary {
+        connection_ref: connection_ref.clone(),
+        inbound: inbound_terminal,
+        outbound: outbound_terminal,
+    };
+    let mut retained_summary = match summary.lock() {
+        Ok(retained_summary) => retained_summary,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *retained_summary = Some(terminal_summary);
+    drop(retained_summary);
+
+    match (inbound_result.is_some(), outbound_result.is_some()) {
+        (true, true) => {
+            state_tx.send_replace(CustodianState::Joined);
+        }
+        (false, false) => {
+            state_tx.send_replace(CustodianState::StartupAbandoned);
+            inventory.release_active_without_pumps(&connection_ref, reservation_id);
+        }
+        _ => {
+            state_tx.send_replace(CustodianState::PartialStartJoined);
+        }
+    };
 }
 
 fn summarize_inbound<E>(result: &Result<InboundExit<E>, JoinError>) -> InboundTerminal {
@@ -1013,12 +1483,298 @@ impl<T> TaskOwner<T> {
     }
 }
 
+async fn join_owned<T>(owner: &mut Option<TaskOwner<T>>) -> Result<T, JoinError> {
+    match owner.as_mut() {
+        Some(owner) => owner.join().await,
+        None => std::future::pending().await,
+    }
+}
+
 impl<T> Drop for TaskOwner<T> {
     fn drop(&mut self) {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
     }
+}
+
+struct PumpHandoff<T: Send + 'static> {
+    handle: Option<JoinHandle<T>>,
+    owner: Option<oneshot::Sender<JoinHandle<T>>>,
+}
+
+impl<T: Send + 'static> PumpHandoff<T> {
+    fn new(handle: JoinHandle<T>, owner: oneshot::Sender<JoinHandle<T>>) -> Self {
+        Self {
+            handle: Some(handle),
+            owner: Some(owner),
+        }
+    }
+
+    fn transfer(mut self) {
+        self.send_to_owner();
+    }
+
+    fn send_to_owner(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Some(owner) = self.owner.take() else {
+            abort_and_reap(handle);
+            return;
+        };
+        if let Err(error) = owner.send(handle) {
+            abort_and_reap(error);
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for PumpHandoff<T> {
+    fn drop(&mut self) {
+        self.send_to_owner();
+    }
+}
+
+fn abort_and_reap<T: Send + 'static>(handle: JoinHandle<T>) {
+    // If the independent reaper has already exited, retain the inventory slot
+    // in its last nonterminal state. This fallback joins the task best-effort
+    // but cannot publish custodian join proof; external cleanup may be needed.
+    handle.abort();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = handle.await;
+        });
+    }
+}
+
+type PumpFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+struct PreparedIo<M, ReadError, WriteError> {
+    connection_ref: ConnectionRef,
+    stop: StopSignal,
+    force_stop: CancellationToken,
+    shutdown: CancellationToken,
+    admission_open: Arc<Mutex<bool>>,
+    inbound: PumpFuture<InboundExit<ReadError>>,
+    outbound: PumpFuture<OutboundExit<WriteError>>,
+    outbound_sender: WriteSender<M>,
+    inbound_receiver: mpsc::Receiver<QueueItem<M>>,
+}
+
+fn prepare_supervised_io<R, W, M, ReadError, WriteError, Size, IsClose, IsSendAfterClose>(
+    connection_ref: ConnectionRef,
+    reader: R,
+    writer: W,
+    limits: TransportLimits,
+    shutdown_protocol: ShutdownProtocol<M, IsSendAfterClose>,
+    frame_size: Size,
+    is_close: IsClose,
+) -> PreparedIo<M, ReadError, WriteError>
+where
+    R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
+    W: Sink<M, Error = WriteError> + Unpin + Send + 'static,
+    M: Send + 'static,
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+    Size: Fn(&M) -> usize + Send + 'static,
+    IsClose: Fn(&M) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+{
+    let ShutdownProtocol {
+        shutdown_frame,
+        is_send_after_close,
+    } = shutdown_protocol;
+    let stop = StopSignal::new();
+    let force_stop = CancellationToken::new();
+    let shutdown = CancellationToken::new();
+    let peer_close = CancellationToken::new();
+    let admission_open = Arc::new(Mutex::new(true));
+    let (inbound, inbound_receiver) = bounded_channel(
+        limits.inbound,
+        stop.clone(),
+        StopReason::InboundOverload,
+        StopReason::InboundQueueClosed,
+    );
+    let (outbound_queue, outbound_receiver) = bounded_channel(
+        limits.outbound,
+        stop.clone(),
+        StopReason::OutboundOverload,
+        StopReason::OutboundQueueClosed,
+    );
+
+    let inbound = Box::pin(run_reader(
+        reader,
+        inbound,
+        stop.clone(),
+        shutdown.clone(),
+        peer_close.clone(),
+        frame_size,
+        is_close,
+    ));
+    let outbound = Box::pin(run_writer(
+        writer,
+        outbound_receiver,
+        WriterSignals {
+            stop: stop.clone(),
+            force_stop: force_stop.clone(),
+            shutdown: shutdown.clone(),
+            peer_close,
+        },
+        Some(shutdown_frame),
+        is_send_after_close,
+    ));
+
+    PreparedIo {
+        connection_ref,
+        stop,
+        force_stop,
+        shutdown,
+        admission_open: admission_open.clone(),
+        inbound,
+        outbound,
+        outbound_sender: WriteSender {
+            sender: outbound_queue,
+            admission_open,
+        },
+        inbound_receiver,
+    }
+}
+
+async fn start_reserved_supervised_io<
+    R,
+    W,
+    M,
+    ReadError,
+    WriteError,
+    Size,
+    IsClose,
+    IsSendAfterClose,
+    Factory,
+    FactoryFuture,
+    Hook,
+    HookFuture,
+>(
+    mut reservation: IoCustodianReservation,
+    config: ReservedIoStartConfig<M, IsSendAfterClose, Size, IsClose>,
+    factory: Factory,
+    mut hook: Hook,
+) -> Result<
+    (
+        IoCustodianHandle,
+        WriteSender<M>,
+        mpsc::Receiver<QueueItem<M>>,
+    ),
+    CustodianInventoryError,
+>
+where
+    R: Stream<Item = Result<M, ReadError>> + Unpin + Send + 'static,
+    W: Sink<M, Error = WriteError> + Unpin + Send + 'static,
+    M: Send + 'static,
+    ReadError: Send + 'static,
+    WriteError: Send + 'static,
+    Size: Fn(&M) -> usize + Send + 'static,
+    IsClose: Fn(&M) -> bool + Send + 'static,
+    IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
+    Factory: FnOnce(&ConnectionRef) -> FactoryFuture + Send,
+    FactoryFuture: Future<Output = (R, W)> + Send,
+    Hook: FnMut(ReservedStartStage) -> HookFuture + Send,
+    HookFuture: Future<Output = ()> + Send,
+{
+    let ReservedIoStartConfig {
+        limits,
+        shutdown_protocol,
+        frame_size,
+        is_close,
+        retirement_deadline,
+    } = config;
+    let connection_ref = reservation.connection_ref.clone();
+    let (reader, writer) = factory(&connection_ref).await;
+    let prepared = prepare_supervised_io(
+        connection_ref.clone(),
+        reader,
+        writer,
+        limits,
+        shutdown_protocol,
+        frame_size,
+        is_close,
+    );
+
+    let (state_tx, state_rx) = watch::channel(CustodianState::Starting);
+    let summary = Arc::new(Mutex::new(None));
+    let handle_summary = summary.clone();
+    let observer = IoCustodianObserver {
+        connection_ref: connection_ref.clone(),
+        state: state_rx.clone(),
+        summary: summary.clone(),
+    };
+    let inventory = reservation.inventory.clone();
+    let reservation_id = reservation.reservation_id;
+
+    let (inbound_owner_tx, inbound_owner_rx) = oneshot::channel();
+    let (outbound_owner_tx, outbound_owner_rx) = oneshot::channel();
+    let (commit_tx, commit_rx) = oneshot::channel();
+    let (inbound_start_tx, inbound_start_rx) = oneshot::channel();
+    let (outbound_start_tx, outbound_start_rx) = oneshot::channel();
+
+    // The reservation remains armed until the reaper exists and has the
+    // channels needed to recover every later startup cancellation or panic.
+    tokio::spawn(run_reserved_start(ReservedReaperSetup {
+        connection_ref: connection_ref.clone(),
+        stop: prepared.stop.clone(),
+        force_stop: prepared.force_stop.clone(),
+        shutdown: prepared.shutdown.clone(),
+        admission_open: prepared.admission_open.clone(),
+        retirement_deadline,
+        inbound_owner_rx,
+        outbound_owner_rx,
+        commit_rx,
+        inbound_start_tx,
+        outbound_start_tx,
+        state_tx,
+        summary,
+        inventory,
+        reservation_id,
+    }));
+
+    reservation
+        .inventory
+        .activate_reservation(&connection_ref, reservation_id, observer)?;
+    reservation.active = false;
+
+    let handle = IoCustodianHandle {
+        client: Arc::new(CustodianClient {
+            connection_ref,
+            stop: prepared.stop,
+            force_stop: prepared.force_stop,
+            admission_open: prepared.admission_open,
+            state: state_rx,
+            summary: handle_summary,
+        }),
+    };
+
+    hook(ReservedStartStage::BeforeInboundSpawn).await;
+    let inbound_task = tokio::spawn(async move {
+        if inbound_start_rx.await.is_err() {
+            return InboundExit::Stopped;
+        }
+        prepared.inbound.await
+    });
+    PumpHandoff::new(inbound_task, inbound_owner_tx).transfer();
+
+    hook(ReservedStartStage::BetweenPumpSpawns).await;
+    let outbound_task = tokio::spawn(async move {
+        if outbound_start_rx.await.is_err() {
+            return OutboundExit::Stopped;
+        }
+        prepared.outbound.await
+    });
+    PumpHandoff::new(outbound_task, outbound_owner_tx).transfer();
+
+    hook(ReservedStartStage::AfterOutboundSpawn).await;
+    let _ = commit_tx.send(());
+    hook(ReservedStartStage::AfterCommit).await;
+
+    Ok((handle, prepared.outbound_sender, prepared.inbound_receiver))
 }
 
 /// Split socket halves into supervised read and write pumps.
@@ -1045,80 +1801,30 @@ where
     IsClose: Fn(&M) -> bool + Send + 'static,
     IsSendAfterClose: Fn(&WriteError) -> bool + Send + Sync + 'static,
 {
-    let ShutdownProtocol {
-        shutdown_frame,
-        is_send_after_close,
-    } = shutdown_protocol;
-    let stop = StopSignal::new();
-    let force_stop = CancellationToken::new();
-    let shutdown = CancellationToken::new();
-    let peer_close = CancellationToken::new();
-    let admission_open = Arc::new(Mutex::new(true));
-    let (inbound, inbound_rx) = bounded_channel(
-        limits.inbound,
-        stop.clone(),
-        StopReason::InboundOverload,
-        StopReason::InboundQueueClosed,
+    let prepared = prepare_supervised_io(
+        connection_ref,
+        reader,
+        writer,
+        limits,
+        shutdown_protocol,
+        frame_size,
+        is_close,
     );
-    let (outbound_queue, outbound_rx) = bounded_channel(
-        limits.outbound,
-        stop.clone(),
-        StopReason::OutboundOverload,
-        StopReason::OutboundQueueClosed,
-    );
-
-    let reader_stop = stop.clone();
-    let reader_shutdown = shutdown.clone();
-    let reader_peer_close = peer_close.clone();
-    let inbound_task = tokio::spawn(async move {
-        run_reader(
-            reader,
-            inbound,
-            reader_stop,
-            reader_shutdown,
-            reader_peer_close,
-            frame_size,
-            is_close,
-        )
-        .await
-    });
-
-    let writer_stop = stop.clone();
-    let writer_force_stop = force_stop.clone();
-    let writer_shutdown = shutdown.clone();
-    let writer_peer_close = peer_close;
-    let writer_signals = WriterSignals {
-        stop: writer_stop,
-        force_stop: writer_force_stop,
-        shutdown: writer_shutdown,
-        peer_close: writer_peer_close,
-    };
-    let outbound_task = tokio::spawn(async move {
-        run_writer(
-            writer,
-            outbound_rx,
-            writer_signals,
-            Some(shutdown_frame),
-            is_send_after_close,
-        )
-        .await
-    });
+    let inbound_task = tokio::spawn(prepared.inbound);
+    let outbound_task = tokio::spawn(prepared.outbound);
 
     (
         IoSupervisor {
-            connection_ref,
-            stop,
-            force_stop,
-            shutdown,
-            admission_open: admission_open.clone(),
+            connection_ref: prepared.connection_ref,
+            stop: prepared.stop,
+            force_stop: prepared.force_stop,
+            shutdown: prepared.shutdown,
+            admission_open: prepared.admission_open,
             inbound: TaskOwner::new(inbound_task),
             outbound: TaskOwner::new(outbound_task),
         },
-        WriteSender {
-            sender: outbound_queue,
-            admission_open,
-        },
-        inbound_rx,
+        prepared.outbound_sender,
+        prepared.inbound_receiver,
     )
 }
 
