@@ -4,11 +4,14 @@ set -euo pipefail
 # Compile once, then use the same immutable archives in four local Nix
 # sandboxes. Each shard pins itself to eight distinct CPUs before starting
 # PostgreSQL or nextest. No archive crosses a runner or trust boundary.
+candidate_sha="$(git rev-parse --verify 'HEAD^{commit}')"
 isolation=(--option builders '' --option sandbox true --option sandbox-fallback false)
 nix build --print-build-logs --no-link "${isolation[@]}" ../#waddle-ci-sandbox-probe
 archive="$(bash scripts/build-nextest-archive.sh)"
 diagnostics=.ci/nextest-archive
 mkdir -p "$diagnostics"
+# A failed rerun must not leave a prior passing sidecar looking current.
+rm -f "$diagnostics/qualification-evidence.json"
 cp "$archive/ci-performance/cargo-timing.html" "$diagnostics/cargo-timing.html"
 cp "$archive/partition-coverage.json" "$diagnostics/partition-coverage.json"
 cp "$archive/plan.json" "$diagnostics/plan.json"
@@ -44,4 +47,6 @@ done
 python3 "$(dirname "${BASH_SOURCE[0]}")/check_required_tests.py" \
   --required .config/required-cluster-tests.txt \
   --executed-out "$diagnostics/executed-tests.txt" \
+  --evidence-out "$diagnostics/qualification-evidence.json" \
+  --candidate-sha "$candidate_sha" \
   "${junit_reports[@]}"

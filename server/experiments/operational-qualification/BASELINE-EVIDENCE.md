@@ -109,6 +109,17 @@ paths in the required PostgreSQL/multiprocess/WebSocket CI lane. The lane must
 fail when prerequisites are absent. Restore hosted CI as described in the
 [CI pause plan](../../../docs/planning/2046-ci-pause.md) before release.
 
+The existing `server/scripts/run-nextest-shards.sh` runner writes
+`.ci/nextest-archive/qualification-evidence.json` only after its required-test
+check passes. The sidecar binds the clean candidate commit to the required-list
+and JUnit report hashes, records every required outcome and the executed test
+inventory, and requires PostgreSQL, multiprocess, real cross-node resume, and
+relay/WebSocket anchor tests. It contains no database URL or report contents.
+Its `qualification` value is always `not_assessed`; it does not establish image
+identity, deployed topology, resource enforcement, workload results, fault
+results, or deployment state. A missing sidecar or a failed lane supplies no
+test-lane evidence.
+
 | Scenario | Evidence to link | Candidate status |
 | --- | --- | --- |
 | Concurrent same-full-JID binds | Current binding and successor fencing | unverified |
