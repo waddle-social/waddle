@@ -29,11 +29,13 @@ pub use retention_lab::{RetentionLab, RetentionLabBatch};
 mod admission_pin_lab;
 #[cfg(feature = "test-support")]
 pub use admission_pin_lab::{
-    direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab,
-    AdmissionPinLabError, DirectAdmission, DirectAdmissionLab, DirectAdmissionLabError,
-    DirectAdmissionLimits, DirectAdmissionOutcome, FixtureConnection, PinAllocationBinding,
-    PinOutcome, PinRecovery, PinState, PinTerminalDisposition, DIRECT_LAB_SQLITE_DDL,
-    PIN_LAB_SQLITE_DDL,
+    allocation_lab_postgres_ddl, direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin,
+    AdmissionPinLab, AdmissionPinLabError, DirectAdmission, DirectAdmissionLab,
+    DirectAdmissionLabError, DirectAdmissionLimits, DirectAdmissionOutcome,
+    FencedFixtureCapability, FixtureAllocationCapability, FixtureAllocationError,
+    FixtureAllocationWitness, FixtureConnection, FixtureFrame, FixtureStream, PinAllocationBinding,
+    PinOutcome, PinRecovery, PinState, PinTerminalDisposition, ALLOCATION_LAB_SQLITE_DDL,
+    DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
 
 /// Bounds on checkout and the first PostgreSQL relation-lock wait.

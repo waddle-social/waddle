@@ -1294,3 +1294,6 @@ async fn postgres_committed_lost_reply_requires_fresh_authoritative_lookup() {
     drop(recovered_lab);
     fixture.cleanup().await;
 }
+
+#[path = "allocation.rs"]
+mod allocation_tests;

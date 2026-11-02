@@ -1,6 +1,14 @@
 //! Closed, unwired experiment. `FixtureConnection` is synthetic and cannot
 //! authorize a real connection or enqueue. No runtime writer calls this lab.
 
+#[path = "direct_admission_lab/allocation.rs"]
+mod allocation;
+pub use allocation::{
+    allocation_lab_postgres_ddl, FencedFixtureCapability, FixtureAllocationCapability,
+    FixtureAllocationError, FixtureAllocationWitness, FixtureFrame, FixtureStream,
+    ALLOCATION_LAB_SQLITE_DDL,
+};
+
 use crate::ingress_uow::{start_fresh_postgres, start_fresh_sqlite, SendLease};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgConnectOptions;

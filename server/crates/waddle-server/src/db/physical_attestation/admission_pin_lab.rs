@@ -10,8 +10,11 @@ pub use state::{PinAllocationBinding, PinRecovery, PinState, PinTerminalDisposit
 #[path = "direct_admission_lab.rs"]
 mod direct;
 pub use direct::{
-    direct_lab_postgres_ddl, DirectAdmission, DirectAdmissionLab, DirectAdmissionLabError,
-    DirectAdmissionLimits, DirectAdmissionOutcome, FixtureConnection, DIRECT_LAB_SQLITE_DDL,
+    allocation_lab_postgres_ddl, direct_lab_postgres_ddl, DirectAdmission, DirectAdmissionLab,
+    DirectAdmissionLabError, DirectAdmissionLimits, DirectAdmissionOutcome,
+    FencedFixtureCapability, FixtureAllocationCapability, FixtureAllocationError,
+    FixtureAllocationWitness, FixtureConnection, FixtureFrame, FixtureStream,
+    ALLOCATION_LAB_SQLITE_DDL, DIRECT_LAB_SQLITE_DDL,
 };
 
 use chrono::{DateTime, Utc};

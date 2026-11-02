@@ -25,11 +25,13 @@ pub use installer::{inspect_installation, install, InstallationStatus};
 mod typed_authority;
 #[cfg(feature = "test-support")]
 pub use typed_authority::{
-    direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab,
-    AdmissionPinLabError, DirectAdmission, DirectAdmissionLab, DirectAdmissionLabError,
-    DirectAdmissionLimits, DirectAdmissionOutcome, FixtureConnection, PinAllocationBinding,
-    PinOutcome, PinRecovery, PinState, PinTerminalDisposition, DIRECT_LAB_SQLITE_DDL,
-    PIN_LAB_SQLITE_DDL,
+    allocation_lab_postgres_ddl, direct_lab_postgres_ddl, pin_lab_postgres_ddl, AdmissionPin,
+    AdmissionPinLab, AdmissionPinLabError, DirectAdmission, DirectAdmissionLab,
+    DirectAdmissionLabError, DirectAdmissionLimits, DirectAdmissionOutcome,
+    FencedFixtureCapability, FixtureAllocationCapability, FixtureAllocationError,
+    FixtureAllocationWitness, FixtureConnection, FixtureFrame, FixtureStream, PinAllocationBinding,
+    PinOutcome, PinRecovery, PinState, PinTerminalDisposition, ALLOCATION_LAB_SQLITE_DDL,
+    DIRECT_LAB_SQLITE_DDL, PIN_LAB_SQLITE_DDL,
 };
 #[cfg(feature = "test-support")]
 pub(crate) use typed_authority::{prelock_epoch_relation, read_epoch_after_prelock};
