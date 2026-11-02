@@ -78,6 +78,7 @@ pub enum BindKind {
 /// Candidate held out of all admitting indexes until activation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointCandidate {
+    full_jid: FullJid,
     binding: EndpointBinding,
     kind: BindKind,
 }
@@ -86,11 +87,13 @@ impl EndpointCandidate {
     /// Mint a distinct attempt on an existing physical connection. Cloning a
     /// candidate retains the same attempt; it does not create a new one.
     pub fn new_attempt(
+        full_jid: FullJid,
         connection_ref: ConnectionRef,
         logical_generation: LogicalResourceGeneration,
         kind: BindKind,
     ) -> Self {
         Self {
+            full_jid,
             binding: EndpointBinding {
                 binding_ref: BindingRef::fresh(connection_ref),
                 logical_generation,
@@ -110,6 +113,7 @@ impl EndpointCandidate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageError {
+    SlotMismatch,
     RevisionConflict,
     AlreadyStaged,
     OperationReused,
@@ -129,6 +133,8 @@ pub enum TransitionError {
     EvidenceMismatch,
     CommitUnknown,
     NotPrepared,
+    PreparationNotStarted,
+    PreparationAlreadyFinished,
     PreparedCannotCompensate,
     RevisionExhausted,
 }
@@ -175,6 +181,7 @@ pub struct ResumeHandoff {
 /// must match the stage; supplying them does not establish the underlying facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparationEvidence {
+    pub full_jid: FullJid,
     pub operation_id: EndpointOperationId,
     pub staged_revision: EndpointRevision,
     pub non_admitting_mirror: EndpointBinding,
@@ -186,6 +193,7 @@ pub struct PreparationEvidence {
 /// not establish current claim authority, a durable write, or remote delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationAcknowledgement {
+    pub full_jid: FullJid,
     pub operation_id: EndpointOperationId,
     pub staged_revision: EndpointRevision,
     pub binding: EndpointBinding,
@@ -196,9 +204,44 @@ pub struct ActivationAcknowledgement {
 /// for activation. The token itself proves no external fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedEndpoint {
+    full_jid: FullJid,
     operation_id: EndpointOperationId,
     staged_revision: EndpointRevision,
     candidate: EndpointCandidate,
+}
+
+/// Identifies the in-flight preparation before any external work is sent.
+/// This in-memory token does not provide a durable dispatch fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationAttempt {
+    full_jid: FullJid,
+    operation_id: EndpointOperationId,
+    staged_revision: EndpointRevision,
+    candidate: EndpointCandidate,
+}
+
+/// Caller-supplied basis for knowing that the original preparation cannot
+/// still commit. A missing lookup alone does not provide either basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationNonCommitDisposition {
+    /// The original transaction itself returned a definitive abort.
+    OriginalTransactionAborted,
+    /// A serialization barrier followed the settled original transaction and
+    /// observed that this exact operation did not commit while the barrier
+    /// prevented the original from committing later.
+    SerializedBarrierConfirmedNoCommit,
+}
+
+/// Exact caller-supplied non-commit assumption, not an authority proof. A real
+/// adapter must establish the stated disposition rather than infer it from
+/// an unavailable store or an absent lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationNonCommitResolution {
+    pub full_jid: FullJid,
+    pub operation_id: EndpointOperationId,
+    pub staged_revision: EndpointRevision,
+    pub candidate: EndpointCandidate,
+    pub disposition: PreparationNonCommitDisposition,
 }
 
 /// What is known about the predecessor when abandoning a staged candidate.
@@ -222,7 +265,9 @@ pub enum PredecessorOnCompensation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationDisposition {
     Staged(EndpointRevision),
+    PreparationInFlight(EndpointRevision),
     PreparationUnresolved(EndpointRevision),
+    PreparationNotCommitted(EndpointRevision),
     Prepared(EndpointRevision),
     ActivationUnresolved(EndpointRevision),
     Activated(EndpointRevision),
@@ -240,6 +285,9 @@ pub enum CommitObservation<T> {
 pub enum EnqueueOutcome<T> {
     Committed(T),
     RetryBeforeEnqueue,
+    /// Detached state requires custody resolution or retry, never an empty
+    /// slot/offline fallback based on this observation alone.
+    RetryDetached(DetachedResource),
     NoEndpoint,
 }
 
@@ -270,6 +318,7 @@ impl EndpointState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnknownCommit {
+    PreparationInFlight,
     Preparation,
     Activation,
 }
@@ -281,6 +330,7 @@ struct Staged {
     candidate: EndpointCandidate,
     prepared: Option<PreparationEvidence>,
     unknown_commit: Option<UnknownCommit>,
+    preparation_not_committed: bool,
 }
 
 /// A single full-JID state-machine fixture. All methods are synchronous so a
@@ -318,6 +368,8 @@ impl EndpointSlot {
         self.revision
     }
 
+    /// An absent active binding does not mean the logical resource is empty;
+    /// use the admission outcome to distinguish detached state.
     pub fn active(&self) -> Option<&EndpointBinding> {
         if self.staged.is_some() {
             return None;
@@ -376,6 +428,9 @@ impl EndpointSlot {
         operation_id: EndpointOperationId,
         candidate: EndpointCandidate,
     ) -> Result<EndpointRevision, StageError> {
+        if candidate.full_jid != self.full_jid {
+            return Err(StageError::SlotMismatch);
+        }
         if self.operations.contains_key(&operation_id) {
             return Err(StageError::OperationReused);
         }
@@ -427,6 +482,7 @@ impl EndpointSlot {
             candidate,
             prepared: None,
             unknown_commit: None,
+            preparation_not_committed: false,
         });
         self.operations
             .insert(operation_id, OperationDisposition::Staged(next));
@@ -450,8 +506,49 @@ impl EndpointSlot {
                 EnqueueOutcome::Committed(enqueue())
             }
             EndpointState::Attached(_) => EnqueueOutcome::RetryBeforeEnqueue,
-            EndpointState::Empty | EndpointState::Detached(_) => EnqueueOutcome::NoEndpoint,
+            EndpointState::Detached(resource) => EnqueueOutcome::RetryDetached(resource.clone()),
+            EndpointState::Empty => EnqueueOutcome::NoEndpoint,
         }
+    }
+
+    /// Record the in-flight transition before dispatching external prepare.
+    /// If the caller is cancelled before observing a result, compensation
+    /// remains sealed. This local marker is not durable across a process loss.
+    pub fn begin_preparation(
+        &mut self,
+        operation_id: EndpointOperationId,
+        staged_revision: EndpointRevision,
+        candidate: &EndpointCandidate,
+    ) -> Result<PreparationAttempt, TransitionError> {
+        if candidate.full_jid != self.full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
+        let staged = self
+            .staged
+            .as_mut()
+            .filter(|stage| {
+                stage.operation_id == operation_id
+                    && stage.revision == staged_revision
+                    && &stage.candidate == candidate
+            })
+            .ok_or(TransitionError::StaleOperation)?;
+        if staged.unknown_commit.is_some() {
+            return Err(TransitionError::CommitUnknown);
+        }
+        if staged.prepared.is_some() || staged.preparation_not_committed {
+            return Err(TransitionError::PreparationAlreadyFinished);
+        }
+        staged.unknown_commit = Some(UnknownCommit::PreparationInFlight);
+        self.operations.insert(
+            operation_id,
+            OperationDisposition::PreparationInFlight(staged_revision),
+        );
+        Ok(PreparationAttempt {
+            full_jid: self.full_jid.clone(),
+            operation_id,
+            staged_revision,
+            candidate: staged.candidate.clone(),
+        })
     }
 
     /// Validate exact caller assumptions and produce a non-routable token.
@@ -459,17 +556,31 @@ impl EndpointSlot {
     /// resolved; it is never interpreted as a failed or rolled-back commit.
     pub fn prepare(
         &mut self,
-        operation_id: EndpointOperationId,
-        staged_revision: EndpointRevision,
+        attempt: &PreparationAttempt,
         observation: CommitObservation<PreparationEvidence>,
     ) -> Result<PreparedEndpoint, TransitionError> {
+        if attempt.full_jid != self.full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
+        let operation_id = attempt.operation_id;
+        let staged_revision = attempt.staged_revision;
         let staged = self
             .staged
             .as_mut()
-            .filter(|stage| stage.operation_id == operation_id && stage.revision == staged_revision)
+            .filter(|stage| {
+                stage.operation_id == operation_id
+                    && stage.revision == staged_revision
+                    && stage.candidate == attempt.candidate
+            })
             .ok_or(TransitionError::StaleOperation)?;
         if staged.unknown_commit == Some(UnknownCommit::Activation) {
             return Err(TransitionError::CommitUnknown);
+        }
+        if staged.preparation_not_committed {
+            return Err(TransitionError::PreparationAlreadyFinished);
+        }
+        if staged.unknown_commit.is_none() && staged.prepared.is_none() {
+            return Err(TransitionError::PreparationNotStarted);
         }
         let evidence = match observation {
             CommitObservation::Unknown {
@@ -502,7 +613,8 @@ impl EndpointSlot {
             }
             _ => false,
         };
-        if evidence.operation_id != operation_id
+        if evidence.full_jid != self.full_jid
+            || evidence.operation_id != operation_id
             || evidence.staged_revision != staged_revision
             || evidence.non_admitting_mirror != staged.candidate.binding
             || !retirement_matches
@@ -521,10 +633,53 @@ impl EndpointSlot {
             OperationDisposition::Prepared(staged_revision),
         );
         Ok(PreparedEndpoint {
+            full_jid: self.full_jid.clone(),
             operation_id,
             staged_revision,
             candidate: staged.candidate.clone(),
         })
+    }
+
+    /// Resolve an in-flight or unknown preparation as definitively not
+    /// committed only on an exact caller-supplied original-transaction or
+    /// serialization-barrier disposition. This fixture cannot verify it.
+    pub fn resolve_preparation_not_committed(
+        &mut self,
+        attempt: &PreparationAttempt,
+        resolution: &PreparationNonCommitResolution,
+    ) -> Result<(), TransitionError> {
+        if attempt.full_jid != self.full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
+        let staged = self
+            .staged
+            .as_mut()
+            .filter(|stage| {
+                stage.operation_id == attempt.operation_id
+                    && stage.revision == attempt.staged_revision
+                    && stage.candidate == attempt.candidate
+            })
+            .ok_or(TransitionError::StaleOperation)?;
+        if resolution.full_jid != self.full_jid
+            || resolution.operation_id != attempt.operation_id
+            || resolution.staged_revision != attempt.staged_revision
+            || resolution.candidate != attempt.candidate
+        {
+            return Err(TransitionError::EvidenceMismatch);
+        }
+        if !matches!(
+            staged.unknown_commit,
+            Some(UnknownCommit::PreparationInFlight | UnknownCommit::Preparation)
+        ) {
+            return Err(TransitionError::PreparationAlreadyFinished);
+        }
+        staged.unknown_commit = None;
+        staged.preparation_not_committed = true;
+        self.operations.insert(
+            attempt.operation_id,
+            OperationDisposition::PreparationNotCommitted(attempt.staged_revision),
+        );
+        Ok(())
     }
 
     /// Activate the exact prepared candidate only after a matching caller
@@ -535,6 +690,9 @@ impl EndpointSlot {
         prepared: &PreparedEndpoint,
         observation: CommitObservation<ActivationAcknowledgement>,
     ) -> Result<EndpointRevision, TransitionError> {
+        if prepared.full_jid != self.full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
         let staged = self
             .staged
             .as_mut()
@@ -544,7 +702,10 @@ impl EndpointSlot {
                     && stage.candidate == prepared.candidate
             })
             .ok_or(TransitionError::StaleOperation)?;
-        if staged.unknown_commit == Some(UnknownCommit::Preparation) {
+        if matches!(
+            staged.unknown_commit,
+            Some(UnknownCommit::PreparationInFlight | UnknownCommit::Preparation)
+        ) {
             return Err(TransitionError::CommitUnknown);
         }
         if staged.prepared.is_none() {
@@ -564,7 +725,8 @@ impl EndpointSlot {
             }
             CommitObservation::Known(acknowledgement) => acknowledgement,
         };
-        if acknowledgement.operation_id != staged.operation_id
+        if acknowledgement.full_jid != self.full_jid
+            || acknowledgement.operation_id != staged.operation_id
             || acknowledgement.staged_revision != staged.revision
             || acknowledgement.binding != staged.candidate.binding
         {
@@ -589,12 +751,20 @@ impl EndpointSlot {
         &mut self,
         operation_id: EndpointOperationId,
         staged_revision: EndpointRevision,
+        candidate: &EndpointCandidate,
         predecessor: PredecessorOnCompensation,
     ) -> Result<EndpointRevision, TransitionError> {
+        if candidate.full_jid != self.full_jid {
+            return Err(TransitionError::StaleOperation);
+        }
         let staged = self
             .staged
             .as_ref()
-            .filter(|stage| stage.operation_id == operation_id && stage.revision == staged_revision)
+            .filter(|stage| {
+                stage.operation_id == operation_id
+                    && stage.revision == staged_revision
+                    && &stage.candidate == candidate
+            })
             .ok_or(TransitionError::StaleOperation)?;
         if staged.unknown_commit.is_some() {
             return Err(TransitionError::CommitUnknown);
@@ -682,6 +852,7 @@ mod tests {
         predecessor: Option<&BindingRef>,
     ) -> PreparationEvidence {
         PreparationEvidence {
+            full_jid: candidate.full_jid.clone(),
             operation_id,
             staged_revision,
             non_admitting_mirror: candidate.binding.clone(),
@@ -699,6 +870,7 @@ mod tests {
 
     fn acknowledgement(prepared: &PreparedEndpoint) -> ActivationAcknowledgement {
         ActivationAcknowledgement {
+            full_jid: prepared.full_jid.clone(),
             operation_id: prepared.operation_id,
             staged_revision: prepared.staged_revision,
             binding: prepared.candidate.binding.clone(),
@@ -712,9 +884,11 @@ mod tests {
         candidate: &EndpointCandidate,
         predecessor: Option<&BindingRef>,
     ) -> PreparedEndpoint {
+        let attempt = slot
+            .begin_preparation(operation, revision, candidate)
+            .expect("mark preparation in flight before dispatch");
         slot.prepare(
-            operation,
-            revision,
+            &attempt,
             CommitObservation::Known(evidence(operation, revision, candidate, predecessor)),
         )
         .expect("prepare exact candidate")
@@ -731,6 +905,7 @@ mod tests {
     fn publish_fresh(slot: &mut EndpointSlot, binding: EndpointBinding) {
         let operation = EndpointOperationId::fresh();
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding,
             kind: BindKind::Fresh,
         };
@@ -747,6 +922,7 @@ mod tests {
         let mut slot = EndpointSlot::new(jid());
         let first = binding(new_connection(), LogicalResourceGeneration::fresh());
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding: first.clone(),
             kind: BindKind::Fresh,
         };
@@ -785,6 +961,10 @@ mod tests {
         let mut slot = EndpointSlot::new(jid());
         let logical = LogicalResourceGeneration::fresh();
         let old = binding(new_connection(), logical);
+        assert_eq!(
+            slot.with_admission(&old, || panic!("empty slot enqueued")),
+            EnqueueOutcome::NoEndpoint
+        );
         publish_fresh(&mut slot, old.clone());
 
         let mut wrong_pump = retirement(&old.binding_ref);
@@ -806,13 +986,17 @@ mod tests {
         );
         assert_eq!(
             slot.with_admission(&old, || panic!("detached endpoint enqueued")),
-            EnqueueOutcome::NoEndpoint
+            EnqueueOutcome::RetryDetached(DetachedResource {
+                logical_generation: logical,
+                prior_binding_ref: old.binding_ref.clone(),
+            })
         );
         assert_eq!(
             slot.stage(
                 slot.revision(),
                 EndpointOperationId::fresh(),
                 EndpointCandidate {
+                    full_jid: jid(),
                     binding: binding(old.binding_ref.connection_ref().clone(), logical),
                     kind: BindKind::Resume,
                 },
@@ -827,6 +1011,7 @@ mod tests {
             logical,
         );
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding: successor.clone(),
             kind: BindKind::Resume,
         };
@@ -834,6 +1019,9 @@ mod tests {
         let staged = slot
             .stage(slot.revision(), operation, candidate.clone())
             .expect("stage detached resume");
+        let attempt = slot
+            .begin_preparation(operation, staged, &candidate)
+            .expect("mark preparation in flight");
         let good = evidence(operation, staged, &candidate, Some(&old.binding_ref));
         let mut cases = Vec::new();
         let mut wrong_operation = good.clone();
@@ -871,17 +1059,17 @@ mod tests {
         cases.push(wrong_handoff);
         for wrong in cases {
             assert_eq!(
-                slot.prepare(operation, staged, CommitObservation::Known(wrong)),
+                slot.prepare(&attempt, CommitObservation::Known(wrong)),
                 Err(TransitionError::EvidenceMismatch)
             );
             assert_eq!(slot.active(), None);
             assert_eq!(
                 slot.disposition(operation),
-                Some(OperationDisposition::Staged(staged))
+                Some(OperationDisposition::PreparationInFlight(staged))
             );
         }
         let prepared = slot
-            .prepare(operation, staged, CommitObservation::Known(good))
+            .prepare(&attempt, CommitObservation::Known(good))
             .expect("all exact assumptions supplied");
         assert_eq!(slot.active(), None);
         activate(&mut slot, &prepared);
@@ -900,6 +1088,7 @@ mod tests {
             .expect("detach");
         let socket = new_connection();
         let failed_candidate = EndpointCandidate::new_attempt(
+            jid(),
             socket.clone(),
             old.logical_generation,
             BindKind::Resume,
@@ -908,11 +1097,12 @@ mod tests {
         assert_eq!(failed_candidate.kind(), BindKind::Resume);
         let failed_op = EndpointOperationId::fresh();
         let failed_revision = slot
-            .stage(slot.revision(), failed_op, failed_candidate)
+            .stage(slot.revision(), failed_op, failed_candidate.clone())
             .expect("stage failed resume");
         slot.compensate(
             failed_op,
             failed_revision,
+            &failed_candidate,
             PredecessorOnCompensation::DetachedAndUnchanged {
                 binding_ref: old.binding_ref.clone(),
             },
@@ -925,6 +1115,7 @@ mod tests {
         );
 
         let candidate = EndpointCandidate::new_attempt(
+            jid(),
             socket,
             LogicalResourceGeneration::fresh(),
             BindKind::Fresh,
@@ -941,6 +1132,7 @@ mod tests {
                 slot.revision(),
                 EndpointOperationId::fresh(),
                 EndpointCandidate {
+                    full_jid: jid(),
                     binding: EndpointBinding {
                         binding_ref: failed.binding_ref.clone(),
                         logical_generation: LogicalResourceGeneration::fresh(),
@@ -967,6 +1159,7 @@ mod tests {
             slot.compensate(
                 failed_op,
                 failed_revision,
+                &failed_candidate,
                 PredecessorOnCompensation::RetiredWithCustody(retirement(&old.binding_ref)),
             ),
             Err(TransitionError::StaleOperation)
@@ -978,6 +1171,7 @@ mod tests {
     fn unknown_commit_cannot_activate_compensate_or_fall_through() {
         let mut slot = EndpointSlot::new(jid());
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding: binding(new_connection(), LogicalResourceGeneration::fresh()),
             kind: BindKind::Fresh,
         };
@@ -986,6 +1180,7 @@ mod tests {
             .stage(slot.revision(), operation, candidate.clone())
             .expect("stage");
         let forged = PreparedEndpoint {
+            full_jid: jid(),
             operation_id: operation,
             staged_revision: staged,
             candidate: candidate.clone(),
@@ -994,10 +1189,25 @@ mod tests {
             slot.activate(&forged, CommitObservation::Known(acknowledgement(&forged))),
             Err(TransitionError::NotPrepared)
         );
+        let forged_attempt = PreparationAttempt {
+            full_jid: jid(),
+            operation_id: operation,
+            staged_revision: staged,
+            candidate: candidate.clone(),
+        };
         assert_eq!(
             slot.prepare(
-                operation,
-                staged,
+                &forged_attempt,
+                CommitObservation::Known(evidence(operation, staged, &candidate, None)),
+            ),
+            Err(TransitionError::PreparationNotStarted)
+        );
+        let attempt = slot
+            .begin_preparation(operation, staged, &candidate)
+            .expect("mark preparation in flight");
+        assert_eq!(
+            slot.prepare(
+                &attempt,
                 CommitObservation::Unknown {
                     operation_id: operation
                 },
@@ -1009,7 +1219,12 @@ mod tests {
             Err(TransitionError::CommitUnknown)
         );
         assert_eq!(
-            slot.compensate(operation, staged, PredecessorOnCompensation::Unknown),
+            slot.compensate(
+                operation,
+                staged,
+                &candidate,
+                PredecessorOnCompensation::Unknown
+            ),
             Err(TransitionError::CommitUnknown)
         );
         assert_eq!(slot.active(), None);
@@ -1020,14 +1235,24 @@ mod tests {
         let mut wrong = evidence(operation, staged, &candidate, None);
         wrong.operation_id = EndpointOperationId::fresh();
         assert_eq!(
-            slot.prepare(operation, staged, CommitObservation::Known(wrong)),
+            slot.prepare(&attempt, CommitObservation::Known(wrong)),
             Err(TransitionError::EvidenceMismatch)
         );
         assert_eq!(
-            slot.compensate(operation, staged, PredecessorOnCompensation::Unknown),
+            slot.compensate(
+                operation,
+                staged,
+                &candidate,
+                PredecessorOnCompensation::Unknown
+            ),
             Err(TransitionError::CommitUnknown)
         );
-        let prepared = prepare(&mut slot, operation, staged, &candidate, None);
+        let prepared = slot
+            .prepare(
+                &attempt,
+                CommitObservation::Known(evidence(operation, staged, &candidate, None)),
+            )
+            .expect("resolve preparation exactly");
         assert_eq!(
             slot.activate(
                 &prepared,
@@ -1042,13 +1267,17 @@ mod tests {
             Some(OperationDisposition::ActivationUnresolved(staged))
         );
         assert_eq!(
-            slot.compensate(operation, staged, PredecessorOnCompensation::Unknown),
+            slot.compensate(
+                operation,
+                staged,
+                &candidate,
+                PredecessorOnCompensation::Unknown
+            ),
             Err(TransitionError::CommitUnknown)
         );
         assert_eq!(
             slot.prepare(
-                operation,
-                staged,
+                &attempt,
                 CommitObservation::Known(evidence(operation, staged, &candidate, None)),
             ),
             Err(TransitionError::CommitUnknown)
@@ -1074,11 +1303,215 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_before_prepare_reply_keeps_detached_state_sealed() {
+        for disposition in [
+            PreparationNonCommitDisposition::OriginalTransactionAborted,
+            PreparationNonCommitDisposition::SerializedBarrierConfirmedNoCommit,
+        ] {
+            let mut slot = EndpointSlot::new(jid());
+            let old = binding(new_connection(), LogicalResourceGeneration::fresh());
+            publish_fresh(&mut slot, old.clone());
+            slot.detach(slot.revision(), &old, &retirement(&old.binding_ref))
+                .expect("detach");
+            let candidate = EndpointCandidate::new_attempt(
+                jid(),
+                new_connection(),
+                old.logical_generation,
+                BindKind::Resume,
+            );
+            let operation = EndpointOperationId::fresh();
+            let staged = slot
+                .stage(slot.revision(), operation, candidate.clone())
+                .expect("stage resume");
+            let attempt = slot
+                .begin_preparation(operation, staged, &candidate)
+                .expect("record in flight before external dispatch");
+
+            // External work may have committed, but its caller was cancelled
+            // before it could report either a success or an unknown reply.
+            assert_eq!(
+                slot.disposition(operation),
+                Some(OperationDisposition::PreparationInFlight(staged))
+            );
+            assert_eq!(
+                slot.compensate(
+                    operation,
+                    staged,
+                    &candidate,
+                    PredecessorOnCompensation::RetiredWithCustody(retirement(&old.binding_ref)),
+                ),
+                Err(TransitionError::CommitUnknown)
+            );
+            assert_eq!(slot.active(), None);
+            assert_eq!(
+                slot.detached().map(|resource| resource.logical_generation),
+                Some(old.logical_generation)
+            );
+            let resolution = PreparationNonCommitResolution {
+                full_jid: jid(),
+                operation_id: operation,
+                staged_revision: staged,
+                candidate: candidate.clone(),
+                disposition,
+            };
+            let mut wrong_key = resolution.clone();
+            wrong_key.full_jid = "alice@example.test/laptop".parse().expect("full JID");
+            let mut wrong_operation = resolution.clone();
+            wrong_operation.operation_id = EndpointOperationId::fresh();
+            let mut wrong_revision = resolution.clone();
+            wrong_revision.staged_revision = EndpointRevision::INITIAL;
+            let mut wrong_candidate = resolution.clone();
+            wrong_candidate.candidate = EndpointCandidate::new_attempt(
+                jid(),
+                new_connection(),
+                old.logical_generation,
+                BindKind::Resume,
+            );
+            for wrong in [wrong_key, wrong_operation, wrong_revision, wrong_candidate] {
+                assert_eq!(
+                    slot.resolve_preparation_not_committed(&attempt, &wrong),
+                    Err(TransitionError::EvidenceMismatch)
+                );
+            }
+            assert_eq!(
+                slot.compensate(
+                    operation,
+                    staged,
+                    &candidate,
+                    PredecessorOnCompensation::DetachedAndUnchanged {
+                        binding_ref: old.binding_ref.clone(),
+                    },
+                ),
+                Err(TransitionError::CommitUnknown)
+            );
+            slot.resolve_preparation_not_committed(&attempt, &resolution)
+                .expect("caller supplies exact definitive non-commit basis");
+            assert_eq!(
+                slot.disposition(operation),
+                Some(OperationDisposition::PreparationNotCommitted(staged))
+            );
+            assert_eq!(
+                slot.begin_preparation(operation, staged, &candidate),
+                Err(TransitionError::PreparationAlreadyFinished)
+            );
+            assert_eq!(
+                slot.prepare(
+                    &attempt,
+                    CommitObservation::Known(evidence(
+                        operation,
+                        staged,
+                        &candidate,
+                        Some(&old.binding_ref),
+                    )),
+                ),
+                Err(TransitionError::PreparationAlreadyFinished)
+            );
+            slot.compensate(
+                operation,
+                staged,
+                &candidate,
+                PredecessorOnCompensation::DetachedAndUnchanged {
+                    binding_ref: old.binding_ref.clone(),
+                },
+            )
+            .expect("only resolved preparation can be compensated");
+            assert_eq!(
+                slot.detached().map(|resource| resource.logical_generation),
+                Some(old.logical_generation)
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_preparation_and_activation_cannot_be_replayed_across_slots() {
+        let first_jid = jid();
+        let other_jid: FullJid = "alice@example.test/laptop".parse().expect("full JID");
+        let mut first = EndpointSlot::new(first_jid.clone());
+        let mut other = EndpointSlot::new(other_jid.clone());
+        let candidate = EndpointCandidate::new_attempt(
+            first_jid,
+            new_connection(),
+            LogicalResourceGeneration::fresh(),
+            BindKind::Fresh,
+        );
+        let operation = EndpointOperationId::fresh();
+        let staged = first
+            .stage(first.revision(), operation, candidate.clone())
+            .expect("stage first candidate");
+        assert_eq!(
+            other.stage(other.revision(), operation, candidate.clone()),
+            Err(StageError::SlotMismatch)
+        );
+
+        // Deliberately force identical binding/operation/revision values in
+        // the fixture to test the key comparison even under a collision.
+        let mut other_candidate = candidate.clone();
+        other_candidate.full_jid = other_jid;
+        let other_staged = other
+            .stage(other.revision(), operation, other_candidate.clone())
+            .expect("stage other slot's candidate");
+        assert_eq!(staged, other_staged);
+        assert_eq!(
+            other.begin_preparation(operation, staged, &candidate),
+            Err(TransitionError::StaleOperation)
+        );
+        assert_eq!(
+            other.compensate(
+                operation,
+                staged,
+                &candidate,
+                PredecessorOnCompensation::NoPredecessor,
+            ),
+            Err(TransitionError::StaleOperation)
+        );
+        let attempt = first
+            .begin_preparation(operation, staged, &candidate)
+            .expect("begin first preparation");
+        let other_attempt = other
+            .begin_preparation(operation, other_staged, &other_candidate)
+            .expect("begin other preparation");
+        let first_evidence = evidence(operation, staged, &candidate, None);
+        assert_eq!(
+            other.prepare(&attempt, CommitObservation::Known(first_evidence.clone())),
+            Err(TransitionError::StaleOperation)
+        );
+        assert_eq!(
+            other.prepare(
+                &other_attempt,
+                CommitObservation::Known(first_evidence.clone()),
+            ),
+            Err(TransitionError::EvidenceMismatch)
+        );
+        let prepared = first
+            .prepare(&attempt, CommitObservation::Known(first_evidence))
+            .expect("prepare first slot");
+        let other_prepared = other
+            .prepare(
+                &other_attempt,
+                CommitObservation::Known(evidence(operation, staged, &other_candidate, None)),
+            )
+            .expect("prepare other slot");
+        let ack = acknowledgement(&prepared);
+        assert_eq!(
+            other.activate(&prepared, CommitObservation::Known(ack.clone())),
+            Err(TransitionError::StaleOperation)
+        );
+        assert_eq!(
+            other.activate(&other_prepared, CommitObservation::Known(ack)),
+            Err(TransitionError::EvidenceMismatch)
+        );
+        assert_eq!(other.active(), None);
+        activate(&mut other, &other_prepared);
+        assert_eq!(other.active(), Some(&other_candidate.binding));
+    }
+
+    #[test]
     fn sealing_blocks_reserved_enqueue_and_retired_predecessor_cannot_reopen() {
         let mut slot = EndpointSlot::new(jid());
         let old = binding(new_connection(), LogicalResourceGeneration::fresh());
         publish_fresh(&mut slot, old.clone());
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding: binding(new_connection(), LogicalResourceGeneration::fresh()),
             kind: BindKind::Fresh,
         };
@@ -1106,6 +1539,7 @@ mod tests {
             slot.compensate(
                 operation,
                 staged,
+                &candidate,
                 PredecessorOnCompensation::StillLiveAndUnchanged {
                     binding_ref: old.binding_ref.clone(),
                 },
@@ -1121,6 +1555,7 @@ mod tests {
             slot.compensate(
                 operation,
                 staged,
+                &candidate,
                 PredecessorOnCompensation::RetiredWithCustody(retirement(&old.binding_ref)),
             ),
             Err(TransitionError::StaleOperation)
@@ -1134,6 +1569,7 @@ mod tests {
         let old = binding(new_connection(), LogicalResourceGeneration::fresh());
         publish_fresh(&mut slot, old.clone());
         let candidate = EndpointCandidate {
+            full_jid: jid(),
             binding: binding(new_connection(), LogicalResourceGeneration::fresh()),
             kind: BindKind::Fresh,
         };
@@ -1147,6 +1583,7 @@ mod tests {
             slot.compensate(
                 operation,
                 staged,
+                &candidate,
                 PredecessorOnCompensation::RetiredWithCustody(wrong_pump),
             ),
             Err(TransitionError::EvidenceMismatch)
@@ -1156,6 +1593,7 @@ mod tests {
             slot.compensate(
                 operation,
                 staged,
+                &candidate,
                 PredecessorOnCompensation::StillLiveAndUnchanged {
                     binding_ref: candidate.binding.binding_ref.clone(),
                 },
@@ -1165,6 +1603,7 @@ mod tests {
         slot.compensate(
             operation,
             staged,
+            &candidate,
             PredecessorOnCompensation::StillLiveAndUnchanged {
                 binding_ref: old.binding_ref.clone(),
             },
@@ -1180,21 +1619,28 @@ mod tests {
             slot.stage(
                 slot.revision(),
                 EndpointOperationId::fresh(),
-                EndpointCandidate::new_attempt(new_connection(), used_logical, BindKind::Fresh),
+                EndpointCandidate::new_attempt(
+                    jid(),
+                    new_connection(),
+                    used_logical,
+                    BindKind::Fresh
+                ),
             ),
             Err(StageError::LogicalGenerationReused)
         );
         let next = EndpointCandidate {
+            full_jid: jid(),
             binding: binding(new_connection(), LogicalResourceGeneration::fresh()),
             kind: BindKind::Fresh,
         };
         let next_op = EndpointOperationId::fresh();
         let next_stage = slot
-            .stage(slot.revision(), next_op, next)
+            .stage(slot.revision(), next_op, next.clone())
             .expect("stage new attempt");
         slot.compensate(
             next_op,
             next_stage,
+            &next,
             PredecessorOnCompensation::RetiredWithCustody(retirement(&old.binding_ref)),
         )
         .expect("forget only exact quiesced predecessor");
