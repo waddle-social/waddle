@@ -32,6 +32,9 @@ use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
 
 use super::{test_url, Fixture, CATALOG_GRANT_LOCK};
 
+#[path = "pooled_archive_resolver.rs"]
+mod pooled_archive_resolver;
+
 fn facade(pool: &DatabasePool, lineage: LineageConfig) -> SharedCorrectnessFixture {
     SharedCorrectnessFixture::from_pool(
         pool,
@@ -77,9 +80,7 @@ fn submission(
     let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
     message.from = Some("alice@example.test/phone".parse().expect("sender"));
     message.type_ = xmpp_parsers::message::MessageType::Chat;
-    message
-        .bodies
-        .insert(Default::default(), "shared facade message".to_owned());
+    message.bodies.insert(Default::default(), id.to_owned());
     add_origin_id(&mut message, origin);
     let target = NormalizedTarget::Bare(recipient.clone());
     let digest_input = DigestInput::from_parsed(
@@ -97,7 +98,7 @@ fn submission(
         message.to.clone().expect("to"),
     );
     archived.id = id.to_owned();
-    archived.body = Some("shared facade message".to_owned());
+    archived.body = Some(id.to_owned());
     archived.message_type = xmpp_parsers::message::MessageType::Chat;
     archived.stanza_id = Some(stamp.clone());
     archived.origin_id = digest_input.origin().cloned();
@@ -292,6 +293,9 @@ async fn sqlite_shared_facade_uses_exact_single_connection_and_replays() {
     assert_eq!(count(pool.global(), "mam_messages").await, 1);
     assert_eq!(count(pool.global(), "ingress_effect_receipts").await, 1);
     assert_eq!(count(pool.global(), "ingress_messages").await, 1);
+    let (second, _) = submission(&principal, "sqlite-second-origin", "sqlite-second");
+    facade.submit(&second).await.expect("second archive");
+    pooled_archive_resolver::exercise_sqlite(&pool, &stamp).await;
 }
 
 #[tokio::test]
@@ -428,6 +432,9 @@ async fn exercise_postgres(
     bootstrap_dark_postgres_mam_owner(&migrator_options, &owner_config, &migrator_role)
         .await
         .expect("separate owner MAM bootstrap");
+    waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema(&owner_db)
+        .await
+        .expect("separate pending owner bootstrap");
     let principal = principal();
     seed_principal(&owner_db, &principal).await;
     drop(owner_db);
@@ -486,6 +493,7 @@ async fn exercise_postgres(
         ("ingress_delivery_receipts", "SELECT"),
         ("mam_archive_sequences", "SELECT, INSERT"),
         ("mam_messages", "SELECT, INSERT"),
+        ("pending_delivery", "SELECT, INSERT, UPDATE, DELETE"),
         ("_lineage", "SELECT"),
         ("_migrations", "SELECT"),
     ] {
@@ -1345,6 +1353,15 @@ async fn exercise_postgres(
     .expect("replacement sessions");
     assert!(replacement_pids.iter().any(|pid| !old_pids.contains(pid)));
 
+    pooled_archive_resolver::exercise_postgres(
+        &pool,
+        &owner_config,
+        &ingress_config,
+        &lineage_config,
+        fixture,
+        &stamp,
+    )
+    .await;
     drop(facade);
     drop(pool);
 }

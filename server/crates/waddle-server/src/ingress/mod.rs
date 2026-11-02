@@ -14,6 +14,8 @@ pub mod commit;
 #[cfg(feature = "test-support")]
 mod shared_correctness;
 #[cfg(feature = "test-support")]
+pub(crate) use shared_correctness::with_mam_rollback_gate;
+#[cfg(feature = "test-support")]
 pub(crate) use shared_correctness::{DarkSharedCorrectness, DarkSharedCorrectnessError};
 mod commit_room;
 mod commit_stream;

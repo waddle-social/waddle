@@ -16,6 +16,7 @@ mod shared_correctness;
 #[cfg(feature = "test-support")]
 pub use shared_correctness::{
     probe_public_mam_acl_rollback, SharedCorrectnessFixture, SharedCorrectnessSubmitError,
+    SharedPendingResolverFixture,
 };
 
 use crate::db::DatabasePool;

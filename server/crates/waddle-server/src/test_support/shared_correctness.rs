@@ -6,6 +6,7 @@ use crate::ingress::commit::IngressCommitFailure;
 use crate::ingress::{
     DarkSharedCorrectness, DarkSharedCorrectnessError, IngressDecision, IngressSubmission,
 };
+use std::sync::Arc;
 use waddle_xmpp::mam::ArchivedMessage;
 use waddle_xmpp_core::xep0359::StanzaId;
 
@@ -25,6 +26,92 @@ use waddle_xmpp::ownership::SharedNodeIdentity;
 /// use waddle_server::ingress::DarkSharedCorrectness;
 /// ```
 pub struct SharedCorrectnessFixture(DarkSharedCorrectness);
+
+/// Disposable same-pool pending store and resolver. Neither returns a database
+/// or connection, and the pending constructor is not a runtime attachment.
+///
+/// ```compile_fail
+/// use waddle_server::test_support::SharedPendingResolverFixture;
+/// fn escape(fixture: &SharedPendingResolverFixture) {
+///     let _ = fixture.pending().database();
+/// }
+/// ```
+pub struct SharedPendingResolverFixture {
+    resolver: crate::pending_delivery::pooled_archive::PooledArchiveResolver,
+    pending: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
+}
+
+impl SharedPendingResolverFixture {
+    /// Bind the resolver and an already initialized pending table to exactly
+    /// the supplied pool's global admission lane.
+    pub async fn from_pool(
+        pool: &DatabasePool,
+        config: &IngressConfig,
+        lineage: LineageConfig,
+        owner: Option<&crate::db::DarkMigrationOwnerConfig>,
+    ) -> anyhow::Result<Self> {
+        let shared = SharedCorrectnessFixture::from_pool(
+            pool,
+            config,
+            lineage,
+            #[cfg(feature = "clustering")]
+            None,
+        )?;
+        match pool.global().driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                let owner = owner.ok_or_else(|| anyhow::anyhow!("owner handoff required"))?;
+                crate::db::bootstrap::verify_mam_runtime_attachment(pool.global(), owner).await?;
+            }
+            crate::db::DatabaseDriver::Sqlite if owner.is_none() => {}
+            crate::db::DatabaseDriver::Sqlite => anyhow::bail!("SQLite has no PostgreSQL owner"),
+        }
+        let pending = Arc::new(
+            crate::pending_delivery::DatabasePendingDeliveryStorage::from_initialized_database_for_test(
+                pool.global().clone(),
+                waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+            ),
+        );
+        Ok(Self {
+            resolver: crate::pending_delivery::pooled_archive::PooledArchiveResolver::new(shared.0),
+            pending,
+        })
+    }
+
+    pub fn pending(
+        &self,
+    ) -> &Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> {
+        &self.pending
+    }
+
+    /// Pause after the read but before rollback to inject a real connection
+    /// failure. This gate exists only in test-support builds.
+    pub async fn resolve_with_rollback_gate(
+        &self,
+        stanza: &StanzaId,
+        entered: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+        deadline: std::time::Duration,
+    ) -> Result<Option<xmpp_parsers::message::Message>, crate::pending_delivery::ArchiveResolveError>
+    {
+        crate::ingress::with_mam_rollback_gate(
+            entered,
+            proceed,
+            self.resolver.resolve_with_deadline(stanza, deadline),
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::pending_delivery::ArchiveResolver for SharedPendingResolverFixture {
+    async fn resolve(
+        &self,
+        stanza: &StanzaId,
+    ) -> Result<Option<xmpp_parsers::message::Message>, crate::pending_delivery::ArchiveResolveError>
+    {
+        crate::pending_delivery::ArchiveResolver::resolve(&self.resolver, stanza).await
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SharedCorrectnessSubmitError {

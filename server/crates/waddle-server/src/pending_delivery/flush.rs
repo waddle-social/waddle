@@ -1062,89 +1062,98 @@ impl ArchiveResolver for MamArchiveResolver {
         // `StanzaId.by` Jid carries that information (the MAM writer
         // always stamps with a bare-form Jid).
         let archive_bare = stanza_id.by.to_bare();
-        let archived = match self
+        let archived = self
             .mam_storage
             .get_message_by_archive_or_stanza_id(&archive_bare, stanza_id.as_str())
-            .await
-        {
-            Ok(Some(archived)) => archived,
-            // Definitive miss: no archive row for this id. Poison
-            // pill — the caller deletes the pending row.
-            Ok(None) => return Ok(None),
-            // Permanent, retry-can-never-succeed conditions — genuine
-            // poison pills. `Ok(None)` deletes the row and fires the
-            // loud corruption counter instead of retrying forever under
-            // the "no mail lost" transient counter:
-            //   - `Serialization`: bad timestamp/JID column, surfaced by
-            //     decode_sqlite_message_row / decode_postgres_message_row.
-            //   - `InvalidQuery`: an unusable stored id.
-            //   - `NotFound`: a definitive miss. The lookup returns
-            //     `Ok(None)` for a genuine miss today, so this is
-            //     unreachable here, but classifying it as a poison pill
-            //     (not transient) keeps a future refactor that surfaces
-            //     `NotFound` from wedging the row in an immortal retry.
-            Err(
-                error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
-                | waddle_xmpp::mam::storage::MamStorageError::InvalidOrdinal(_)
-                | waddle_xmpp::mam::storage::MamStorageError::MissingOrdinal(_)
-                | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)
-                | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
-            ) => {
-                warn!(
-                    error = %error,
-                    archive_jid = %archive_bare,
-                    stanza_id = %stanza_id,
-                    "MAM lookup resolved to a permanent miss during flush; treating as poison pill"
-                );
-                return Ok(None);
-            }
-            // Transient storage failure (issue #1122): propagate the
-            // typed error so the caller RELEASES the row (and the
-            // rest of the claimed batch) for retry instead of
-            // destroying queued mail during a MAM outage.
-            //
-            // `NotOwner`/`ClusterColocationMismatch` (ADR-0017 Phase 3
-            // Slice 7 FIX 1) are defensive-only here: both are only ever
-            // returned by `store_message_fenced` (a write path), never by
-            // this read lookup. Matched exhaustively so a future
-            // `MamStorageError` variant forces this classification to be
-            // revisited; treated as transient (not a poison pill) since
-            // treating a fencing/co-location condition as "permanently
-            // unresolvable" would risk deleting a pending row that could
-            // still resolve once ownership/co-location is restored.
-            Err(
-                error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
-                | waddle_xmpp::mam::storage::MamStorageError::OrdinalExhausted
-                | waddle_xmpp::mam::storage::MamStorageError::NotOwner { .. }
-                | waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch {
-                    ..
-                }),
-            ) => {
-                warn!(
-                    error = %error,
-                    archive_jid = %archive_bare,
-                    stanza_id = %stanza_id,
-                    "MAM lookup failed transiently during flush"
-                );
-                return Err(ArchiveResolveError::Storage(error));
-            }
-        };
-        // Parse the preserved wire XML back into a typed Message. The
-        // archived row includes server-stamped <stanza-id> by recipient
-        // bare, so the parsed Message already carries the XEP-0359
-        // identifier required by locked Q5c.
-        //
-        // An absent or unparseable `stanza_xml` is row corruption, not
-        // a transient condition — retrying can never succeed, so these
-        // stay `Ok(None)` poison pills.
-        let Some(stanza_xml) = archived.stanza_xml.as_deref() else {
-            return Ok(None);
-        };
-        let Ok(element) = stanza_xml.parse::<xmpp_parsers::minidom::Element>() else {
-            return Ok(None);
-        };
-        Ok(xmpp_parsers::message::Message::try_from(element).ok())
+            .await;
+        classify_archive_lookup(stanza_id, archived)
     }
+}
+
+/// Use the same classification after either backend has ended its read.
+pub(super) fn classify_archive_lookup(
+    stanza_id: &StanzaId,
+    archived: Result<Option<waddle_xmpp::mam::ArchivedMessage>, waddle_xmpp::mam::MamStorageError>,
+) -> Result<Option<xmpp_parsers::message::Message>, ArchiveResolveError> {
+    let archive_bare = stanza_id.by.to_bare();
+    let archived = match archived {
+        Ok(Some(archived)) => archived,
+        // Definitive miss: no archive row for this id. Poison
+        // pill — the caller deletes the pending row.
+        Ok(None) => return Ok(None),
+        // Permanent, retry-can-never-succeed conditions — genuine
+        // poison pills. `Ok(None)` deletes the row and fires the
+        // loud corruption counter instead of retrying forever under
+        // the "no mail lost" transient counter:
+        //   - `Serialization`: bad timestamp/JID column, surfaced by
+        //     decode_sqlite_message_row / decode_postgres_message_row.
+        //   - `InvalidQuery`: an unusable stored id.
+        //   - `NotFound`: a definitive miss. The lookup returns
+        //     `Ok(None)` for a genuine miss today, so this is
+        //     unreachable here, but classifying it as a poison pill
+        //     (not transient) keeps a future refactor that surfaces
+        //     `NotFound` from wedging the row in an immortal retry.
+        Err(
+            error @ (waddle_xmpp::mam::storage::MamStorageError::Serialization(_)
+            | waddle_xmpp::mam::storage::MamStorageError::InvalidOrdinal(_)
+            | waddle_xmpp::mam::storage::MamStorageError::MissingOrdinal(_)
+            | waddle_xmpp::mam::storage::MamStorageError::InvalidQuery(_)
+            | waddle_xmpp::mam::storage::MamStorageError::NotFound(_)),
+        ) => {
+            warn!(
+                error = %error,
+                archive_jid = %archive_bare,
+                stanza_id = %stanza_id,
+                "MAM lookup resolved to a permanent miss during flush; treating as poison pill"
+            );
+            return Ok(None);
+        }
+        // Transient storage failure (issue #1122): propagate the
+        // typed error so the caller RELEASES the row (and the
+        // rest of the claimed batch) for retry instead of
+        // destroying queued mail during a MAM outage.
+        //
+        // `NotOwner`/`ClusterColocationMismatch` (ADR-0017 Phase 3
+        // Slice 7 FIX 1) are defensive-only here: both are only ever
+        // returned by `store_message_fenced` (a write path), never by
+        // this read lookup. Matched exhaustively so a future
+        // `MamStorageError` variant forces this classification to be
+        // revisited; treated as transient (not a poison pill) since
+        // treating a fencing/co-location condition as "permanently
+        // unresolvable" would risk deleting a pending row that could
+        // still resolve once ownership/co-location is restored.
+        Err(
+            error @ (waddle_xmpp::mam::storage::MamStorageError::Database(_)
+            | waddle_xmpp::mam::storage::MamStorageError::OrdinalExhausted
+            | waddle_xmpp::mam::storage::MamStorageError::NotOwner { .. }
+            | waddle_xmpp::mam::storage::MamStorageError::ClusterColocationMismatch {
+                ..
+            }),
+        ) => {
+            warn!(
+                error = %error,
+                archive_jid = %archive_bare,
+                stanza_id = %stanza_id,
+                "MAM lookup failed transiently during flush"
+            );
+            return Err(ArchiveResolveError::Storage(error));
+        }
+    };
+    // Parse the preserved wire XML back into a typed Message. The
+    // archived row includes server-stamped <stanza-id> by recipient
+    // bare, so the parsed Message already carries the XEP-0359
+    // identifier required by locked Q5c.
+    //
+    // An absent or unparseable `stanza_xml` is row corruption, not
+    // a transient condition — retrying can never succeed, so these
+    // stay `Ok(None)` poison pills.
+    let Some(stanza_xml) = archived.stanza_xml.as_deref() else {
+        return Ok(None);
+    };
+    let Ok(element) = stanza_xml.parse::<xmpp_parsers::minidom::Element>() else {
+        return Ok(None);
+    };
+    Ok(xmpp_parsers::message::Message::try_from(element).ok())
 }
 
 /// No-op resolver for tests that only exercise Transient rows.

@@ -49,6 +49,8 @@ use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
 mod codec;
 pub(crate) mod database;
 mod flush;
+#[cfg(feature = "test-support")]
+pub(crate) mod pooled_archive;
 mod recovery;
 
 pub use database::bootstrap_pending_delivery_owner_schema;

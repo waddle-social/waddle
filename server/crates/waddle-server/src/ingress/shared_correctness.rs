@@ -9,6 +9,19 @@ use crate::ingress_uow::{IngressUnitOfWork, IngressUowError};
 use waddle_xmpp::mam::{ArchivedMessage, MamStorageError, SqlxMamStorage};
 use waddle_xmpp_core::xep0359::StanzaId;
 
+tokio::task_local! {
+    static MAM_ROLLBACK_GATE: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}
+
+/// Test-only fault boundary after the MAM query and before transaction cleanup.
+pub(crate) async fn with_mam_rollback_gate<F: std::future::Future>(
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    proceed: std::sync::Arc<tokio::sync::Notify>,
+    future: F,
+) -> F::Output {
+    MAM_ROLLBACK_GATE.scope((entered, proceed), future).await
+}
+
 #[cfg(feature = "clustering")]
 use waddle_xmpp::ownership::SharedNodeIdentity;
 
@@ -60,6 +73,10 @@ pub(crate) struct DarkSharedCorrectness {
 }
 
 impl DarkSharedCorrectness {
+    pub(crate) fn uses_postgres(&self) -> bool {
+        self.postgres.is_some()
+    }
+
     /// Bind both lanes from one pool. SQLite retains the exact global pool;
     /// PostgreSQL requires the hook-bearing pool's own reserved ingress lane.
     pub(crate) fn from_pool(
@@ -158,15 +175,21 @@ impl DarkSharedCorrectness {
             SqlxMamStorage::lookup_archive_or_stanza_id_on_postgres_connection_in_schema(
                 connection, schema, stanza,
             )
-            .await?
+            .await
         } else {
             let connection = tx
                 .sqlite_connection()
                 .ok_or(DarkSharedCorrectnessError::AttestedIngressLaneRequired)?;
             SqlxMamStorage::lookup_archive_or_stanza_id_on_sqlite_connection(connection, stanza)
-                .await?
+                .await
         };
+        // A failed or cancelled rollback must never become a definitive MAM
+        // miss, including when decoding the row returned a permanent error.
+        if let Ok((entered, proceed)) = MAM_ROLLBACK_GATE.try_with(Clone::clone) {
+            entered.notify_one();
+            proceed.notified().await;
+        }
         tx.rollback().await?;
-        Ok(result)
+        result.map_err(Into::into)
     }
 }

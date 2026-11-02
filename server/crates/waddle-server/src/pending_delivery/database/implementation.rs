@@ -164,6 +164,18 @@ pub(in crate::pending_delivery::database) fn claim_error_to_pending_storage_erro
 }
 
 impl DatabasePendingDeliveryStorage {
+    /// Assemble a disposable fixture after owner initialization. This is not a
+    /// production schema or privilege attachment proof.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_initialized_database_for_test(db: Database, quota: QuotaPolicy) -> Self {
+        Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        }
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }
