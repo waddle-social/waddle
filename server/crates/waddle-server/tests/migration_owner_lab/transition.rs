@@ -400,6 +400,113 @@ async fn transition_refuses_wrong_identity_role_paths_and_catalog_drift() {
         Err(DisposableEpochTransitionError::Roles)
     ));
 
+    let outsider = format!(
+        "migration_transition_lab_x_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    fixture
+        .admin(&format!("CREATE ROLE {outsider} LOGIN"))
+        .await;
+    let mut outsider_login =
+        PgConnection::connect_with(&fixture.migrator_options.clone().username(&outsider))
+            .await
+            .expect("independent fourth login");
+    for role in [&fixture.owner, &fixture.migrator, &fixture.runtime] {
+        fixture
+            .admin(&format!(
+                "GRANT {role} TO {outsider} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE"
+            ))
+            .await;
+        sqlx::query(&format!("SET ROLE {role}"))
+            .execute(&mut outsider_login)
+            .await
+            .expect("fourth login can assume the granted role");
+        let identity: (String, String) =
+            sqlx::query_as("SELECT session_user::text, current_user::text")
+                .fetch_one(&mut outsider_login)
+                .await
+                .expect("fourth login role identity");
+        assert_eq!(
+            (identity.0.as_str(), identity.1.as_str()),
+            (outsider.as_str(), role.as_str())
+        );
+        if role == &fixture.migrator {
+            sqlx::query(&format!("SET ROLE {}", fixture.owner))
+                .execute(&mut outsider_login)
+                .await
+                .expect("fourth login can also assume the owner through migrator");
+        }
+        sqlx::query("RESET ROLE")
+            .execute(&mut outsider_login)
+            .await
+            .expect("reset fourth login role");
+        assert!(matches!(
+            fixture.run(DisposableEpochTransitionFault::None).await,
+            Err(DisposableEpochTransitionError::Roles)
+        ));
+        fixture
+            .admin(&format!("REVOKE {role} FROM {outsider}"))
+            .await;
+    }
+    fixture
+        .admin(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {outsider}",
+            fixture.schema
+        ))
+        .await;
+    for role in [&fixture.migrator, &outsider] {
+        for (privileges, grant_option) in [
+            ("INSERT, UPDATE, DELETE", ""),
+            ("SELECT", " WITH GRANT OPTION"),
+            ("UPDATE (checksum)", " WITH GRANT OPTION"),
+            ("INSERT (version, checksum)", ""),
+        ] {
+            fixture
+                .admin(&format!(
+                    "GRANT {privileges} ON {}.waddle_epoch_transition_lab_marker TO {role}{grant_option}",
+                    fixture.schema
+                ))
+                .await;
+            if role == &outsider && privileges == "INSERT, UPDATE, DELETE" {
+                let mut write_tx = outsider_login
+                    .begin()
+                    .await
+                    .expect("outsider write transaction");
+                for statement in [
+                    format!("INSERT INTO {}.waddle_epoch_transition_lab_marker VALUES ('forged', 'checksum')", fixture.schema),
+                    format!("UPDATE {}.waddle_epoch_transition_lab_marker SET checksum = 'modified'", fixture.schema),
+                    format!("DELETE FROM {}.waddle_epoch_transition_lab_marker", fixture.schema),
+                ] {
+                    assert_eq!(sqlx::query(&statement).execute(&mut *write_tx).await.expect("outsider marker write").rows_affected(), 1);
+                }
+                write_tx.rollback().await.expect("discard outsider writes");
+            }
+            assert!(
+                matches!(
+                    fixture.run(DisposableEpochTransitionFault::None).await,
+                    Err(DisposableEpochTransitionError::Marker)
+                ),
+                "accepted marker {privileges}{grant_option} for {role}"
+            );
+            fixture
+                .admin(&format!(
+                    "REVOKE {privileges} ON {}.waddle_epoch_transition_lab_marker FROM {role}",
+                    fixture.schema
+                ))
+                .await;
+            assert_eq!(fixture.state().await, (true, true, 0, 0));
+            assert_eq!(fixture.ledger().await, ledger);
+        }
+    }
+    fixture
+        .admin(&format!(
+            "REVOKE USAGE ON SCHEMA {} FROM {outsider}",
+            fixture.schema
+        ))
+        .await;
+    drop(outsider_login);
+    fixture.admin(&format!("DROP ROLE {outsider}")).await;
+
     for (change, restore) in [
         (
             format!("ALTER ROLE {} LOGIN", fixture.owner),

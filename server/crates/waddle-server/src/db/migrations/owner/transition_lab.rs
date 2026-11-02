@@ -2,7 +2,7 @@
 //!
 //! This is not a registered migration or an online rollout protocol. The test
 //! operator must quiesce old writers and all DDL, role, ACL, lineage, ledger,
-//! epoch and manifest changes, and fence failover for the full operation.
+//! epoch, manifest and marker writes, and fence failover for the full operation.
 //! Runtime correlation assumes honest endpoints and no replay. Privileged
 //! functions and arbitrary application-table ACLs are not audited.
 
@@ -364,7 +364,11 @@ async fn check_roles(
                               WHERE x.member = m.oid AND x.roleid = o.oid
                                 AND x.set_option AND NOT x.inherit_option AND NOT x.admin_option)
                   AND (SELECT count(*) FROM pg_catalog.pg_auth_members x WHERE x.member = m.oid) = 1
-                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members x WHERE x.member = o.oid)
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members x
+                                  WHERE x.member IN (o.oid, r.oid)
+                                     OR (x.member = m.oid AND x.roleid <> o.oid)
+                                     OR x.roleid IN (m.oid, r.oid)
+                                     OR (x.roleid = o.oid AND x.member <> m.oid))
                   AND pg_catalog.pg_has_role(m.oid, o.oid, 'SET')
                   AND NOT pg_catalog.pg_has_role(m.oid, o.oid, 'USAGE')
                   AND pg_catalog.pg_my_temp_schema() = 0
@@ -372,12 +376,14 @@ async fn check_roles(
                   AND NOT pg_catalog.pg_is_in_recovery()
                FROM pg_catalog.pg_roles m
                JOIN pg_catalog.pg_roles o ON o.rolname = ?
+               JOIN pg_catalog.pg_roles r ON r.rolname = ?
                JOIN pg_catalog.pg_namespace n ON n.nspname = ?
                JOIN pg_catalog.pg_database d ON d.datname = pg_catalog.current_database()
                WHERE m.rolname = ?"#,
             crate::db_params![
                 schema_oid,
                 config.owner.owner.as_str(),
+                config.owner.runtime.as_str(),
                 schema,
                 config.migrator.as_str()
             ],
@@ -448,19 +454,17 @@ async fn check_marker(
                             AND i.indexprs IS NULL AND i.indpred IS NULL)
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
                                   coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))
-                              ) a WHERE a.grantee = 0 OR a.grantee = r.oid)
+                              ) a WHERE a.grantee <> c.relowner)
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute col
                               CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) a
                               WHERE col.attrelid = c.oid AND col.attnum > 0
-                                AND (a.grantee = 0 OR a.grantee = r.oid))
+                                AND a.grantee <> c.relowner)
            FROM pg_catalog.pg_class c
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
            JOIN pg_catalog.pg_roles o ON o.rolname = ?
-           JOIN pg_catalog.pg_roles r ON r.rolname = ?
            WHERE n.nspname = ? AND c.relname = ?"#,
             crate::db_params![
                 config.owner.owner.as_str(),
-                config.owner.runtime.as_str(),
                 schema,
                 MARKER_TABLE
             ],
