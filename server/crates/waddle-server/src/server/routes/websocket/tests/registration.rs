@@ -1489,6 +1489,15 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     );
     assert_eq!(conn.pending_resume_h, Some(9));
     assert!(conn.suppress_sm_record_next_batch);
+    let resume_binding = conn
+        .binding_ref
+        .clone()
+        .expect("successful resume retains its binding attempt");
+    assert_eq!(
+        conn.resume_binding_attempts.as_slice(),
+        std::slice::from_ref(&resume_binding)
+    );
+    assert_eq!(resume_binding.connection_ref(), &conn.connection_ref);
 
     let (tx, _rx) = mpsc::channel::<OutboundStanza>(1);
     let mut pending_tx = Some(tx);
@@ -1539,6 +1548,8 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         .connection_registry
         .entry(&jid)
         .expect("registered resumed connection");
+    assert_eq!(conn.binding_ref.as_ref(), Some(&resume_binding));
+    assert_eq!(entry.binding_ref(), Some(&resume_binding));
     assert_eq!(conn.occupancy_session, original_generation);
     assert_eq!(
         state
