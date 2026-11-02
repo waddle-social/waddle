@@ -22,6 +22,8 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::stream_management::persistence::SmClaimFence;
 
 mod implementation;
+#[cfg(feature = "test-support")]
+pub(crate) mod ordered_claim;
 use implementation::assert_insert_fence;
 use implementation::claim_error_to_pending_storage_error;
 pub(crate) use implementation::contains_in_transaction;

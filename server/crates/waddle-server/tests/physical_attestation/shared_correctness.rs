@@ -32,6 +32,8 @@ use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
 
 use super::{test_url, Fixture, CATALOG_GRANT_LOCK};
 
+#[path = "ordered_claim_lab.rs"]
+mod ordered_claim_lab;
 #[path = "pooled_archive_resolver.rs"]
 mod pooled_archive_resolver;
 
@@ -1363,5 +1365,8 @@ async fn exercise_postgres(
     )
     .await;
     drop(facade);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
     drop(pool);
+    ordered_claim_lab::exercise_postgres(fixture).await;
 }
