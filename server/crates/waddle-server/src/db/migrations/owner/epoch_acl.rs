@@ -9,7 +9,9 @@ use super::{
 };
 use crate::config::LineageConfig;
 use crate::db::lineage;
-use crate::db::migrations::waddle::V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES;
+use crate::db::migrations::waddle::{
+    V1009_INERT_INGRESS_EPOCH_GUARDS_POSTGRES, V1028_INGRESS_SOURCE_BINDING_POSTGRES,
+};
 use crate::db::{Database, DatabaseDriver, IntoParams, Transaction};
 use crate::ingress_substrate::EPOCH_GUARDED_TABLES;
 
@@ -27,8 +29,11 @@ pub(super) const RELATION_GUARD_CANDIDATE: &str =
 /// privilege lookups. Catalogs, privileges, credentials and connections can
 /// change immediately afterward. The checks do not audit arbitrary
 /// security-definer functions or prevent a runtime from forging epoch GUCs.
-/// They do not audit ACLs on the twelve guarded data tables or establish
-/// application attachment or write readiness.
+/// The pinned runtime session must use the origin replication role and the
+/// runtime role must lack effective SET privilege for that parameter.
+/// They do not audit ACLs on the thirteen guarded data tables or establish
+/// application attachment or write readiness. Internal triggers on guarded
+/// data tables, such as foreign-key triggers, are outside this inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DarkEpochAclStage {
     /// The original V1009 guard at epoch zero and the scoped direct/effective
@@ -50,7 +55,7 @@ pub enum DarkEpochAclStage {
 ///
 /// Only the complete current migration catalog and the two exact guard bodies
 /// are recognized. Unknown or changed inspected epoch/catalog objects and
-/// nonzero epochs are refused. The twelve guarded `ingress_*` tables plus the
+/// nonzero epochs are refused. The thirteen guarded `ingress_*` tables plus the
 /// epoch and manifest tables must match the live non-index relation set. This
 /// diagnostic performs no grants, DDL, migration, or epoch transition.
 pub async fn inspect_dark_postgres_epoch_acl(
@@ -386,15 +391,18 @@ pub(super) async fn runtime_pid(
     config: &DarkMigrationOwnerConfig,
     nonce: &str,
 ) -> Result<i32, DarkMigrationOwnerError> {
-    let (session, current, pid, application): (String, String, i32, String) = sqlx::query_as(
-        "SELECT session_user::text, current_user::text, pg_catalog.pg_backend_pid(), \
-             pg_catalog.current_setting('application_name')",
-    )
-    .fetch_one(&mut **runtime)
-    .await?;
+    let (session, current, pid, application, origin): (String, String, i32, String, bool) =
+        sqlx::query_as(
+            "SELECT session_user::text, current_user::text, pg_catalog.pg_backend_pid(), \
+             pg_catalog.current_setting('application_name'), \
+             pg_catalog.current_setting('session_replication_role') = 'origin'",
+        )
+        .fetch_one(&mut **runtime)
+        .await?;
     if session != config.runtime.as_str()
         || current != config.runtime.as_str()
         || application != nonce
+        || !origin
     {
         return Err(DarkMigrationOwnerError::RuntimeSessionUnverified);
     }
@@ -458,6 +466,7 @@ async fn check_runtime_role(
               AND NOT r.rolcreatedb AND NOT r.rolreplication AND NOT r.rolbypassrls
               AND r.oid <> d.datdba
               AND NOT pg_catalog.has_database_privilege(r.oid, d.oid, 'CREATE,TEMP')
+              AND NOT pg_catalog.has_parameter_privilege(r.oid, 'session_replication_role', 'SET')
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid)
               AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'USAGE')
               AND NOT pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE')
@@ -574,6 +583,44 @@ struct TriggerPair {
     reject_internal: bool,
 }
 
+struct AdditionalTrigger {
+    name: &'static str,
+    function: &'static str,
+    trigger_type: i32,
+}
+
+// V1028 adds ordinary row triggers to these two epoch-guarded tables. Their
+// presence must not hide a missing guard or admit an unrelated trigger.
+const MESSAGE_TRIGGERS: &[AdditionalTrigger] = &[
+    AdditionalTrigger {
+        name: "ingress_messages_source_binding_guard",
+        function: "waddle_ingress_source_binding_guard",
+        trigger_type: 19,
+    },
+    AdditionalTrigger {
+        name: "ingress_messages_source_insert_guard",
+        function: "waddle_ingress_source_insert_guard",
+        trigger_type: 7,
+    },
+];
+const OWNER_REJECTION_TRIGGERS: &[AdditionalTrigger] = &[
+    AdditionalTrigger {
+        name: "ingress_owner_rejections_update_guard",
+        function: "waddle_ingress_owner_rejection_immutable",
+        trigger_type: 19,
+    },
+    AdditionalTrigger {
+        name: "ingress_owner_rejections_insert_guard",
+        function: "waddle_ingress_owner_rejection_insert_guard",
+        trigger_type: 7,
+    },
+    AdditionalTrigger {
+        name: "ingress_owner_rejections_delete_guard",
+        function: "waddle_ingress_owner_rejection_delete_guard",
+        trigger_type: 11,
+    },
+];
+
 async fn check_trigger_pair(
     tx: &mut Transaction<'_>,
     config: &DarkMigrationOwnerConfig,
@@ -581,6 +628,11 @@ async fn check_trigger_pair(
     table: &str,
     pair: TriggerPair,
 ) -> Result<(), DarkMigrationOwnerError> {
+    let additional = match table {
+        "ingress_messages" => MESSAGE_TRIGGERS,
+        "ingress_owner_rejections" => OWNER_REJECTION_TRIGGERS,
+        _ => &[],
+    };
     let (row_name, truncate_name) = match table {
         "ingress_protocol_epoch" => (
             "ingress_protocol_epoch_guard_row".to_string(),
@@ -602,7 +654,7 @@ async fn check_trigger_pair(
               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
                               WHERE i.inhrelid = c.oid OR i.inhparent = c.oid)
               AND (SELECT count(*) FROM pg_catalog.pg_trigger t
-                   WHERE t.tgrelid = c.oid AND (NOT t.tgisinternal OR ? <> 0)) = 2
+                   WHERE t.tgrelid = c.oid AND (NOT t.tgisinternal OR ? <> 0)) = ?
               AND EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
                           WHERE t.tgrelid = c.oid AND t.tgname = ? AND t.tgtype = ?
                             AND t.tgfoid::bigint = ?
@@ -623,6 +675,7 @@ async fn check_trigger_pair(
            WHERE n.nspname = ? AND c.relname = ?"#,
         crate::db_params![
             pair.reject_internal,
+            2_i64 + additional.len() as i64,
             row_name,
             pair.row_type,
             pair.row_function,
@@ -634,7 +687,38 @@ async fn check_trigger_pair(
         ],
         DarkMigrationOwnerError::EpochCatalogDrift,
     )
-    .await
+    .await?;
+
+    for trigger in additional {
+        let function = function_source(tx, config, schema, trigger.function).await?;
+        if Some(function.source.as_str())
+            != source_body(V1028_INGRESS_SOURCE_BINDING_POSTGRES, trigger.function)
+        {
+            return Err(DarkMigrationOwnerError::EpochCatalogDrift);
+        }
+        require(
+            tx,
+            r#"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
+                 JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = ? AND c.relname = ? AND t.tgname = ? AND t.tgtype = ?
+                   AND t.tgfoid::bigint = ?
+                   AND NOT t.tgisinternal AND t.tgenabled = 'O' AND t.tgparentid = 0
+                   AND t.tgconstraint = 0 AND NOT t.tgdeferrable AND NOT t.tginitdeferred
+                   AND t.tgnargs = 0 AND t.tgattr::text = '' AND t.tgqual IS NULL
+                   AND t.tgoldtable IS NULL AND t.tgnewtable IS NULL)"#,
+            crate::db_params![
+                schema,
+                table,
+                trigger.name,
+                trigger.trigger_type,
+                function.oid
+            ],
+            DarkMigrationOwnerError::EpochCatalogDrift,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn check_acl(

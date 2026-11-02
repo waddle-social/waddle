@@ -984,3 +984,381 @@ async fn stalled_runtime_setup_times_out_and_discards_connection() {
         .expect("proxy connection closes cleanly");
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn v1028_trigger_sets_are_exact_at_both_epoch_guard_stages() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url, true).await;
+    prepare(&fixture).await;
+    grant_id(&fixture).await;
+    let schema = &fixture.schema;
+    let triggers = [
+        (
+            "ingress_messages",
+            "ingress_messages_source_binding_guard",
+            "waddle_ingress_source_binding_guard",
+        ),
+        (
+            "ingress_messages",
+            "ingress_messages_source_insert_guard",
+            "waddle_ingress_source_insert_guard",
+        ),
+        (
+            "ingress_owner_rejections",
+            "ingress_owner_rejections_update_guard",
+            "waddle_ingress_owner_rejection_immutable",
+        ),
+        (
+            "ingress_owner_rejections",
+            "ingress_owner_rejections_insert_guard",
+            "waddle_ingress_owner_rejection_insert_guard",
+        ),
+        (
+            "ingress_owner_rejections",
+            "ingress_owner_rejections_delete_guard",
+            "waddle_ingress_owner_rejection_delete_guard",
+        ),
+    ];
+
+    for stage in [
+        DarkEpochAclStage::V1009EpochZero,
+        DarkEpochAclStage::RelationGuardEpochZero,
+    ] {
+        if stage == DarkEpochAclStage::RelationGuardEpochZero {
+            let mut installer = PgConnection::connect_with(&fixture.admin_options)
+                .await
+                .expect("candidate installer");
+            sqlx::raw_sql(include_str!(
+                "../../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
+            ))
+            .execute(&mut installer)
+            .await
+            .expect("install unregistered candidate on disposable fixture");
+            drop(installer);
+            admin(
+                &fixture,
+                &format!(
+                    "REVOKE UPDATE (id) ON {schema}.ingress_protocol_epoch FROM {}",
+                    fixture.runtime
+                ),
+            )
+            .await;
+        }
+        assert_eq!(
+            inspect(&fixture).await.expect("real migration triggers"),
+            stage
+        );
+
+        for (table, trigger, function) in triggers {
+            let original_trigger: String = sqlx::query_scalar(
+                "SELECT pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t \
+                 WHERE t.tgrelid = pg_catalog.to_regclass($1) AND t.tgname = $2",
+            )
+            .bind(format!("{schema}.{table}"))
+            .bind(trigger)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("original trigger definition");
+
+            admin(
+                &fixture,
+                &format!("DROP TRIGGER {trigger} ON {schema}.{table}"),
+            )
+            .await;
+            assert_v1028_catalog_drift(&fixture, stage, &format!("missing {trigger}")).await;
+            admin(&fixture, &original_trigger).await;
+
+            admin(
+                &fixture,
+                &format!("ALTER TABLE {schema}.{table} DISABLE TRIGGER {trigger}"),
+            )
+            .await;
+            assert_v1028_catalog_drift(&fixture, stage, &format!("disabled {trigger}")).await;
+            admin(
+                &fixture,
+                &format!("ALTER TABLE {schema}.{table} ENABLE TRIGGER {trigger}"),
+            )
+            .await;
+
+            let function_name = format!("{schema}.{function}()");
+            let original_function: String = sqlx::query_scalar(
+                "SELECT pg_catalog.pg_get_functiondef($1::pg_catalog.regprocedure)",
+            )
+            .bind(&function_name)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("original function definition");
+            let altered = original_function.replacen("BEGIN", "BEGIN\n    -- catalog drift", 1);
+            assert_ne!(original_function, altered);
+            admin(&fixture, &altered).await;
+            assert_v1028_catalog_drift(&fixture, stage, &format!("changed {function}")).await;
+            admin(&fixture, &original_function).await;
+        }
+
+        for table in [
+            "ingress_messages",
+            "ingress_owner_rejections",
+            "ingress_deliveries",
+        ] {
+            admin(&fixture, &format!("CREATE TRIGGER unrelated BEFORE UPDATE ON {schema}.{table} FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_source_binding_guard()" )).await;
+            assert_v1028_catalog_drift(&fixture, stage, &format!("extra trigger on {table}")).await;
+            admin(
+                &fixture,
+                &format!("DROP TRIGGER unrelated ON {schema}.{table}"),
+            )
+            .await;
+        }
+
+        // Preserve the count and name while altering the trigger's definition.
+        for (event, condition, function, case) in [
+            (
+                "UPDATE",
+                "",
+                "waddle_ingress_source_insert_guard",
+                "wrong function",
+            ),
+            (
+                "INSERT",
+                "",
+                "waddle_ingress_source_binding_guard",
+                "wrong event",
+            ),
+            (
+                "UPDATE",
+                "WHEN (false)",
+                "waddle_ingress_source_binding_guard",
+                "conditional trigger",
+            ),
+        ] {
+            admin(&fixture, &format!("DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_messages")).await;
+            admin(&fixture, &format!("CREATE TRIGGER ingress_messages_source_binding_guard BEFORE {event} ON {schema}.ingress_messages FOR EACH ROW {condition} EXECUTE FUNCTION {schema}.{function}()")).await;
+            assert_v1028_catalog_drift(&fixture, stage, case).await;
+            admin(&fixture, &format!("DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_messages")).await;
+            admin(&fixture, &format!("CREATE TRIGGER ingress_messages_source_binding_guard BEFORE UPDATE ON {schema}.ingress_messages FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_source_binding_guard()")).await;
+        }
+
+        // An unrelated trigger cannot make up for a missing epoch guard.
+        admin(
+            &fixture,
+            &format!("DROP TRIGGER ingress_messages_epoch_guard_dml ON {schema}.ingress_messages"),
+        )
+        .await;
+        admin(&fixture, &format!("CREATE TRIGGER unrelated BEFORE UPDATE ON {schema}.ingress_messages FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_source_binding_guard()")).await;
+        assert_v1028_catalog_drift(
+            &fixture,
+            stage,
+            "missing epoch guard masked by extra trigger",
+        )
+        .await;
+        admin(
+            &fixture,
+            &format!("DROP TRIGGER unrelated ON {schema}.ingress_messages"),
+        )
+        .await;
+        admin(&fixture, &format!("CREATE TRIGGER ingress_messages_epoch_guard_dml BEFORE INSERT OR UPDATE OR DELETE ON {schema}.ingress_messages FOR EACH STATEMENT EXECUTE FUNCTION {schema}.waddle_ingress_epoch_guard()")).await;
+        admin(&fixture, &format!("ALTER TABLE {schema}.ingress_messages ENABLE ALWAYS TRIGGER ingress_messages_epoch_guard_dml")).await;
+
+        // Swap two names between tables, preserving both per-table counts.
+        admin(
+            &fixture,
+            &format!(
+                "DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_messages"
+            ),
+        )
+        .await;
+        admin(&fixture, &format!("DROP TRIGGER ingress_owner_rejections_update_guard ON {schema}.ingress_owner_rejections")).await;
+        admin(&fixture, &format!("CREATE TRIGGER ingress_messages_source_binding_guard BEFORE UPDATE ON {schema}.ingress_owner_rejections FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_source_binding_guard()")).await;
+        admin(&fixture, &format!("CREATE TRIGGER ingress_owner_rejections_update_guard BEFORE UPDATE ON {schema}.ingress_messages FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_owner_rejection_immutable()")).await;
+        assert_v1028_catalog_drift(&fixture, stage, "triggers moved to wrong tables").await;
+        admin(&fixture, &format!("DROP TRIGGER ingress_messages_source_binding_guard ON {schema}.ingress_owner_rejections")).await;
+        admin(
+            &fixture,
+            &format!(
+                "DROP TRIGGER ingress_owner_rejections_update_guard ON {schema}.ingress_messages"
+            ),
+        )
+        .await;
+        admin(&fixture, &format!("CREATE TRIGGER ingress_messages_source_binding_guard BEFORE UPDATE ON {schema}.ingress_messages FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_source_binding_guard()")).await;
+        admin(&fixture, &format!("CREATE TRIGGER ingress_owner_rejections_update_guard BEFORE UPDATE ON {schema}.ingress_owner_rejections FOR EACH ROW EXECUTE FUNCTION {schema}.waddle_ingress_owner_rejection_immutable()")).await;
+        assert_eq!(
+            inspect(&fixture).await.expect("restored trigger set"),
+            stage
+        );
+    }
+    fixture.cleanup().await;
+}
+
+async fn assert_v1028_catalog_drift(fixture: &Fixture, stage: DarkEpochAclStage, case: &str) {
+    let result = inspect(fixture).await;
+    assert!(
+        matches!(result, Err(DarkMigrationOwnerError::EpochCatalogDrift)),
+        "{case} at {stage:?}: {result:?}"
+    );
+}
+
+async fn install_relation_guard_stage(fixture: &Fixture) {
+    let mut installer = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("candidate installer");
+    sqlx::raw_sql(include_str!(
+        "../../src/db/migrations/owner/ingress_epoch_relation_guard_candidate.sql"
+    ))
+    .execute(&mut installer)
+    .await
+    .expect("install unregistered candidate on disposable fixture");
+    drop(installer);
+    admin(
+        fixture,
+        &format!(
+            "REVOKE UPDATE (id) ON {}.ingress_protocol_epoch FROM {}",
+            fixture.schema, fixture.runtime
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_replication_role_and_direct_set_privilege_are_rejected() {
+    let Some(url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let fixture = Fixture::new(&url, true).await;
+    prepare(&fixture).await;
+    grant_id(&fixture).await;
+
+    for stage in [
+        DarkEpochAclStage::V1009EpochZero,
+        DarkEpochAclStage::RelationGuardEpochZero,
+    ] {
+        if stage == DarkEpochAclStage::RelationGuardEpochZero {
+            install_relation_guard_stage(&fixture).await;
+        }
+        assert_eq!(inspect(&fixture).await.expect("baseline"), stage);
+
+        // The administrator can configure a replica default even though the
+        // runtime has no privilege to change the setting itself.
+        admin(
+            &fixture,
+            &format!(
+                "ALTER ROLE {} SET session_replication_role = replica",
+                fixture.runtime
+            ),
+        )
+        .await;
+        let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+            .await
+            .expect("runtime with replica default");
+        let (replication_role, can_set): (String, bool) = sqlx::query_as(
+            "SELECT pg_catalog.current_setting('session_replication_role'), \
+             pg_catalog.has_parameter_privilege(current_user, 'session_replication_role', 'SET')",
+        )
+        .fetch_one(&mut runtime)
+        .await
+        .expect("observe replica default and privilege");
+        assert_eq!(replication_role, "replica");
+        assert!(!can_set);
+        let error = sqlx::query("SET session_replication_role = origin")
+            .execute(&mut runtime)
+            .await
+            .expect_err("runtime cannot change parameter");
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("42501")
+        );
+        drop(runtime);
+        let replica_result = inspect(&fixture).await;
+        admin(
+            &fixture,
+            &format!(
+                "ALTER ROLE {} RESET session_replication_role",
+                fixture.runtime
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                replica_result,
+                Err(DarkMigrationOwnerError::RuntimeSessionUnverified)
+            ),
+            "{replica_result:?}"
+        );
+        assert_eq!(inspect(&fixture).await.expect("restored origin"), stage);
+
+        // Parameter ACLs are cluster-wide. Verify PostgreSQL's PUBLIC-grant
+        // semantics inside an uncommitted transaction so other sessions never
+        // receive the privilege. The direct grant below exercises the full
+        // diagnostic across its separate connections.
+        let mut public_grant = fixture
+            .admin
+            .begin()
+            .await
+            .expect("PUBLIC probe transaction");
+        sqlx::query("GRANT SET ON PARAMETER session_replication_role TO PUBLIC")
+            .execute(&mut *public_grant)
+            .await
+            .expect("transactional PUBLIC grant");
+        let privilege_query = "SELECT pg_catalog.has_parameter_privilege($1::pg_catalog.name, 'session_replication_role', 'SET')";
+        let visible_inside: bool = sqlx::query_scalar(privilege_query)
+            .bind(&fixture.runtime)
+            .fetch_one(&mut *public_grant)
+            .await
+            .expect("PUBLIC grant in transaction");
+        let visible_outside: bool = sqlx::query_scalar(privilege_query)
+            .bind(&fixture.runtime)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("PUBLIC grant outside transaction");
+        public_grant
+            .rollback()
+            .await
+            .expect("rollback PUBLIC grant");
+        assert!(
+            visible_inside,
+            "PUBLIC grant must be effective within the transaction"
+        );
+        assert!(
+            !visible_outside,
+            "uncommitted PUBLIC grant must not affect other sessions"
+        );
+
+        admin(
+            &fixture,
+            &format!(
+                "GRANT SET ON PARAMETER session_replication_role TO {}",
+                fixture.runtime
+            ),
+        )
+        .await;
+        let mut runtime = PgConnection::connect_with(&fixture.runtime_options)
+            .await
+            .expect("runtime with direct SET privilege");
+        let replication_role: String =
+            sqlx::query_scalar("SELECT pg_catalog.current_setting('session_replication_role')")
+                .fetch_one(&mut runtime)
+                .await
+                .expect("initial replication role");
+        assert_eq!(replication_role, "origin");
+        sqlx::query("SET session_replication_role = replica")
+            .execute(&mut runtime)
+            .await
+            .expect("direct SET privilege works");
+        drop(runtime);
+        let granted_result = inspect(&fixture).await;
+        admin(
+            &fixture,
+            &format!(
+                "REVOKE SET ON PARAMETER session_replication_role FROM {}",
+                fixture.runtime
+            ),
+        )
+        .await;
+        assert!(
+            matches!(granted_result, Err(DarkMigrationOwnerError::Roles)),
+            "{granted_result:?}"
+        );
+        assert_eq!(inspect(&fixture).await.expect("revoked SET"), stage);
+    }
+    fixture.cleanup().await;
+}
