@@ -1,6 +1,8 @@
 use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use waddle_server::db::physical_attestation::{RetentionLab, RetentionLabBatch};
+use waddle_server::db::physical_attestation::{
+    pin_lab_postgres_ddl, RetentionLab, RetentionLabBatch, PIN_LAB_SQLITE_DDL,
+};
 use waddle_server::ingress_substrate::ALIAS_RETENTION;
 
 fn now() -> DateTime<Utc> {
@@ -23,6 +25,15 @@ async fn sqlite_fixture() -> (Database, RetentionLab) {
         .run(&db)
         .await
         .expect("apply migrations");
+    let mut schema = db
+        .begin_immediate()
+        .await
+        .expect("fixture schema transaction");
+    schema
+        .execute_batch(PIN_LAB_SQLITE_DDL)
+        .await
+        .expect("install unregistered pin lab schema");
+    schema.commit().await.expect("commit pin lab schema");
     let lab = RetentionLab::sqlite(&db, typed_bounds()).expect("bind exact runtime pool");
     (db, lab)
 }
@@ -326,6 +337,38 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
     .await
     .expect("remove seed");
     seed.commit().await.expect("commit seed removal");
+    let mut owner = PgConnection::connect_with(&fixture.admin_options)
+        .await
+        .expect("lab schema owner");
+    let shadow = format!("pin_ddl_shadow_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {shadow}"))
+        .execute(&mut owner)
+        .await
+        .expect("DDL shadow schema");
+    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+        .bind(format!("{shadow}, {}", fixture.target))
+        .execute(&mut owner)
+        .await
+        .expect("hostile DDL search path");
+    sqlx::raw_sql(&pin_lab_postgres_ddl(&config))
+        .execute(&mut owner)
+        .await
+        .expect("install unregistered pin lab schema");
+    let target_exists: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+        .bind(format!("{}.ingress_admission_pins", fixture.target))
+        .fetch_one(&mut owner)
+        .await
+        .expect("target pin relation");
+    let shadow_exists: bool = sqlx::query_scalar("SELECT pg_catalog.to_regclass($1) IS NOT NULL")
+        .bind(format!("{shadow}.ingress_admission_pins"))
+        .fetch_one(&mut owner)
+        .await
+        .expect("shadow pin relation");
+    assert!(
+        target_exists && !shadow_exists,
+        "candidate DDL uses attested schema"
+    );
+    drop(owner);
     sqlx::query(&format!(
         "CREATE TABLE {}.pending_delivery (row_id TEXT PRIMARY KEY)",
         fixture.target
@@ -340,10 +383,14 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         "ingress_sm_refs",
         "ingress_effect_intents",
         "ingress_effect_receipts",
+        "ingress_delivery_receipts",
+        "ingress_carbon_receipts",
+        "ingress_send_attempts",
         "ingress_effect_descendants",
         "ingress_archive_dispatch",
         "pending_delivery",
         "sm_ingress_appends",
+        "ingress_admission_pins",
     ] {
         sqlx::query(&format!(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {}",
@@ -876,5 +923,535 @@ async fn postgres_each_live_obligation_blocks_without_starving_ready_rows() {
         assert_eq!(remaining, 0, "canonical cascade removes {table}");
     }
     drop(lab);
+    fixture.cleanup().await;
+}
+
+fn direct_pin(
+    key: uuid::Uuid,
+    resource: &str,
+) -> (
+    waddle_server::db::physical_attestation::AdmissionPin,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    use sha2::{Digest, Sha256};
+    use waddle_server::db::physical_attestation::AdmissionPin;
+    use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, StoredMessagePayload};
+    use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
+    let message = waddle_xmpp::parser::message_from_string("<message xmlns='jabber:client' from='alice@example.test/phone' to='bob@example.test' type='chat'><body>hello</body></message>").expect("typed message");
+    let resource: jid::FullJid = resource.parse().expect("resource");
+    let intent = IngressEffectIntent::RouteDirect {
+        recipient: "bob@example.test".parse().expect("recipient"),
+        fanout: vec![resource.clone()],
+        route_identity: EffectMessageIdentity::capture_ordinal(1),
+        prepared: Some(StoredMessagePayload::try_new(message.clone()).expect("freeze message")),
+    };
+    let hash: [u8; 32] = Sha256::digest(intent.semantic_key().storage_identity().as_bytes()).into();
+    let (kind, intent_bytes) = intent
+        .with_encoded_v1(|kind, bytes| (kind, bytes.to_vec()))
+        .expect("encode intent");
+    let envelope = serde_json::to_vec(&serde_json::json!({"message": waddle_xmpp::parser::message_to_string(&message).expect("serialize message"), "observer_request": null})).expect("encode envelope");
+    (
+        AdmissionPin {
+            admission_id: uuid::Uuid::new_v4(),
+            key: SmIngressAppendKey {
+                message_key: MessageKey::from_storage(key),
+                kind: SmIngressReceiptKind::from_storage(kind),
+                semantic_identity_hash: hash,
+                resource,
+            },
+            payload: message,
+            received_at: now(),
+        },
+        envelope,
+        intent_bytes,
+    )
+}
+
+async fn seed_sqlite_direct(
+    db: &Database,
+    pin: &waddle_server::db::physical_attestation::AdmissionPin,
+    envelope: Vec<u8>,
+    intent: Vec<u8>,
+) {
+    let key = pin.key.message_key.to_storage().to_string();
+    seed_sqlite(db, &key, Some(now() - ALIAS_RETENTION)).await;
+    let guard = db.guard().await.expect("fixture guard");
+    guard.execute("UPDATE main.ingress_messages SET envelope_version = 1, envelope = ?, created_at = ? WHERE message_key = ?", waddle_server::db_params![envelope, pin.received_at.to_rfc3339(), key.clone()]).await.expect("canonical envelope");
+    guard.execute("INSERT INTO main.ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, '0', ?, ?, 1, ?)", waddle_server::db_params![key, pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), intent]).await.expect("record direct route");
+}
+
+async fn seed_pg_direct(
+    fixture: &Fixture,
+    pin: &waddle_server::db::physical_attestation::AdmissionPin,
+    envelope: Vec<u8>,
+    intent: Vec<u8>,
+) {
+    let key = pin.key.message_key.to_storage();
+    seed_pg(fixture, key, Some(now() - ALIAS_RETENTION)).await;
+    let schema = &fixture.target;
+    let mut tx = pg_seed_transaction(fixture).await;
+    sqlx::query(&format!("UPDATE {schema}.ingress_messages SET envelope_version = 1, envelope = $1, created_at = $2 WHERE message_key = $3")).bind(envelope).bind(pin.received_at).bind(key).execute(&mut *tx).await.expect("canonical envelope");
+    sqlx::query(&format!("INSERT INTO {schema}.ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ($1, 0, $2, $3, 1, $4)"))
+        .bind(key).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(intent).execute(&mut *tx).await.expect("record direct route");
+    tx.commit().await.expect("commit direct fixture");
+}
+
+#[tokio::test]
+async fn sqlite_pin_validates_recorded_route_and_survives_reopen() {
+    use waddle_server::db::physical_attestation::{
+        AdmissionPinLab, AdmissionPinLabError, PinOutcome,
+    };
+    let (db, retention) = sqlite_fixture().await;
+    sqlite_exec(
+        &db,
+        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+    )
+    .await;
+    let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_sqlite_direct(&db, &pin, envelope, intent).await;
+    let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("shared pin lab");
+    let mut wrong = pin.clone();
+    wrong.payload = waddle_xmpp::parser::message_from_string("<message xmlns='jabber:client' from='alice@example.test/phone' to='bob@example.test' type='chat'><body>forged</body></message>").expect("message");
+    assert!(matches!(
+        lab.admit(&wrong).await,
+        Err(AdmissionPinLabError::Rejected)
+    ));
+    wrong = pin.clone();
+    wrong.key.semantic_identity_hash = [0; 32];
+    let guard = db.guard().await.expect("guard");
+    guard.execute("UPDATE main.ingress_effect_intents SET semantic_identity_hash = ? WHERE message_key = ?", waddle_server::db_params![vec![0_u8; 32], pin.key.message_key.to_storage().to_string()]).await.expect("model corrupted recorded hash");
+    drop(guard);
+    assert!(
+        matches!(lab.admit(&wrong).await, Err(AdmissionPinLabError::Rejected)),
+        "a row with a forged hash is not authority"
+    );
+    let guard = db.guard().await.expect("guard");
+    guard.execute("UPDATE main.ingress_effect_intents SET semantic_identity_hash = ? WHERE message_key = ?", waddle_server::db_params![pin.key.semantic_identity_hash.to_vec(), pin.key.message_key.to_storage().to_string()]).await.expect("restore recorded hash");
+    drop(guard);
+    wrong = pin.clone();
+    wrong.key.resource = "bob@example.test/other".parse().expect("other resource");
+    assert!(matches!(
+        lab.admit(&wrong).await,
+        Err(AdmissionPinLabError::Rejected)
+    ));
+    wrong = pin.clone();
+    wrong.key.semantic_identity_hash = [0; 32];
+    assert!(matches!(
+        lab.admit(&wrong).await,
+        Err(AdmissionPinLabError::Rejected)
+    ));
+    wrong = pin.clone();
+    wrong.received_at += ChronoDuration::microseconds(1);
+    assert!(
+        matches!(lab.admit(&wrong).await, Err(AdmissionPinLabError::Rejected)),
+        "the canonical receipt time must match"
+    );
+    for (table, insert) in [
+        ("ingress_delivery_receipts", "INSERT INTO main.ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?, ?, ?, ?)"),
+        ("ingress_carbon_receipts", "INSERT INTO main.ingress_carbon_receipts (message_key, kind, semantic_identity_hash, recipient) VALUES (?, ?, ?, ?)"),
+        ("ingress_send_attempts", "INSERT INTO main.ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state) VALUES (?, ?, ?, ?, 'node', 'incarnation', 'token', 1, 2)"),
+        ("sm_ingress_appends", "INSERT INTO main.sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition) VALUES (?, ?, ?, ?, 'stream', 1, 1, 'payload', 1, 0)"),
+    ] {
+        let guard = db.guard().await.expect("guard");
+        guard.execute(insert, waddle_server::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string()]).await.expect("existing delivery evidence");
+        drop(guard);
+        assert!(matches!(lab.admit(&pin).await, Err(AdmissionPinLabError::Rejected)), "{table} blocks a fresh pin");
+        let guard = db.guard().await.expect("guard");
+        guard.execute(&format!("DELETE FROM main.{table} WHERE message_key = ?"), waddle_server::db_params![pin.key.message_key.to_storage().to_string()]).await.expect("clear delivery evidence");
+    }
+    assert_eq!(
+        lab.admit(&pin).await.expect("pin created"),
+        PinOutcome::Created
+    );
+    assert_eq!(
+        lab.admit(&pin).await.expect("idempotent"),
+        PinOutcome::Existing
+    );
+    wrong = pin.clone();
+    wrong.admission_id = uuid::Uuid::new_v4();
+    assert!(matches!(
+        lab.admit(&wrong).await,
+        Err(AdmissionPinLabError::Conflict)
+    ));
+    wrong = pin.clone();
+    wrong.received_at += ChronoDuration::microseconds(1);
+    assert!(matches!(
+        lab.admit(&wrong).await,
+        Err(AdmissionPinLabError::Conflict)
+    ));
+    drop(lab);
+    let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("reopen over same runtime pool");
+    let recovered = lab
+        .lookup(&pin.key)
+        .await
+        .expect("lookup")
+        .expect("durable pin");
+    assert_eq!(recovered.admission_id, pin.admission_id);
+    assert_eq!(recovered.payload, pin.payload);
+    assert_eq!(recovered.received_at, pin.received_at);
+    let guard = db.guard().await.expect("guard");
+    for sql in [
+        "UPDATE main.ingress_admission_pins SET admission_id = 'changed'",
+        "DELETE FROM main.ingress_admission_pins",
+    ] {
+        assert!(
+            guard.execute(sql, ()).await.is_err(),
+            "the experimental pin is immutable"
+        );
+    }
+    guard.execute("INSERT INTO main.ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, ?, ?)", waddle_server::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec()]).await.expect("settle route effect");
+    guard
+        .execute(
+            "UPDATE main.ingress_messages SET retention_eligible_at = ? WHERE message_key = ?",
+            waddle_server::db_params![
+                (now() - ALIAS_RETENTION).to_rfc3339(),
+                pin.key.message_key.to_storage().to_string()
+            ],
+        )
+        .await
+        .expect("old frontier");
+    drop(guard);
+    assert_eq!(
+        retention
+            .collect(now(), 1)
+            .await
+            .expect("pin blocks GC")
+            .deleted,
+        0
+    );
+    assert_eq!(
+        sqlite_count(&db, "SELECT COUNT(*) FROM main.ingress_messages").await,
+        1
+    );
+    assert_eq!(
+        sqlite_count(&db, "SELECT COUNT(*) FROM main.ingress_admission_pins").await,
+        1
+    );
+    assert_eq!(
+        lab.admit(&pin).await.expect("same pin after receipt"),
+        PinOutcome::Existing
+    );
+    let (mut other, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/tablet");
+    seed_sqlite_direct(&db, &other, envelope, intent).await;
+    other.admission_id = pin.admission_id;
+    assert!(matches!(
+        lab.admit(&other).await,
+        Err(AdmissionPinLabError::Conflict)
+    ));
+    assert!(lab
+        .lookup(&other.key)
+        .await
+        .expect("conflicting ID lookup")
+        .is_none());
+    sqlite_exec(
+        &db,
+        "ALTER TABLE main.ingress_admission_pins RENAME TO hidden_admission_pins",
+    )
+    .await;
+    assert!(matches!(
+        retention.collect(now(), 1).await,
+        Err(DarkIngressAuthorityError::Database)
+    ));
+    assert!(matches!(
+        lab.lookup(&pin.key).await,
+        Err(AdmissionPinLabError::Authority(
+            DarkIngressAuthorityError::Database
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_collector_first_refuses_new_pin_and_temp_shadows() {
+    use waddle_server::db::physical_attestation::{AdmissionPinLab, AdmissionPinLabError};
+    let (db, retention) = sqlite_fixture().await;
+    sqlite_exec(
+        &db,
+        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+    )
+    .await;
+    let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_sqlite_direct(&db, &pin, envelope, intent).await;
+    let guard = db.guard().await.expect("guard");
+    guard.execute("INSERT INTO main.ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, ?, ?)", waddle_server::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec()]).await.expect("effect completed");
+    guard.execute("CREATE TEMP TABLE ingress_admission_pins AS SELECT * FROM main.ingress_admission_pins WHERE 0", ()).await.expect("hostile pin shadow");
+    guard.execute("CREATE TEMP TABLE ingress_effect_intents AS SELECT * FROM main.ingress_effect_intents WHERE 0", ()).await.expect("hostile intent shadow");
+    guard.execute("CREATE TEMP TABLE ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL)", ()).await.expect("hostile epoch shadow");
+    guard
+        .execute("INSERT INTO temp.ingress_protocol_epoch VALUES (1, 0)", ())
+        .await
+        .expect("supported shadow epoch");
+    guard.execute("UPDATE main.ingress_protocol_epoch SET epoch = 2, activated_at = '2026-11-01T12:00:00Z', lineage_uuid = '00000000-0000-0000-0000-000000000001' WHERE id = 1", ()).await.expect("future main epoch");
+    drop(guard);
+    let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("lab");
+    assert!(matches!(
+        lab.admit(&pin).await,
+        Err(AdmissionPinLabError::Authority(
+            DarkIngressAuthorityError::UnsupportedEpoch
+        ))
+    ));
+    sqlite_exec(&db, "UPDATE main.ingress_protocol_epoch SET epoch = 0, activated_at = NULL, lineage_uuid = NULL WHERE id = 1").await;
+    assert!(
+        matches!(lab.admit(&pin).await, Err(AdmissionPinLabError::Rejected)),
+        "settled effect cannot receive a fresh pin"
+    );
+    assert_eq!(
+        retention
+            .collect(now(), 1)
+            .await
+            .expect("collector first")
+            .deleted,
+        1
+    );
+    assert!(
+        matches!(lab.admit(&pin).await, Err(AdmissionPinLabError::Rejected)),
+        "deleted canonical cannot authorize a late pin"
+    );
+    assert!(lab.lookup(&pin.key).await.expect("lookup").is_none());
+    assert_eq!(
+        sqlite_count(&db, "SELECT COUNT(*) FROM temp.ingress_admission_pins").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn postgres_pin_writer_first_blocks_gc_and_collector_first_rejects_admission() {
+    use waddle_server::db::physical_attestation::{
+        AdmissionPinLab, AdmissionPinLabError, PinOutcome,
+    };
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, retention) = postgres_fixture(&fixture).await;
+    let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_pg_direct(&fixture, &pin, envelope, intent).await;
+    let schema = &fixture.target;
+    let shadow = format!("pin_shadow_{}", uuid::Uuid::new_v4().simple());
+    for statement in [
+        format!("CREATE SCHEMA {shadow}"),
+        format!("CREATE TABLE {shadow}.ingress_messages (LIKE {schema}.ingress_messages INCLUDING ALL)"),
+        format!("INSERT INTO {shadow}.ingress_messages SELECT * FROM {schema}.ingress_messages"),
+        format!("GRANT USAGE ON SCHEMA {shadow} TO {}", fixture.runtime),
+        format!("GRANT ALL ON ALL TABLES IN SCHEMA {shadow} TO {}", fixture.runtime),
+        format!("CREATE FUNCTION {schema}.wait_pin_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.set_config('search_path', '{shadow}, {schema}', true); PERFORM pg_catalog.pg_advisory_xact_lock(7199222); RETURN NEW; END $$"),
+        format!("CREATE TRIGGER wait_pin_insert BEFORE INSERT ON {schema}.ingress_admission_pins FOR EACH ROW EXECUTE FUNCTION {schema}.wait_pin_insert()"),
+    ] { sqlx::query(&statement).execute(&fixture.admin).await.expect("test pause"); }
+    let mut blocker = fixture.admin.begin().await.expect("blocker");
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(7199222)")
+        .execute(&mut *blocker)
+        .await
+        .expect("pause pin insertion");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("pid");
+    let app = format!("pin_lab_{}", uuid::Uuid::new_v4().simple());
+    let lab = Arc::new(
+        AdmissionPinLab::postgres(
+            fixture.runtime_options.clone().application_name(&app),
+            config.clone(),
+            1,
+            typed_bounds(),
+        )
+        .expect("lab"),
+    );
+    sqlx::query(&format!("INSERT INTO {schema}.sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition) VALUES ($1, $2, $3, $4, 'stream', 1, 1, 'payload', 1, 0)"))
+        .bind(pin.key.message_key.to_storage().to_string()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).bind(pin.key.resource.to_string()).execute(&fixture.admin).await.expect("existing SM custody");
+    assert!(matches!(
+        lab.admit(&pin).await,
+        Err(AdmissionPinLabError::Rejected)
+    ));
+    sqlx::query(&format!(
+        "DELETE FROM {schema}.sm_ingress_appends WHERE message_key = $1"
+    ))
+    .bind(pin.key.message_key.to_storage().to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("clear existing SM custody");
+    let task = {
+        let lab = lab.clone();
+        let pin = pin.clone();
+        tokio::spawn(async move { lab.admit(&pin).await })
+    };
+    wait_for_blocked_application(&fixture.admin, &app, blocker_pid).await;
+    let mut receipt = pg_seed_transaction(&fixture).await;
+    sqlx::query(&format!("INSERT INTO {schema}.ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES ($1, $2, $3)"))
+        .bind(pin.key.message_key.to_storage()).bind(pin.key.kind.to_storage()).bind(pin.key.semantic_identity_hash.as_slice()).execute(&mut *receipt).await.expect("settle effect while writer holds canonical");
+    receipt.commit().await.expect("commit receipt");
+    assert_eq!(
+        retention.collect(now(), 1).await.expect("skip held parent"),
+        RetentionLabBatch::default()
+    );
+    blocker.commit().await.expect("release writer");
+    assert_eq!(
+        task.await.expect("task").expect("admit"),
+        PinOutcome::Created
+    );
+    let recovered = lab.lookup(&pin.key).await.expect("lookup").expect("pin");
+    assert_eq!(recovered.admission_id, pin.admission_id);
+    assert_eq!(recovered.payload, pin.payload);
+    assert_eq!(recovered.received_at, pin.received_at);
+    let shadow_unchanged: bool = sqlx::query_scalar(&format!("SELECT retention_eligible_at IS NOT NULL FROM {shadow}.ingress_messages WHERE message_key = $1"))
+        .bind(pin.key.message_key.to_storage()).fetch_one(&fixture.admin).await.expect("shadow frontier");
+    assert!(
+        shadow_unchanged,
+        "poisoned search path cannot redirect the canonical update"
+    );
+    for sql in [
+        format!(
+            "UPDATE {schema}.ingress_admission_pins SET admission_id = '{}'",
+            uuid::Uuid::new_v4()
+        ),
+        format!("DELETE FROM {schema}.ingress_admission_pins"),
+        format!("TRUNCATE {schema}.ingress_admission_pins"),
+    ] {
+        assert!(
+            sqlx::query(&sql).execute(&fixture.admin).await.is_err(),
+            "the experimental pin is immutable"
+        );
+    }
+    let mut stale = pg_seed_transaction(&fixture).await;
+    sqlx::query(&format!(
+        "UPDATE {schema}.ingress_messages SET retention_eligible_at = $1 WHERE message_key = $2"
+    ))
+    .bind(now() - ALIAS_RETENTION)
+    .bind(pin.key.message_key.to_storage())
+    .execute(&mut *stale)
+    .await
+    .expect("stale frontier");
+    stale.commit().await.expect("commit stale frontier");
+    assert_eq!(
+        retention
+            .collect(now(), 1)
+            .await
+            .expect("pin prevents GC")
+            .deleted,
+        0
+    );
+    assert_eq!(pg_count(&fixture, "ingress_admission_pins").await, 1);
+    assert_eq!(pg_count(&fixture, "ingress_messages").await, 1);
+    sqlx::query(&format!(
+        "DROP TRIGGER wait_pin_insert ON {schema}.ingress_admission_pins"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove pause");
+
+    let (late, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_pg_direct(&fixture, &late, envelope, intent).await;
+    let mut completed = pg_seed_transaction(&fixture).await;
+    sqlx::query(&format!("INSERT INTO {schema}.ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES ($1, $2, $3)"))
+        .bind(late.key.message_key.to_storage()).bind(late.key.kind.to_storage()).bind(late.key.semantic_identity_hash.as_slice()).execute(&mut *completed).await.expect("completed route");
+    completed.commit().await.expect("commit completion");
+    assert_eq!(
+        retention
+            .collect(now(), 1)
+            .await
+            .expect("collector first")
+            .deleted,
+        1
+    );
+    assert!(matches!(
+        lab.admit(&late).await,
+        Err(AdmissionPinLabError::Rejected)
+    ));
+    assert!(lab.lookup(&late.key).await.expect("late lookup").is_none());
+    drop(lab);
+    drop(retention);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_pin_cancelled_lock_wait_and_unknown_commit_are_recoverable() {
+    use waddle_server::db::physical_attestation::{
+        AdmissionPinLab, AdmissionPinLabError, PinOutcome,
+    };
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (config, retention) = postgres_fixture(&fixture).await;
+    drop(retention);
+    let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_pg_direct(&fixture, &pin, envelope, intent).await;
+    let app = format!("pin_cancel_{}", uuid::Uuid::new_v4().simple());
+    let lab = Arc::new(
+        AdmissionPinLab::postgres(
+            fixture.runtime_options.clone().application_name(&app),
+            config.clone(),
+            1,
+            typed_bounds(),
+        )
+        .expect("lab"),
+    );
+    let mut holder = fixture.admin.begin().await.expect("holder");
+    sqlx::query(&format!(
+        "SELECT 1 FROM {}.ingress_messages WHERE message_key = $1 FOR UPDATE",
+        fixture.target
+    ))
+    .bind(pin.key.message_key.to_storage())
+    .fetch_one(&mut *holder)
+    .await
+    .expect("hold canonical");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("holder pid");
+    let task = {
+        let lab = lab.clone();
+        let pin = pin.clone();
+        tokio::spawn(async move { lab.admit(&pin).await })
+    };
+    wait_for_blocked_application(&fixture.admin, &app, holder_pid).await;
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+    holder.rollback().await.expect("unlock");
+    let schema = &fixture.target;
+    for statement in [
+        format!("CREATE FUNCTION {schema}.reject_pin_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END $$"),
+        format!("CREATE CONSTRAINT TRIGGER reject_pin_commit AFTER INSERT ON {schema}.ingress_admission_pins DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {schema}.reject_pin_commit()"),
+    ] { sqlx::query(&statement).execute(&fixture.admin).await.expect("deferred failure"); }
+    assert!(matches!(
+        lab.admit(&pin).await,
+        Err(AdmissionPinLabError::Authority(
+            DarkIngressAuthorityError::CommitIndeterminate
+        ))
+    ));
+    assert!(lab
+        .lookup(&pin.key)
+        .await
+        .expect("no committed pin")
+        .is_none());
+    sqlx::query(&format!(
+        "DROP TRIGGER reject_pin_commit ON {schema}.ingress_admission_pins"
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("remove failure");
+    assert_eq!(
+        lab.admit(&pin).await.expect("one-slot recovery"),
+        PinOutcome::Created
+    );
+    assert_eq!(
+        lab.lookup(&pin.key)
+            .await
+            .expect("lookup")
+            .expect("pin")
+            .admission_id,
+        pin.admission_id
+    );
+    drop(lab);
+    let restarted =
+        AdmissionPinLab::postgres(fixture.runtime_options.clone(), config, 1, typed_bounds())
+            .expect("restart lab");
+    assert_eq!(
+        restarted
+            .lookup(&pin.key)
+            .await
+            .expect("restart lookup")
+            .expect("durable pin")
+            .admission_id,
+        pin.admission_id
+    );
+    drop(restarted);
     fixture.cleanup().await;
 }

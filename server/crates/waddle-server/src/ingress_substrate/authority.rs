@@ -75,6 +75,14 @@ pub struct MessageEnvelope {
 }
 
 impl MessageEnvelope {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_pin_lab_storage(
+        version: i64,
+        bytes: Vec<u8>,
+    ) -> Result<Self, IngressSubstrateError> {
+        Self::from_storage(version, bytes)
+    }
+
     pub fn new(message: Message) -> Self {
         Self {
             version: EnvelopeVersion::V1,
