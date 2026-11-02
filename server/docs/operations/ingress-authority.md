@@ -372,8 +372,11 @@ obligations are settled; the child starts its own tail when its obligations
 settle. The mapping and both messages remain available for source replay until
 both tails have elapsed. GC holds the epoch proof, locks source then child,
 rechecks both rows, and deletes child then source in one transaction. A failed
-or indeterminate commit is resolved by reading the durable state; it never
-reports the pair as committed before commit succeeds. A bound remote-room
+or timed-out commit does not increment the reported committed deletion count.
+Its actual outcome stays unknown until the original backend is fenced or an
+equivalent transaction barrier has passed; only then can authoritative readback
+determine whether the pair remains. An immediate read seeing both rows is not
+rollback proof. A bound remote-room
 source with an undecided owner result remains retained even after its outbound
 dispatch receipt. Legacy rows without a source binding keep their earlier
 retention behavior. Descendant

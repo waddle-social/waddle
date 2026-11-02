@@ -114,6 +114,7 @@ async fn owner_grant_and_attested_ingress_lab() {
         format!("ALTER TABLE {}.ingress_owner_rejections OWNER TO {owner}", fixture.target),
         format!("GRANT SELECT ON {}._lineage, {}._migrations TO {owner}", fixture.target, fixture.target),
         format!("GRANT SELECT ON {}.ingress_protocol_epoch, {}.ingress_messages TO {owner}", fixture.target, fixture.target),
+        format!("GRANT UPDATE (id) ON {}.ingress_protocol_epoch TO {}", fixture.target, fixture.runtime),
         format!("GRANT DELETE ON {}.ingress_messages TO {}", fixture.target, fixture.runtime),
     ] {
         sqlx::query(&statement)

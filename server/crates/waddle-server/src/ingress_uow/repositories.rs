@@ -285,6 +285,38 @@ pub(crate) struct RelayedSourceAuthority {
 
 #[cfg(test)]
 #[derive(Debug)]
+pub(crate) struct ClosedRoomOwnerResultSource<'a> {
+    message_key: MessageKey,
+    sender: &'a FullJid,
+    room: &'a BareJid,
+    digest: &'a SemanticDigest,
+    binding: &'a ingress_substrate::CanonicalSourceBinding,
+    stanza_lang: Option<&'a xmpp_parsers::message::Lang>,
+}
+
+#[cfg(test)]
+impl<'a> ClosedRoomOwnerResultSource<'a> {
+    pub(crate) fn new(
+        message_key: MessageKey,
+        sender: &'a FullJid,
+        room: &'a BareJid,
+        digest: &'a SemanticDigest,
+        binding: &'a ingress_substrate::CanonicalSourceBinding,
+        stanza_lang: Option<&'a xmpp_parsers::message::Lang>,
+    ) -> Self {
+        Self {
+            message_key,
+            sender,
+            room,
+            digest,
+            binding,
+            stanza_lang,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
 pub(crate) enum ClosedRoomOwnerResultProposal {
     Accepted {
         owner_effects: Vec<IngressEffectIntent>,
@@ -649,9 +681,7 @@ impl CanonicalMessageRepository {
                 ordinal.to_storage().to_string(),
             )
         });
-        let stored_sm_occurrence = source_sm_ingress_id
-            .zip(source_ingress_ordinal)
-            .map(|(id, ordinal)| (id, ordinal));
+        let stored_sm_occurrence = source_sm_ingress_id.zip(source_ingress_ordinal);
         if i32::from(offered_version) != digest_version
             || digest_bytes.as_slice() != offered_digest
             || source_version != Some(1)
@@ -734,14 +764,17 @@ impl CanonicalMessageRepository {
     #[cfg(test)]
     pub(crate) async fn apply_closed_room_owner_result(
         transaction: &mut IngressUowTransaction<'_>,
-        message_key: MessageKey,
-        sender: &FullJid,
-        room: &BareJid,
-        digest: &SemanticDigest,
-        binding: &ingress_substrate::CanonicalSourceBinding,
-        stanza_lang: Option<&xmpp_parsers::message::Lang>,
+        source: ClosedRoomOwnerResultSource<'_>,
         proposal: ClosedRoomOwnerResultProposal,
     ) -> Result<ClosedRoomOwnerResultOutcome, IngressUowError> {
+        let ClosedRoomOwnerResultSource {
+            message_key,
+            sender,
+            room,
+            digest,
+            binding,
+            stanza_lang,
+        } = source;
         if sender.to_bare() != *binding.principal().bare_jid() {
             return Err(ingress_substrate::IngressSubstrateError::RelayedAliasUnproven.into());
         }

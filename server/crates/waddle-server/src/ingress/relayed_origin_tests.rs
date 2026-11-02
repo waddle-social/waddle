@@ -4,8 +4,8 @@ use super::{IngressCanonicalRef, IngressStreamIdentity, IngressSubmission};
 use crate::ingress_substrate::{CanonicalSourceBinding, IngressSubstrateError, MessageEnvelope};
 use crate::ingress_uow::{
     CanonicalMessageRepository, ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal,
-    EffectIntentRepository, EffectReceiptRepository, IngressUowError, ReconcileVerdict,
-    RoomOwnerDecision, SmIngressRepository, SmIngressStreamRepository,
+    ClosedRoomOwnerResultSource, EffectIntentRepository, EffectReceiptRepository, IngressUowError,
+    ReconcileVerdict, RoomOwnerDecision, SmIngressRepository, SmIngressStreamRepository,
 };
 use crate::server::routes::interpret::effects::{
     AuthorizationDeniedReason, PlanRejection, RoomExecutionPath,
@@ -16,6 +16,9 @@ use waddle_xmpp::ingress::{
     RelayTargetIdentity, WireHandledCount,
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
+
+#[cfg(not(feature = "clustering"))]
+mod synthetic_alias;
 
 fn groupchat(mut submission: IngressSubmission, room: &jid::BareJid) -> IngressSubmission {
     let message = &mut submission.plan.sanitized_message;
@@ -1039,12 +1042,14 @@ async fn sqlite_closed_owner_result_replays_latched_acceptance_before_replanning
     let accepted: ClosedRoomOwnerResultOutcome =
         CanonicalMessageRepository::apply_closed_room_owner_result(
             &mut tx,
-            source_key,
-            &source.sender,
-            &room,
-            &digest,
-            &binding,
-            None,
+            ClosedRoomOwnerResultSource::new(
+                source_key,
+                &source.sender,
+                &room,
+                &digest,
+                &binding,
+                None,
+            ),
             ClosedRoomOwnerResultProposal::Accepted {
                 owner_effects: vec![route.clone()],
             },
@@ -1075,12 +1080,14 @@ async fn sqlite_closed_owner_result_replays_latched_acceptance_before_replanning
         .expect("replay with changed policy");
     let replay = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1116,12 +1123,14 @@ async fn sqlite_closed_owner_result_rejects_missing_or_wrong_room_dispatch() {
     let mut tx = fixture.uow.begin().await.expect("missing source dispatch");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&room)],
         },
@@ -1139,12 +1148,14 @@ async fn sqlite_closed_owner_result_rejects_missing_or_wrong_room_dispatch() {
     let mut tx = fixture.uow.begin().await.expect("wrong owner effect room");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        routed_key,
-        &source.sender,
-        &room,
-        &digest,
-        &binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            routed_key,
+            &source.sender,
+            &room,
+            &digest,
+            &binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&other_room)],
         },
@@ -1191,12 +1202,14 @@ async fn sqlite_closed_owner_result_rejects_missing_or_wrong_room_dispatch() {
         .expect("resource-addressed source");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        resource_key,
-        &resource_source.sender,
-        &room,
-        &resource_digest,
-        &resource_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            resource_key,
+            &resource_source.sender,
+            &room,
+            &resource_digest,
+            &resource_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&room)],
         },
@@ -1232,12 +1245,14 @@ async fn sqlite_closed_owner_result_rejects_missing_or_wrong_room_dispatch() {
         .expect("reject conflicting stored owner effect");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        conflicting_key,
-        &source.sender,
-        &room,
-        &digest,
-        &binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            conflicting_key,
+            &source.sender,
+            &room,
+            &digest,
+            &binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&room)],
         },
@@ -1263,12 +1278,14 @@ async fn sqlite_closed_owner_result_rejects_missing_or_wrong_room_dispatch() {
         .expect("reject preexisting owner effect before child creation");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        conflicting_key,
-        &source.sender,
-        &room,
-        &digest,
-        &binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            conflicting_key,
+            &source.sender,
+            &room,
+            &digest,
+            &binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1363,12 +1380,14 @@ async fn sqlite_closed_owner_rejection_binds_child_and_receipt_identity_atomical
     let mut tx = fixture.uow.begin().await.expect("forged source stream");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &wrong_stream_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &wrong_stream_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1387,12 +1406,14 @@ async fn sqlite_closed_owner_rejection_binds_child_and_receipt_identity_atomical
     let mut tx = fixture.uow.begin().await.expect("forged source sender");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &forged_sender,
-        &room,
-        &digest,
-        &first_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &forged_sender,
+            &room,
+            &digest,
+            &first_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1409,12 +1430,14 @@ async fn sqlite_closed_owner_rejection_binds_child_and_receipt_identity_atomical
     let mut tx = fixture.uow.begin().await.expect("stage owner rejection");
     let staged = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &first_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &first_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1449,12 +1472,14 @@ async fn sqlite_closed_owner_rejection_binds_child_and_receipt_identity_atomical
     let mut tx = fixture.uow.begin().await.expect("retry owner rejection");
     let rejected = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &first_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &first_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },
@@ -1481,12 +1506,14 @@ async fn sqlite_closed_owner_rejection_binds_child_and_receipt_identity_atomical
         .expect("replay rejected owner result");
     let replay = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        source_key,
-        &source.sender,
-        &room,
-        &digest,
-        &first_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            source_key,
+            &source.sender,
+            &room,
+            &digest,
+            &first_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&room)],
         },
@@ -1574,12 +1601,14 @@ async fn postgres_closed_owner_result_serializes_acceptance_and_rejection() {
         accept_barrier.wait().await;
         let outcome = CanonicalMessageRepository::apply_closed_room_owner_result(
             &mut tx,
-            source_key,
-            &accept_source.sender,
-            &room,
-            &digest,
-            &accept_binding,
-            None,
+            ClosedRoomOwnerResultSource::new(
+                source_key,
+                &accept_source.sender,
+                &room,
+                &digest,
+                &accept_binding,
+                None,
+            ),
             ClosedRoomOwnerResultProposal::Accepted {
                 owner_effects: vec![accept_effect],
             },
@@ -1597,12 +1626,14 @@ async fn postgres_closed_owner_result_serializes_acceptance_and_rejection() {
         reject_barrier.wait().await;
         let outcome = CanonicalMessageRepository::apply_closed_room_owner_result(
             &mut tx,
-            source_key,
-            &reject_source.sender,
-            &room,
-            &digest,
-            &reject_binding,
-            None,
+            ClosedRoomOwnerResultSource::new(
+                source_key,
+                &reject_source.sender,
+                &room,
+                &digest,
+                &reject_binding,
+                None,
+            ),
             ClosedRoomOwnerResultProposal::Rejected {
                 error: forbidden_owner_error(),
             },
@@ -1744,12 +1775,14 @@ async fn sqlite_dark_source_binding_rejects_mismatch_and_legacy_rows() {
     let mut tx = fixture.uow.begin().await.expect("mismatched principal");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        key,
-        &source.sender,
-        &room,
-        &digest,
-        &conflicting_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            key,
+            &source.sender,
+            &room,
+            &digest,
+            &conflicting_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Accepted {
             owner_effects: vec![closed_owner_route(&room)],
         },
@@ -1882,12 +1915,14 @@ async fn sqlite_dark_source_binding_rejects_mismatch_and_legacy_rows() {
     let mut tx = fixture.uow.begin().await.expect("legacy owner result");
     let error = CanonicalMessageRepository::apply_closed_room_owner_result(
         &mut tx,
-        legacy_key,
-        &unbound.sender,
-        &room,
-        &legacy_digest,
-        &legacy_binding,
-        None,
+        ClosedRoomOwnerResultSource::new(
+            legacy_key,
+            &unbound.sender,
+            &room,
+            &legacy_digest,
+            &legacy_binding,
+            None,
+        ),
         ClosedRoomOwnerResultProposal::Rejected {
             error: forbidden_owner_error(),
         },

@@ -66,7 +66,9 @@ pub use repositories::{
 #[cfg(feature = "clustering")]
 pub use repositories::{ClaimRepository, RoomClaimFence, SmClaimFence};
 #[cfg(test)]
-pub(crate) use repositories::{ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal};
+pub(crate) use repositories::{
+    ClosedRoomOwnerResultOutcome, ClosedRoomOwnerResultProposal, ClosedRoomOwnerResultSource,
+};
 pub(crate) use retry::is_database_timeout;
 pub use retry::{run_with_retry, DbRetryClass, RetryExhausted};
 

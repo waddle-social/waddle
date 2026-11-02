@@ -438,6 +438,13 @@ async fn postgres_fixture(fixture: &Fixture) -> (PhysicalAttestationConfig, Rete
         .await
         .expect("grant lab relation");
     }
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}.ingress_owner_rejections TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant paired-GC mapping read without mapping mutation");
     let lab = RetentionLab::postgres(
         fixture.runtime_options.clone(),
         config.clone(),
