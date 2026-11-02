@@ -106,27 +106,54 @@ pub enum StopReason {
 #[derive(Clone)]
 pub struct StopSignal {
     token: CancellationToken,
-    reason: Arc<Mutex<Option<StopReason>>>,
+    state: Arc<Mutex<StopSignalState>>,
+}
+
+struct StopSignalState {
+    reason: Option<StopReason>,
+    listener: Option<Arc<dyn Fn(StopReason) + Send + Sync>>,
 }
 
 impl StopSignal {
     fn new() -> Self {
         Self {
             token: CancellationToken::new(),
-            reason: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(StopSignalState {
+                reason: None,
+                listener: None,
+            })),
         }
     }
 
     /// Request pump cancellation. The first reason remains authoritative.
     pub fn cancel(&self, reason: StopReason) {
-        let mut current = match self.reason.lock() {
-            Ok(current) => current,
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if current.is_none() {
-            *current = Some(reason);
+        if state.reason.is_none() {
+            if let Some(listener) = &state.listener {
+                // The listener is a synchronous lifecycle authority. It runs
+                // before cancellation becomes observable so protocol
+                // completion and every stop source share one linearization
+                // point. Listeners must not call back into this StopSignal.
+                listener(reason);
+            }
+            state.reason = Some(reason);
         }
+        drop(state);
         self.token.cancel();
+    }
+
+    fn set_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.listener = Some(Arc::clone(&listener));
+        if let Some(reason) = state.reason {
+            listener(reason);
+        }
     }
 
     /// Wait until cancellation is requested.
@@ -141,9 +168,9 @@ impl StopSignal {
 
     /// First cancellation reason, when present.
     pub fn reason(&self) -> Option<StopReason> {
-        match self.reason.lock() {
-            Ok(current) => *current,
-            Err(poisoned) => *poisoned.into_inner(),
+        match self.state.lock() {
+            Ok(state) => state.reason,
+            Err(poisoned) => poisoned.into_inner().reason,
         }
     }
 }
@@ -955,6 +982,10 @@ impl IoCustodianHandle {
         drop(admission_open);
         self.client.stop.cancel(reason);
         self.client.force_stop.cancel();
+    }
+
+    pub(crate) fn set_stop_listener(&self, listener: Arc<dyn Fn(StopReason) + Send + Sync>) {
+        self.client.stop.set_listener(listener);
     }
 
     /// Create an observation-only handle that can outlive this controller.

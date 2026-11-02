@@ -11,11 +11,12 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::connection_actor::{
-    start_connection_actor, CompleteHandledInbound, ConnectionActorError,
-    ConnectionActorOperationId, ConnectionActorStartError, ConnectionWireFrame, InstallBinding,
-    PanicConnectionActor, PauseConnectionActor, PrepareBinding, RequestAcknowledgement,
-    ReserveHandledInbound, RetireBinding, SeedInboundCounterForTest, SnapshotConnection,
-    StopConnectionActor,
+    start_connection_actor, CompleteHandledInbound, CompleteHandledInboundAtLifecycleGate,
+    CompleteHandledInboundBeforeLifecycleGate, ConfirmBindingInstall, ConnectionActorError,
+    ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorStartError,
+    ConnectionWireFrame, InstallBinding, PanicConnectionActor, PauseConnectionActor,
+    PrepareBinding, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
+    SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
 };
 use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
@@ -140,6 +141,29 @@ async fn start_actor(
         gate,
         retirement_deadline,
         HANDLED_OPERATION_DEADLINE,
+    )
+    .await
+}
+
+async fn start_actor_with_lifecycle_deadline(
+    inventory: &IoCustodianInventory,
+    max_outbound_count: usize,
+    max_outbound_bytes: usize,
+    gate: Arc<FlushGate>,
+    lifecycle_deadline: Duration,
+) -> (
+    waddle_server::test_support::connection_actor::ConnectionActorController,
+    ClientSocket,
+    oneshot::Receiver<()>,
+) {
+    start_actor_with_inbound_limit(
+        inventory,
+        8,
+        max_outbound_count,
+        max_outbound_bytes,
+        gate,
+        TEST_TIMEOUT,
+        lifecycle_deadline,
     )
     .await
 }
@@ -511,10 +535,16 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
     let stale_binding_a_install = binding_a_attempt.clone();
     controller
         .actor()
-        .ask(InstallBinding::new(binding_a_attempt))
+        .ask(InstallBinding::new(binding_a_attempt.clone()))
         .send()
         .await
         .expect("binding A is installed by its actor-issued transition");
+    controller
+        .actor()
+        .ask(ConfirmBindingInstall(binding_a_attempt))
+        .send()
+        .await
+        .expect("binding A installation handoff is confirmed");
     let sequence_a = controller
         .actor()
         .ask(reserve_request())
@@ -579,10 +609,16 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
     let binding_b = binding_b_attempt.binding_ref().clone();
     controller
         .actor()
-        .ask(InstallBinding::new(binding_b_attempt))
+        .ask(InstallBinding::new(binding_b_attempt.clone()))
         .send()
         .await
         .expect("binding B installs on the same physical socket");
+    controller
+        .actor()
+        .ask(ConfirmBindingInstall(binding_b_attempt))
+        .send()
+        .await
+        .expect("binding B installation handoff is confirmed");
     assert_eq!(
         controller
             .actor()
@@ -732,6 +768,11 @@ async fn canceled_prepare_and_install_asks_recover_the_exact_binding_attempt() {
         .send()
         .await
         .expect("retry install reports the already-installed exact attempt");
+    actor
+        .ask(ConfirmBindingInstall(recovered_attempt.clone()))
+        .send()
+        .await
+        .expect("explicit handoff confirms the recovered installation");
     let snapshot = actor
         .ask(SnapshotConnection)
         .send()
@@ -838,6 +879,11 @@ async fn orphaned_prepare_is_one_bounded_pending_attempt_and_never_installs() {
         .send()
         .await
         .expect("only the current pending attempt installs");
+    actor
+        .ask(ConfirmBindingInstall(attempt_b.clone()))
+        .send()
+        .await
+        .expect("current binding installation is confirmed");
     assert_eq!(
         actor
             .ask(SnapshotConnection)
@@ -853,6 +899,108 @@ async fn orphaned_prepare_is_one_bounded_pending_attempt_and_never_installs() {
         controller.wait_until_joined().await,
         Some(CustodianState::Joined)
     );
+}
+
+#[tokio::test]
+async fn orphaned_install_deadline_stops_old_socket_and_requires_a_fresh_connection() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let deadline = Duration::from_millis(50);
+    let (controller, _peer, _) =
+        start_actor_with_lifecycle_deadline(&inventory, 4, 256, gate, deadline).await;
+    let old_connection_ref = controller.connection_ref().clone();
+    let actor = controller.actor().clone();
+    let attempt = actor
+        .ask(PrepareBinding::new(new_operation_id()))
+        .send()
+        .await
+        .expect("prepare the binding whose install result will be orphaned");
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let install_actor = actor.clone();
+    let orphaned_attempt = attempt.clone();
+    let canceled_install = tokio::spawn(async move {
+        install_actor
+            .ask(InstallBinding::with_reply_barrier(
+                orphaned_attempt,
+                entered_tx,
+                release_rx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("install is active before the canceled reply")
+        .expect("install barrier entered");
+    canceled_install.abort();
+    let _ = canceled_install.await;
+    let _ = release_tx.send(());
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("unconfirmed install deadline stops and joins the exact socket"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::Requested));
+    assert_eq!(
+        actor
+            .ask(ConfirmBindingInstall(attempt.clone()))
+            .send()
+            .await
+            .expect_err("a late confirmation cannot revive the stopped stream")
+            .err()
+            .expect("typed stop rejection"),
+        ConnectionActorError::ConnectionStopping
+    );
+    assert_eq!(
+        actor
+            .ask(PrepareBinding::new(new_operation_id()))
+            .send()
+            .await
+            .expect_err("the stopped physical connection cannot accept a fresh binding")
+            .err()
+            .expect("typed same-socket rejection"),
+        ConnectionActorError::ConnectionStopping
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+
+    let fresh_gate = Arc::new(FlushGate::new());
+    fresh_gate.release();
+    let (fresh_controller, _fresh_peer, _) =
+        start_actor(&inventory, 4, 256, fresh_gate, TEST_TIMEOUT).await;
+    assert_ne!(
+        fresh_controller.connection_ref(),
+        &old_connection_ref,
+        "recovery after an orphaned install starts with a new physical identity"
+    );
+    let fresh_attempt = fresh_controller
+        .actor()
+        .ask(PrepareBinding::new(new_operation_id()))
+        .send()
+        .await
+        .expect("fresh connection can prepare a binding");
+    fresh_controller
+        .actor()
+        .ask(InstallBinding::new(fresh_attempt.clone()))
+        .send()
+        .await
+        .expect("fresh connection installs its attempt");
+    fresh_controller
+        .actor()
+        .ask(ConfirmBindingInstall(fresh_attempt.clone()))
+        .send()
+        .await
+        .expect("fresh connection confirms installation");
+
+    fresh_controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        fresh_controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(inventory.prune_joined(), 1);
 }
 
 #[tokio::test]
@@ -1014,6 +1162,260 @@ async fn stopped_transport_rejects_late_handled_completion_without_advancing_h()
             .send()
             .await
             .expect("snapshot confirms no late protocol progress")
+            .handled_h,
+        0
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_that_holds_lifecycle_gate_wins_over_its_deadline() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let deadline = Duration::from_millis(40);
+    let (controller, _peer, _) =
+        start_actor_with_lifecycle_deadline(&inventory, 4, 256, gate, deadline).await;
+    let token = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve before deadline");
+
+    let lifecycle_barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let actor = controller.actor().clone();
+    let message_barrier = Arc::clone(&lifecycle_barrier);
+    let completion = tokio::spawn(async move {
+        actor
+            .ask(CompleteHandledInboundAtLifecycleGate::new(
+                token,
+                entered_tx,
+                message_barrier,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("completion holds the lifecycle gate before h mutation")
+        .expect("completion gate barrier entered");
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    lifecycle_barrier.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, completion)
+            .await
+            .expect("completion finishes after releasing its gate")
+            .expect("completion task joins")
+            .expect("actor accepts completion"),
+        1
+    );
+    assert_eq!(
+        controller.stop_reason(),
+        None,
+        "deadline observes that the operation committed before the stop transition"
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot completed state")
+            .handled_h,
+        1
+    );
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn external_stop_signal_waits_for_an_in_progress_completion_gate() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let controller = Arc::new(controller);
+    let token = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve before external stop");
+
+    let lifecycle_barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let actor = controller.actor().clone();
+    let message_barrier = Arc::clone(&lifecycle_barrier);
+    let completion = tokio::spawn(async move {
+        actor
+            .ask(CompleteHandledInboundAtLifecycleGate::new(
+                token,
+                entered_tx,
+                message_barrier,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("completion owns the shared lifecycle gate")
+        .expect("completion gate barrier entered");
+
+    let stop_controller = Arc::clone(&controller);
+    let stop = tokio::task::spawn_blocking(move || {
+        stop_controller.request_stop(StopReason::LeaseLost);
+    });
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_stop_signal_callbacks(1))
+            .await
+            .expect("external caller enters StopSignal callback while completion owns the gate"),
+        "StopSignal lifecycle callback is observable before it waits for the gate"
+    );
+
+    lifecycle_barrier.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, completion)
+            .await
+            .expect("completion finishes before the waiting stop callback")
+            .expect("completion task joins")
+            .expect("actor accepts completion"),
+        1
+    );
+    timeout(TEST_TIMEOUT, stop)
+        .await
+        .expect("stop callback continues after completion releases the gate")
+        .expect("stop request task returns");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("external stop joins both pumps"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::LeaseLost));
+    assert_eq!(
+        controller
+            .actor()
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot after stop")
+            .handled_h,
+        1,
+        "completion wins because it already owns the lifecycle gate"
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn deadline_that_wins_before_completion_keeps_h_unchanged() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let deadline = Duration::from_millis(40);
+    let (controller, _peer, _) =
+        start_actor_with_lifecycle_deadline(&inventory, 4, 256, gate, deadline).await;
+    let token = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve before deadline");
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let actor = controller.actor().clone();
+    let completion = tokio::spawn(async move {
+        actor
+            .ask(CompleteHandledInboundBeforeLifecycleGate::new(
+                token, entered_tx, release_rx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("completion pauses before the lifecycle gate")
+        .expect("pre-gate barrier entered");
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("deadline independently interrupts and joins both pumps"),
+        Some(CustodianState::Joined)
+    );
+    let _ = release_tx.send(());
+    assert_eq!(
+        timeout(TEST_TIMEOUT, completion)
+            .await
+            .expect("completion returns after the deadline")
+            .expect("completion ask returns")
+            .expect_err("deadline won the lifecycle gate")
+            .err()
+            .expect("typed stopping result"),
+        ConnectionActorError::ConnectionStopping
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot stopped state")
+            .handled_h,
+        0,
+        "a stop winner prevents the late handler from advancing h"
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn pump_initiated_peer_close_wins_the_lifecycle_gate_before_late_completion() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let token = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve before peer close");
+
+    peer.send(Message::Close(None))
+        .await
+        .expect("send peer close frame to reader pump");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("reader pump's stop callback joins both pumps"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::PeerClosed));
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(token))
+            .send()
+            .await
+            .expect_err("pump-initiated stop rejects late protocol completion")
+            .err()
+            .expect("typed stop rejection"),
+        ConnectionActorError::ConnectionStopping
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot after peer stop")
             .handled_h,
         0
     );

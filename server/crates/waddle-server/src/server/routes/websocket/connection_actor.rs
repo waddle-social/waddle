@@ -16,10 +16,10 @@ use crate::server::routes::interpret::OrderedRelayInboundSequence;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::mailbox;
 use kameo::message::{Context, Message};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -85,7 +85,7 @@ pub async fn start_connection_actor<
 >(
     inventory: &IoCustodianInventory,
     node_lease: NodeLeaseIdentity,
-    handled_operation_deadline: Duration,
+    lifecycle_handoff_deadline: Duration,
     config: ReservedIoStartConfig<ConnectionWireFrame, IsSendAfterClose, Size, IsClose>,
     factory: Factory,
 ) -> Result<ConnectionActorController, ConnectionActorStartError>
@@ -110,17 +110,23 @@ where
     // until the one physical identity owned by `state` has a slot.
     let reservation = inventory.reserve(connection_ref.clone())?;
     let (custodian, outbound, inbound) = reservation.start_with(config, factory).await?;
+    let lifecycle = Arc::new(ConnectionActorLifecycle::new());
+    let stop_listener_lifecycle = Arc::clone(&lifecycle);
+    custodian.set_stop_listener(Arc::new(move |reason| {
+        stop_listener_lifecycle.observe_pump_stop(reason);
+    }));
     let io_control = Arc::new(ConnectionActorIoControl {
         custodian,
         inventory: inventory.clone(),
         connection_ref: connection_ref.clone(),
+        lifecycle,
     });
     let actor = ConnectionActor::spawn_with_mailbox(
         ConnectionActor {
             state,
             io_control: Arc::clone(&io_control),
             outbound,
-            handled_operation_deadline,
+            lifecycle_handoff_deadline,
             next_handled_nonce: 1,
             handled_operations: HashMap::new(),
             highest_handled_operation_id: None,
@@ -128,6 +134,8 @@ where
             highest_binding_operation_id: None,
             pending_binding_attempt: None,
             active_binding_attempt: None,
+            active_binding_confirmed: false,
+            binding_handoff_task: None,
         },
         mailbox::bounded(256),
     );
@@ -175,6 +183,7 @@ struct ConnectionActorIoControl {
     custodian: IoCustodianHandle,
     inventory: IoCustodianInventory,
     connection_ref: ConnectionRef,
+    lifecycle: Arc<ConnectionActorLifecycle>,
 }
 
 impl ConnectionActorIoControl {
@@ -185,6 +194,166 @@ impl ConnectionActorIoControl {
     fn request_stop(&self, reason: StopReason) {
         self.custodian.request_stop(reason);
     }
+
+    async fn expire_handled_operation(&self, operation_id: ConnectionActorOperationId) {
+        if self.lifecycle.expire_handled_operation(operation_id).await {
+            self.custodian.request_stop(StopReason::Requested);
+        }
+    }
+
+    async fn expire_binding_handoff(&self, epoch: u64) {
+        if self.lifecycle.expire_binding_handoff(epoch).await {
+            self.custodian.request_stop(StopReason::Requested);
+        }
+    }
+}
+
+struct ConnectionActorLifecycle {
+    state: Mutex<ConnectionActorLifecycleState>,
+    stop_callback_count: AtomicU64,
+    stop_callback_watch: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct ConnectionActorLifecycleState {
+    stop_reason: Option<StopReason>,
+    pending_handled_operations: HashSet<ConnectionActorOperationId>,
+    pending_binding_handoff: Option<u64>,
+}
+
+impl ConnectionActorLifecycle {
+    fn new() -> Self {
+        let (stop_callback_watch, _) = watch::channel(0);
+        Self {
+            state: Mutex::new(ConnectionActorLifecycleState::default()),
+            stop_callback_count: AtomicU64::new(0),
+            stop_callback_watch,
+        }
+    }
+
+    fn lock_running(&self) -> Result<ConnectionActorLifecycleGuard<'_>, ConnectionActorError> {
+        let state = self.lock_state();
+        if state.stop_reason.is_some() {
+            return Err(ConnectionActorError::ConnectionStopping);
+        }
+        Ok(ConnectionActorLifecycleGuard { state })
+    }
+
+    fn lock_pending_handled(
+        &self,
+        operation_id: ConnectionActorOperationId,
+    ) -> Result<ConnectionActorLifecycleGuard<'_>, ConnectionActorError> {
+        let state = self.lock_state();
+        if state.stop_reason.is_some() {
+            return Err(ConnectionActorError::ConnectionStopping);
+        }
+        if !state.pending_handled_operations.contains(&operation_id) {
+            return Err(ConnectionActorError::SequenceNotPending);
+        }
+        Ok(ConnectionActorLifecycleGuard { state })
+    }
+
+    fn request_stop(&self, reason: StopReason) -> bool {
+        let mut state = self.lock_state();
+        if state.stop_reason.is_some() {
+            return false;
+        }
+        state.stop_reason = Some(reason);
+        true
+    }
+
+    fn observe_pump_stop(&self, reason: StopReason) {
+        let next = match self.stop_callback_count.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ) {
+            Ok(previous) => previous.saturating_add(1),
+            Err(current) => current,
+        };
+        self.stop_callback_watch.send_replace(next);
+        self.request_stop(reason);
+    }
+
+    fn subscribe_stop_callback_count(&self) -> watch::Receiver<u64> {
+        self.stop_callback_watch.subscribe()
+    }
+
+    async fn expire_handled_operation(&self, operation_id: ConnectionActorOperationId) -> bool {
+        let mut state = self.lock_state_async().await;
+        if state.stop_reason.is_some() || !state.pending_handled_operations.remove(&operation_id) {
+            return false;
+        }
+        state.stop_reason = Some(StopReason::Requested);
+        true
+    }
+
+    async fn expire_binding_handoff(&self, epoch: u64) -> bool {
+        let mut state = self.lock_state_async().await;
+        if state.stop_reason.is_some() || state.pending_binding_handoff != Some(epoch) {
+            return false;
+        }
+        state.pending_binding_handoff = None;
+        state.stop_reason = Some(StopReason::Requested);
+        true
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, ConnectionActorLifecycleState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    async fn lock_state_async(&self) -> MutexGuard<'_, ConnectionActorLifecycleState> {
+        loop {
+            if let Some(state) = self.try_lock_state() {
+                return state;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn try_lock_state(&self) -> Option<MutexGuard<'_, ConnectionActorLifecycleState>> {
+        match self.state.try_lock() {
+            Ok(state) => Some(state),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        }
+    }
+}
+
+struct ConnectionActorLifecycleGuard<'a> {
+    state: MutexGuard<'a, ConnectionActorLifecycleState>,
+}
+
+impl ConnectionActorLifecycleGuard<'_> {
+    fn track_handled_operation(&mut self, operation_id: ConnectionActorOperationId) {
+        self.state.pending_handled_operations.insert(operation_id);
+    }
+
+    fn finish_handled_operation(&mut self, operation_id: ConnectionActorOperationId) -> bool {
+        self.state.pending_handled_operations.remove(&operation_id)
+    }
+
+    fn track_binding_handoff(&mut self, epoch: u64) {
+        self.state.pending_binding_handoff = Some(epoch);
+    }
+
+    fn finish_binding_handoff(&mut self, epoch: u64) -> bool {
+        if self.state.pending_binding_handoff == Some(epoch) {
+            self.state.pending_binding_handoff = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn retire_binding_handoff(&mut self, epoch: u64) {
+        if self.state.pending_binding_handoff == Some(epoch) {
+            self.state.pending_binding_handoff = None;
+        }
+    }
 }
 
 /// Addressable Kameo actor with the single mutable owner of connection state.
@@ -193,7 +362,7 @@ pub struct ConnectionActor {
     state: WsConnState,
     io_control: Arc<ConnectionActorIoControl>,
     outbound: WriteSender<ConnectionWireFrame>,
-    handled_operation_deadline: Duration,
+    lifecycle_handoff_deadline: Duration,
     next_handled_nonce: u64,
     handled_operations: HashMap<ConnectionActorOperationId, HandledOperation>,
     highest_handled_operation_id: Option<u64>,
@@ -201,12 +370,13 @@ pub struct ConnectionActor {
     highest_binding_operation_id: Option<u64>,
     pending_binding_attempt: Option<ConnectionActorBindingAttempt>,
     active_binding_attempt: Option<ConnectionActorBindingAttempt>,
+    active_binding_confirmed: bool,
+    binding_handoff_task: Option<JoinHandle<()>>,
 }
 
 struct HandledOperation {
     token: ConnectionActorSequence,
     completed: bool,
-    expired: Arc<AtomicBool>,
     expiry_task: JoinHandle<()>,
 }
 
@@ -215,6 +385,9 @@ impl Drop for ConnectionActor {
         // Actor retirement is independent of mailbox traffic. The custodian
         // remains indexed and owns/join-reaps the actual pump handles.
         self.io_control.request_stop(StopReason::Requested);
+        if let Some(task) = self.binding_handoff_task.take() {
+            task.abort();
+        }
         for operation in self.handled_operations.values() {
             operation.expiry_task.abort();
         }
@@ -223,11 +396,17 @@ impl Drop for ConnectionActor {
 
 impl ConnectionActor {
     fn enqueue_acknowledgement(&self) -> Result<(), ConnectionActorError> {
+        drop(self.io_control.lifecycle.lock_running()?);
         if !self.state.sm_state.enabled {
             return Err(ConnectionActorError::StreamManagementDisabled);
         }
         let ack = SmAck::new(self.state.sm_state.inbound_count());
         let byte_len = ack.to_xml().len();
+        // WriteSender may synchronously request stop on overload. Release the
+        // lifecycle gate after its preflight check so that stop callback can
+        // enter without re-locking this actor's own gate. This is not an atomic
+        // output-authority fence: a stop can race between preflight and queue
+        // admission, which remains a live-cutover blocker.
         self.outbound
             .try_send(ConnectionWireFrame::Acknowledgement(ack), byte_len)
             .map(|_| ())
@@ -286,6 +465,20 @@ impl ConnectionActorController {
                 return true;
             }
             if forwarded.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    /// Wait until a pump or control caller enters the shared StopSignal
+    /// callback. This synchronization point is for lifecycle race tests.
+    pub async fn wait_for_stop_signal_callbacks(&self, count: u64) -> bool {
+        let mut callbacks = self.io_control.lifecycle.subscribe_stop_callback_count();
+        loop {
+            if *callbacks.borrow_and_update() >= count {
+                return true;
+            }
+            if callbacks.changed().await.is_err() {
                 return false;
             }
         }
@@ -492,9 +685,7 @@ impl ConnectionActor {
         &mut self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorSequence, ConnectionActorError> {
-        if self.io_control.custodian.stop_reason().is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
+        let mut lifecycle = self.io_control.lifecycle.lock_running()?;
         if let Some(operation) = self.handled_operations.get(&operation_id) {
             return Ok(operation.token.clone());
         }
@@ -523,16 +714,13 @@ impl ConnectionActor {
             operation_id,
             nonce,
         };
-        let expired = Arc::new(AtomicBool::new(false));
-        let timer_expired = Arc::clone(&expired);
+        lifecycle.track_handled_operation(operation_id);
         let io_control = Arc::downgrade(&self.io_control);
-        let deadline = self.handled_operation_deadline;
+        let deadline = self.lifecycle_handoff_deadline;
         let expiry_task = tokio::spawn(async move {
             sleep(deadline).await;
-            if !timer_expired.load(Ordering::Acquire) {
-                if let Some(io_control) = io_control.upgrade() {
-                    io_control.request_stop(StopReason::Requested);
-                }
+            if let Some(io_control) = io_control.upgrade() {
+                io_control.expire_handled_operation(operation_id).await;
             }
         });
         self.handled_operations.insert(
@@ -540,7 +728,6 @@ impl ConnectionActor {
             HandledOperation {
                 token: token.clone(),
                 completed: false,
-                expired,
                 expiry_task,
             },
         );
@@ -561,39 +748,174 @@ impl Message<CompleteHandledInbound> for ConnectionActor {
         msg: CompleteHandledInbound,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if msg.0.connection_ref != *self.state.connection_ref() {
+        self.complete_handled_operation(msg.0, None)
+    }
+}
+
+/// Synchronous barrier for deterministic lifecycle-gate race tests. The actor
+/// pauses while holding the same gate used by completion and stop sources.
+pub struct ConnectionActorGateBarrier {
+    released: Mutex<bool>,
+    release: Condvar,
+}
+
+impl ConnectionActorGateBarrier {
+    /// Create a closed test barrier.
+    pub fn new() -> Self {
+        Self {
+            released: Mutex::new(false),
+            release: Condvar::new(),
+        }
+    }
+
+    /// Let the actor continue past its lifecycle-gate barrier.
+    pub fn release(&self) {
+        let mut released = match self.released.lock() {
+            Ok(released) => released,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *released = true;
+        self.release.notify_all();
+    }
+
+    fn wait(&self, entered: oneshot::Sender<()>) {
+        let _ = entered.send(());
+        let mut released = match self.released.lock() {
+            Ok(released) => released,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        while !*released {
+            released = match self.release.wait(released) {
+                Ok(released) => released,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
+    }
+}
+
+impl Default for ConnectionActorGateBarrier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Completion request paused after taking the shared lifecycle gate and
+/// before advancing the handled prefix.
+pub struct CompleteHandledInboundAtLifecycleGate {
+    token: ConnectionActorSequence,
+    entered: oneshot::Sender<()>,
+    barrier: Arc<ConnectionActorGateBarrier>,
+}
+
+impl CompleteHandledInboundAtLifecycleGate {
+    /// Create a request with a barrier the test releases explicitly.
+    pub fn new(
+        token: ConnectionActorSequence,
+        entered: oneshot::Sender<()>,
+        barrier: Arc<ConnectionActorGateBarrier>,
+    ) -> Self {
+        Self {
+            token,
+            entered,
+            barrier,
+        }
+    }
+}
+
+impl Message<CompleteHandledInboundAtLifecycleGate> for ConnectionActor {
+    type Reply = Result<u32, ConnectionActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: CompleteHandledInboundAtLifecycleGate,
+        _: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.complete_handled_operation(msg.token, Some((msg.entered, msg.barrier)))
+    }
+}
+
+/// Completion request held before it tries to acquire the shared lifecycle
+/// gate. A deadline can win while the operation has not begun committing.
+pub struct CompleteHandledInboundBeforeLifecycleGate {
+    token: ConnectionActorSequence,
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+impl CompleteHandledInboundBeforeLifecycleGate {
+    /// Create a request with an asynchronous pre-gate barrier.
+    pub fn new(
+        token: ConnectionActorSequence,
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            token,
+            entered,
+            release,
+        }
+    }
+}
+
+impl Message<CompleteHandledInboundBeforeLifecycleGate> for ConnectionActor {
+    type Reply = Result<u32, ConnectionActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: CompleteHandledInboundBeforeLifecycleGate,
+        _: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = msg.entered.send(());
+        let _ = msg.release.await;
+        self.complete_handled_operation(msg.token, None)
+    }
+}
+
+impl ConnectionActor {
+    fn complete_handled_operation(
+        &mut self,
+        token: ConnectionActorSequence,
+        barrier: Option<(oneshot::Sender<()>, Arc<ConnectionActorGateBarrier>)>,
+    ) -> Result<u32, ConnectionActorError> {
+        if token.connection_ref != *self.state.connection_ref() {
             return Err(ConnectionActorError::SequenceConnectionMismatch);
         }
-        if msg.0.binding_ref != self.state.binding_ref {
+        if token.binding_ref != self.state.binding_ref {
             return Err(ConnectionActorError::SequenceBindingMismatch);
         }
-        if self.io_control.custodian.stop_reason().is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
-        let Some(operation) = self.handled_operations.get(&msg.0.operation_id) else {
+        let Some(operation) = self.handled_operations.get(&token.operation_id) else {
             if self
                 .highest_handled_operation_id
-                .is_some_and(|highest| msg.0.operation_id.0 <= highest)
+                .is_some_and(|highest| token.operation_id.0 <= highest)
             {
                 return Err(ConnectionActorError::SequenceTokenMismatch);
             }
             return Err(ConnectionActorError::SequenceNotPending);
         };
-        if operation.token.nonce != msg.0.nonce || operation.token.sequence != msg.0.sequence {
+        if operation.token.nonce != token.nonce || operation.token.sequence != token.sequence {
             return Err(ConnectionActorError::SequenceTokenMismatch);
         }
         if operation.completed {
             return Err(ConnectionActorError::SequenceNotPending);
         }
-        if !self.state.sm_inbound_completion.is_pending(msg.0.sequence) {
+        if !self.state.sm_inbound_completion.is_pending(token.sequence) {
+            return Err(ConnectionActorError::SequenceNotPending);
+        }
+        let mut lifecycle = self
+            .io_control
+            .lifecycle
+            .lock_pending_handled(token.operation_id)?;
+        if let Some((entered, barrier)) = barrier {
+            barrier.wait(entered);
+        }
+        if !lifecycle.finish_handled_operation(token.operation_id) {
             return Err(ConnectionActorError::SequenceNotPending);
         }
         self.state
             .sm_inbound_completion
-            .complete(msg.0.sequence, &mut self.state.sm_state);
-        if let Some(operation) = self.handled_operations.get_mut(&msg.0.operation_id) {
+            .complete(token.sequence, &mut self.state.sm_state);
+        if let Some(operation) = self.handled_operations.get_mut(&token.operation_id) {
             operation.completed = true;
-            operation.expired.store(true, Ordering::Release);
             operation.expiry_task.abort();
         }
         let tracker = &self.state.sm_inbound_completion;
@@ -606,7 +928,6 @@ impl Message<CompleteHandledInbound> for ConnectionActor {
             .collect::<Vec<_>>();
         for operation_id in settled_operation_ids {
             if let Some(operation) = self.handled_operations.remove(&operation_id) {
-                operation.expired.store(true, Ordering::Release);
                 operation.expiry_task.abort();
             }
         }
@@ -626,6 +947,10 @@ impl Message<SeedInboundCounterForTest> for ConnectionActor {
         msg: SeedInboundCounterForTest,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let _lifecycle = match self.io_control.lifecycle.lock_running() {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => return Err(error),
+        };
         if self.state.sm_inbound_completion.outstanding_count() > 0 {
             return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
@@ -764,9 +1089,7 @@ impl ConnectionActor {
         &mut self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorBindingAttempt, ConnectionActorError> {
-        if self.io_control.custodian.stop_reason().is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
+        let _lifecycle = self.io_control.lifecycle.lock_running()?;
         if let Some(active) = &self.active_binding_attempt {
             if active.operation_id == operation_id {
                 return Ok(active.clone());
@@ -863,9 +1186,7 @@ impl ConnectionActor {
         &mut self,
         attempt: ConnectionActorBindingAttempt,
     ) -> Result<(), ConnectionActorError> {
-        if self.io_control.custodian.stop_reason().is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
+        let mut lifecycle = self.io_control.lifecycle.lock_running()?;
         if attempt.connection_ref != *self.state.connection_ref() {
             return Err(ConnectionActorError::BindingConnectionMismatch);
         }
@@ -883,9 +1204,64 @@ impl ConnectionActor {
         if self.state.sm_inbound_completion.outstanding_count() > 0 {
             return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
+        lifecycle.track_binding_handoff(attempt.epoch);
         self.state.binding_ref = Some(attempt.binding_ref.clone());
         self.pending_binding_attempt = None;
-        self.active_binding_attempt = Some(attempt);
+        self.active_binding_attempt = Some(attempt.clone());
+        self.active_binding_confirmed = false;
+        let io_control = Arc::downgrade(&self.io_control);
+        let deadline = self.lifecycle_handoff_deadline;
+        self.binding_handoff_task = Some(tokio::spawn(async move {
+            sleep(deadline).await;
+            if let Some(io_control) = io_control.upgrade() {
+                io_control.expire_binding_handoff(attempt.epoch).await;
+            }
+        }));
+        Ok(())
+    }
+}
+
+/// Confirm that the caller received the installed binding result. If this
+/// handoff is lost, the exact physical connection stops at its configured
+/// deadline instead of retaining an unacknowledged active binding forever.
+pub struct ConfirmBindingInstall(pub ConnectionActorBindingAttempt);
+
+impl Message<ConfirmBindingInstall> for ConnectionActor {
+    type Reply = Result<(), ConnectionActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: ConfirmBindingInstall,
+        _: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.confirm_binding_install(msg.0)
+    }
+}
+
+impl ConnectionActor {
+    fn confirm_binding_install(
+        &mut self,
+        attempt: ConnectionActorBindingAttempt,
+    ) -> Result<(), ConnectionActorError> {
+        let mut lifecycle = self.io_control.lifecycle.lock_running()?;
+        if attempt.connection_ref != *self.state.connection_ref() {
+            return Err(ConnectionActorError::BindingConnectionMismatch);
+        }
+        if self.active_binding_attempt.as_ref() != Some(&attempt)
+            || self.state.binding_ref.as_ref() != Some(&attempt.binding_ref)
+        {
+            return Err(ConnectionActorError::StaleBindingTransition);
+        }
+        if self.active_binding_confirmed {
+            return Ok(());
+        }
+        if !lifecycle.finish_binding_handoff(attempt.epoch) {
+            return Err(ConnectionActorError::StaleBindingTransition);
+        }
+        self.active_binding_confirmed = true;
+        if let Some(task) = self.binding_handoff_task.take() {
+            task.abort();
+        }
         Ok(())
     }
 }
@@ -902,16 +1278,25 @@ impl Message<RetireBinding> for ConnectionActor {
         msg: RetireBinding,
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let Ok(mut lifecycle) = self.io_control.lifecycle.lock_running() else {
+            return false;
+        };
         if self.state.binding_ref.as_ref() == Some(&msg.0)
             && msg.0.connection_ref() == self.state.connection_ref()
             && self.state.sm_inbound_completion.outstanding_count() == 0
         {
+            let epoch = self.binding_epoch;
             let Some(next_epoch) = self.binding_epoch.checked_add(1) else {
                 return false;
             };
+            lifecycle.retire_binding_handoff(epoch);
             self.state.binding_ref = None;
             self.binding_epoch = next_epoch;
             self.active_binding_attempt = None;
+            self.active_binding_confirmed = false;
+            if let Some(task) = self.binding_handoff_task.take() {
+                task.abort();
+            }
             self.pending_binding_attempt = None;
             true
         } else {
