@@ -403,19 +403,22 @@ impl ConnectionEntry {
     }
 
     /// Create a non-admitting local binding candidate for the dark P3.1
-    /// admission transition. Production registration still uses
-    /// [`Self::new_for_binding`]; this constructor does not publish the entry
-    /// or authorize any delivery by itself.
+    /// admission transition. The returned type cannot be passed to registry
+    /// or UserActor publication APIs; exact activation converts it into a
+    /// [`ConnectionEntry`]. Production registration still uses
+    /// [`Self::new_for_binding`].
     pub fn new_provisional_for_binding(
         endpoint: impl Into<SocketOutboundEndpoint>,
         binding_ref: BindingRef,
-    ) -> Self {
-        Self::new_entry(
-            endpoint.into(),
-            binding_ref.connection_ref().clone(),
-            Some(binding_ref),
-            super::BindingAdmissionState::Provisional,
-        )
+    ) -> ProvisionalConnectionEntry {
+        ProvisionalConnectionEntry {
+            entry: Self::new_entry(
+                endpoint.into(),
+                binding_ref.connection_ref().clone(),
+                Some(binding_ref),
+                super::BindingAdmissionState::Provisional,
+            ),
+        }
     }
 
     fn new_entry(
@@ -494,16 +497,10 @@ impl ConnectionEntry {
         entry
     }
 
-    /// Atomically activate this exact local binding candidate. Returns true
-    /// when the supplied local owner and physical binding attempt identify
-    /// this entry and it is active (or was just activated). A sealed binding
-    /// cannot be reactivated. This dark primitive is not wired into
-    /// registration or remote publication.
-    pub fn activate_binding(
-        &self,
-        owner: LocalConnectionBindingId,
-        binding_ref: &BindingRef,
-    ) -> bool {
+    /// Atomically activate this exact local binding candidate. A sealed
+    /// binding cannot be reactivated. Only the provisional wrapper exposes
+    /// the resulting entry to publication APIs.
+    fn activate_binding(&self, owner: LocalConnectionBindingId, binding_ref: &BindingRef) -> bool {
         self.endpoint.activate(owner, binding_ref)
     }
 
@@ -671,6 +668,60 @@ impl ConnectionEntry {
     }
 }
 
+/// A local binding candidate that is not accepted by registry or actor
+/// publication APIs. It can become a [`ConnectionEntry`] only by activating
+/// the exact local owner and binding attempt that it carries.
+///
+/// ```compile_fail
+/// use jid::FullJid;
+/// use waddle_xmpp::registry::{ConnectionRegistry, ProvisionalConnectionEntry};
+///
+/// fn publish(
+///     registry: &ConnectionRegistry,
+///     jid: FullJid,
+///     candidate: ProvisionalConnectionEntry,
+/// ) {
+///     registry.register_entry(jid, candidate);
+/// }
+/// ```
+///
+/// UserActor publication also accepts only [`ConnectionEntry`]:
+///
+/// ```compile_fail
+/// use jid::FullJid;
+/// use waddle_xmpp::registry::{user_actor::RegisterConnection, ProvisionalConnectionEntry};
+///
+/// fn publish_to_actor(jid: FullJid, candidate: ProvisionalConnectionEntry) {
+///     let _ = RegisterConnection { jid, entry: candidate };
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ProvisionalConnectionEntry {
+    entry: ConnectionEntry,
+}
+
+impl ProvisionalConnectionEntry {
+    /// Return this candidate's stable local owner identity.
+    pub fn binding_id(&self) -> LocalConnectionBindingId {
+        self.entry.binding_id()
+    }
+
+    /// Activate the exact local owner and binding attempt, yielding the
+    /// registerable entry only on success. A mismatch or sealed candidate is
+    /// discarded and cannot be retried through this API.
+    pub fn activate_binding(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> Option<ConnectionEntry> {
+        if self.entry.activate_binding(owner, binding_ref) {
+            Some(self.entry)
+        } else {
+            None
+        }
+    }
+}
+
 /// Exclusive ownership of a connection's terminal ordering retry task slot.
 #[derive(Debug)]
 #[must_use = "hold the lease for the lifetime of the terminal ordering retry task"]
@@ -734,5 +785,35 @@ impl BroadcastOutcome {
     /// True iff the stanza was enqueued for delivery.
     pub fn is_delivered(self) -> bool {
         matches!(self, BroadcastOutcome::Delivered)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
+    use super::{ConnectionEntry, OutboundStanza, SocketOutboundEndpoint};
+    use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    use crate::Stanza;
+
+    #[test]
+    fn sealed_candidate_cannot_activate_or_enqueue() {
+        let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+        let owner = candidate.binding_id();
+
+        assert!(candidate.entry.seal_binding(owner, &binding_ref));
+        assert_eq!(
+            candidate
+                .entry
+                .endpoint
+                .try_send(OutboundStanza::new(Stanza::Message(
+                    xmpp_parsers::message::Message::new(None),
+                ))),
+            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Sealed)
+        );
+        assert!(candidate.activate_binding(owner, &binding_ref).is_none());
+        assert!(receiver.try_recv().is_err());
     }
 }

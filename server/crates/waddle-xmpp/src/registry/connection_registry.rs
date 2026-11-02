@@ -33,7 +33,7 @@ pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
-    SendResult, TerminalOrderingRetryLease,
+    ProvisionalConnectionEntry, SendResult, TerminalOrderingRetryLease,
 };
 pub use sending::{
     PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,

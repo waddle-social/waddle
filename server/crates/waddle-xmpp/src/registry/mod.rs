@@ -26,8 +26,8 @@ pub use connection_registry::{
     ConnectionRegistry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
     LiveResumeControl, LocalConnectionBindingId, LocalResumeReply, OutboundStanza,
     OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
-    PendingFlushReservation, PendingFlushReserveError, PresenceState, SendResult,
-    SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
+    PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,
+    SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
     TerminalOrderingRetryLease,
 };
 pub use selection::{

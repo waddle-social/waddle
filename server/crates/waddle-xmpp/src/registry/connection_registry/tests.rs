@@ -1,9 +1,9 @@
 use super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
 use super::{
-    mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    FullJid, Instant, LocalConnectionBindingId, Ordering, OutboundStanza, OutboundWriteAcceptance,
-    PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReserveError, SendResult,
-    Stanza,
+    mpsc, Arc, BareJid, BindingAdmissionState, BroadcastOutcome, ConnectionEntry,
+    ConnectionRegistry, DeliveryKind, FullJid, Instant, LocalConnectionBindingId, Ordering,
+    OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
+    PendingFlushCommitRejection, PendingFlushReserveError, SendResult, Stanza,
 };
 use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
@@ -1584,38 +1584,36 @@ fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner(
 
 #[test]
 fn cloned_binding_endpoint_observes_provisional_and_sealed_refusal() {
-    let (endpoint, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+    let (socket, mut receiver) = super::SocketOutboundEndpoint::channel(1);
     let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
-    let entry = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
-    let retained_entry = entry.clone();
-    let owner = entry.binding_id();
+    let owner = LocalConnectionBindingId::fresh();
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Provisional,
+    );
+    let retained_endpoint = endpoint.clone();
 
     assert_eq!(
-        retained_entry
-            .endpoint
-            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
-                "reserved@example.com"
-            )))),
+        retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com"
+        )))),
         EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional)
     );
     assert!(receiver.try_recv().is_err());
 
-    assert!(retained_entry.activate_binding(owner, &binding_ref));
+    assert!(retained_endpoint.activate(owner, &binding_ref));
     assert_eq!(
-        retained_entry
-            .endpoint
-            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
-                "accepted@example.com"
-            )))),
+        endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "accepted@example.com"
+        )))),
         EndpointEnqueueOutcome::AcceptedOrUnknown
     );
-    assert!(entry.seal_binding(owner, &binding_ref));
+    assert!(endpoint.seal(owner, &binding_ref));
     assert_eq!(
-        retained_entry
-            .endpoint
-            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
-                "reserved@example.com"
-            )))),
+        retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com"
+        )))),
         EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Sealed)
     );
     assert!(
@@ -1624,47 +1622,113 @@ fn cloned_binding_endpoint_observes_provisional_and_sealed_refusal() {
     );
     assert!(receiver.try_recv().is_err());
     assert!(
-        !entry.activate_binding(owner, &binding_ref),
+        !endpoint.activate(owner, &binding_ref),
         "a sealed binding cannot be reactivated"
     );
 }
 
 #[test]
-fn binding_transitions_require_the_exact_local_owner_and_attempt() {
-    let (stale_socket, _stale_receiver) = super::SocketOutboundEndpoint::channel(1);
+fn binding_activation_requires_exact_local_owner_and_attempt() {
+    let (stale_socket, mut stale_receiver) = super::SocketOutboundEndpoint::channel(1);
     let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
     let stale_binding = BindingRef::fresh(connection_ref.clone());
-    let stale_entry =
+    let stale_candidate =
         ConnectionEntry::new_provisional_for_binding(stale_socket, stale_binding.clone());
-    let stale_owner = stale_entry.binding_id();
+    let stale_owner = stale_candidate.binding_id();
 
-    let (successor_socket, _successor_receiver) = super::SocketOutboundEndpoint::channel(1);
+    let (successor_socket, mut successor_receiver) = super::SocketOutboundEndpoint::channel(1);
     let successor_binding = BindingRef::fresh(connection_ref);
-    let successor =
+    let successor_candidate =
         ConnectionEntry::new_provisional_for_binding(successor_socket, successor_binding.clone());
-    let successor_owner = successor.binding_id();
 
-    assert!(!stale_entry.activate_binding(stale_owner, &successor_binding));
-    assert!(!successor.activate_binding(successor_owner, &stale_binding));
-    assert!(!stale_entry.seal_binding(successor_owner, &stale_binding));
-    assert!(!successor.seal_binding(stale_owner, &successor_binding));
+    assert!(stale_candidate
+        .activate_binding(stale_owner, &successor_binding)
+        .is_none());
+    assert!(stale_receiver.try_recv().is_err());
+    assert!(
+        successor_candidate
+            .activate_binding(stale_owner, &successor_binding)
+            .is_none(),
+        "a stale owner cannot activate a candidate"
+    );
+    assert!(successor_receiver.try_recv().is_err());
+}
 
-    assert_eq!(
-        stale_entry
-            .endpoint
-            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
-                "stale@example.com"
-            )))),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional)
-    );
-    assert_eq!(
-        successor
-            .endpoint
-            .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
-                "successor@example.com"
-            )))),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional)
-    );
+#[test]
+fn provisional_candidate_is_published_only_after_exact_activation() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("provisional");
+    let (endpoint, _receiver) = super::SocketOutboundEndpoint::channel(1);
+    let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+    let owner = candidate.binding_id();
+
+    let entry = candidate
+        .activate_binding(owner, &binding_ref)
+        .expect("exact activation returns a publishable entry");
+    assert_eq!(entry.binding_id(), owner);
+    assert_eq!(entry.binding_ref(), Some(&binding_ref));
+    assert_eq!(registry.connection_count(), 0);
+    assert!(!registry.is_connected(&jid));
+
+    registry.register_entry(jid.clone(), entry);
+    assert_eq!(registry.connection_count(), 1);
+    assert!(registry.is_connected(&jid));
+}
+
+#[test]
+fn provisional_enqueue_and_exact_activation_are_linearized() {
+    for _ in 0..32 {
+        let (socket, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let owner = LocalConnectionBindingId::fresh();
+        let endpoint = socket.bind(
+            owner,
+            Some(binding_ref.clone()),
+            BindingAdmissionState::Provisional,
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let outcome = std::thread::scope(|scope| {
+            let send_endpoint = endpoint.clone();
+            let send_barrier = Arc::clone(&barrier);
+            let send = scope.spawn(move || {
+                send_barrier.wait();
+                send_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+                    "activation-race@example.com",
+                ))))
+            });
+
+            let activate_endpoint = endpoint.clone();
+            let activate_barrier = Arc::clone(&barrier);
+            let activation_ref = binding_ref.clone();
+            let activate = scope.spawn(move || {
+                activate_barrier.wait();
+                activate_endpoint.activate(owner, &activation_ref)
+            });
+
+            barrier.wait();
+            assert!(activate.join().expect("activation thread"));
+            send.join().expect("send thread")
+        });
+
+        match outcome {
+            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional) => {
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "pre-activation send was refused"
+                );
+            }
+            EndpointEnqueueOutcome::AcceptedOrUnknown => {
+                assert!(
+                    receiver.try_recv().is_ok(),
+                    "post-activation send was accepted"
+                );
+            }
+            other => panic!("unexpected provisional activation race outcome: {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -1715,20 +1779,17 @@ fn pending_flush_commit_rechecks_endpoint_admission_after_reservation() {
     let jid = test_jid("reserved");
     let (endpoint, mut receiver) = super::SocketOutboundEndpoint::channel(1);
     let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
-    let entry = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+    let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+    let owner = candidate.binding_id();
+    let entry = candidate
+        .activate_binding(owner, &binding_ref)
+        .expect("exact activation before registry publication");
     let owner = registry.register_entry(jid.clone(), entry);
     assert!(registry.update_presence(&jid, true, 0));
 
-    assert_eq!(
-        registry
-            .try_reserve_pending_flush(&jid, Some(&owner))
-            .expect_err("provisional"),
-        PendingFlushReserveError::NotAdmitted
-    );
     let entry = registry
         .entry_if_owner(&jid, &owner)
         .expect("registered owner");
-    assert!(entry.activate_binding(owner, &binding_ref));
     let reservation = registry
         .try_reserve_pending_flush(&jid, Some(&owner))
         .expect("reserve while active");
