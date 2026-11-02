@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify a materialized candidate against every entry in its Git tree."""
+from collections import deque
 import hashlib
 import os
 from pathlib import Path
@@ -10,6 +11,39 @@ import sys
 
 def fail(message: str) -> None:
     raise ValueError(f"candidate source snapshot: {message}")
+
+
+def validate_symlink(source: Path, path: Path) -> None:
+    """Resolve each link component without ever leaving the store source."""
+    relative = path.relative_to(source)
+    pending = deque(relative.parts)
+    resolved = []
+    traversals = 0
+    while pending:
+        component = pending.popleft()
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if not resolved:
+                fail(f"symlink escapes source: {relative}")
+            resolved.pop()
+            continue
+        current = source.joinpath(*resolved, component)
+        try:
+            mode = current.lstat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            resolved.append(component)
+            continue
+        if not stat.S_ISLNK(mode):
+            resolved.append(component)
+            continue
+        traversals += 1
+        if traversals > 40:
+            fail(f"symlink loop or too many symlinks: {relative}")
+        target = os.readlink(current)
+        if os.path.isabs(target):
+            fail(f"symlink escapes source: {relative}")
+        pending.extendleft(reversed(Path(target).parts))
 
 
 def verify(candidate: str, source: Path) -> None:
@@ -52,11 +86,8 @@ def verify(candidate: str, source: Path) -> None:
                 if mode == b"120000":
                     if not stat.S_ISLNK(info.st_mode):
                         fail(f"expected symlink: {relative}")
-                    target = os.readlink(path)
-                    target_path = Path(os.path.normpath(os.path.join(path.parent, target)))
-                    if os.path.isabs(target) or not target_path.is_relative_to(source):
-                        fail(f"symlink escapes source: {relative}")
-                    content = os.fsencode(target)
+                    validate_symlink(source, path)
+                    content = os.fsencode(os.readlink(path))
                     digest = hashlib.new(object_format, b"blob " + str(len(content)).encode() + b"\0")
                     digest.update(content)
                 else:

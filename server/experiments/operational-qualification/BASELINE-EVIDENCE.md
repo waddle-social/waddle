@@ -117,7 +117,9 @@ inventory, and requires PostgreSQL, multiprocess, real cross-node resume, and
 relay/WebSocket anchor tests. The runner builds from one Nix store snapshot
 verified against the committed Git tree, and the gate compares the parsed
 required-list bytes with the committed list. It contains no database URL or
-report contents.
+report contents. Concurrent runner invocations fail rather than mix reports.
+After an interrupted run, confirm that its processes have stopped before
+removing a stale `.ci/nextest-archive/.qualification-run.lock` directory.
 Its `qualification` value is always `not_assessed`; it does not establish image
 identity, deployed topology, resource enforcement, workload results, fault
 results, or deployment state. A missing sidecar or a failed lane supplies no

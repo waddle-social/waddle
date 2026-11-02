@@ -6,6 +6,31 @@ set -euo pipefail
 # PostgreSQL or nextest. No archive crosses a runner or trust boundary.
 diagnostics=.ci/nextest-archive
 mkdir -p "$diagnostics"
+# A concurrent invocation must not replace reports while they are checked.
+# A stale lock after an uncatchable termination fails closed until removed.
+run_lock="$diagnostics/.qualification-run.lock"
+if ! mkdir "$run_lock"; then
+  echo "cannot acquire nextest qualification run lock: $run_lock" >&2
+  exit 1
+fi
+snapshot_directory=""
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [[ -n "$snapshot_directory" ]] && ! rm -rf "$snapshot_directory"; then
+    status=1
+  fi
+  if ! rmdir "$run_lock"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+# A child may outlive an interrupted shell and still be writing diagnostics.
+# Keep the lock in that case; it can be cleared after the run is confirmed dead.
+trap 'trap - EXIT; exit 129' HUP
+trap 'trap - EXIT; exit 130' INT
+trap 'trap - EXIT; exit 143' TERM
 # A failed rerun must not leave a prior passing sidecar looking current.
 rm -f "$diagnostics/qualification-evidence.json"
 # Reject a dirty candidate before constructing the committed source snapshot.
@@ -21,7 +46,6 @@ if [[ -n "$untracked" ]]; then
 fi
 candidate_sha="$(git rev-parse --verify 'HEAD^{commit}')"
 snapshot_directory="$(mktemp -d)"
-trap 'rm -rf "$snapshot_directory"' EXIT
 git -C "$(git rev-parse --show-toplevel)" archive --format=tar "$candidate_sha" \
   | tar -xf - -C "$snapshot_directory"
 # Verify the materialized store path, not the writable extraction directory.

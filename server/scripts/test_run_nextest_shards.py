@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -67,7 +68,7 @@ class LocalShardTests(unittest.TestCase):
         nix = self.server / "scripts/nix"
         nix.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, pathlib, shutil, sys\n"
+            "import json, os, pathlib, shutil, sys, time\n"
             "root = pathlib.Path(os.environ['TEST_ROOT'])\n"
             "args = sys.argv[1:]\n"
             "if args[:2] == ['store', 'add-path']:\n"
@@ -100,6 +101,9 @@ class LocalShardTests(unittest.TestCase):
             "    sys.exit(int(os.environ.get('SHARD_EXIT', '0')))\n"
             "if args[:2] == ['eval', '--raw']:\n"
             "    partition = args[2].split('shard-')[1].split('.')[0]\n"
+            "    if os.environ.get('HOLD_SHARD') == partition:\n"
+            "        (root / '.ci/nextest-archive/hold-started').touch()\n"
+            "        while not (root / '.ci/nextest-archive/release-hold').exists(): time.sleep(0.01)\n"
             "    print(root / '.ci/nextest-archive/mock-shards' / ('shard-' + partition))\n"
             "else:\n"
             "    sys.exit(99)\n"
@@ -113,8 +117,10 @@ class LocalShardTests(unittest.TestCase):
                         "server/scripts/build-nextest-archive.sh", "server/scripts/check_required_tests.py",
                         "server/scripts/nix", "server/.config/required-cluster-tests.txt"], check=True)
         subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "fixture"], check=True)
+        temp_dir = self.server / ".ci/nextest-archive/tmp"
+        temp_dir.mkdir()
         self.env = dict(os.environ, PATH=f"{self.server / 'scripts'}:{os.environ['PATH']}",
-                        TEST_ROOT=str(self.server), TEST_ARCHIVE=str(self.archive))
+                        TEST_ROOT=str(self.server), TEST_ARCHIVE=str(self.archive), TMPDIR=str(temp_dir))
 
     def run_shards(self):
         return subprocess.run(["bash", str(SCRIPT)], cwd=self.server, env=self.env,
@@ -208,6 +214,92 @@ class LocalShardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("symlink escapes source: source-link", result.stderr)
         self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+
+    def test_chained_symlinks_resolve_components_and_reject_loops(self):
+        directory = self.root / "dir"
+        directory.mkdir()
+        (directory / "s").symlink_to(".")
+        link = self.root / "source-link"
+        link.symlink_to("dir/s/../flake.nix")
+        subprocess.run(["git", "-C", str(self.root), "add", "dir/s", "source-link"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "safe chain"], check=True)
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        link.unlink()
+        link.symlink_to("dir/s/../../outside")
+        subprocess.run(["git", "-C", str(self.root), "add", "source-link"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "escape chain"], check=True)
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink escapes source: source-link", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+
+        link.unlink()
+        link.symlink_to("loop")
+        (self.root / "loop").symlink_to("source-link")
+        subprocess.run(["git", "-C", str(self.root), "add", "source-link", "loop"], check=True)
+        subprocess.run(["git", "-C", str(self.root), "commit", "--quiet", "-m", "loop"], check=True)
+        result = self.run_shards()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink loop or too many symlinks:", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+
+    def test_overlapping_invocations_cannot_replace_reports_or_sidecar(self):
+        diagnostics = self.server / ".ci/nextest-archive"
+        self.env["HOLD_SHARD"] = "2"
+        first = subprocess.Popen(["bash", str(SCRIPT)], cwd=self.server, env=self.env,
+                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while not (diagnostics / "hold-started").exists() and first.poll() is None:
+                if time.monotonic() >= deadline:
+                    self.fail("first run did not reach the report copy barrier")
+                time.sleep(0.01)
+            self.assertTrue((diagnostics / "shard-1/junit-whole.xml").is_file())
+            sidecar = diagnostics / "qualification-evidence.json"
+            sidecar.write_text("sentinel")
+            second = self.run_shards()
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("cannot acquire nextest qualification run lock", second.stderr)
+            self.assertEqual(sidecar.read_text(), "sentinel")
+            sidecar.unlink()
+        finally:
+            (diagnostics / "release-hold").touch()
+            try:
+                stdout, stderr = first.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                first.kill()
+                stdout, stderr = first.communicate()
+        self.assertEqual(first.returncode, 0, (stdout, stderr))
+        self.assertFalse((diagnostics / ".qualification-run.lock").exists())
+        self.assertTrue((diagnostics / "qualification-evidence.json").is_file())
+
+    def test_interrupted_invocation_keeps_lock_for_manual_recovery(self):
+        diagnostics = self.server / ".ci/nextest-archive"
+        self.env["HOLD_SHARD"] = "2"
+        first = subprocess.Popen(["bash", str(SCRIPT)], cwd=self.server, env=self.env,
+                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while not (diagnostics / "hold-started").exists() and first.poll() is None:
+                if time.monotonic() >= deadline:
+                    self.fail("first run did not reach the report copy barrier")
+                time.sleep(0.01)
+            self.assertTrue((diagnostics / "hold-started").exists())
+            first.terminate()
+        finally:
+            (diagnostics / "release-hold").touch()
+            try:
+                stdout, stderr = first.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                first.kill()
+                stdout, stderr = first.communicate()
+        self.assertEqual(first.returncode, 143, (stdout, stderr))
+        self.assertTrue((diagnostics / ".qualification-run.lock").is_dir())
+        second = self.run_shards()
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("cannot acquire nextest qualification run lock", second.stderr)
 
     def test_executed_test_names_from_every_shard_are_emitted(self):
         result = self.run_shards()
