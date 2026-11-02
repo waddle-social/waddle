@@ -157,6 +157,9 @@ impl SmInboundCompletionTracker {
     pub fn is_pending(&self, sequence: OrderedRelayInboundSequence) -> bool {
         self.pending.contains(&sequence.0)
     }
+    pub fn is_tracked(&self, sequence: OrderedRelayInboundSequence) -> bool {
+        self.pending.contains(&sequence.0) || self.completed.contains(&sequence.0)
+    }
     pub fn has_unhandled_hole(&self) -> bool {
         self.first_unhandled.is_some()
     }

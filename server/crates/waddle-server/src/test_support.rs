@@ -12,11 +12,12 @@ pub mod connection_actor {
     //! Dark, test-only vertical proof for a connection actor that owns the
     //! real WebSocket connection state and its reserved physical pump pair.
     pub use crate::server::routes::websocket::connection_actor::{
-        start_connection_actor, AcknowledgementResult, BindConnection, CompleteHandledInbound,
-        ConnectionActor, ConnectionActorController, ConnectionActorError, ConnectionActorSequence,
-        ConnectionActorSnapshot, ConnectionActorStartError, ConnectionWireFrame,
-        PanicConnectionActor, PauseConnectionActor, RequestAcknowledgement, ReserveHandledInbound,
-        RetireBinding, SnapshotConnection, StopConnectionActor,
+        start_connection_actor, AcknowledgementResult, CompleteHandledInbound, ConnectionActor,
+        ConnectionActorBindingAttempt, ConnectionActorController, ConnectionActorError,
+        ConnectionActorOperationId, ConnectionActorSequence, ConnectionActorSnapshot,
+        ConnectionActorStartError, ConnectionWireFrame, InstallBinding, PanicConnectionActor,
+        PauseConnectionActor, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
+        RetireBinding, SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
     };
 }
 

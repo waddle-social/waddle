@@ -11,19 +11,29 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::connection_actor::{
-    start_connection_actor, BindConnection, CompleteHandledInbound, ConnectionActorError,
-    ConnectionActorStartError, ConnectionWireFrame, PanicConnectionActor, PauseConnectionActor,
-    RequestAcknowledgement, ReserveHandledInbound, RetireBinding, SnapshotConnection,
+    start_connection_actor, CompleteHandledInbound, ConnectionActorError,
+    ConnectionActorOperationId, ConnectionActorStartError, ConnectionWireFrame, InstallBinding,
+    PanicConnectionActor, PauseConnectionActor, PrepareBinding, RequestAcknowledgement,
+    ReserveHandledInbound, RetireBinding, SeedInboundCounterForTest, SnapshotConnection,
     StopConnectionActor,
 };
 use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
-use waddle_xmpp::ownership::{BindingRef, NodeLeaseIdentity};
+use waddle_xmpp::ownership::NodeLeaseIdentity;
 use waddle_xmpp::stream_management::{SmAck, SmRequest, SmStanza};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const HANDLED_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
+
+fn new_operation_id() -> ConnectionActorOperationId {
+    ConnectionActorOperationId::fresh().expect("operation ID counter remains available")
+}
+
+fn reserve_request() -> ReserveHandledInbound {
+    ReserveHandledInbound::new(new_operation_id())
+}
 
 struct FlushGate {
     released: AtomicBool,
@@ -129,6 +139,7 @@ async fn start_actor(
         max_outbound_bytes,
         gate,
         retirement_deadline,
+        HANDLED_OPERATION_DEADLINE,
     )
     .await
 }
@@ -140,6 +151,7 @@ async fn start_actor_with_inbound_limit(
     max_outbound_bytes: usize,
     gate: Arc<FlushGate>,
     retirement_deadline: Duration,
+    handled_operation_deadline: Duration,
 ) -> (
     waddle_server::test_support::connection_actor::ConnectionActorController,
     ClientSocket,
@@ -162,6 +174,7 @@ async fn start_actor_with_inbound_limit(
     let controller = start_connection_actor(
         inventory,
         NodeLeaseIdentity::local_process(),
+        handled_operation_deadline,
         config,
         move |_| async move {
             let (writer, reader) = server.split();
@@ -236,13 +249,13 @@ async fn one_actor_owns_state_and_answers_xep0198_from_contiguous_handled_prefix
 
     let first = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve first handled-prefix message");
     let second = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve second handled-prefix message");
@@ -292,13 +305,13 @@ async fn actor_processes_control_while_writer_flush_is_blocked_and_wire_waits_fo
 
     let first = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve first sequence message");
     let second = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve second sequence message");
@@ -487,18 +500,24 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
     gate.release();
     let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
     let connection_ref = controller.connection_ref().clone();
-    let binding_a = BindingRef::fresh(connection_ref.clone());
-    let binding_b = BindingRef::fresh(connection_ref.clone());
-
-    controller
+    let binding_a_operation = new_operation_id();
+    let binding_a_attempt = controller
         .actor()
-        .ask(BindConnection(binding_a.clone()))
+        .ask(PrepareBinding::new(binding_a_operation))
         .send()
         .await
-        .expect("binding A is accepted by the live actor");
+        .expect("prepare binding A");
+    let binding_a = binding_a_attempt.binding_ref().clone();
+    let stale_binding_a_install = binding_a_attempt.clone();
+    controller
+        .actor()
+        .ask(InstallBinding::new(binding_a_attempt))
+        .send()
+        .await
+        .expect("binding A is installed by its actor-issued transition");
     let sequence_a = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve sequence A message");
@@ -512,10 +531,11 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
             .expect("retirement with unresolved work is handled"),
         "retiring a binding cannot strand its unresolved handled work"
     );
+    let binding_b_operation = new_operation_id();
     assert_eq!(
         controller
             .actor()
-            .ask(BindConnection(binding_b.clone()))
+            .ask(PrepareBinding::new(binding_b_operation))
             .send()
             .await
             .expect_err("unresolved work rejects binding replacement")
@@ -542,7 +562,7 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
             .expect_err("duplicate sequence completion is rejected")
             .err()
             .expect("typed duplicate completion rejection"),
-        ConnectionActorError::SequenceNotPending
+        ConnectionActorError::SequenceTokenMismatch
     );
     assert!(controller
         .actor()
@@ -550,12 +570,43 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
         .send()
         .await
         .expect("retire A"));
-    controller
+    let binding_b_attempt = controller
         .actor()
-        .ask(BindConnection(binding_b.clone()))
+        .ask(PrepareBinding::new(binding_b_operation))
         .send()
         .await
-        .expect("binding B reuses the same physical socket");
+        .expect("prepare binding B after A retirement");
+    let binding_b = binding_b_attempt.binding_ref().clone();
+    controller
+        .actor()
+        .ask(InstallBinding::new(binding_b_attempt))
+        .send()
+        .await
+        .expect("binding B installs on the same physical socket");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(PrepareBinding::new(binding_a_operation))
+            .send()
+            .await
+            .expect_err("retired A operation ID cannot mint another attempt")
+            .err()
+            .expect("typed stale prepare rejection"),
+        ConnectionActorError::OperationIdNotIncreasing,
+        "replaying A's operation ID cannot mint a fresh identity or replace B"
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(InstallBinding::new(stale_binding_a_install))
+            .send()
+            .await
+            .expect_err("delayed install A is rejected after B is active")
+            .err()
+            .expect("typed stale binding transition rejection"),
+        ConnectionActorError::StaleBindingTransition,
+        "retired install token cannot replace the current B attempt"
+    );
     assert_eq!(
         controller
             .actor()
@@ -570,7 +621,7 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
     );
     let sequence_b = controller
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve sequence B message");
@@ -612,6 +663,509 @@ async fn binding_retirement_fences_stale_completion_without_resetting_handled_pr
 }
 
 #[tokio::test]
+async fn canceled_prepare_and_install_asks_recover_the_exact_binding_attempt() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let operation_id = new_operation_id();
+    let actor = controller.actor().clone();
+
+    let (prepare_entered_tx, prepare_entered_rx) = oneshot::channel();
+    let (prepare_release_tx, prepare_release_rx) = oneshot::channel();
+    let (observed_attempt_tx, observed_attempt_rx) = oneshot::channel();
+    let prepare_actor = actor.clone();
+    let canceled_prepare = tokio::spawn(async move {
+        prepare_actor
+            .ask(PrepareBinding::with_reply_barrier(
+                operation_id,
+                prepare_entered_tx,
+                prepare_release_rx,
+                observed_attempt_tx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, prepare_entered_rx)
+        .await
+        .expect("prepare reaches actor-owned barrier")
+        .expect("prepare barrier entered");
+    let observed_attempt = timeout(TEST_TIMEOUT, observed_attempt_rx)
+        .await
+        .expect("prepared attempt is observable before reply")
+        .expect("observed binding attempt");
+    canceled_prepare.abort();
+    let _ = canceled_prepare.await;
+    let _ = prepare_release_tx.send(());
+
+    let recovered_attempt = actor
+        .ask(PrepareBinding::new(operation_id))
+        .send()
+        .await
+        .expect("retry prepare returns its stable operation result");
+    assert_eq!(recovered_attempt, observed_attempt);
+
+    let (install_entered_tx, install_entered_rx) = oneshot::channel();
+    let (install_release_tx, install_release_rx) = oneshot::channel();
+    let install_actor = actor.clone();
+    let attempt_for_install = recovered_attempt.clone();
+    let canceled_install = tokio::spawn(async move {
+        install_actor
+            .ask(InstallBinding::with_reply_barrier(
+                attempt_for_install,
+                install_entered_tx,
+                install_release_rx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, install_entered_rx)
+        .await
+        .expect("install reaches actor-owned barrier")
+        .expect("install barrier entered");
+    canceled_install.abort();
+    let _ = canceled_install.await;
+    let _ = install_release_tx.send(());
+
+    actor
+        .ask(InstallBinding::new(recovered_attempt.clone()))
+        .send()
+        .await
+        .expect("retry install reports the already-installed exact attempt");
+    let snapshot = actor
+        .ask(SnapshotConnection)
+        .send()
+        .await
+        .expect("snapshot installed binding");
+    assert_eq!(
+        snapshot.binding_ref,
+        Some(recovered_attempt.binding_ref().clone())
+    );
+    assert_eq!(snapshot.binding_epoch, 1);
+
+    assert!(actor
+        .ask(RetireBinding(recovered_attempt.binding_ref().clone()))
+        .send()
+        .await
+        .expect("retire installed attempt"));
+    assert_eq!(
+        actor
+            .ask(PrepareBinding::new(operation_id))
+            .send()
+            .await
+            .expect_err("retired prepare operation cannot mint another identity")
+            .err()
+            .expect("typed stale operation ID rejection"),
+        ConnectionActorError::OperationIdNotIncreasing
+    );
+    assert_eq!(
+        actor
+            .ask(InstallBinding::new(recovered_attempt))
+            .send()
+            .await
+            .expect_err("retired install token is stale")
+            .err()
+            .expect("typed stale binding token rejection"),
+        ConnectionActorError::StaleBindingTransition
+    );
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn orphaned_prepare_is_one_bounded_pending_attempt_and_never_installs() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let actor = controller.actor().clone();
+    let operation_a = new_operation_id();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (observed_tx, observed_rx) = oneshot::channel();
+    let prepare_actor = actor.clone();
+    let canceled_prepare = tokio::spawn(async move {
+        prepare_actor
+            .ask(PrepareBinding::with_reply_barrier(
+                operation_a,
+                entered_tx,
+                release_rx,
+                observed_tx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("prepare enters barrier")
+        .expect("prepare barrier signal");
+    let orphaned_attempt = timeout(TEST_TIMEOUT, observed_rx)
+        .await
+        .expect("actor has one prepared attempt")
+        .expect("observed orphaned attempt");
+    canceled_prepare.abort();
+    let _ = canceled_prepare.await;
+    let _ = release_tx.send(());
+
+    let operation_b = new_operation_id();
+    let attempt_b = actor
+        .ask(PrepareBinding::new(operation_b))
+        .send()
+        .await
+        .expect("new prepare supersedes the orphaned pending slot");
+    assert_eq!(
+        actor
+            .ask(InstallBinding::new(orphaned_attempt))
+            .send()
+            .await
+            .expect_err("superseded orphan cannot become active")
+            .err()
+            .expect("typed stale transition rejection"),
+        ConnectionActorError::StaleBindingTransition
+    );
+    let snapshot = actor
+        .ask(SnapshotConnection)
+        .send()
+        .await
+        .expect("snapshot after rejected orphan install");
+    assert_eq!(snapshot.binding_ref, None);
+    actor
+        .ask(InstallBinding::new(attempt_b.clone()))
+        .send()
+        .await
+        .expect("only the current pending attempt installs");
+    assert_eq!(
+        actor
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot current install")
+            .binding_ref,
+        Some(attempt_b.binding_ref().clone())
+    );
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn canceled_reservation_ask_recovers_the_same_sequence_by_operation_id() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let actor = controller.actor().clone();
+    let operation_id = new_operation_id();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let request_actor = actor.clone();
+    let canceled_request = tokio::spawn(async move {
+        request_actor
+            .ask(ReserveHandledInbound::with_reply_barrier(
+                operation_id,
+                entered_tx,
+                release_rx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("reservation is actor-owned before ask cancellation")
+        .expect("reservation barrier entered");
+    canceled_request.abort();
+    let _ = canceled_request.await;
+    let _ = release_tx.send(());
+
+    let recovered = actor
+        .ask(ReserveHandledInbound::new(operation_id))
+        .send()
+        .await
+        .expect("retry retrieves the original reservation");
+    assert_eq!(
+        actor
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("reservation alone does not advance h")
+            .handled_h,
+        0
+    );
+    assert_eq!(
+        actor
+            .ask(CompleteHandledInbound(recovered))
+            .send()
+            .await
+            .expect("complete recovered reservation"),
+        1,
+        "retried operation closes the original ordinal rather than creating a gap"
+    );
+    assert_eq!(
+        actor
+            .ask(ReserveHandledInbound::new(operation_id))
+            .send()
+            .await
+            .expect_err("settled operation ID cannot reserve a phantom sequence")
+            .err()
+            .expect("typed monotonic ID rejection"),
+        ConnectionActorError::OperationIdNotIncreasing
+    );
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 1);
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn canceled_reservation_without_retry_stops_and_joins_exact_transport() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor_with_inbound_limit(
+        &inventory,
+        8,
+        4,
+        256,
+        gate,
+        TEST_TIMEOUT,
+        Duration::from_millis(40),
+    )
+    .await;
+    let actor = controller.actor().clone();
+    let operation_id = new_operation_id();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let request_actor = actor.clone();
+    let canceled_request = tokio::spawn(async move {
+        request_actor
+            .ask(ReserveHandledInbound::with_reply_barrier(
+                operation_id,
+                entered_tx,
+                release_rx,
+            ))
+            .send()
+            .await
+    });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("unresolved reservation reaches the cancellation barrier")
+        .expect("reservation barrier entered");
+    canceled_request.abort();
+    let _ = canceled_request.await;
+    let _ = release_tx.send(());
+
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("operation deadline stops pumps when no caller retries"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::Requested));
+    assert_eq!(inventory.len(), 1, "joined observation remains indexed");
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn stopped_transport_rejects_late_handled_completion_without_advancing_h() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let token = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve before stop");
+
+    controller.request_stop(StopReason::LeaseLost);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("lease-loss stop joins both pumps"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(token))
+            .send()
+            .await
+            .expect_err("late completion is rejected after transport stop")
+            .err()
+            .expect("typed stopped transport rejection"),
+        ConnectionActorError::ConnectionStopping
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("snapshot confirms no late protocol progress")
+            .handled_h,
+        0
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
+async fn caller_operation_ids_are_strictly_increasing_per_actor() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let lower_id = new_operation_id();
+    let higher_id = new_operation_id();
+    let higher = controller
+        .actor()
+        .ask(ReserveHandledInbound::new(higher_id))
+        .send()
+        .await
+        .expect("higher ID is admitted first");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(ReserveHandledInbound::new(lower_id))
+            .send()
+            .await
+            .expect_err("unseen lower ID is rejected after high-water advances")
+            .err()
+            .expect("typed out-of-order ID rejection"),
+        ConnectionActorError::OperationIdNotIncreasing
+    );
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(higher))
+            .send()
+            .await
+            .expect("complete admitted higher ID"),
+        1
+    );
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
+async fn wrapped_xep_counter_does_not_alias_old_completion_generation() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let actor = controller.actor();
+    let old_operation_id = new_operation_id();
+    let old_token = actor
+        .ask(ReserveHandledInbound::new(old_operation_id))
+        .send()
+        .await
+        .expect("reserve old completion generation");
+    let stale_old_token = old_token.clone();
+    assert_eq!(old_token.sequence_number(), 1);
+    assert_eq!(
+        actor
+            .ask(CompleteHandledInbound(old_token))
+            .send()
+            .await
+            .expect("complete old generation"),
+        1
+    );
+
+    for _ in 0..256 {
+        let token = actor
+            .ask(ReserveHandledInbound::new(new_operation_id()))
+            .send()
+            .await
+            .expect("reserve operation to age out caller ID");
+        actor
+            .ask(CompleteHandledInbound(token))
+            .send()
+            .await
+            .expect("complete operation to age out caller ID");
+    }
+    assert_eq!(
+        actor
+            .ask(ReserveHandledInbound::new(old_operation_id))
+            .send()
+            .await
+            .expect_err("old caller ID remains rejected after many settlements")
+            .err()
+            .expect("typed permanent high-water rejection"),
+        ConnectionActorError::OperationIdNotIncreasing
+    );
+
+    actor
+        .ask(SeedInboundCounterForTest(0))
+        .send()
+        .await
+        .expect("seed the XEP counter for a deterministic wrap alias");
+    let new_token = actor
+        .ask(ReserveHandledInbound::new(new_operation_id()))
+        .send()
+        .await
+        .expect("reserve new generation at the same XEP ordinal");
+    assert_eq!(
+        new_token.sequence_number(),
+        stale_old_token.sequence_number()
+    );
+    assert_ne!(
+        new_token.nonce_generation(),
+        stale_old_token.nonce_generation(),
+        "the completion nonce advances independently of XEP h"
+    );
+    assert_eq!(
+        actor
+            .ask(CompleteHandledInbound(stale_old_token))
+            .send()
+            .await
+            .expect_err("old generation cannot complete the same XEP ordinal")
+            .err()
+            .expect("typed stale operation rejection"),
+        ConnectionActorError::SequenceTokenMismatch
+    );
+    assert_eq!(
+        actor
+            .ask(SnapshotConnection)
+            .send()
+            .await
+            .expect("stale token does not invent progress")
+            .handled_h,
+        0
+    );
+    assert_eq!(
+        actor
+            .ask(CompleteHandledInbound(new_token))
+            .send()
+            .await
+            .expect("complete current generation"),
+        1
+    );
+    send_request(&mut peer).await;
+    assert_eq!(read_ack(&mut peer).await.h, 1);
+
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
 async fn handled_completion_token_is_fenced_by_exact_physical_connection() {
     let inventory = IoCustodianInventory::new(2).expect("inventory capacity");
     let gate_a = FlushGate::new();
@@ -625,14 +1179,14 @@ async fn handled_completion_token_is_fenced_by_exact_physical_connection() {
 
     let sequence_a = controller_a
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve A message");
     let sequence_a_for_b = sequence_a.clone();
     let sequence_b = controller_b
         .actor()
-        .ask(ReserveHandledInbound)
+        .ask(reserve_request())
         .send()
         .await
         .expect("reserve B message");
@@ -694,7 +1248,7 @@ async fn handled_prefix_window_bounds_pending_and_out_of_order_completions() {
         sequences.push(
             controller
                 .actor()
-                .ask(ReserveHandledInbound)
+                .ask(reserve_request())
                 .send()
                 .await
                 .expect("reserve handled-prefix message"),
@@ -703,7 +1257,7 @@ async fn handled_prefix_window_bounds_pending_and_out_of_order_completions() {
     assert_eq!(
         controller
             .actor()
-            .ask(ReserveHandledInbound)
+            .ask(reserve_request())
             .send()
             .await
             .expect_err("pending handled-prefix window is full")
@@ -728,7 +1282,7 @@ async fn handled_prefix_window_bounds_pending_and_out_of_order_completions() {
     assert_eq!(
         controller
             .actor()
-            .ask(ReserveHandledInbound)
+            .ask(reserve_request())
             .send()
             .await
             .expect_err("out-of-order handled-prefix window is full")
@@ -761,8 +1315,16 @@ async fn inbound_permit_stays_held_while_actor_mailbox_is_paused() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
     let gate = Arc::new(FlushGate::new());
     gate.release();
-    let (controller, mut peer, _) =
-        start_actor_with_inbound_limit(&inventory, 1, 4, 256, gate, TEST_TIMEOUT).await;
+    let (controller, mut peer, _) = start_actor_with_inbound_limit(
+        &inventory,
+        1,
+        4,
+        256,
+        gate,
+        TEST_TIMEOUT,
+        HANDLED_OPERATION_DEADLINE,
+    )
+    .await;
 
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -810,6 +1372,58 @@ async fn inbound_permit_stays_held_while_actor_mailbox_is_paused() {
 }
 
 #[tokio::test]
+async fn peer_request_ack_saturation_stops_and_joins_the_physical_writer() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    let (controller, mut peer, entered) = start_actor(
+        &inventory,
+        1,
+        256,
+        Arc::clone(&gate),
+        Duration::from_millis(50),
+    )
+    .await;
+
+    send_request(&mut peer).await;
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_inbound_forwarded(1))
+            .await
+            .expect("first peer request reaches the actor mailbox"),
+        "first typed `<r/>` is forwarded"
+    );
+    timeout(TEST_TIMEOUT, entered)
+        .await
+        .expect("first `<a h/>` reaches the blocked writer")
+        .expect("writer flush barrier entered");
+
+    send_request(&mut peer).await;
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_inbound_forwarded(2))
+            .await
+            .expect("second peer request reaches the actor mailbox"),
+        "actor receives control while the first writer flush is stalled"
+    );
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("outbound overload interrupts and joins the writer"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(
+        controller.stop_reason(),
+        Some(StopReason::OutboundOverload),
+        "the peer-driven second `<r/>` observes the in-flight writer permit"
+    );
+    gate.release();
+    assert_eq!(
+        inventory.len(),
+        1,
+        "joined cleanup remains indexed until pruned"
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+}
+
+#[tokio::test]
 async fn normal_actor_stop_also_keeps_controller_stop_and_inventory_independent() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
     let gate = Arc::new(FlushGate::new());
@@ -854,6 +1468,7 @@ async fn reservation_is_indexed_before_the_actor_pump_factory_runs() {
     let controller = start_connection_actor(
         &inventory,
         NodeLeaseIdentity::local_process(),
+        HANDLED_OPERATION_DEADLINE,
         config,
         move |connection_ref| {
             let connection_ref = connection_ref.clone();
@@ -940,6 +1555,7 @@ async fn failed_reservation_does_not_call_the_connection_pump_factory() {
     let result = start_connection_actor(
         &inventory,
         NodeLeaseIdentity::local_process(),
+        HANDLED_OPERATION_DEADLINE,
         config,
         move |_| async move {
             called_factory.store(true, Ordering::Release);
