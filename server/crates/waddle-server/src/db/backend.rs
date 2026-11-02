@@ -67,6 +67,11 @@ impl PoolAdmission {
         self.lane
     }
 
+    #[cfg(feature = "test-support")]
+    pub(super) fn same_admission(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.permits, &other.permits)
+    }
+
     pub(super) fn limit(&self) -> Option<u32> {
         self.limit
     }

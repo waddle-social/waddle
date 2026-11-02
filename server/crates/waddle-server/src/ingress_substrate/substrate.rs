@@ -554,11 +554,12 @@ async fn record_message_after_epoch_lock(
 /// The marker is constructible only by the disposable candidate-guard lab.
 #[cfg(feature = "test-support")]
 pub(crate) async fn record_message_in_relation_guard_lab(
-    lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    _fixture: &crate::test_support::relation_guard_lab::RelationGuardLabToken,
     message_key: MessageKey,
     digest: &SemanticDigest,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    let (tx, prepared) = lab.parts();
     record_message_after_epoch_lock(tx, Some(prepared), message_key, digest, None, None).await
 }
 
@@ -943,11 +944,12 @@ pub(crate) async fn insert_sm_ref_in_prepared_transaction(
 /// Record a delivery under the lab's already-held relation barrier.
 #[cfg(feature = "test-support")]
 pub(crate) async fn record_delivery_in_relation_guard_lab(
-    lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+    tx: &mut Transaction<'_>,
+    prepared: &PreparedAttestedReceiptWriter,
+    _fixture: &crate::test_support::relation_guard_lab::RelationGuardLabToken,
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    let (tx, prepared) = lab.parts();
     record_delivery_after_epoch_lock(tx, Some(prepared), delivery_key, message_key).await
 }
 

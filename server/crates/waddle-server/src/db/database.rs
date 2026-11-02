@@ -603,6 +603,15 @@ impl Database {
         self.admission.lane() == PoolLane::Ingress
     }
 
+    /// Test whether two handles carry the very same reserved lane, without
+    /// exposing its semaphore or the underlying physical pool.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn shares_ingress_lane(&self, other: &Self) -> bool {
+        self.is_ingress_lane()
+            && other.is_ingress_lane()
+            && self.admission.same_admission(&other.admission)
+    }
+
     pub(crate) fn ingress_pool_size(&self) -> Option<u32> {
         self.ingress_admission.as_ref()?.limit()
     }

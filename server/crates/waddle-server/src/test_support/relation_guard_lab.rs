@@ -18,13 +18,13 @@ use waddle_xmpp::ingress::{
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
 use crate::db::physical_attestation::{
-    attested_pool, install, prelock_epoch_relation, read_epoch_after_prelock, PgRoleName,
+    attested_pool, install, AttestedPgPool, AttestedPostgresWriterCapability, PgRoleName,
     PhysicalAttestationConfig,
 };
-use crate::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner, Transaction};
-use crate::ingress_substrate::PreparedAttestedReceiptWriter;
+use crate::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner};
 use crate::ingress_uow::{
-    EffectDescendantRepository, EffectIntentRepository, IngressUowError, ReconcileVerdict,
+    CandidateTransaction, CanonicalMessageRepository, EffectDescendantRepository, IngressLineage,
+    IngressUnitOfWork, IngressUowError, ReconcileVerdict,
 };
 
 const GUARD: &str =
@@ -36,20 +36,61 @@ enum LabWriteError {
     Prepare(#[source] anyhow::Error),
     #[error(transparent)]
     Operation(#[from] IngressUowError),
+    #[error("candidate transaction timed out before COMMIT")]
+    Timeout,
     #[error("candidate COMMIT outcome is indeterminate")]
     CommitIndeterminate,
 }
 
-/// Private fields and no public constructor: only this module's fresh fixture
-/// can create the marker, and it owns the exact transaction through commit.
-pub(crate) struct CandidateTransaction<'a> {
-    transaction: Transaction<'a>,
-    prepared: PreparedAttestedReceiptWriter,
+/// Only the disposable fixture can construct this proof. It binds its
+/// attested pool and the exact reserved ingress admission lane together.
+pub(crate) struct RelationGuardLabToken {
+    ingress: Database,
+    capability: AttestedPostgresWriterCapability,
 }
 
-impl<'a> CandidateTransaction<'a> {
-    pub(crate) fn parts(&mut self) -> (&mut Transaction<'a>, &PreparedAttestedReceiptWriter) {
-        (&mut self.transaction, &self.prepared)
+impl RelationGuardLabToken {
+    pub(crate) fn permits(&self, database: &Database) -> bool {
+        database.shares_ingress_lane(&self.ingress)
+            && database
+                .verify_attested_pg_writer_capability(&self.capability)
+                .is_ok()
+    }
+}
+
+struct LabLane {
+    main: Database,
+    ingress: Database,
+    uow: IngressUnitOfWork,
+    fixture: RelationGuardLabToken,
+}
+
+impl LabLane {
+    async fn new(pool: AttestedPgPool, lineage: &AttestedLineage) -> anyhow::Result<Self> {
+        let main =
+            Database::from_attested_postgres_pool_with_ingress("relation-guard-lab", pool, 1, 1)
+                .await?;
+        let ingress = main.ingress_lane();
+        let capability = ingress
+            .attested_pg_writer_capability()
+            .context("attested ingress lane required")?;
+        let fixture = RelationGuardLabToken {
+            ingress: ingress.clone(),
+            capability,
+        };
+        let uow = IngressUnitOfWork::open(
+            ingress.clone(),
+            LineageConfig {
+                deployment_uuid: Some(lineage.deployment_uuid),
+                action: None,
+            },
+        )?;
+        Ok(Self {
+            main,
+            ingress,
+            uow,
+            fixture,
+        })
     }
 }
 
@@ -59,7 +100,7 @@ struct Lab {
     admin: PgPool,
     owner_options: PgConnectOptions,
     runtime_options: PgConnectOptions,
-    database: Database,
+    lane: LabLane,
     database_name: String,
     owner: String,
     migrator: String,
@@ -290,8 +331,8 @@ impl Lab {
         )?;
         let config = install(&installer_options, config, Uuid::new_v4()).await?;
         let attested = attested_pool(runtime_options.clone(), config.clone(), 2, Duration::from_secs(5))?;
-        let database = Database::from_attested_postgres_pool("relation-guard-lab", attested);
-        Ok(Self { resources: None, cluster: cluster.clone(), admin, owner_options, runtime_options, database, database_name,
+        let lane = LabLane::new(attested, &lineage).await?;
+        Ok(Self { resources: None, cluster: cluster.clone(), admin, owner_options, runtime_options, lane, database_name,
             owner, migrator, runtime, installer, definer, lineage, config, password, application })
         }.await;
         match result {
@@ -307,49 +348,11 @@ impl Lab {
     }
 
     async fn begin(&self) -> anyhow::Result<CandidateTransaction<'_>> {
-        let capability = self
-            .database
-            .attested_pg_writer_capability()
-            .context("attested pool required")?;
-        self.database
-            .verify_attested_pg_writer_capability(&capability)?;
-        let mut transaction = self.database.begin().await?;
-        transaction
-            .execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-            .await?;
-        let mut bounds = transaction
-            .query(
-                "SELECT pg_catalog.set_config('lock_timeout', CASE \
-             WHEN pg_catalog.current_setting('lock_timeout')::interval = interval '0 ms' \
-               OR pg_catalog.current_setting('lock_timeout')::interval > interval '3 s' \
-             THEN '3s' ELSE pg_catalog.current_setting('lock_timeout') END, true), \
-             pg_catalog.set_config('statement_timeout', CASE \
-             WHEN pg_catalog.current_setting('statement_timeout')::interval = interval '0 ms' \
-               OR pg_catalog.current_setting('statement_timeout')::interval > interval '5 s' \
-             THEN '5s' ELSE pg_catalog.current_setting('statement_timeout') END, true)",
-                (),
-            )
-            .await?;
-        ensure!(
-            bounds.next().await?.is_some(),
-            "transaction timeout bounds were not installed"
-        );
-        drop(bounds);
-        let expected = &capability.identity().schema;
-        let connection = transaction
-            .postgres_connection()
-            .context("PostgreSQL transaction required")?;
-        prelock_epoch_relation(connection, &expected.name.0).await?;
-        capability.attest_transaction(&mut transaction).await?;
-        let connection = transaction
-            .postgres_connection()
-            .context("PostgreSQL transaction required")?;
-        let epoch = read_epoch_after_prelock(connection, &expected.name.0, expected.oid).await?;
-        let prepared = PreparedAttestedReceiptWriter::for_relation_guard_lab(&capability, epoch);
-        Ok(CandidateTransaction {
-            transaction,
-            prepared,
-        })
+        Ok(self
+            .lane
+            .uow
+            .begin_in_relation_guard_lab(&self.lane.fixture)
+            .await?)
     }
 
     async fn write(
@@ -359,20 +362,44 @@ impl Lab {
         intent: &IngressEffectIntent,
         descendant: Uuid,
     ) -> Result<ProtocolEpoch, LabWriteError> {
-        let mut candidate = self.begin().await.map_err(LabWriteError::Prepare)?;
-        let epoch = candidate.prepared.protocol_epoch();
-        write_chain(&mut candidate, key, digest, intent, descendant).await?;
+        self.write_until(
+            key,
+            digest,
+            intent,
+            descendant,
+            tokio::time::Instant::now() + Duration::from_secs(8),
+        )
+        .await
+    }
+
+    async fn write_until(
+        &self,
+        key: MessageKey,
+        digest: &SemanticDigest,
+        intent: &IngressEffectIntent,
+        descendant: Uuid,
+        deadline: tokio::time::Instant,
+    ) -> Result<ProtocolEpoch, LabWriteError> {
+        let mut candidate = tokio::time::timeout_at(deadline, self.begin())
+            .await
+            .map_err(|_| LabWriteError::Timeout)?
+            .map_err(LabWriteError::Prepare)?;
+        let epoch = candidate.protocol_epoch();
+        tokio::time::timeout_at(
+            deadline,
+            write_chain(&mut candidate, key, digest, intent, descendant),
+        )
+        .await
+        .map_err(|_| LabWriteError::Timeout)??;
         // Arm the fault-injection proxy only after all domain writes and
         // immediately before this transaction's business COMMIT.
-        candidate
-            .transaction
-            .execute("SELECT 1 /* waddle_relation_lab_business_commit */", ())
+        let armed = tokio::time::timeout_at(deadline, candidate.arm_fixture_commit_fault())
             .await
-            .map_err(|error| LabWriteError::Operation(error.into()))?;
-        candidate
-            .transaction
-            .commit()
+            .map_err(|_| LabWriteError::Timeout)?;
+        armed.map_err(LabWriteError::Operation)?;
+        tokio::time::timeout_at(deadline, candidate.commit())
             .await
+            .map_err(|_| LabWriteError::CommitIndeterminate)?
             .map_err(|_| LabWriteError::CommitIndeterminate)?;
         Ok(epoch)
     }
@@ -381,11 +408,11 @@ impl Lab {
         let Self {
             cluster,
             admin,
-            database,
+            lane,
             mut resources,
             ..
         } = self;
-        drop(database);
+        drop(lane);
         admin.close().await;
         resources
             .as_mut()
@@ -405,7 +432,7 @@ async fn write_chain(
     descendant: Uuid,
 ) -> Result<(), IngressUowError> {
     let message =
-        crate::ingress_substrate::record_message_in_relation_guard_lab(candidate, key, digest)
+        CanonicalMessageRepository::record_message_in_relation_guard_lab(candidate, key, digest)
             .await?;
     let existing = match message {
         crate::ingress_substrate::MessageWriteOutcome::Recorded => false,
@@ -414,13 +441,9 @@ async fn write_chain(
             return Err(IngressUowError::EffectIntentMessageMissing)
         }
     };
-    let verdict = EffectIntentRepository::reconcile_in_relation_guard_lab(
-        candidate,
-        key,
-        std::slice::from_ref(intent),
-        existing,
-    )
-    .await?;
+    let verdict = candidate
+        .reconcile_intents(key, std::slice::from_ref(intent), existing)
+        .await?;
     if matches!(
         verdict,
         ReconcileVerdict::Contradiction { .. } | ReconcileVerdict::Divergent { .. }
@@ -428,15 +451,9 @@ async fn write_chain(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let receipt = crate::ingress::receipt_key(intent)?;
-    let (transaction, prepared) = candidate.parts();
-    crate::ingress_substrate::record_receipt_in_prepared_transaction(
-        transaction,
-        key,
-        receipt.kind,
-        &receipt.semantic_identity_hash,
-        Some(prepared.schema()),
-    )
-    .await?;
+    candidate
+        .record_receipt(key, receipt.kind, &receipt.semantic_identity_hash)
+        .await?;
     EffectDescendantRepository::attach_in_relation_guard_lab(
         candidate,
         key,
@@ -642,25 +659,54 @@ async fn role_boundary(lab: &Lab) -> anyhow::Result<()> {
         );
     }
     let mut candidate = lab.begin().await?;
-    let mut bounds = candidate
-        .transaction
-        .query(
-            "SELECT pg_catalog.current_setting('lock_timeout')::interval = interval '2500 ms' \
-         AND pg_catalog.current_setting('statement_timeout')::interval = interval '4500 ms'",
-            (),
-        )
-        .await?;
-    let preserved: bool = bounds
-        .next()
-        .await?
-        .context("missing timeout check")?
-        .get(0)?;
     ensure!(
-        preserved,
+        matches!(candidate.lineage(), IngressLineage::Attested(lineage) if lineage == &lab.lineage),
+        "the UoW did not retain the fixture's attested lineage"
+    );
+    ensure!(
+        candidate.has_fixture_bounds_and_isolation().await?,
         "candidate preparation loosened tighter session timeouts"
     );
-    drop(bounds);
     drop(candidate);
+    Ok(())
+}
+
+async fn ingress_lane_boundary(lab: &Lab) -> anyhow::Result<()> {
+    ensure!(
+        lab.lane.uow.begin().await.is_err(),
+        "the installed-guard UoW unexpectedly bypassed its epoch row lock"
+    );
+    let held = lab.begin().await?;
+    let main = lab.lane.main.guard().await?;
+    tokio::time::timeout(Duration::from_secs(2), main.execute("SELECT 1", ())).await??;
+    ensure!(
+        tokio::time::timeout(Duration::from_millis(250), lab.begin())
+            .await
+            .is_err(),
+        "a second UoW bypassed the occupied ingress admission lane"
+    );
+    drop(held);
+    let main_held = lab.lane.main.begin().await?;
+    let recovered = tokio::time::timeout(Duration::from_secs(5), lab.begin()).await??;
+    drop(recovered);
+    drop(main_held);
+
+    let wrong_lineage = IngressUnitOfWork::open(
+        lab.lane.ingress.clone(),
+        LineageConfig {
+            deployment_uuid: Some(DeploymentUuid(Uuid::new_v4())),
+            action: None,
+        },
+    )?;
+    ensure!(
+        matches!(
+            wrong_lineage
+                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .await,
+            Err(IngressUowError::Lineage(_))
+        ),
+        "a UoW with the wrong deployment lineage was admitted"
+    );
     Ok(())
 }
 
@@ -731,7 +777,8 @@ async fn shadow_and_wrong_pool(
     )?;
     let other = Database::from_attested_postgres_pool("different-attested-pool", other);
     let capability = lab
-        .database
+        .lane
+        .ingress
         .attested_pg_writer_capability()
         .context("lab capability")?;
     ensure!(
@@ -740,7 +787,41 @@ async fn shadow_and_wrong_pool(
             .is_err(),
         "a capability was accepted by a different pool"
     );
+    let wrong_pool = IngressUnitOfWork::open(
+        other.clone(),
+        LineageConfig {
+            deployment_uuid: Some(lab.lineage.deployment_uuid),
+            action: None,
+        },
+    )?;
+    ensure!(
+        matches!(
+            wrong_pool
+                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .await,
+            Err(IngressUowError::AttestedPoolRequired)
+        ),
+        "the fixture proof was accepted by a different physical pool"
+    );
+    drop(wrong_pool);
     drop(other);
+
+    let wrong_lane = IngressUnitOfWork::open(
+        lab.lane.main.clone(),
+        LineageConfig {
+            deployment_uuid: Some(lab.lineage.deployment_uuid),
+            action: None,
+        },
+    )?;
+    ensure!(
+        matches!(
+            wrong_lane
+                .begin_in_relation_guard_lab(&lab.lane.fixture)
+                .await,
+            Err(IngressUowError::AttestedPoolRequired)
+        ),
+        "the fixture proof was accepted on the main admission lane"
+    );
 
     sqlx::query(&format!("CREATE SCHEMA shadow AUTHORIZATION {}", lab.owner))
         .execute(&lab.admin)
@@ -764,12 +845,9 @@ async fn shadow_and_wrong_pool(
     }
     let key = MessageKey::new();
     let mut candidate = lab.begin().await?;
-    candidate
-        .transaction
-        .execute("SET LOCAL search_path = shadow, guarded", ())
-        .await?;
+    candidate.use_fixture_shadow_path().await?;
     write_chain(&mut candidate, key, digest, intent, Uuid::new_v4()).await?;
-    candidate.transaction.commit().await?;
+    candidate.commit().await?;
     ensure!(
         counts(lab, key).await? == vec![1, 1, 1, 1, 1],
         "qualified target chain missing"
@@ -878,6 +956,7 @@ async fn verify_failed_provision_cleanup(lab: &Lab) -> anyhow::Result<()> {
 async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     verify_failed_provision_cleanup(lab).await?;
     role_boundary(lab).await?;
+    ingress_lane_boundary(lab).await?;
     let digest = SemanticDigest::from_storage(1, [1_u8; 32])?;
     let intent = make_intent(false)?;
     let key = MessageKey::new();
@@ -938,13 +1017,13 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     {
         let mut empty = lab.begin().await?;
         ensure!(matches!(
-            crate::ingress_substrate::record_message_in_relation_guard_lab(
+            CanonicalMessageRepository::record_message_in_relation_guard_lab(
                 &mut empty, empty_key, &digest
             )
             .await?,
             crate::ingress_substrate::MessageWriteOutcome::Recorded
         ));
-        empty.transaction.commit().await?;
+        empty.commit().await?;
     }
     ensure!(
         matches!(
@@ -994,7 +1073,8 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     shadow_and_wrong_pool(lab, &digest, &intent).await?;
     concurrency_and_transition(lab, &digest, &intent).await?;
     proof_failures(lab, &digest, &intent).await?;
-    lost_commit_ack(lab, &digest, &intent).await?;
+    lost_commit_ack(lab, &digest, &intent, false).await?;
+    lost_commit_ack(lab, &digest, &intent, true).await?;
     Ok(())
 }
 
@@ -1234,6 +1314,7 @@ async fn lost_commit_ack(
     lab: &mut Lab,
     digest: &SemanticDigest,
     intent: &IngressEffectIntent,
+    expire_deadline: bool,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -1254,19 +1335,22 @@ async fn lost_commit_ack(
         .application_name(&lab.application)
         .ssl_mode(sqlx::postgres::PgSslMode::Disable)
         .options([("search_path", "guarded")]);
-    let pool = attested_pool(options, lab.config.clone(), 1, Duration::from_secs(5))?;
-    let database = Database::from_attested_postgres_pool("relation-lab-lost-ack", pool);
-    let old = std::mem::replace(&mut lab.database, database);
+    let pool = attested_pool(options, lab.config.clone(), 2, Duration::from_secs(5))?;
+    let lane = LabLane::new(pool, &lab.lineage).await?;
+    let old = std::mem::replace(&mut lab.lane, lane);
     drop(old);
     let key = MessageKey::new();
-    let write = lab.write(key, digest, intent, Uuid::new_v4());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let write = lab.write_until(key, digest, intent, Uuid::new_v4(), deadline);
     let observe = async {
-        tokio::time::timeout(Duration::from_secs(8), held.notified()).await?;
+        tokio::time::timeout_at(deadline, held.notified()).await?;
         ensure!(
             counts(lab, key).await? == vec![1, 1, 1, 1, 1],
             "COMMIT was not durable before the reply was dropped"
         );
-        disconnect.notify_one();
+        if !expire_deadline {
+            disconnect.notify_one();
+        }
         Ok::<(), anyhow::Error>(())
     };
     let (result, observed) = tokio::join!(
@@ -1278,6 +1362,13 @@ async fn lost_commit_ack(
         matches!(result?, Err(LabWriteError::CommitIndeterminate)),
         "lost COMMIT reply did not remain indeterminate"
     );
+    if expire_deadline {
+        ensure!(
+            tokio::time::Instant::now() >= deadline,
+            "held COMMIT reply returned before the operation deadline"
+        );
+    }
+    disconnect.notify_one();
     proxy.await??;
     ensure!(
         counts(lab, key).await? == vec![1, 1, 1, 1, 1],

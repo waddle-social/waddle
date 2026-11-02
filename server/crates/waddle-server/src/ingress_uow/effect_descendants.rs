@@ -106,7 +106,7 @@ impl EffectDescendantRepository {
     /// ordinary entry below retains its V1009 proof and raw-writer behavior.
     #[cfg(feature = "test-support")]
     pub(crate) async fn attach_in_relation_guard_lab(
-        lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+        lab: &mut super::CandidateTransaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
         descendant: Uuid,
@@ -114,7 +114,8 @@ impl EffectDescendantRepository {
         use crate::ingress_substrate::{prepared_ingress_sql, PreparedIngressRelation};
 
         {
-            let (tx, prepared) = lab.parts();
+            let (tx, prepared) = lab.transaction.prepared_parts();
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
             let query = prepared_ingress_sql(
                 tx.driver(),
                 Some(prepared),
@@ -148,17 +149,25 @@ impl EffectDescendantRepository {
             return Err(IngressUowError::EffectIntentConflict);
         }
         let delivery = DeliveryKey::effect(message_key, effect);
-        if crate::ingress_substrate::record_delivery_in_relation_guard_lab(
-            lab,
-            delivery,
-            message_key,
-        )
-        .await?
-            == MessageWriteOutcome::MessageVanished
         {
-            return Err(IngressUowError::EffectIntentMessageMissing);
+            let fixture = lab.fixture;
+            let (tx, prepared) = lab.transaction.prepared_parts();
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+            if crate::ingress_substrate::record_delivery_in_relation_guard_lab(
+                tx,
+                prepared,
+                fixture,
+                delivery,
+                message_key,
+            )
+            .await?
+                == MessageWriteOutcome::MessageVanished
+            {
+                return Err(IngressUowError::EffectIntentMessageMissing);
+            }
         }
-        let (tx, prepared) = lab.parts();
+        let (tx, prepared) = lab.transaction.prepared_parts();
+        let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
         let query = prepared_ingress_sql(
             tx.driver(),
             Some(prepared),
