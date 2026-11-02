@@ -51,6 +51,7 @@ impl AccountResourceOperationId {
 ///
 /// Each mutation carries the exact actor identity and expected revision. The
 /// update and retire forms also carry the exact binding attempt they target.
+/// Every retire must include an explicit custody disposition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountResourceMutation {
     Bind {
@@ -67,7 +68,7 @@ pub enum AccountResourceMutation {
         claim_identity: UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: BindingRef,
-        retirement_authority: BindingRetirementAuthority,
+        custody_disposition: BindingRetirementDisposition,
     },
     ReplaceClaim {
         expected_claim_identity: UserClaimIdentity,
@@ -76,15 +77,14 @@ pub enum AccountResourceMutation {
     },
 }
 
-/// Caller-supplied basis for retiring the exact active binding.
-///
-/// `SuccessorAssumesCustody` is an explicit test assumption that external
-/// policy authorized the successor to retire the predecessor binding. This
-/// fixture cannot verify that custody claim.
+/// Caller-supplied assumed disposition of accepted work when retiring a
+/// binding. The fixture cannot verify that work is absent or that a recovery
+/// owner holds it. `Unknown` fails closed for original and successor actors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingRetirementAuthority {
-    OriginalBindingActor,
-    SuccessorAssumesCustody,
+pub enum BindingRetirementDisposition {
+    NoAcceptedWork,
+    AcceptedWorkHasRecoveryOwner,
+    Unknown,
 }
 
 /// One identified mutation and its replay key.
@@ -133,7 +133,7 @@ pub enum AccountResourceTransitionError {
     NotBound,
     BindingMismatch,
     BindingOwnerMismatch,
-    RetirementAuthorityMismatch,
+    RetirementCustodyUnknown,
     BindingRefReused,
 }
 
@@ -141,6 +141,7 @@ pub enum AccountResourceTransitionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountResourceOperationLookup<'a> {
     Unknown,
+    PayloadMismatch,
     Recorded(&'a AccountResourceOperationOutcome),
 }
 
@@ -233,17 +234,23 @@ impl AccountResourceSlot {
     }
 
     /// Resolve a possibly lost operation response from the retained journal.
-    /// `Unknown` means this slot has no record for that ID; it does not prove
-    /// that an unavailable external store rolled back.
+    /// The complete operation must match. `Unknown` means this slot has no
+    /// record for the ID; `PayloadMismatch` means the ID is already bound to
+    /// another mutation. Neither result proves an unavailable external store
+    /// rolled back.
     pub fn lookup(
         &self,
-        operation_id: AccountResourceOperationId,
+        operation: &AccountResourceOperation,
     ) -> AccountResourceOperationLookup<'_> {
         self.journal
             .iter()
-            .find(|entry| entry.id == operation_id)
+            .find(|entry| entry.id == operation.id)
             .map_or(AccountResourceOperationLookup::Unknown, |entry| {
-                AccountResourceOperationLookup::Recorded(&entry.outcome)
+                if entry.mutation == operation.mutation {
+                    AccountResourceOperationLookup::Recorded(&entry.outcome)
+                } else {
+                    AccountResourceOperationLookup::PayloadMismatch
+                }
             })
     }
 
@@ -263,12 +270,12 @@ impl AccountResourceSlot {
                 claim_identity,
                 expected_revision,
                 binding_ref,
-                retirement_authority,
+                custody_disposition,
             } => self.retire(
                 claim_identity,
                 *expected_revision,
                 binding_ref,
-                *retirement_authority,
+                *custody_disposition,
             ),
             AccountResourceMutation::ReplaceClaim {
                 expected_claim_identity,
@@ -336,21 +343,16 @@ impl AccountResourceSlot {
         claim_identity: &UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         binding_ref: &BindingRef,
-        retirement_authority: BindingRetirementAuthority,
+        custody_disposition: BindingRetirementDisposition,
     ) -> Result<AccountResourceRevision, AccountResourceTransitionError> {
         self.check_actor(claim_identity)?;
         self.check_revision(expected_revision)?;
         self.check_binding(binding_ref)?;
-        let binding_owner = self
-            .binding_claim_identity
-            .as_ref()
-            .ok_or(AccountResourceTransitionError::NotBound)?;
-        let authorized = match retirement_authority {
-            BindingRetirementAuthority::OriginalBindingActor => binding_owner == claim_identity,
-            BindingRetirementAuthority::SuccessorAssumesCustody => binding_owner != claim_identity,
-        };
-        if !authorized {
-            return Err(AccountResourceTransitionError::RetirementAuthorityMismatch);
+        if self.binding_claim_identity.is_none() {
+            return Err(AccountResourceTransitionError::NotBound);
+        }
+        if custody_disposition == BindingRetirementDisposition::Unknown {
+            return Err(AccountResourceTransitionError::RetirementCustodyUnknown);
         }
         let revision = self.next_revision()?;
 
@@ -557,7 +559,7 @@ mod tests {
                 claim_identity: replacement.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: old_binding.clone(),
-                retirement_authority: BindingRetirementAuthority::SuccessorAssumesCustody,
+                custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
             }))
             .expect("successor explicitly retires predecessor binding"),
         );
@@ -578,7 +580,7 @@ mod tests {
                 claim_identity: old_claim.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: new_binding.clone(),
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
             },
         ] {
             assert_eq!(
@@ -648,7 +650,7 @@ mod tests {
                     claim_identity: replacement.clone(),
                     expected_revision: slot.revision(),
                     binding_ref: old_binding,
-                    retirement_authority: BindingRetirementAuthority::SuccessorAssumesCustody,
+                    custody_disposition: BindingRetirementDisposition::AcceptedWorkHasRecoveryOwner,
                 }))
                 .expect("successor explicitly retires predecessor binding"),
             );
@@ -667,7 +669,7 @@ mod tests {
                     claim_identity: old_claim,
                     expected_revision: slot.revision(),
                     binding_ref: current_binding.clone(),
-                    retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                    custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
                 })),
                 Ok(AccountResourceExecution::Applied(
                     AccountResourceOperationOutcome::Rejected(
@@ -707,7 +709,7 @@ mod tests {
                 claim_identity,
                 expected_revision: slot.revision(),
                 binding_ref: failed_resume,
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
             },
         ] {
             assert_eq!(
@@ -741,7 +743,7 @@ mod tests {
                 claim_identity: claim_identity.clone(),
                 expected_revision: old_revision,
                 binding_ref: old_binding.clone(),
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
             }))
             .expect("retire old resource"),
         );
@@ -777,7 +779,7 @@ mod tests {
                 claim_identity,
                 expected_revision: slot.revision(),
                 binding_ref: old_binding,
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
             },
         ] {
             assert_eq!(
@@ -819,8 +821,20 @@ mod tests {
             },
         );
         assert_eq!(
-            slot.execute(conflicting_payload),
+            slot.execute(conflicting_payload.clone()),
             Err(AccountResourceExecuteError::OperationIdConflict)
+        );
+        // A lost conflict reply must resolve against B's complete payload,
+        // not accidentally report A's committed result under the reused ID.
+        assert_eq!(
+            slot.lookup(&conflicting_payload),
+            AccountResourceOperationLookup::PayloadMismatch
+        );
+        assert_eq!(
+            slot.lookup(&first_operation),
+            AccountResourceOperationLookup::Recorded(&AccountResourceOperationOutcome::Committed {
+                revision
+            })
         );
         assert_eq!(slot.revision(), revision);
         assert_eq!(slot.binding_ref(), Some(&binding_ref));
@@ -835,16 +849,22 @@ mod tests {
             slot.revision(),
             &binding(local_connection()),
         );
-        let unknown_id = AccountResourceOperationId::fresh();
+        let unknown_operation = AccountResourceOperation::new(
+            AccountResourceOperationId::fresh(),
+            AccountResourceMutation::Bind {
+                claim_identity: claim_identity.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: binding(local_connection()),
+            },
+        );
         assert_eq!(
-            slot.lookup(unknown_id),
+            slot.lookup(&unknown_operation),
             AccountResourceOperationLookup::Unknown
         );
 
-        let operation_id = operation.id;
-        let _lost_response = slot.execute(operation).expect("commit bind");
+        let _lost_response = slot.execute(operation.clone()).expect("commit bind");
         assert_eq!(
-            slot.lookup(operation_id),
+            slot.lookup(&operation),
             AccountResourceOperationLookup::Recorded(&AccountResourceOperationOutcome::Committed {
                 revision: AccountResourceRevision(1),
             },)
@@ -865,12 +885,26 @@ mod tests {
             ))
             .expect("bind resource"),
         );
+        assert_eq!(
+            slot.execute(operation(AccountResourceMutation::Retire {
+                claim_identity: claim_identity.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: retired_binding.clone(),
+                custody_disposition: BindingRetirementDisposition::Unknown,
+            })),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::RetirementCustodyUnknown,
+                ),
+            ))
+        );
+        assert_eq!(slot.binding_ref(), Some(&retired_binding));
         committed_revision(
             slot.execute(operation(AccountResourceMutation::Retire {
                 claim_identity: claim_identity.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: retired_binding.clone(),
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
             }))
             .expect("retire resource"),
         );
@@ -932,11 +966,11 @@ mod tests {
                 claim_identity: replacement.clone(),
                 expected_revision: slot.revision(),
                 binding_ref: binding_ref.clone(),
-                retirement_authority: BindingRetirementAuthority::OriginalBindingActor,
+                custody_disposition: BindingRetirementDisposition::Unknown,
             })),
             Ok(AccountResourceExecution::Applied(
                 AccountResourceOperationOutcome::Rejected(
-                    AccountResourceTransitionError::RetirementAuthorityMismatch,
+                    AccountResourceTransitionError::RetirementCustodyUnknown,
                 ),
             ))
         );
@@ -977,21 +1011,21 @@ mod tests {
             last_operation = Some(operation);
         }
         let revision_at_capacity = slot.revision();
-        let rejected_id = AccountResourceOperationId::fresh();
+        let rejected_operation = AccountResourceOperation::new(
+            AccountResourceOperationId::fresh(),
+            AccountResourceMutation::Update {
+                claim_identity: claim_identity.clone(),
+                expected_revision: revision_at_capacity,
+                binding_ref: binding_ref.clone(),
+            },
+        );
         assert_eq!(
-            slot.execute(AccountResourceOperation::new(
-                rejected_id,
-                AccountResourceMutation::Update {
-                    claim_identity: claim_identity.clone(),
-                    expected_revision: revision_at_capacity,
-                    binding_ref: binding_ref.clone(),
-                },
-            )),
+            slot.execute(rejected_operation.clone()),
             Err(AccountResourceExecuteError::JournalFull)
         );
         assert_eq!(slot.revision(), revision_at_capacity);
         assert_eq!(
-            slot.lookup(rejected_id),
+            slot.lookup(&rejected_operation),
             AccountResourceOperationLookup::Unknown
         );
         assert!(matches!(
