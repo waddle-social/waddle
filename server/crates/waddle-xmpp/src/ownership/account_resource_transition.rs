@@ -5,10 +5,11 @@
 //! coordinate concurrent processes, or participate in production routing.
 //! Its synchronous `&mut self` transitions model a serialized compare-and-set
 //! history for tests only. Claim replacement fences the old actor but retains
-//! its binding. A successor cannot update that binding and must explicitly
-//! retire it before a fresh bind; adoption requires a separately reviewed
-//! transition. Resource selection, cleanup, and delivery remain owned by their
-//! existing production paths.
+//! its binding. A successor must explicitly adopt the unchanged binding or
+//! retire it before a fresh bind. Adoption compares identities; it does not
+//! prove claim authority, transfer a pump, or make an endpoint routable.
+//! Resource selection, cleanup, and delivery remain owned by their existing
+//! production paths.
 
 use jid::FullJid;
 use uuid::Uuid;
@@ -75,6 +76,12 @@ pub enum AccountResourceMutation {
         expected_claim_identity: UserClaimIdentity,
         expected_revision: AccountResourceRevision,
         replacement_claim_identity: UserClaimIdentity,
+    },
+    AdoptBinding {
+        claim_identity: UserClaimIdentity,
+        expected_revision: AccountResourceRevision,
+        binding_ref: BindingRef,
+        expected_binding_claim_identity: UserClaimIdentity,
     },
 }
 
@@ -287,6 +294,17 @@ impl AccountResourceSlot {
                 *expected_revision,
                 replacement_claim_identity,
             ),
+            AccountResourceMutation::AdoptBinding {
+                claim_identity,
+                expected_revision,
+                binding_ref,
+                expected_binding_claim_identity,
+            } => self.adopt_binding(
+                claim_identity,
+                *expected_revision,
+                binding_ref,
+                expected_binding_claim_identity,
+            ),
         };
 
         match result {
@@ -387,8 +405,29 @@ impl AccountResourceSlot {
             .push(self.claim_identity.clone());
         self.claim_identity = replacement_claim_identity.clone();
         // A claim change fences the old actor without silently discarding the
-        // resource. A successor bind requires an explicit retirement of this
-        // exact binding first.
+        // resource. A successor must explicitly adopt or retire this binding.
+        self.revision = revision;
+        Ok(revision)
+    }
+
+    fn adopt_binding(
+        &mut self,
+        claim_identity: &UserClaimIdentity,
+        expected_revision: AccountResourceRevision,
+        binding_ref: &BindingRef,
+        expected_binding_claim_identity: &UserClaimIdentity,
+    ) -> Result<AccountResourceRevision, AccountResourceTransitionError> {
+        self.check_actor(claim_identity)?;
+        self.check_revision(expected_revision)?;
+        self.check_binding(binding_ref)?;
+        if self.binding_claim_identity.as_ref() != Some(expected_binding_claim_identity)
+            || expected_binding_claim_identity == claim_identity
+        {
+            return Err(AccountResourceTransitionError::BindingOwnerMismatch);
+        }
+        let revision = self.next_revision()?;
+
+        self.binding_claim_identity = Some(claim_identity.clone());
         self.revision = revision;
         Ok(revision)
     }
@@ -988,6 +1027,190 @@ mod tests {
             ))
         );
         assert_eq!(slot.binding_ref(), Some(&binding_ref));
+    }
+
+    #[test]
+    fn successor_adopts_exact_binding_and_fences_stale_claims() {
+        let mut slot = slot();
+        let old_claim = slot.claim_identity().clone();
+        let old_binding = binding(local_connection());
+        committed_revision(
+            slot.execute(bind_operation(&old_claim, slot.revision(), &old_binding))
+                .expect("bind"),
+        );
+        let successor = claim("node-a", "epoch-a", 1);
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::ReplaceClaim {
+                expected_claim_identity: old_claim.clone(),
+                expected_revision: slot.revision(),
+                replacement_claim_identity: successor.clone(),
+            }))
+            .expect("replace claim"),
+        );
+
+        let stale_predecessor = claim("node-a", "epoch-a", 1);
+        let adoption = |claim_identity: UserClaimIdentity,
+                        expected_binding_claim_identity: UserClaimIdentity,
+                        expected_revision| {
+            operation(AccountResourceMutation::AdoptBinding {
+                claim_identity,
+                expected_revision,
+                binding_ref: old_binding.clone(),
+                expected_binding_claim_identity,
+            })
+        };
+        for (actor, predecessor, rejection) in [
+            (
+                old_claim.clone(),
+                old_claim.clone(),
+                AccountResourceTransitionError::ClaimMismatch,
+            ),
+            (
+                successor.clone(),
+                stale_predecessor,
+                AccountResourceTransitionError::BindingOwnerMismatch,
+            ),
+        ] {
+            assert_eq!(
+                slot.execute(adoption(actor, predecessor, slot.revision())),
+                Ok(AccountResourceExecution::Applied(
+                    AccountResourceOperationOutcome::Rejected(rejection),
+                ))
+            );
+        }
+        assert_eq!(
+            slot.execute(adoption(
+                successor.clone(),
+                old_claim.clone(),
+                AccountResourceRevision::INITIAL,
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::RevisionConflict,
+                ),
+            ))
+        );
+        assert_eq!(
+            slot.execute(operation(AccountResourceMutation::AdoptBinding {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: binding(old_binding.connection_ref().clone()),
+                expected_binding_claim_identity: old_claim.clone(),
+            })),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::BindingMismatch,
+                ),
+            ))
+        );
+
+        let adopt = adoption(successor.clone(), old_claim.clone(), slot.revision());
+        let result = slot.execute(adopt.clone()).expect("adopt binding");
+        let adopted_revision = committed_revision(result);
+        assert_eq!(
+            slot.execute(adopt.clone()),
+            Ok(AccountResourceExecution::Replayed(
+                AccountResourceOperationOutcome::Committed {
+                    revision: adopted_revision,
+                },
+            ))
+        );
+        let mut conflicting = adopt;
+        if let AccountResourceMutation::AdoptBinding {
+            expected_binding_claim_identity,
+            ..
+        } = &mut conflicting.mutation
+        {
+            *expected_binding_claim_identity = successor.clone();
+        }
+        assert_eq!(
+            slot.execute(conflicting),
+            Err(AccountResourceExecuteError::OperationIdConflict)
+        );
+        assert_eq!(
+            slot.execute(adoption(
+                successor.clone(),
+                old_claim.clone(),
+                slot.revision(),
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::BindingOwnerMismatch,
+                ),
+            ))
+        );
+        assert_eq!(slot.binding_ref(), Some(&old_binding));
+        assert_eq!(
+            slot.binding_ref().map(BindingRef::connection_ref),
+            Some(old_binding.connection_ref())
+        );
+
+        for mutation in [
+            AccountResourceMutation::Update {
+                claim_identity: old_claim.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+            },
+            AccountResourceMutation::Retire {
+                claim_identity: old_claim.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+                custody_disposition: BindingRetirementDisposition::NoAcceptedWork,
+            },
+        ] {
+            assert_eq!(
+                slot.execute(operation(mutation)),
+                Ok(AccountResourceExecution::Applied(
+                    AccountResourceOperationOutcome::Rejected(
+                        AccountResourceTransitionError::ClaimMismatch,
+                    ),
+                ))
+            );
+        }
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::Update {
+                claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                binding_ref: old_binding.clone(),
+            }))
+            .expect("adopted owner updates binding"),
+        );
+        assert_eq!(slot.binding_ref(), Some(&old_binding));
+
+        let next_successor = claim("node-b", "epoch-b", 2);
+        committed_revision(
+            slot.execute(operation(AccountResourceMutation::ReplaceClaim {
+                expected_claim_identity: successor.clone(),
+                expected_revision: slot.revision(),
+                replacement_claim_identity: next_successor.clone(),
+            }))
+            .expect("replace successor claim"),
+        );
+        assert_eq!(
+            slot.execute(adoption(
+                successor.clone(),
+                old_claim.clone(),
+                slot.revision(),
+            )),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::ClaimMismatch,
+                ),
+            ))
+        );
+        assert_eq!(
+            slot.execute(adoption(next_successor.clone(), old_claim, slot.revision())),
+            Ok(AccountResourceExecution::Applied(
+                AccountResourceOperationOutcome::Rejected(
+                    AccountResourceTransitionError::BindingOwnerMismatch,
+                ),
+            ))
+        );
+        committed_revision(
+            slot.execute(adoption(next_successor, successor, slot.revision()))
+                .expect("next successor adopts current binding owner"),
+        );
+        assert_eq!(slot.binding_ref(), Some(&old_binding));
     }
 
     #[test]
