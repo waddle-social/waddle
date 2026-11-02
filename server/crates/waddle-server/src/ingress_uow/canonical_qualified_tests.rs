@@ -347,6 +347,26 @@ async fn postgres_case(fixture: &Fixture) {
     assert!(
         matches!(resolve(&mut tx, "origin", &semantic_digest, key).await, AliasResolution::Aliased(AliasOutcome::Inserted(saved)) if saved == key)
     );
+    CanonicalMessageRepository::assert_relayed_alias(
+        &mut tx,
+        key,
+        &"alice@example.test".parse().expect("sender"),
+        &NormalizedTarget::Bare("bob@example.test".parse().expect("target")),
+        &OriginId::new("origin"),
+        &semantic_digest,
+    )
+    .await
+    .expect("attested alias proof ignores empty temporary shadows");
+    assert!(CanonicalMessageRepository::assert_relayed_alias(
+        &mut tx,
+        key,
+        &"alice@example.test".parse().expect("sender"),
+        &NormalizedTarget::Bare("bob@example.test".parse().expect("target")),
+        &OriginId::new("missing"),
+        &semantic_digest,
+    )
+    .await
+    .is_err());
     CanonicalMessageRepository::record_message(&mut tx, key, &semantic_digest, Some(&original))
         .await
         .expect("complete alias envelope");
@@ -657,6 +677,16 @@ async fn sqlite_shared_memory_canonical_replay_and_rollback() {
     assert!(
         matches!(resolve(&mut replay, "sqlite", &semantic_digest, MessageKey::new()).await, AliasResolution::Aliased(AliasOutcome::Existing(saved)) if saved == key)
     );
+    CanonicalMessageRepository::assert_relayed_alias(
+        &mut replay,
+        key,
+        &"alice@example.test".parse().expect("sender"),
+        &NormalizedTarget::Bare("bob@example.test".parse().expect("target")),
+        &OriginId::new("sqlite"),
+        &semantic_digest,
+    )
+    .await
+    .expect("SQLite alias proof");
     assert_eq!(
         CanonicalMessageRepository::load_envelope(&mut replay, key)
             .await

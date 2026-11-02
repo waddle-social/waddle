@@ -473,6 +473,31 @@ impl CanonicalMessageRepository {
         .map_err(Into::into)
     }
 
+    /// Assert an already-recorded origin alias without creating or repairing it.
+    /// PostgreSQL retains parent and alias row locks through the transaction;
+    /// SQLite relies on the transaction's BEGIN IMMEDIATE writer serialization.
+    pub(crate) async fn assert_relayed_alias(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        sender: &BareJid,
+        target: &NormalizedTarget,
+        origin_id: &OriginId,
+        digest: &SemanticDigest,
+    ) -> Result<(), IngressUowError> {
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::assert_relayed_alias_in_prepared_transaction(
+            tx,
+            prepared,
+            message_key,
+            sender,
+            target,
+            origin_id,
+            digest,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     /// Reopen a canonical row when reconciliation adds a new obligation.
     pub async fn clear_terminal(
         transaction: &mut IngressUowTransaction<'_>,

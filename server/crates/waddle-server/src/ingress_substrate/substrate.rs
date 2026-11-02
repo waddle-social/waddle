@@ -89,6 +89,8 @@ pub enum IngressSubstrateError {
     InvalidStoredDigest,
     #[error("persisted ingress alias identity is malformed or inconsistent with its hash")]
     AliasIdentityConflict,
+    #[error("relayed origin alias does not prove the supplied canonical message")]
+    RelayedAliasUnproven,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
     #[error("ingress sm ordinal is already bound to a different message")]
@@ -650,6 +652,71 @@ pub(crate) async fn resolve_alias_in_prepared_transaction(
         .await?
         .ok_or(IngressSubstrateError::AliasMissingAfterConflict)?;
     Ok(resolve_alias(true, digest, Some(&stored), || candidate_key))
+}
+
+/// Prove an existing relayed origin against its exact canonical parent.
+///
+/// The caller has already acquired the epoch and room-claim fences. PostgreSQL
+/// retains row locks on the supplied parent, then the alias, until transaction
+/// end. NOWAIT on the alias avoids waiting in a reverse lock order. SQLite uses
+/// the caller's BEGIN IMMEDIATE writer serialization. Neither path discovers or
+/// creates another parent.
+pub(crate) async fn assert_relayed_alias_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+) -> Result<(), IngressSubstrateError> {
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
+        return Err(IngressSubstrateError::RelayedAliasUnproven);
+    }
+
+    let alias_key = AliasStorageKey::new(sender, target, origin_id);
+    let postgres = format!(
+        "SELECT m.message_key::text, m.digest_version, m.digest, a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id FROM {} a JOIN {} m USING (message_key) WHERE a.alias_key_hash = ? AND a.message_key = ?::uuid FOR UPDATE OF a NOWAIT",
+        prepared_ingress_relation(prepared, PreparedIngressRelation::Aliases),
+        prepared_ingress_relation(prepared, PreparedIngressRelation::Messages),
+    );
+    const SQLITE: &str = "SELECT m.message_key, m.digest_version, m.digest, a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id FROM ingress_origin_aliases a JOIN ingress_messages m USING (message_key) WHERE a.alias_key_hash = ? AND a.message_key = ?";
+    let mut rows = tx
+        .query(
+            if tx.driver() == DatabaseDriver::Postgres {
+                &postgres
+            } else {
+                SQLITE
+            },
+            crate::db_params![
+                alias_key.hash.to_vec(),
+                message_key.to_storage().to_string()
+            ],
+        )
+        .await
+        .map_err(relayed_alias_lock_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(relayed_alias_lock_error)?
+        .ok_or(IngressSubstrateError::RelayedAliasUnproven)?;
+    validate_stored_alias_identity(&row, &alias_key)?;
+    let stored = decode_stored_alias(&row)?;
+    if stored.key != message_key || &stored.digest != digest {
+        return Err(IngressSubstrateError::RelayedAliasUnproven);
+    }
+    Ok(())
+}
+
+fn relayed_alias_lock_error(error: DatabaseError) -> IngressSubstrateError {
+    if let DatabaseError::Internal(sqlx::Error::Database(database)) = &error {
+        if database.code().as_deref() == Some("55P03") {
+            return IngressSubstrateError::Database {
+                retry_class: DbRetryClass::CanonicalLockContention,
+            };
+        }
+    }
+    discard_database_error(error)
 }
 
 /// Attach a stream-management ordinal to a live message.
