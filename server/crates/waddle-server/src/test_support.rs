@@ -7,6 +7,18 @@
 pub mod iq_forward;
 #[cfg(feature = "test-support")]
 pub mod supervised_io;
+#[cfg(feature = "test-support")]
+pub mod connection_actor {
+    //! Dark, test-only vertical proof for a connection actor that owns the
+    //! real WebSocket connection state and its reserved physical pump pair.
+    pub use crate::server::routes::websocket::connection_actor::{
+        start_connection_actor, AcknowledgementResult, BindConnection, CompleteHandledInbound,
+        ConnectionActor, ConnectionActorController, ConnectionActorError, ConnectionActorSequence,
+        ConnectionActorSnapshot, ConnectionActorStartError, ConnectionWireFrame,
+        PanicConnectionActor, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
+        SnapshotConnection, StopConnectionActor,
+    };
+}
 
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;

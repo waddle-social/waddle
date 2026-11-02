@@ -75,6 +75,8 @@ mod parse_errors;
 mod registration;
 #[cfg(feature = "clustering")]
 pub(crate) use registration::complete_bind_retirements;
+#[cfg(feature = "test-support")]
+pub mod connection_actor;
 #[cfg(feature = "clustering")]
 mod remote_muc_retry;
 pub(crate) mod replay;

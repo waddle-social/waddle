@@ -2,6 +2,8 @@
 
 #![cfg(feature = "test-support")]
 
+#[path = "supervised_io/connection_actor.rs"]
+mod connection_actor;
 #[path = "supervised_io/kameo_control.rs"]
 mod kameo_control;
 #[path = "supervised_io/pumps.rs"]

@@ -1956,6 +1956,12 @@ impl WsConnState {
         }
     }
 
+    /// Exact identity of this physical WebSocket, shared by every binding
+    /// attempt made on the same socket.
+    pub(super) fn connection_ref(&self) -> &waddle_xmpp::ownership::ConnectionRef {
+        &self.connection_ref
+    }
+
     pub(super) fn retire_binding_ref(&mut self) {
         self.binding_ref = None;
     }
