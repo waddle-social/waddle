@@ -437,7 +437,10 @@ fn status_for_error(error: &DatabaseError) -> LineageStatus {
 fn is_transport_error(error: &DatabaseError) -> bool {
     match error {
         DatabaseError::ConnectionFailed(_) => true,
-        DatabaseError::Internal(source) => match source {
+        DatabaseError::Internal(source)
+        | DatabaseError::PhysicalAttestation(
+            crate::db::physical_attestation::PhysicalAttestationError::Database(source),
+        ) => match source {
             sqlx::Error::Io(_)
             | sqlx::Error::Tls(_)
             | sqlx::Error::Protocol(_)
@@ -503,8 +506,8 @@ impl LineageReport {
 
 #[cfg(test)]
 mod transport_classification_tests {
-    use super::is_transport_error;
-    use crate::db::DatabaseError;
+    use super::{is_transport_error, status_for_error, LineageStatus};
+    use crate::db::{physical_attestation::PhysicalAttestationError, DatabaseError};
 
     #[derive(Debug)]
     struct FakePgError(&'static str);
@@ -547,6 +550,12 @@ mod transport_classification_tests {
         DatabaseError::Internal(sqlx::Error::Database(Box::new(FakePgError(code))))
     }
 
+    fn attestor_error(code: &'static str) -> DatabaseError {
+        DatabaseError::PhysicalAttestation(PhysicalAttestationError::Database(
+            sqlx::Error::Database(Box::new(FakePgError(code))),
+        ))
+    }
+
     #[test]
     fn pool_and_io_class_errors_are_transport() {
         assert!(is_transport_error(&DatabaseError::Internal(
@@ -554,6 +563,9 @@ mod transport_classification_tests {
         )));
         assert!(is_transport_error(&DatabaseError::ConnectionFailed(
             "refused".to_string()
+        )));
+        assert!(is_transport_error(&DatabaseError::PhysicalAttestation(
+            PhysicalAttestationError::Database(sqlx::Error::PoolTimedOut)
         )));
     }
 
@@ -565,9 +577,16 @@ mod transport_classification_tests {
         assert!(is_transport_error(&database_error("57P03")));
         // Class 08: connection exception.
         assert!(is_transport_error(&database_error("08006")));
+        assert!(is_transport_error(&attestor_error("57P01")));
+        assert!(is_transport_error(&attestor_error("08006")));
+        assert_eq!(
+            status_for_error(&attestor_error("57P01")),
+            LineageStatus::ProbeError
+        );
         // 57014 query_canceled is the DATABASE answering (statement_timeout
         // behind a lock) — definitive, never sticky.
         assert!(!is_transport_error(&database_error("57014")));
+        assert!(!is_transport_error(&attestor_error("57014")));
     }
 
     #[test]
@@ -577,6 +596,7 @@ mod transport_classification_tests {
         assert!(!is_transport_error(&database_error("42P01")));
         // insufficient_privilege.
         assert!(!is_transport_error(&database_error("42501")));
+        assert!(!is_transport_error(&attestor_error("42501")));
         // And typed lineage refusals are always definitive.
         assert!(!is_transport_error(&DatabaseError::Lineage(
             super::super::LineageError::MissingRow
