@@ -122,7 +122,8 @@ fn custody_predicate(schema: &str, message_as_text: &str) -> String {
          AND NOT EXISTS (SELECT 1 FROM {schema}.ingress_archive_dispatch d JOIN {schema}.pending_delivery p ON p.row_id = d.pending_row_id \
              WHERE d.message_key = m.message_key AND d.pending_row_id <> '') \
          AND NOT EXISTS (SELECT 1 FROM {schema}.sm_ingress_appends a WHERE a.message_key = {message_as_text} AND a.disposition = 0) \
-         AND NOT EXISTS (SELECT 1 FROM {schema}.ingress_admission_pins pin WHERE pin.message_key = m.message_key)"
+         AND NOT EXISTS (SELECT 1 FROM {schema}.ingress_admission_pins pin WHERE pin.message_key = m.message_key) \
+         AND NOT EXISTS (SELECT 1 FROM {schema}.direct_admission_lab admission WHERE admission.message_key = m.message_key)"
     )
 }
 

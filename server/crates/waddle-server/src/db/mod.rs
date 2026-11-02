@@ -4,6 +4,8 @@
 
 pub mod actor;
 mod backend;
+#[cfg(feature = "test-support")]
+pub(crate) use backend::{bind_postgres, rewrite_positional_for_postgres};
 pub mod blocking;
 pub mod bootstrap;
 pub mod lineage;

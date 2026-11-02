@@ -43,6 +43,8 @@ pub(crate) use recovery_receipts::{
 };
 mod send_attempts;
 pub(crate) use send_attempts::{send_attempt_blocks_delivery, SendAttemptStatus};
+#[cfg(feature = "test-support")]
+pub(crate) use send_attempts::{start_fresh_postgres, start_fresh_sqlite};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
 mod projections;
 pub(crate) use projections::ProjectionRepository;
