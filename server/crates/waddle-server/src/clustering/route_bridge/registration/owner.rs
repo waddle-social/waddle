@@ -364,9 +364,13 @@ impl OrderedRelayDeliveryBridge {
             }
         }
 
-        let (tx, rx) = mpsc::channel(REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE);
-        let entry =
-            ConnectionEntry::remote_hosted_for_connection(tx, msg.state.connection_ref.clone());
+        let (endpoint, rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(
+            REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE,
+        );
+        let entry = ConnectionEntry::remote_hosted_for_connection(
+            endpoint,
+            msg.state.connection_ref.clone(),
+        );
         apply_remote_resource_state(&entry, &msg.state);
         let owner = entry.binding_id();
         let force_detach_rx = entry.take_force_detach_rx();

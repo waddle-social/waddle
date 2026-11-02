@@ -4,7 +4,7 @@ use super::stream_management::{
     finalize_sm_after_registry_registration, reject_unregistered_resume, sm_show_name,
     SmRegistrationFinalization,
 };
-use super::{error, info, mpsc, Blocklist, FullJid, OutboundStanza, WebSocketState};
+use super::{error, info, Blocklist, FullJid, WebSocketState};
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceRegisterOutcome;
 use crate::clustering::NodeAdmissionPermit;
@@ -13,6 +13,7 @@ use crate::server::dual_registration::MirrorRegisterOutcome;
 use crate::sm_promotion::DisplacedPromotionDeps;
 #[cfg(test)]
 use std::sync::Arc;
+use waddle_xmpp::registry::SocketOutboundEndpoint;
 
 /// A resume can briefly observe the previous node's `UserActor` while its
 /// force-detach cleanup drains.  Bound retries keep that handoff from turning
@@ -420,12 +421,15 @@ pub(super) fn publish_stream_id_and_presence(
 }
 
 #[cfg(test)]
-pub(super) async fn register_bound_connection_after_frame(
+pub(super) async fn register_bound_connection_after_frame<E>(
     state: &WebSocketState,
     domain: &str,
     conn: &mut WsConnState,
-    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
-) -> RegistrationAfterFrame {
+    pending_tx: &mut Option<E>,
+) -> RegistrationAfterFrame
+where
+    E: Into<SocketOutboundEndpoint>,
+{
     let lifecycle = crate::clustering::NodeLifecycle::new();
     let permit = lifecycle.admit().expect("fresh serving lifecycle");
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -435,14 +439,17 @@ pub(super) async fn register_bound_connection_after_frame(
     .await
 }
 
-pub(super) async fn register_bound_connection_after_frame_with_admission(
+pub(super) async fn register_bound_connection_after_frame_with_admission<E>(
     state: &WebSocketState,
     domain: &str,
     conn: &mut WsConnState,
-    pending_tx: &mut Option<mpsc::Sender<OutboundStanza>>,
+    pending_tx: &mut Option<E>,
     permit: &NodeAdmissionPermit,
     shutdown: &tokio_util::sync::CancellationToken,
-) -> RegistrationAfterFrame {
+) -> RegistrationAfterFrame
+where
+    E: Into<SocketOutboundEndpoint>,
+{
     // Take the provisional resume identity before any early return or await.
     // It is reinstalled only if this registration reaches local publication.
     let pending_resume_binding = if conn.pending_resume_stream_id.is_some() {

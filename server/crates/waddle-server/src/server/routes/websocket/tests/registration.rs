@@ -204,8 +204,8 @@ async fn busy_registration_sends_resource_constraint_and_rolls_back() {
 
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
-    let (tx, _rx) = mpsc::channel(1);
-    let mut pending_tx = Some(tx);
+    let (endpoint, _rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(1);
+    let mut pending_tx = Some(endpoint);
     let mut force_detach_rx = None;
     let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -1119,8 +1119,8 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
     let physical_connection_ref = conn.connection_ref.clone();
     conn.phase = ConnectionPhase::authenticated(&jid);
     conn.authenticated_session = Some(session);
-    let (tx, _rx) = mpsc::channel(4);
-    let mut pending_tx = Some(tx);
+    let (endpoint, _rx) = waddle_xmpp::registry::SocketOutboundEndpoint::channel(4);
+    let mut pending_tx = Some(endpoint);
     if resume_first {
         let frame = element_to_xml(
             Element::builder("resume", SM_NS)

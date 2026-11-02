@@ -1,51 +1,51 @@
 use super::{
-    debug, instrument, mpsc, ConnectionEntry, ConnectionRegistry, FullJid,
-    LocalConnectionBindingId, Ordering, OutboundStanza,
+    debug, instrument, ConnectionEntry, ConnectionRegistry, FullJid, LocalConnectionBindingId,
+    Ordering, SocketOutboundEndpoint,
 };
 use crate::pending_delivery::SmSessionId;
 
 impl ConnectionRegistry {
-    /// Register a connection with its outbound channel.
+    /// Register a connection with its opaque outbound socket endpoint.
     ///
     /// Returns the local identity of the published binding.
     ///
     /// If a connection with the same JID already exists, it will be replaced.
     /// This handles reconnection scenarios where a client reconnects with
     /// the same resource before the old connection is cleaned up.
-    #[instrument(skip(self, sender, jid), fields(jid = %jid))]
+    #[instrument(skip(self, endpoint, jid), fields(jid = %jid))]
     pub fn register(
         &self,
         jid: FullJid,
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: impl Into<SocketOutboundEndpoint>,
     ) -> LocalConnectionBindingId {
-        self.register_with_carbons(jid, sender, false)
+        self.register_with_carbons(jid, endpoint, false)
     }
 
     /// Register a connection and seed its XEP-0280 carbons opt-in to
     /// `carbons_enabled`. Used by the XEP-0198 stream-resume path so a
     /// resumed stream keeps the carbons flag it negotiated before the
     /// disconnect instead of silently reverting to the disabled default.
-    #[instrument(skip(self, sender, jid), fields(jid = %jid, carbons = carbons_enabled))]
+    #[instrument(skip(self, endpoint, jid), fields(jid = %jid, carbons = carbons_enabled))]
     pub fn register_with_carbons(
         &self,
         jid: FullJid,
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: impl Into<SocketOutboundEndpoint>,
         carbons_enabled: bool,
     ) -> LocalConnectionBindingId {
-        self.register_with_stream_state(jid, sender, carbons_enabled, false, false)
+        self.register_with_stream_state(jid, endpoint, carbons_enabled, false, false)
     }
 
     /// Register a connection and seed per-stream feature state.
-    #[instrument(skip(self, sender, jid), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested, blocklist_interested = blocklist_interested))]
+    #[instrument(skip(self, endpoint, jid), fields(jid = %jid, carbons = carbons_enabled, roster_interested = roster_interested, blocklist_interested = blocklist_interested))]
     pub fn register_with_stream_state(
         &self,
         jid: FullJid,
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: impl Into<SocketOutboundEndpoint>,
         carbons_enabled: bool,
         roster_interested: bool,
         blocklist_interested: bool,
     ) -> LocalConnectionBindingId {
-        let entry = ConnectionEntry::new(sender);
+        let entry = ConnectionEntry::new(endpoint);
         if carbons_enabled {
             entry.carbons_enabled.store(true, Ordering::Relaxed);
         }

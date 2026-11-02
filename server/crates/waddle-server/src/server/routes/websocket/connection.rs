@@ -37,6 +37,7 @@ use axum::extract::{FromRequest, Request};
 use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use waddle_xmpp::registry::SocketOutboundEndpoint;
 use waddle_xmpp::stream_management::SmRequest;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -210,7 +211,7 @@ const ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS: usize = 1_024;
 /// `handle_inbound_text` stays under the clippy too-many-arguments
 /// threshold, mirroring `SmCtx`'s identical rationale one file over.
 pub(super) struct RegistrationChannels<'a> {
-    pub(super) pending_tx: &'a mut Option<mpsc::Sender<OutboundStanza>>,
+    pub(super) pending_tx: &'a mut Option<SocketOutboundEndpoint>,
     pub(super) force_detach_rx:
         &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
 }
@@ -261,11 +262,12 @@ async fn handle_xmpp_websocket(
     // Create outbound channel for receiving messages from other connections.
     // After the session is registered, `pending_tx` is handed to the
     // ConnectionRegistry and `None`'d out here — the registry becomes the sole
-    // holder of the sender. If another session arrives for the same FullJid,
-    // the registry replaces our entry, drops the sender, and our `recv()`
+    // holder of the opaque endpoint. If another session arrives for the same FullJid,
+    // the registry replaces its entry, and our `recv()`
     // returns `None` — that's how we detect replacement and exit cleanly.
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundStanza>(OUTBOUND_CHANNEL_SIZE);
-    let mut pending_tx: Option<mpsc::Sender<OutboundStanza>> = Some(outbound_tx);
+    let (outbound_endpoint, mut outbound_rx) =
+        SocketOutboundEndpoint::channel(OUTBOUND_CHANNEL_SIZE);
+    let mut pending_tx: Option<SocketOutboundEndpoint> = Some(outbound_endpoint);
 
     // ADR-0017 Phase 3 Slice 6: the cross-node resume live-steal handshake's
     // force-detach receiver. `None` until this connection registers — the

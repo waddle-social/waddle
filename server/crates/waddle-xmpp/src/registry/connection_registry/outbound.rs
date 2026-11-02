@@ -1,3 +1,4 @@
+use super::endpoint::{BindingOutboundEndpoint, SocketOutboundEndpoint};
 use super::{mpsc, Arc, Ordering, Stanza};
 use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use crate::pending_delivery::PendingRowId;
@@ -268,34 +269,6 @@ impl LocalConnectionBindingId {
     }
 }
 
-/// Admission shared by all clones of one published entry. Production starts
-/// open; the future socket-detach cutover must couple sealing to every sender.
-#[derive(Debug)]
-pub(super) struct BindingAdmission {
-    owner: LocalConnectionBindingId,
-    binding_ref: Option<BindingRef>,
-    accepting: bool,
-}
-
-impl BindingAdmission {
-    pub(super) fn matches(
-        &self,
-        owner: LocalConnectionBindingId,
-        binding_ref: Option<&BindingRef>,
-    ) -> bool {
-        self.owner == owner && self.binding_ref.as_ref() == binding_ref
-    }
-
-    pub(super) fn is_accepting(&self) -> bool {
-        self.accepting
-    }
-
-    #[cfg(test)]
-    pub(super) fn seal_for_test(&mut self) {
-        self.accepting = false;
-    }
-}
-
 /// Connection state stored in the registry.
 ///
 /// Contains the outbound sender and shared state that can be queried
@@ -307,16 +280,15 @@ pub struct ConnectionEntry {
     // The current v4 remote registration carries only the physical source.
     // A mirror must not fabricate a source binding attempt from its own ID.
     binding_ref: Option<BindingRef>,
-    pub(super) admission: Arc<std::sync::Mutex<BindingAdmission>>,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
     resume_control: Arc<std::sync::OnceLock<Arc<super::LiveResumeControl>>>,
     /// Bounds terminal ordering retry tasks to one per connection generation.
     terminal_ordering_retry: Arc<AtomicBool>,
-    /// Channel to send stanzas to this connection. Entry clones must not
-    /// expose the sender to producers outside the registry implementation.
-    pub(super) sender: mpsc::Sender<OutboundStanza>,
+    /// Opaque per-socket sink shared by every registry and UserActor clone.
+    /// The raw Tokio sender is created and retained inside this endpoint.
+    pub(super) endpoint: BindingOutboundEndpoint,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
     pub carbons_enabled: Arc<AtomicBool>,
     /// Whether this resource is currently available (presence type != unavailable)
@@ -400,9 +372,9 @@ const FORCE_DETACH_CHANNEL_CAPACITY: usize = 8;
 
 impl ConnectionEntry {
     /// Create a new connection entry with carbons disabled by default.
-    pub fn new(sender: mpsc::Sender<OutboundStanza>) -> Self {
+    pub fn new(endpoint: impl Into<SocketOutboundEndpoint>) -> Self {
         Self::new_for_connection(
-            sender,
+            endpoint,
             ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
         )
     }
@@ -410,43 +382,42 @@ impl ConnectionEntry {
     /// Create a new local registry entry for an already-identified physical
     /// connection. Each call still mints a new JID-binding token.
     pub fn new_for_connection(
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: impl Into<SocketOutboundEndpoint>,
         connection_ref: ConnectionRef,
     ) -> Self {
-        Self::new_for_binding(sender, BindingRef::fresh(connection_ref))
+        Self::new_for_binding(endpoint, BindingRef::fresh(connection_ref))
     }
 
     /// Create a local registry entry for the exact bind or resume attempt.
     /// The independently minted local owner ID still fences this registry entry.
-    pub fn new_for_binding(sender: mpsc::Sender<OutboundStanza>, binding_ref: BindingRef) -> Self {
+    pub fn new_for_binding(
+        endpoint: impl Into<SocketOutboundEndpoint>,
+        binding_ref: BindingRef,
+    ) -> Self {
         Self::new_entry(
-            sender,
+            endpoint.into(),
             binding_ref.connection_ref().clone(),
             Some(binding_ref),
         )
     }
 
     fn new_entry(
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: SocketOutboundEndpoint,
         connection_ref: ConnectionRef,
         binding_ref: Option<BindingRef>,
     ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         let binding_id = LocalConnectionBindingId::fresh();
+        let endpoint = BindingOutboundEndpoint::bind(endpoint, binding_id, binding_ref.clone());
         Self {
             binding_id,
             connection_ref,
-            admission: Arc::new(std::sync::Mutex::new(BindingAdmission {
-                owner: binding_id,
-                binding_ref: binding_ref.clone(),
-                accepting: true,
-            })),
             binding_ref,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
             archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
-            sender,
+            endpoint,
             carbons_enabled: Arc::new(AtomicBool::new(false)),
             presence_available: Arc::new(AtomicBool::new(false)),
             presence_priority: Arc::new(std::sync::atomic::AtomicI8::new(0)),
@@ -482,9 +453,9 @@ impl ConnectionEntry {
         self.resume_control.get().cloned()
     }
 
-    pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {
+    pub fn remote_hosted(endpoint: impl Into<SocketOutboundEndpoint>) -> Self {
         Self::remote_hosted_for_connection(
-            sender,
+            endpoint,
             ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
         )
     }
@@ -492,10 +463,10 @@ impl ConnectionEntry {
     /// Create a remote-hosted account mirror which retains the originating
     /// physical connection reference while minting a mirror-local binding.
     pub fn remote_hosted_for_connection(
-        sender: mpsc::Sender<OutboundStanza>,
+        endpoint: impl Into<SocketOutboundEndpoint>,
         connection_ref: ConnectionRef,
     ) -> Self {
-        let mut entry = Self::new_entry(sender, connection_ref, None);
+        let mut entry = Self::new_entry(endpoint.into(), connection_ref, None);
         entry.hosting = ConnectionHosting::Remote;
         entry
     }
@@ -515,13 +486,13 @@ impl ConnectionEntry {
     /// Read-only observation for the WebSocket queue characterization seam.
     #[cfg(feature = "test-utils")]
     pub fn outbound_queue_is_empty_for_test(&self) -> bool {
-        self.sender.capacity() == self.sender.max_capacity()
+        self.endpoint.capacity() == self.endpoint.max_capacity()
     }
 
     /// Read-only observation for the WebSocket queue characterization seam.
     #[cfg(feature = "test-utils")]
     pub fn outbound_queue_is_closed_for_test(&self) -> bool {
-        self.sender.is_closed()
+        self.endpoint.is_closed()
     }
 
     pub fn is_locally_hosted(&self) -> bool {
