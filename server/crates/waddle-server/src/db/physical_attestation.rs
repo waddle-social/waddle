@@ -23,6 +23,8 @@ use super::DatabaseError;
 mod installer;
 pub use installer::{inspect_installation, install, InstallationStatus};
 mod typed_authority;
+#[cfg(feature = "test-support")]
+pub(crate) use typed_authority::{prelock_epoch_relation, read_epoch_after_prelock};
 pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 
 const FUNCTION_NAME: &str = "read_physical_identity";

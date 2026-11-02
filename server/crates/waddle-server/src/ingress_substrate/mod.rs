@@ -99,3 +99,7 @@ pub(crate) use substrate::{
     record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
     terminalize_message_in_prepared_transaction, PreparedIngressRelation,
 };
+#[cfg(feature = "test-support")]
+pub(crate) use substrate::{
+    record_delivery_in_relation_guard_lab, record_message_in_relation_guard_lab,
+};

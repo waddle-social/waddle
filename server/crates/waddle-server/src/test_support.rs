@@ -5,6 +5,10 @@
 
 #[cfg(feature = "test-support")]
 pub mod iq_forward;
+#[cfg(feature = "test-support")]
+pub(crate) mod relation_guard_lab;
+#[cfg(feature = "test-support")]
+pub use relation_guard_lab::verify_disposable_relation_guard_chain;
 
 use crate::db::DatabasePool;
 use crate::ingress::IngressAuthority;

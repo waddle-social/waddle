@@ -1142,6 +1142,18 @@ pub enum ReconcileVerdict {
 pub struct EffectIntentRepository;
 
 impl EffectIntentRepository {
+    /// Reuse the real reconciliation body inside the sealed relation-guard lab.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn reconcile_in_relation_guard_lab(
+        lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+        message_key: MessageKey,
+        planned: &[IngressEffectIntent],
+        existing_authority: bool,
+    ) -> Result<ReconcileVerdict, IngressUowError> {
+        let (tx, prepared) = lab.parts();
+        Self::reconcile_prepared(tx, Some(prepared), message_key, planned, existing_authority).await
+    }
+
     /// Report a changed retry plan without allowing it to revise a sealed audience.
     pub(crate) fn compare_sealed_replan(
         recorded: &[IngressEffectIntent],

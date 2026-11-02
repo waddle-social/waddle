@@ -511,10 +511,35 @@ pub(crate) async fn record_message_in_prepared_transaction(
     envelope: Option<&MessageEnvelope>,
 ) -> Result<(), IngressSubstrateError> {
     acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
-    if !insert_message(tx, prepared, message_key, digest, envelope).await? {
+    record_message_after_epoch_lock(tx, prepared, message_key, digest, envelope)
+        .await
+        .map(|_| ())
+}
+
+async fn record_message_after_epoch_lock(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+    envelope: Option<&MessageEnvelope>,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    if insert_message(tx, prepared, message_key, digest, envelope).await? {
+        Ok(MessageWriteOutcome::Recorded)
+    } else {
         authority::complete_message_envelope(tx, prepared, message_key, digest, envelope).await?;
+        Ok(MessageWriteOutcome::AlreadyRecorded)
     }
-    Ok(())
+}
+
+/// The marker is constructible only by the disposable candidate-guard lab.
+#[cfg(feature = "test-support")]
+pub(crate) async fn record_message_in_relation_guard_lab(
+    lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    let (tx, prepared) = lab.parts();
+    record_message_after_epoch_lock(tx, Some(prepared), message_key, digest, None).await
 }
 
 pub(in crate::ingress_substrate) async fn insert_message(
@@ -806,6 +831,17 @@ pub(crate) async fn insert_sm_ref_in_prepared_transaction(
     }
 }
 
+/// Record a delivery under the lab's already-held relation barrier.
+#[cfg(feature = "test-support")]
+pub(crate) async fn record_delivery_in_relation_guard_lab(
+    lab: &mut crate::test_support::relation_guard_lab::CandidateTransaction<'_>,
+    delivery_key: DeliveryKey,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    let (tx, prepared) = lab.parts();
+    record_delivery_after_epoch_lock(tx, Some(prepared), delivery_key, message_key).await
+}
+
 /// Record a delivery/effect identity for a live message.
 ///
 /// Idempotent for ambiguous-commit retries, mirroring [`insert_sm_ref`]:
@@ -827,6 +863,15 @@ pub(crate) async fn record_delivery_in_prepared_transaction(
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
     acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    record_delivery_after_epoch_lock(tx, prepared, delivery_key, message_key).await
+}
+
+async fn record_delivery_after_epoch_lock(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    delivery_key: DeliveryKey,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
     if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
@@ -1597,6 +1642,19 @@ pub(crate) struct PreparedAttestedReceiptWriter {
 }
 
 impl PreparedAttestedReceiptWriter {
+    /// A schema carrier for the closed lab; the separate lab transaction marker
+    /// is required by every adapter that omits the V1009 row lock.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn for_relation_guard_lab(
+        capability: &AttestedPostgresWriterCapability,
+        protocol_epoch: ProtocolEpoch,
+    ) -> Self {
+        Self {
+            protocol_epoch,
+            schema: capability.identity().schema.name.0.clone(),
+        }
+    }
+
     pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
         self.protocol_epoch
     }
