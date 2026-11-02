@@ -579,11 +579,14 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
         blocklist,
     );
 
+    let Some(binding_ref) = conn.ensure_binding_ref() else {
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    };
     let Some(tx) = pending_tx.take() else {
         return RegistrationAfterFrame::Unchanged;
     };
 
-    let mut entry = waddle_xmpp::registry::ConnectionEntry::new(tx);
+    let mut entry = waddle_xmpp::registry::ConnectionEntry::new_with_binding(tx, binding_ref);
     entry.write_interruption = conn.write_interruption.clone();
     let wired = entry.wire_resume_control(jid.clone(), conn.live_resume_control.clone());
     debug_assert!(wired, "new connection resume control must be unbound");

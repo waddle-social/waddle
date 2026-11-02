@@ -284,7 +284,15 @@ async fn handle_xmpp_websocket(
     let mut pending_force_detach: Vec<waddle_xmpp::registry::ForceDetachRequest> = Vec::new();
 
     // Track connection state
-    let mut conn = WsConnState::new();
+    let node_identity = state
+        .deps
+        .app_state
+        .clustering_claims
+        .node_identity
+        .as_ref()
+        .map(|identity| identity.current())
+        .unwrap_or_else(waddle_xmpp::ownership::NodeIdentity::local);
+    let mut conn = WsConnState::new_for_node(node_identity);
     let live_resume_control = conn.live_resume_control.clone();
     let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
     let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())

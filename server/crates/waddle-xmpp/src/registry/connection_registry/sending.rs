@@ -1,3 +1,4 @@
+use super::endpoint_gate::EndpointGateError;
 use super::{
     debug, instrument, mpsc, Arc, AtomicBool, BroadcastOutcome, ConnectionEntry,
     ConnectionRegistry, DashMap, FullJid, OutboundStanza, OutboundWriteAcceptance, PresenceState,
@@ -24,6 +25,28 @@ pub enum PendingFlushReserveError {
     NotConnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntrySendError {
+    ChannelClosed,
+    EndpointRejected,
+}
+
+async fn send_entry_waiting(
+    entry: &ConnectionEntry,
+    outbound: OutboundStanza,
+) -> Result<(), EntrySendError> {
+    let permit = entry
+        .reserve_outbound()
+        .await
+        .map_err(|error| match error {
+            EndpointGateError::ChannelClosed => EntrySendError::ChannelClosed,
+            _ => EntrySendError::EndpointRejected,
+        })?;
+    entry
+        .send_reserved(entry.binding_ref(), permit, outbound)
+        .map_err(|_| EntrySendError::EndpointRejected)
+}
+
 impl ConnectionRegistry {
     /// Wait for pending-delivery capacity before marking the row offered.
     /// No durable offer exists while this operation awaits backpressure.
@@ -32,15 +55,16 @@ impl ConnectionRegistry {
         jid: &FullJid,
         owner: Option<&Arc<AtomicBool>>,
     ) -> Result<PendingFlushReservation, PendingFlushReserveError> {
-        let entry = self
+        let entry_ref = self
             .connections
             .get(jid)
             .filter(|entry| owner.is_none_or(|owner| Arc::ptr_eq(&entry.carbons_enabled, owner)))
             .ok_or(PendingFlushReserveError::NotConnected)?;
+        let entry = entry_ref.value().clone();
         let sender = entry.sender.clone();
         let captured_owner = Arc::clone(&entry.carbons_enabled);
-        drop(entry);
-        match sender.clone().reserve_owned().await {
+        drop(entry_ref);
+        match entry.reserve_outbound().await {
             Ok(permit) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,
@@ -48,8 +72,12 @@ impl ConnectionRegistry {
                 permit,
             }),
             Err(_) => {
-                self.remove_if_sender_closed_owner(jid, &sender);
-                Err(PendingFlushReserveError::Closed)
+                if sender.is_closed() {
+                    self.remove_if_sender_closed_owner(jid, &sender);
+                    Err(PendingFlushReserveError::Closed)
+                } else {
+                    Err(PendingFlushReserveError::NotConnected)
+                }
             }
         }
     }
@@ -69,19 +97,20 @@ impl ConnectionRegistry {
             .ok_or(PendingFlushReserveError::NotConnected)?;
         let sender = entry.sender.clone();
         let captured_owner = Arc::clone(&entry.carbons_enabled);
-        drop(entry);
-        match sender.clone().try_reserve_owned() {
-            Ok(permit) => Ok(PendingFlushReservation {
+        match entry.try_reserve_outbound() {
+            Ok(Ok(permit)) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,
                 sender,
                 permit,
             }),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(PendingFlushReserveError::Full),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Ok(Err(mpsc::error::TrySendError::Full(_))) => Err(PendingFlushReserveError::Full),
+            Ok(Err(mpsc::error::TrySendError::Closed(_))) => {
+                drop(entry);
                 self.remove_if_sender_closed_owner(jid, &sender);
                 Err(PendingFlushReserveError::Closed)
             }
+            Err(_) => Err(PendingFlushReserveError::NotConnected),
         }
     }
 
@@ -114,7 +143,12 @@ impl ConnectionRegistry {
             self.remove_if_sender_closed_owner(&jid, &sender);
             return SendResult::ChannelClosed;
         }
-        permit.send(outbound);
+        if entry
+            .send_reserved(entry.binding_ref(), permit, outbound)
+            .is_err()
+        {
+            return SendResult::NotConnected;
+        }
         drop(entry);
         SendResult::Sent
     }
@@ -128,33 +162,42 @@ impl ConnectionRegistry {
         stanza: Stanza,
         acceptance: OutboundWriteAcceptance,
     ) -> SendResult {
-        let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().sender.clone(),
+        let entry = match self.connections.get(jid) {
+            Some(entry) => entry.value().clone(),
             None => return SendResult::NotConnected,
         };
-        let outbound = OutboundStanza::with_write_acceptance(stanza.clone(), acceptance.clone());
-        match sender.send(outbound).await {
-            Ok(()) => SendResult::Sent,
-            Err(_) => {
-                self.remove_if_sender_closed_owner(jid, &sender);
-                if let Some(entry) = self.connections.get(jid) {
-                    let current = entry.value().sender.clone();
-                    drop(entry);
-                    if !current.same_channel(&sender) {
-                        return match current
-                            .send(OutboundStanza::with_write_acceptance(stanza, acceptance))
-                            .await
-                        {
-                            Ok(()) => SendResult::Sent,
-                            Err(_) => {
-                                self.remove_if_sender_closed_owner(jid, &current);
-                                SendResult::ChannelClosed
-                            }
-                        };
-                    }
+        let first = send_entry_waiting(
+            &entry,
+            OutboundStanza::with_write_acceptance(stanza.clone(), acceptance.clone()),
+        )
+        .await;
+        if first.is_ok() {
+            return SendResult::Sent;
+        }
+        if first == Err(EntrySendError::ChannelClosed) {
+            self.remove_if_sender_closed_owner(jid, &entry.sender);
+            if let Some(current) = self.connections.get(jid).map(|entry| entry.value().clone()) {
+                if !current.sender.same_channel(&entry.sender) {
+                    return match send_entry_waiting(
+                        &current,
+                        OutboundStanza::with_write_acceptance(stanza, acceptance),
+                    )
+                    .await
+                    {
+                        Ok(()) => SendResult::Sent,
+                        Err(EntrySendError::ChannelClosed) => {
+                            self.remove_if_sender_closed_owner(jid, &current.sender);
+                            SendResult::ChannelClosed
+                        }
+                        Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
+                    };
                 }
-                SendResult::ChannelClosed
             }
+        }
+        match first {
+            Err(EntrySendError::ChannelClosed) => SendResult::ChannelClosed,
+            Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
+            Ok(()) => SendResult::Sent,
         }
     }
 
@@ -178,40 +221,41 @@ impl ConnectionRegistry {
     )]
     pub async fn send_to(&self, jid: &FullJid, stanza: Stanza) -> SendResult {
         crate::telemetry::messages::record_span_message_id(stanza_message_id(&stanza));
-        let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().sender.clone(),
+        let entry = match self.connections.get(jid) {
+            Some(entry) => entry.value().clone(),
             None => {
                 debug!("Recipient not connected");
                 return SendResult::NotConnected;
             }
         };
-
-        match sender.send(OutboundStanza::new(stanza.clone())).await {
-            Ok(()) => {
-                debug!("Stanza queued for delivery");
-                SendResult::Sent
-            }
-            Err(_) => {
-                debug!("Outbound channel closed, connection may have dropped");
-                self.remove_if_sender_closed_owner(jid, &sender);
-                if let Some(entry) = self.connections.get(jid) {
-                    let current = entry.value().sender.clone();
-                    drop(entry);
-                    if !current.same_channel(&sender) {
-                        return match current.send(OutboundStanza::new(stanza)).await {
-                            Ok(()) => {
-                                debug!("Stanza queued for replacement connection");
-                                SendResult::Sent
-                            }
-                            Err(_) => {
-                                self.remove_if_sender_closed_owner(jid, &current);
-                                SendResult::ChannelClosed
-                            }
-                        };
-                    }
+        let first = send_entry_waiting(&entry, OutboundStanza::new(stanza.clone())).await;
+        if first.is_ok() {
+            debug!("Stanza queued for delivery");
+            return SendResult::Sent;
+        }
+        if first == Err(EntrySendError::ChannelClosed) {
+            debug!("Outbound channel closed, connection may have dropped");
+            self.remove_if_sender_closed_owner(jid, &entry.sender);
+            if let Some(current) = self.connections.get(jid).map(|entry| entry.value().clone()) {
+                if !current.sender.same_channel(&entry.sender) {
+                    return match send_entry_waiting(&current, OutboundStanza::new(stanza)).await {
+                        Ok(()) => {
+                            debug!("Stanza queued for replacement connection");
+                            SendResult::Sent
+                        }
+                        Err(EntrySendError::ChannelClosed) => {
+                            self.remove_if_sender_closed_owner(jid, &current.sender);
+                            SendResult::ChannelClosed
+                        }
+                        Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
+                    };
                 }
-                SendResult::ChannelClosed
             }
+        }
+        match first {
+            Err(EntrySendError::ChannelClosed) => SendResult::ChannelClosed,
+            Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
+            Ok(()) => SendResult::Sent,
         }
     }
 
@@ -233,21 +277,22 @@ impl ConnectionRegistry {
         owner: &Arc<AtomicBool>,
         stanza: Stanza,
     ) -> SendResult {
-        let sender = match self.connections.get(jid) {
+        let entry = match self.connections.get(jid) {
             Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().sender.clone()
+                entry.value().clone()
             }
             _ => {
                 debug!("Recipient not owned by this session; not delivering");
                 return SendResult::NotConnected;
             }
         };
-        match sender.send(OutboundStanza::new(stanza)).await {
+        match send_entry_waiting(&entry, OutboundStanza::new(stanza)).await {
             Ok(()) => SendResult::Sent,
-            Err(_) => {
-                self.remove_if_sender_closed_owner(jid, &sender);
+            Err(EntrySendError::ChannelClosed) => {
+                self.remove_if_sender_closed_owner(jid, &entry.sender);
                 SendResult::ChannelClosed
             }
+            Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
         }
     }
 
@@ -264,20 +309,21 @@ impl ConnectionRegistry {
         row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
-        let sender = match self.connections.get(jid) {
-            Some(entry) => entry.value().sender.clone(),
+        let entry = match self.connections.get(jid) {
+            Some(entry) => entry.value().clone(),
             None => {
                 debug!("Recipient not connected for pending flush");
                 return SendResult::NotConnected;
             }
         };
         let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
-        match sender.send(outbound).await {
+        match send_entry_waiting(&entry, outbound).await {
             Ok(()) => SendResult::Sent,
-            Err(_) => {
-                self.remove_if_sender_closed_owner(jid, &sender);
+            Err(EntrySendError::ChannelClosed) => {
+                self.remove_if_sender_closed_owner(jid, &entry.sender);
                 SendResult::ChannelClosed
             }
+            Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
         }
     }
 
@@ -305,9 +351,9 @@ impl ConnectionRegistry {
         row_id: PendingRowId,
         original_receipt_at: chrono::DateTime<chrono::Utc>,
     ) -> SendResult {
-        let sender = match self.connections.get(jid) {
+        let entry = match self.connections.get(jid) {
             Some(entry) if Arc::ptr_eq(&entry.value().carbons_enabled, owner) => {
-                entry.value().sender.clone()
+                entry.value().clone()
             }
             _ => {
                 debug!("Recipient not owned by this session for pending flush");
@@ -315,12 +361,13 @@ impl ConnectionRegistry {
             }
         };
         let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
-        match sender.send(outbound).await {
+        match send_entry_waiting(&entry, outbound).await {
             Ok(()) => SendResult::Sent,
-            Err(_) => {
-                self.remove_if_sender_closed_owner(jid, &sender);
+            Err(EntrySendError::ChannelClosed) => {
+                self.remove_if_sender_closed_owner(jid, &entry.sender);
                 SendResult::ChannelClosed
             }
+            Err(EntrySendError::EndpointRejected) => SendResult::NotConnected,
         }
     }
 
@@ -374,8 +421,8 @@ impl ConnectionRegistry {
         stanza: Stanza,
         matches: impl FnOnce(&ConnectionEntry) -> bool,
     ) -> BroadcastOutcome {
-        let sender = match self.connections.get(jid) {
-            Some(entry) if matches(entry.value()) => entry.value().sender.clone(),
+        let entry = match self.connections.get(jid) {
+            Some(entry) if matches(entry.value()) => entry.value().clone(),
             None => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 return BroadcastOutcome::NotConnected;
@@ -387,7 +434,7 @@ impl ConnectionRegistry {
         };
 
         let delivered_kind = crate::telemetry::messages::delivered_message_kind(&stanza);
-        match sender.try_send(OutboundStanza::new(stanza)) {
+        match entry.try_send_archive_ordered(OutboundStanza::new(stanza)) {
             Ok(()) => {
                 crate::telemetry::reliability::increment_broadcast_delivered();
                 if let Some(kind) = delivered_kind {
@@ -395,7 +442,7 @@ impl ConnectionRegistry {
                 }
                 BroadcastOutcome::Delivered
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 crate::telemetry::reliability::increment_broadcast_dropped_full();
                 // Keep per-recipient detail at debug only — the
                 // aggregated broadcast log at the call site already
@@ -410,7 +457,7 @@ impl ConnectionRegistry {
                 );
                 BroadcastOutcome::DroppedFull
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Closed(_)) => {
                 crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
                 BroadcastOutcome::DroppedClosed

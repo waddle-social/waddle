@@ -18,6 +18,7 @@ use crate::Stanza;
 mod archive_dispatch;
 mod binding;
 mod connections;
+mod endpoint_gate;
 mod live_resume;
 mod outbound;
 mod presence;

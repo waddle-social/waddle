@@ -324,6 +324,10 @@ pub(in crate::server::routes::websocket::stream_management) fn max_resume_secs_f
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
 pub(in crate::server::routes::websocket) struct SmCtx<'a> {
+    pub(in crate::server::routes::websocket) connection_ref:
+        &'a waddle_xmpp::ownership::ConnectionRef,
+    pub(in crate::server::routes::websocket) binding_ref:
+        &'a mut Option<waddle_xmpp::ownership::BindingRef>,
     pub(in crate::server::routes::websocket) phase: &'a mut ConnectionPhase,
     pub(in crate::server::routes::websocket) sm_state: &'a mut StreamManagementState,
     pub(in crate::server::routes::websocket) sm_ingress_fence:
@@ -837,6 +841,8 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
 
     let SmCtx {
+        connection_ref,
+        binding_ref,
         phase,
         sm_state,
         sm_ingress_fence,
@@ -869,6 +875,12 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
             SmResumeOutcome::UnexpectedRequest,
         );
     }
+    let Some(attempt_binding) = connection_ref.next_binding_ref() else {
+        return SmResumeTerminal::failed(
+            waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+            SmResumeOutcome::Internal,
+        );
+    };
 
     // Capture and retire the old transport before claiming its snapshot. The
     // connection-owned handshake retains counters, replay and occupancy and
@@ -1349,6 +1361,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *pending_resume_claim = Some(claim_guard);
+    *binding_ref = Some(attempt_binding);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —

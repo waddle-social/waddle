@@ -273,6 +273,36 @@ mod tests {
         "user@example.test".parse().expect("jid")
     }
 
+    #[test]
+    fn mismatched_force_detach_request_does_not_change_dark_gate_admission() {
+        let mut state = StreamManagementState::new();
+        state.enable("live-resume".into(), true, None);
+        let control = LiveResumeControl::new(state.resume_checkpoint(), CancellationToken::new());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(sender);
+        let jid: FullJid = "user@example.test/device".parse().expect("jid");
+        assert!(entry.wire_resume_control(jid.clone(), control));
+        let mut force_receiver = entry.take_force_detach_rx().expect("owner receiver");
+        let (ack, _ack_rx) = oneshot::channel();
+
+        entry
+            .force_detach_sender()
+            .try_send(ForceDetachRequest {
+                origin: ForceDetachOrigin::CrossNodeResume,
+                requester_bare_jid: "impostor@example.test".parse().expect("bare jid"),
+                ack,
+            })
+            .expect("mismatched request reaches owner-side identity check");
+
+        assert!(force_receiver.try_recv().is_ok());
+        assert!(entry
+            .try_send_archive_ordered(crate::registry::OutboundStanza::new(
+                crate::Stanza::Message(xmpp_parsers::message::Message::new(Some(jid.into(),))),
+            ))
+            .is_ok());
+        assert!(receiver.try_recv().is_ok());
+    }
+
     #[tokio::test]
     async fn live_resume_reset_keeps_checkpoint_and_rebinds_current_entry() {
         let (mut state, control, mut old_force) = fixture();

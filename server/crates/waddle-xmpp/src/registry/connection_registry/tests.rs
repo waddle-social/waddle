@@ -93,6 +93,24 @@ fn locally_hosted_send_excludes_remote_owner_mirror() {
     assert!(rx.try_recv().is_err());
 }
 
+#[test]
+fn remote_hosted_proxy_keeps_its_local_adapter_queue_active() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("remote");
+    let (sender, mut receiver) = mpsc::channel(1);
+    registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(sender));
+
+    assert_eq!(
+        registry.try_send_to(
+            &jid,
+            Stanza::Message(make_test_message("remote@example.com")),
+        ),
+        BroadcastOutcome::Delivered
+    );
+    assert!(receiver.try_recv().is_ok());
+    assert!(!registry.is_locally_hosted(&jid));
+}
+
 #[tokio::test]
 async fn register_and_unregister_publish_connection_gauge() {
     let guard = crate::telemetry::test_support::acquire().await;
@@ -263,12 +281,16 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
 fn test_register_entry_if_owner_or_absent_refuses_replacement_owner() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();
-    let (tx1, _rx1) = mpsc::channel(16);
+    let (tx1, mut rx1) = mpsc::channel(16);
     let entry1 = ConnectionEntry::new(tx1);
     let owner1 = entry1.carbons_handle();
 
     assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
+    assert!(registry.update_presence(&jid, true, 0));
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner1))
+        .expect("reserve before same-owner republish");
 
     let (tx2, _rx2) = mpsc::channel(16);
     let entry2 = ConnectionEntry::new(tx2);
@@ -282,6 +304,23 @@ fn test_register_entry_if_owner_or_absent_refuses_replacement_owner() {
     assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
     assert_eq!(registry.connection_count(), 1);
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("user@example.com")))
+        ),
+        SendResult::Sent
+    ));
+    assert!(
+        rx1.try_recv().is_ok(),
+        "same owner and channel still accept held work"
+    );
+    assert_eq!(
+        registry.try_send_to(&jid, Stanza::Message(make_test_message("user@example.com")),),
+        BroadcastOutcome::Delivered,
+        "republishing the exact entry must leave its shared gate active"
+    );
+    assert!(rx1.try_recv().is_ok());
 }
 
 #[test]
@@ -1360,6 +1399,119 @@ fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner(
         assert!(old_receiver.try_recv().is_err());
         assert!(replacement_receiver.try_recv().is_err());
     }
+}
+
+#[test]
+fn replacement_preserves_old_direct_permit_and_rejects_stale_pending_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut old_receiver) = mpsc::channel(3);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let old_entry = registry
+        .entry_if_owner(&jid, &owner)
+        .expect("original entry");
+    let old_binding = old_entry.binding_ref().clone();
+
+    assert_eq!(
+        registry.try_send_to(
+            &jid,
+            Stanza::Message(make_test_message("reserved@example.com")),
+        ),
+        BroadcastOutcome::Delivered,
+        "the frame accepted before replacement remains queued"
+    );
+    let direct_permit = old_entry
+        .try_reserve_outbound()
+        .expect("active gate")
+        .expect("reserve old direct-send capacity");
+    let pending_reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve pending capacity before replacement");
+
+    let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
+    registry.register(jid.clone(), replacement_sender);
+    assert!(
+        old_entry
+            .send_reserved(
+                &old_binding,
+                direct_permit,
+                OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com"))),
+            )
+            .is_ok(),
+        "a sender that already held capacity still publishes to its captured old queue"
+    );
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            pending_reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::NotConnected
+    ));
+
+    assert!(
+        old_receiver.try_recv().is_ok(),
+        "previously accepted work stays queued"
+    );
+    assert!(
+        old_receiver.try_recv().is_ok(),
+        "captured direct permit keeps its old behavior"
+    );
+    assert!(old_receiver.try_recv().is_err());
+    assert!(replacement_receiver.try_recv().is_err());
+}
+
+#[test]
+fn force_detach_interrupt_keeps_dark_gate_final_permit_admission_unchanged() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(2);
+    let owner = registry.register(jid.clone(), sender);
+    assert!(registry.update_presence(&jid, true, 0));
+    let entry = registry.entry_if_owner(&jid, &owner).expect("local entry");
+    let mut force_detach_rx = entry.take_force_detach_rx().expect("detach receiver");
+
+    assert_eq!(
+        registry.try_send_to(
+            &jid,
+            Stanza::Message(make_test_message("reserved@example.com")),
+        ),
+        BroadcastOutcome::Delivered,
+        "pre-detach accepted work remains in the channel"
+    );
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve a held final-send permit");
+    let (ack, _ack_rx) = tokio::sync::oneshot::channel();
+    entry
+        .try_force_detach_and_interrupt(crate::registry::ForceDetachRequest {
+            origin: crate::registry::ForceDetachOrigin::CrossNodeResume,
+            requester_bare_jid: jid.to_bare(),
+            ack,
+        })
+        .expect("queue force detach before sealing");
+
+    assert!(entry.write_interruption.is_cancelled());
+    assert!(
+        force_detach_rx.try_recv().is_ok(),
+        "detach request stays queued"
+    );
+    assert!(matches!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        SendResult::Sent
+    ));
+    assert!(
+        receiver.try_recv().is_ok(),
+        "accepted pre-detach work is preserved"
+    );
+    assert!(
+        receiver.try_recv().is_ok(),
+        "active gate preserves existing enqueue behavior"
+    );
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]
