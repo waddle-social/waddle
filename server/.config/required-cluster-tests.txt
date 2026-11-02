@@ -186,6 +186,12 @@ waddle-server clustering::route_bridge::registration::owner_update::tests::delay
 waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
 waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
 
+# Reserved pending-flush commits recheck their exact binding after capacity
+# waits and serialize with a test-only seal before consuming the permit.
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_wait
+waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_commit_and_test_seal_have_one_order
+
 # Dark endpoint transition model: logical lifetime and exact seal/commit
 # outcomes are characterized before a durable repository or runtime cutover.
 waddle-xmpp ownership::endpoint_transition::tests::successful_cross_node_resume_keeps_logical_generation_and_changes_transport

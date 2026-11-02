@@ -268,6 +268,34 @@ impl LocalConnectionBindingId {
     }
 }
 
+/// Admission shared by all clones of one published entry. Production starts
+/// open; the future socket-detach cutover must couple sealing to every sender.
+#[derive(Debug)]
+pub(super) struct BindingAdmission {
+    owner: LocalConnectionBindingId,
+    binding_ref: Option<BindingRef>,
+    accepting: bool,
+}
+
+impl BindingAdmission {
+    pub(super) fn matches(
+        &self,
+        owner: LocalConnectionBindingId,
+        binding_ref: Option<&BindingRef>,
+    ) -> bool {
+        self.owner == owner && self.binding_ref.as_ref() == binding_ref
+    }
+
+    pub(super) fn is_accepting(&self) -> bool {
+        self.accepting
+    }
+
+    #[cfg(test)]
+    pub(super) fn seal_for_test(&mut self) {
+        self.accepting = false;
+    }
+}
+
 /// Connection state stored in the registry.
 ///
 /// Contains the outbound sender and shared state that can be queried
@@ -279,14 +307,16 @@ pub struct ConnectionEntry {
     // The current v4 remote registration carries only the physical source.
     // A mirror must not fabricate a source binding attempt from its own ID.
     binding_ref: Option<BindingRef>,
+    pub(super) admission: Arc<std::sync::Mutex<BindingAdmission>>,
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
     resume_control: Arc<std::sync::OnceLock<Arc<super::LiveResumeControl>>>,
     /// Bounds terminal ordering retry tasks to one per connection generation.
     terminal_ordering_retry: Arc<AtomicBool>,
-    /// Channel to send stanzas to this connection
-    pub sender: mpsc::Sender<OutboundStanza>,
+    /// Channel to send stanzas to this connection. Entry clones must not
+    /// expose the sender to producers outside the registry implementation.
+    pub(super) sender: mpsc::Sender<OutboundStanza>,
     /// Whether XEP-0280 Message Carbons is enabled for this connection
     pub carbons_enabled: Arc<AtomicBool>,
     /// Whether this resource is currently available (presence type != unavailable)
@@ -402,9 +432,15 @@ impl ConnectionEntry {
         binding_ref: Option<BindingRef>,
     ) -> Self {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
+        let binding_id = LocalConnectionBindingId::fresh();
         Self {
-            binding_id: LocalConnectionBindingId::fresh(),
+            binding_id,
             connection_ref,
+            admission: Arc::new(std::sync::Mutex::new(BindingAdmission {
+                owner: binding_id,
+                binding_ref: binding_ref.clone(),
+                accepting: true,
+            })),
             binding_ref,
             hosting: ConnectionHosting::Local,
             resume_control: Arc::new(std::sync::OnceLock::new()),
@@ -474,6 +510,18 @@ impl ConnectionEntry {
     /// remote-hosted mirror returns `None` instead of minting a false attempt.
     pub fn binding_ref(&self) -> Option<&BindingRef> {
         self.binding_ref.as_ref()
+    }
+
+    /// Read-only observation for the WebSocket queue characterization seam.
+    #[cfg(feature = "test-utils")]
+    pub fn outbound_queue_is_empty_for_test(&self) -> bool {
+        self.sender.capacity() == self.sender.max_capacity()
+    }
+
+    /// Read-only observation for the WebSocket queue characterization seam.
+    #[cfg(feature = "test-utils")]
+    pub fn outbound_queue_is_closed_for_test(&self) -> bool {
+        self.sender.is_closed()
     }
 
     pub fn is_locally_hosted(&self) -> bool {

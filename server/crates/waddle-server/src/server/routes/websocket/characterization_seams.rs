@@ -380,8 +380,8 @@ pub(in crate::server::routes::websocket) async fn hold_until_live_stanza_queued(
         return;
     };
     hold.record(HoldEvent::Held, Some(jid));
-    while entry.sender.capacity() == entry.sender.max_capacity() {
-        if entry.sender.is_closed() {
+    while entry.outbound_queue_is_empty_for_test() {
+        if entry.outbound_queue_is_closed_for_test() {
             hold.record(HoldEvent::Abandoned, Some(jid));
             return;
         }

@@ -1,8 +1,10 @@
+use super::outbound::BindingAdmission;
 use super::{
-    debug, instrument, mpsc, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DashMap,
+    debug, instrument, mpsc, Arc, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DashMap,
     FullJid, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance, PresenceState,
     SendResult, Stanza,
 };
+use crate::ownership::BindingRef;
 use crate::pending_delivery::PendingRowId;
 use crate::pending_delivery::SmSessionId;
 
@@ -12,6 +14,8 @@ use crate::pending_delivery::SmSessionId;
 pub struct PendingFlushReservation {
     jid: FullJid,
     owner: LocalConnectionBindingId,
+    binding_ref: Option<BindingRef>,
+    admission: Arc<std::sync::Mutex<BindingAdmission>>,
     sender: mpsc::Sender<OutboundStanza>,
     permit: mpsc::OwnedPermit<OutboundStanza>,
 }
@@ -22,6 +26,64 @@ pub enum PendingFlushReserveError {
     Full,
     Closed,
     NotConnected,
+}
+
+/// Result of the synchronous commit of reserved pending-delivery capacity.
+///
+/// A consumed channel permit does not prove that the socket received, wrote,
+/// or took durable custody of the frame. The receiver can also close while
+/// the permit is being committed, so that result must not authorize a retry
+/// predicated on the frame definitely not being enqueued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingFlushCommitOutcome {
+    AcceptedOrUnknown,
+    DefinitelyNotEnqueued(PendingFlushCommitRejection),
+}
+
+/// Reasons the final commit refused the frame before consuming its permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingFlushCommitRejection {
+    StaleOrIneligible,
+    BindingMismatch,
+    Sealed,
+    ChannelClosed,
+}
+
+impl ConnectionEntry {
+    /// Called with the registry entry guard held. No await may separate the
+    /// exact-binding check and permit commit, or occur under the admission
+    /// lock. This path does not yet seal any production binding.
+    fn commit_pending_flush(
+        &self,
+        reservation: PendingFlushReservation,
+        outbound: OutboundStanza,
+    ) -> PendingFlushCommitOutcome {
+        use PendingFlushCommitOutcome::{AcceptedOrUnknown, DefinitelyNotEnqueued};
+        use PendingFlushCommitRejection::{BindingMismatch, ChannelClosed, Sealed};
+
+        if self.binding_id() != reservation.owner
+            || self.binding_ref() != reservation.binding_ref.as_ref()
+            || !self.sender.same_channel(&reservation.sender)
+            || !Arc::ptr_eq(&self.admission, &reservation.admission)
+        {
+            return DefinitelyNotEnqueued(BindingMismatch);
+        }
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if !admission.matches(reservation.owner, reservation.binding_ref.as_ref()) {
+            return DefinitelyNotEnqueued(BindingMismatch);
+        }
+        if !admission.is_accepting() {
+            return DefinitelyNotEnqueued(Sealed);
+        }
+        if reservation.sender.is_closed() {
+            return DefinitelyNotEnqueued(ChannelClosed);
+        }
+        reservation.permit.send(outbound);
+        AcceptedOrUnknown
+    }
 }
 
 impl ConnectionRegistry {
@@ -39,11 +101,15 @@ impl ConnectionRegistry {
             .ok_or(PendingFlushReserveError::NotConnected)?;
         let sender = entry.sender.clone();
         let captured_owner = entry.binding_id();
+        let binding_ref = entry.binding_ref().cloned();
+        let admission = Arc::clone(&entry.admission);
         drop(entry);
         match sender.clone().reserve_owned().await {
             Ok(permit) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,
+                binding_ref,
+                admission,
                 sender,
                 permit,
             }),
@@ -69,11 +135,15 @@ impl ConnectionRegistry {
             .ok_or(PendingFlushReserveError::NotConnected)?;
         let sender = entry.sender.clone();
         let captured_owner = entry.binding_id();
+        let binding_ref = entry.binding_ref().cloned();
+        let admission = Arc::clone(&entry.admission);
         drop(entry);
         match sender.clone().try_reserve_owned() {
             Ok(permit) => Ok(PendingFlushReservation {
                 jid: jid.clone(),
                 owner: captured_owner,
+                binding_ref,
+                admission,
                 sender,
                 permit,
             }),
@@ -93,30 +163,28 @@ impl ConnectionRegistry {
         &self,
         reservation: PendingFlushReservation,
         outbound: OutboundStanza,
-    ) -> SendResult {
-        let PendingFlushReservation {
-            jid,
-            owner,
-            sender,
-            permit,
-        } = reservation;
+    ) -> PendingFlushCommitOutcome {
+        let jid = reservation.jid.clone();
+        let sender = reservation.sender.clone();
         let Some(entry) = self.connections.get_mut(&jid).filter(|entry| {
-            entry.binding_id() == owner
-                && entry.sender.same_channel(&sender)
-                && entry.is_locally_hosted()
+            entry.is_locally_hosted()
                 && entry.is_presence_available()
                 && entry.presence_priority() >= 0
         }) else {
-            return SendResult::NotConnected;
+            return PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::StaleOrIneligible,
+            );
         };
-        if sender.is_closed() {
-            drop(entry);
-            self.remove_if_sender_closed_owner(&jid, &sender);
-            return SendResult::ChannelClosed;
-        }
-        permit.send(outbound);
+        let outcome = entry.commit_pending_flush(reservation, outbound);
         drop(entry);
-        SendResult::Sent
+        if outcome
+            == PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::ChannelClosed,
+            )
+        {
+            self.remove_if_sender_closed_owner(&jid, &sender);
+        }
+        outcome
     }
 
     /// Enqueue a server-generated direct frame with a completion notifier that

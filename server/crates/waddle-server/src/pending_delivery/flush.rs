@@ -4,7 +4,7 @@ use super::{
     PendingStorageError, ReplayReason, SendResult, SmSessionId, Stanza, StanzaId,
 };
 use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, PendingClaimToken};
-use waddle_xmpp::registry::{OutboundStanza, PendingFlushReservation};
+use waddle_xmpp::registry::{OutboundStanza, PendingFlushCommitOutcome, PendingFlushReservation};
 
 /// Bound on rows claimed and pushed per `claim_batch_for_session` iteration
 /// inside [`flush_for_resource`] (issue #1220). Deliberately « the 256-slot
@@ -849,29 +849,29 @@ async fn attempt_offer(
         outbound,
         sm_enabled,
     } = offer;
-    if registry
-        .send_reserved_pending_flush(reservation, outbound)
-        .is_sent()
-    {
-        outcome.pushed += 1;
-        if !sm_enabled {
-            if let Err(error) = storage
-                .delete_unsequenced_claim(&claim, PendingClaimPhase::Offered)
-                .await
-            {
-                warn!(row_id = %claim.row_id, %error, "non-SM offered pending row delete failed; retaining exact cleanup");
-                outcome.pending_deletes.push(claim);
+    match registry.send_reserved_pending_flush(reservation, outbound) {
+        PendingFlushCommitOutcome::AcceptedOrUnknown => {
+            outcome.pushed += 1;
+            if !sm_enabled {
+                if let Err(error) = storage
+                    .delete_unsequenced_claim(&claim, PendingClaimPhase::Offered)
+                    .await
+                {
+                    warn!(row_id = %claim.row_id, %error, "non-SM offered pending row delete failed; retaining exact cleanup");
+                    outcome.pending_deletes.push(claim);
+                }
             }
+            true
         }
-        true
-    } else {
-        // The registry proved no enqueue occurred. Only this exact owner may
-        // abandon a possibly committed reservation; scanners cannot do so.
-        if let Err(error) = storage.release_unqueued_offer(&claim).await {
-            warn!(row_id = %claim.row_id, %error, "unqueued offer cleanup failed; retaining custody");
-            outcome.unqueued_offers.push(claim);
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(_) => {
+            // Only this exact owner may abandon a possibly committed offer;
+            // scanners cannot do so.
+            if let Err(error) = storage.release_unqueued_offer(&claim).await {
+                warn!(row_id = %claim.row_id, %error, "unqueued offer cleanup failed; retaining custody");
+                outcome.unqueued_offers.push(claim);
+            }
+            false
         }
-        false
     }
 }
 

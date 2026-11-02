@@ -324,21 +324,23 @@ async fn subscription_roster_push_does_not_offer_uninterested_registered_remote_
 #[tokio::test]
 async fn subscription_roster_remote_backpressure_does_not_append_or_retry() {
     let mut fixture = RemoteRosterFixture::new(true).await;
-    let socket_entry = fixture
+    let socket_registry = &fixture
         .socket_bridge
         .services
         .get()
         .expect("wired socket services")
-        .connection_registry
+        .connection_registry;
+    let socket_entry = socket_registry
         .entry(&fixture.target)
         .expect("registered socket entry");
     for _ in 0..4 {
-        socket_entry
-            .sender
-            .try_send(OutboundStanza::new(Stanza::Presence(Presence::new(
-                Type::None,
-            ))))
-            .expect("fill actual socket queue");
+        assert!(socket_registry
+            .try_send_outbound_if_owner(
+                &fixture.target,
+                &socket_entry.binding_id(),
+                OutboundStanza::new(Stanza::Presence(Presence::new(Type::None))),
+            )
+            .is_delivered());
     }
     let offers = Arc::new(AtomicUsize::new(0));
     let offer_count = offers.clone();

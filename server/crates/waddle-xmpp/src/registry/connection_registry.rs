@@ -33,7 +33,10 @@ pub use outbound::{
     ForceDetachRequest, LocalConnectionBindingId, OutboundStanza, OutboundWriteAcceptance,
     SendResult, TerminalOrderingRetryLease,
 };
-pub use sending::{PendingFlushReservation, PendingFlushReserveError};
+pub use sending::{
+    PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReservation,
+    PendingFlushReserveError,
+};
 pub use state::{LastActivityState, PresenceState};
 
 /// Registry for tracking active XMPP connections.

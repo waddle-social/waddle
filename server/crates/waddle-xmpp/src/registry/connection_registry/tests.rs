@@ -1,7 +1,8 @@
 use super::{
     mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
     FullJid, Instant, LocalConnectionBindingId, Ordering, OutboundStanza, OutboundWriteAcceptance,
-    PendingFlushReserveError, SendResult, Stanza,
+    PendingFlushCommitOutcome, PendingFlushCommitRejection, PendingFlushReserveError, SendResult,
+    Stanza,
 };
 use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
@@ -1567,7 +1568,9 @@ fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner(
                 reservation,
                 OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
             ),
-            SendResult::NotConnected
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::BindingMismatch
+            )
         ));
         assert!(old_receiver.try_recv().is_err());
         assert!(replacement_receiver.try_recv().is_err());
@@ -1593,7 +1596,9 @@ fn pending_flush_reservation_checks_channel_even_when_owner_is_reused() {
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::NotConnected
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::BindingMismatch
+        )
     ));
     assert!(old_receiver.try_recv().is_err());
     assert!(replacement_receiver.try_recv().is_err());
@@ -1615,7 +1620,9 @@ fn pending_flush_reservation_checks_receiver_before_commit() {
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::ChannelClosed
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::ChannelClosed
+        )
     ));
     assert!(!registry.is_connected(&jid));
 }
@@ -1641,7 +1648,7 @@ fn pending_flush_reservation_preserves_sm_row_metadata() {
                 received_at,
             )
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     let outbound = receiver.try_recv().expect("committed pending frame");
     assert_eq!(outbound.pending_row_id, Some(row_id));
@@ -1669,7 +1676,7 @@ async fn pending_flush_reservation_waits_for_capacity_before_commit() {
             first,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     receiver.recv().await.expect("drain first frame");
     let second = reserve.await.expect("capacity available after drain");
@@ -1678,9 +1685,129 @@ async fn pending_flush_reservation_waits_for_capacity_before_commit() {
             second,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     assert!(receiver.try_recv().is_ok());
+}
+
+fn seal_pending_binding_for_test(entry: &ConnectionEntry) {
+    entry
+        .admission
+        .lock()
+        .expect("binding admission lock")
+        .seal_for_test();
+}
+
+#[tokio::test]
+async fn pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender
+        .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com",
+        ))))
+        .expect("fill channel");
+    let owner = registry.register(jid.clone(), sender.clone());
+    assert!(registry.update_presence(&jid, true, 0));
+    let reserve = registry.reserve_pending_flush(&jid, Some(&owner));
+    tokio::pin!(reserve);
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+
+    let entry = registry.entry(&jid).expect("original binding");
+    seal_pending_binding_for_test(&entry);
+    receiver.recv().await.expect("release channel capacity");
+    let reservation = reserve.await.expect("reserve returns after capacity");
+    assert_eq!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(PendingFlushCommitRejection::Sealed)
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(sender.capacity(), 1, "refusal returns reserved capacity");
+}
+
+#[tokio::test]
+async fn pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_wait() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender
+        .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com",
+        ))))
+        .expect("fill channel");
+    let owner = registry.register(jid.clone(), sender.clone());
+    assert!(registry.update_presence(&jid, true, 0));
+    let old = registry.entry(&jid).expect("original binding");
+    let reserve = registry.reserve_pending_flush(&jid, Some(&owner));
+    tokio::pin!(reserve);
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+
+    let replacement =
+        ConnectionEntry::new_for_connection(sender.clone(), old.connection_ref().clone());
+    assert_ne!(replacement.binding_ref(), old.binding_ref());
+    registry.register_entry(jid.clone(), replacement);
+    assert!(registry.update_presence(&jid, true, 0));
+    receiver.recv().await.expect("release original capacity");
+    let reservation = reserve.await.expect("original reservation completes");
+    assert_eq!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::BindingMismatch
+        )
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(sender.capacity(), 1, "refusal returns reserved capacity");
+}
+
+#[test]
+fn pending_flush_reservation_commit_and_test_seal_have_one_order() {
+    for _ in 0..32 {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("reserved");
+        let (sender, mut receiver) = mpsc::channel(1);
+        let owner = registry.register(jid.clone(), sender.clone());
+        assert!(registry.update_presence(&jid, true, 0));
+        let entry = registry.entry(&jid).expect("original binding");
+        let reservation = registry
+            .try_reserve_pending_flush(&jid, Some(&owner))
+            .expect("reserve channel capacity");
+        let barrier = std::sync::Barrier::new(2);
+
+        let outcome = std::thread::scope(|scope| {
+            let commit = scope.spawn(|| {
+                barrier.wait();
+                registry.send_reserved_pending_flush(
+                    reservation,
+                    OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com"))),
+                )
+            });
+            let seal = scope.spawn(|| {
+                barrier.wait();
+                seal_pending_binding_for_test(&entry);
+            });
+            seal.join().expect("seal thread");
+            commit.join().expect("commit thread")
+        });
+        match outcome {
+            PendingFlushCommitOutcome::AcceptedOrUnknown => {
+                receiver.try_recv().expect("commit won before seal");
+            }
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::Sealed,
+            ) => {
+                assert!(receiver.try_recv().is_err(), "seal won before commit");
+            }
+            other => panic!("unexpected commit result: {other:?}"),
+        }
+        assert_eq!(sender.capacity(), 1);
+    }
 }
 
 #[test]
@@ -1700,7 +1827,9 @@ fn pending_flush_reservation_rechecks_presence_after_reservation() {
                 reservation,
                 OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
             ),
-            SendResult::NotConnected
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::StaleOrIneligible
+            )
         ));
         assert!(
             receiver.try_recv().is_err(),
@@ -1734,7 +1863,9 @@ fn pending_flush_reservation_rejects_remote_hosted_mirror() {
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::NotConnected
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::StaleOrIneligible
+        )
     ));
     assert!(receiver.try_recv().is_err());
 }
