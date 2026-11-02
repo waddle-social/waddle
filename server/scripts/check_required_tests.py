@@ -88,16 +88,21 @@ def parse_required(path: Path) -> list[TestId]:
     return required
 
 
-def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[TestId]]:
+def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[TestId], dict[Path, str]]:
     """Return (executed, failed, skipped) test ids across JUnit reports."""
     executed: set[TestId] = set()
     failed: set[TestId] = set()
     skipped: set[TestId] = set()
+    report_digests: dict[Path, str] = {}
     for report in reports:
         try:
-            root = ElementTree.parse(report).getroot()
+            contents = report.read_bytes()
+            root = ElementTree.fromstring(contents)
         except (ElementTree.ParseError, OSError) as error:
             raise InputError(f"{report}: unreadable JUnit report: {error}") from error
+        report_digests[report.resolve()] = hashlib.sha256(contents).hexdigest()
+        if root.tag not in {"testsuites", "testsuite"}:
+            raise InputError(f"{report}: expected a JUnit <testsuites> or <testsuite> document")
         for case in root.iter("testcase"):
             binary, name = case.get("classname"), case.get("name")
             if not binary or not name:
@@ -109,7 +114,7 @@ def executed_tests(reports: list[Path]) -> tuple[set[TestId], set[TestId], set[T
             executed.add(test)
             if any(case.find(tag) is not None for tag in FAILED):
                 failed.add(test)
-    return executed, failed, skipped
+    return executed, failed, skipped, report_digests
 
 
 EXECUTED_PER_BINARY_LIMIT = 500
@@ -155,17 +160,19 @@ def candidate_sha(root: Path, expected: str) -> str:
     # The shard runner writes its JUnit and sidecar outputs under this exact
     # generated directory after tests start. Exclude those artifacts, while
     # still checking every tracked file and every other untracked source file.
-    try:
-        diff = subprocess.run(
-            ["git", "-C", str(root), "diff", "--quiet", "HEAD", "--"],
-            check=False,
-        )
-    except OSError as error:
-        raise InputError(f"cannot inspect candidate Git state: {error}") from error
-    if diff.returncode != 0:
-        if diff.returncode == 1:
-            raise InputError("candidate worktree is dirty")
-        raise InputError("cannot inspect candidate worktree")
+    for arguments, label in ((["diff", "--cached", "--quiet", "HEAD", "--"], "index"),
+                             (["diff", "--quiet", "--"], "worktree")):
+        try:
+            diff = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                check=False,
+            )
+        except OSError as error:
+            raise InputError(f"cannot inspect candidate Git state: {error}") from error
+        if diff.returncode != 0:
+            if diff.returncode == 1:
+                raise InputError(f"candidate {label} is dirty")
+            raise InputError(f"cannot inspect candidate {label}")
     untracked = git_output(
         root,
         "ls-files",
@@ -265,7 +272,9 @@ def required_test_outcomes(
 ) -> list[dict[str, str]]:
     outcomes = []
     for test in sorted(required):
-        if test in failed:
+        if test in skipped:
+            outcome = "skipped"
+        elif test in failed:
             outcome = "failed"
         elif test in executed:
             outcome = "passed"
@@ -287,12 +296,18 @@ def build_evidence(
     executed: set[TestId],
     failed: set[TestId],
     skipped: set[TestId],
+    report_digests: dict[Path, str],
 ) -> dict[str, object]:
     actual_sha = candidate_sha(root, expected_sha)
     _, required_relative, required_digest = repo_relative_file(required_path, root)
     report_files: list[tuple[str, str]] = []
     for path in report_paths:
-        _, relative, digest = repo_relative_file(path, root)
+        resolved, relative, _ = repo_relative_file(path, root)
+        digest = report_digests.get(resolved)
+        if digest is None:
+            raise InputError(f"{path}: report bytes were not captured during parsing")
+        if sha256(resolved) != digest:
+            raise InputError(f"{path}: JUnit report changed after parsing")
         report_files.append((relative, digest))
     report_files.sort()
 
@@ -356,7 +371,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         required = parse_required(args.required)
-        executed, failed, skipped = executed_tests(args.reports)
+        executed, failed, skipped, report_digests = executed_tests(args.reports)
         evidence_output = None
         evidence_root = None
         if args.evidence_out is not None:
@@ -374,7 +389,7 @@ def main() -> int:
         return 2
     if args.executed_out:
         args.executed_out.write_text("".join(f"{test}\n" for test in sorted(executed)))
-    missing = [test for test in required if test not in executed]
+    missing = [test for test in required if test not in executed or test in skipped]
     failing = [test for test in required if test in failed]
     if missing or failing:
         # On main the diagnostics artifact is uploaded only when the lane
@@ -395,6 +410,7 @@ def main() -> int:
                 executed=executed,
                 failed=failed,
                 skipped=skipped,
+                report_digests=report_digests,
             )
             evidence_output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         except (InputError, OSError) as error:

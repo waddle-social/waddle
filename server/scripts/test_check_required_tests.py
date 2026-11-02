@@ -201,6 +201,8 @@ class RequiredTestTests(unittest.TestCase):
         self.required.write_text("bin test\n")
         self.report.write_text("<testsuites><testsuite>")
         self.assertEqual(self.run_check().returncode, 2)
+        self.report.write_text("<not-junit/>")
+        self.assertEqual(self.run_check().returncode, 2)
 
     def test_committed_list_parses(self):
         result = subprocess.run(
@@ -280,6 +282,16 @@ class RequiredTestTests(unittest.TestCase):
         self.assertIn("untracked files outside", result.stderr)
         self.assertFalse(untracked["evidence"].exists())
 
+        staged = self.make_evidence_checkout()
+        readme = staged["server"] / "README.md"
+        readme.write_text("staged candidate source\n")
+        subprocess.run(["git", "-C", str(staged["repo"]), "add", "server/README.md"], check=True)
+        readme.write_text("candidate fixture\n")
+        result = self.run_evidence_check(staged)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("candidate index is dirty", result.stderr)
+        self.assertFalse(staged["evidence"].exists())
+
         missing_sha = self.make_evidence_checkout()
         result = self.run_evidence_check(missing_sha, include_sha=False)
         self.assertEqual(result.returncode, 2)
@@ -329,6 +341,14 @@ class RequiredTestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("required test did not run", result.stderr)
         self.assertFalse(skipped["evidence"].exists())
+
+        contradictory = self.make_evidence_checkout()
+        required_test = "waddle-server::clustering_cluster_e2e required_non_anchor"
+        contradictory["reports"][1].write_text(junit_cases([required_test], skipped={required_test}))
+        result = self.run_evidence_check(contradictory)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("required test did not run", result.stderr)
+        self.assertFalse(contradictory["evidence"].exists())
 
     def test_evidence_sidecar_requires_each_explicit_prerequisite_inventory_anchor(self):
         for anchor_ids in PREREQUISITE_ANCHORS.values():

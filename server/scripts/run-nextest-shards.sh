@@ -4,14 +4,27 @@ set -euo pipefail
 # Compile once, then use the same immutable archives in four local Nix
 # sandboxes. Each shard pins itself to eight distinct CPUs before starting
 # PostgreSQL or nextest. No archive crosses a runner or trust boundary.
-candidate_sha="$(git rev-parse --verify 'HEAD^{commit}')"
-isolation=(--option builders '' --option sandbox true --option sandbox-fallback false)
-nix build --print-build-logs --no-link "${isolation[@]}" ../#waddle-ci-sandbox-probe
-archive="$(bash scripts/build-nextest-archive.sh)"
 diagnostics=.ci/nextest-archive
 mkdir -p "$diagnostics"
 # A failed rerun must not leave a prior passing sidecar looking current.
 rm -f "$diagnostics/qualification-evidence.json"
+# Reject a dirty source tree before Nix reads it. The evidence checker repeats
+# this check before writing the sidecar, catching persistent changes during the
+# build. A mutation restored before that second check cannot be detected here;
+# fully closing that race requires building from an immutable source snapshot.
+if ! git diff --quiet HEAD --; then
+  echo "candidate worktree is dirty before nextest build" >&2
+  exit 1
+fi
+untracked="$(git ls-files --others --exclude-standard -z -- . ':(exclude).ci/nextest-archive/**')"
+if [[ -n "$untracked" ]]; then
+  echo "candidate worktree has untracked files before nextest build" >&2
+  exit 1
+fi
+candidate_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+isolation=(--option builders '' --option sandbox true --option sandbox-fallback false)
+nix build --print-build-logs --no-link "${isolation[@]}" ../#waddle-ci-sandbox-probe
+archive="$(bash scripts/build-nextest-archive.sh)"
 cp "$archive/ci-performance/cargo-timing.html" "$diagnostics/cargo-timing.html"
 cp "$archive/partition-coverage.json" "$diagnostics/partition-coverage.json"
 cp "$archive/plan.json" "$diagnostics/plan.json"

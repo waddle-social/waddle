@@ -144,23 +144,40 @@ class LocalShardTests(unittest.TestCase):
         self.assertNotEqual(self.run_shards().returncode, 0)
 
     def test_failed_shard_fails_the_job_and_preserves_compiler_diagnostics(self):
+        sidecar = self.server / ".ci/nextest-archive/qualification-evidence.json"
+        sidecar.write_text('{"old": true}')
         self.env["SHARD_EXIT"] = "17"
         result = self.run_shards()
         self.assertEqual(result.returncode, 17)
         self.assertTrue((self.server / ".ci/nextest-archive/cargo-timing.html").is_file())
-        self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+        self.assertFalse(sidecar.exists())
 
     def test_unavailable_sandbox_fails_before_compilation(self):
+        sidecar = self.server / ".ci/nextest-archive/qualification-evidence.json"
+        sidecar.write_text('{"old": true}')
         self.env["SANDBOX_EXIT"] = "23"
         self.env["COMPILE_EXIT"] = "19"
         self.assertEqual(self.run_shards().returncode, 23)
         self.assertFalse((self.server / ".ci/nextest-archive/build-args.json").exists())
-        self.assertFalse((self.server / ".ci/nextest-archive/qualification-evidence.json").exists())
+        self.assertFalse(sidecar.exists())
 
     def test_failed_compile_cannot_start_shards(self):
+        sidecar = self.server / ".ci/nextest-archive/qualification-evidence.json"
+        sidecar.write_text('{"old": true}')
         self.env["COMPILE_EXIT"] = "19"
         self.assertEqual(self.run_shards().returncode, 19)
         self.assertFalse((self.server / ".ci/nextest-archive/build-args.json").exists())
+        self.assertFalse(sidecar.exists())
+
+    def test_dirty_candidate_fails_before_nix_and_removes_old_sidecar(self):
+        sidecar = self.server / ".ci/nextest-archive/qualification-evidence.json"
+        sidecar.write_text('{"old": true}')
+        self.required.write_text(self.required.read_text() + "# dirty\n")
+        result = self.run_shards()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("candidate worktree is dirty before nextest build", result.stderr)
+        self.assertFalse((self.server / ".ci/nextest-archive/probe-args.json").exists())
+        self.assertFalse(sidecar.exists())
 
     def test_missing_shard_coverage_cannot_report_success(self):
         (self.server / ".ci/nextest-archive/mock-shards/shard-4/shared-coverage.json").unlink()
