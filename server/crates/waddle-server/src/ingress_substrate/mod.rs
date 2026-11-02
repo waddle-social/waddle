@@ -26,7 +26,9 @@ pub use authority::{
     EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
 };
 pub(crate) use authority::{
-    load_envelope_in_prepared_transaction, record_room_envelope_in_prepared_transaction,
+    advance_frontier_in_prepared_transaction, flush_checkpoint_in_prepared_transaction,
+    load_envelope_in_prepared_transaction, load_stream_checkpoint_in_prepared_transaction,
+    lookup_wire_binding_in_prepared_transaction, record_room_envelope_in_prepared_transaction,
 };
 pub(crate) use authority::{receipts_complete_in_schema, record_receipt_in_prepared_transaction};
 
@@ -91,6 +93,7 @@ pub use substrate::TerminalizeOutcome;
 pub use substrate::ALIAS_RETENTION;
 pub use substrate::EPOCH_GUARDED_TABLES;
 pub(crate) use substrate::{
-    canonical_relation, record_message_in_prepared_transaction,
-    resolve_alias_in_prepared_transaction, CanonicalRelation,
+    insert_sm_ref_in_prepared_transaction, prepared_ingress_relation, prepared_ingress_sql,
+    record_message_in_prepared_transaction, resolve_alias_in_prepared_transaction,
+    PreparedIngressRelation,
 };

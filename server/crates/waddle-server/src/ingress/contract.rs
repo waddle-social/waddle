@@ -470,8 +470,11 @@ impl IngressAuthority {
                 transaction.commit().await?;
                 return Ok(IngressRetirementOutcome::DeferredClaim);
             }
-            let Some(id) =
-                SmIngressStreamRepository::lookup_unclaimed(&mut transaction, stream_id).await?
+            let Some(id) = SmIngressStreamRepository::lookup_unclaimed_for_retirement(
+                &mut transaction,
+                stream_id,
+            )
+            .await?
             else {
                 transaction.commit().await?;
                 return Ok(IngressRetirementOutcome::StreamMissing);

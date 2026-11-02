@@ -281,13 +281,13 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT 1 FROM {} WHERE message_key = ?::uuid FOR UPDATE",
-                ingress_substrate::canonical_relation(
+                ingress_substrate::prepared_ingress_relation(
                     prepared,
-                    ingress_substrate::CanonicalRelation::Messages
+                    ingress_substrate::PreparedIngressRelation::Messages
                 )
             )
         } else {
@@ -307,13 +307,13 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT 1 FROM {} WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-                ingress_substrate::canonical_relation(
+                ingress_substrate::prepared_ingress_relation(
                     prepared,
-                    ingress_substrate::CanonicalRelation::Messages
+                    ingress_substrate::PreparedIngressRelation::Messages
                 )
             )
         } else {
@@ -335,7 +335,7 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         envelope: Option<&MessageEnvelope>,
     ) -> Result<(), IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         ingress_substrate::record_message_in_prepared_transaction(
             tx,
             prepared,
@@ -378,7 +378,7 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
         envelope: &MessageEnvelope,
     ) -> Result<(), IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         ingress_substrate::record_room_envelope_in_prepared_transaction(
             tx,
             prepared,
@@ -393,7 +393,7 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Option<MessageEnvelope>, IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         ingress_substrate::load_envelope_in_prepared_transaction(tx, prepared, message_key)
             .await
             .map_err(Into::into)
@@ -404,11 +404,11 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<DateTime<Utc>, IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM {} WHERE message_key = ?::uuid",
-                ingress_substrate::canonical_relation(prepared, ingress_substrate::CanonicalRelation::Messages)
+                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
             )
         } else {
             "SELECT created_at FROM ingress_messages WHERE message_key = ?".to_owned()
@@ -437,7 +437,7 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         mint: impl FnOnce() -> MessageKey,
     ) -> Result<AliasResolution, IngressUowError> {
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         ingress_substrate::resolve_alias_in_prepared_transaction(
             tx, prepared, sender, target, origin_id, digest, mint,
         )
@@ -453,11 +453,11 @@ impl CanonicalMessageRepository {
         if !Self::lock(transaction, message_key).await? {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
-        let (tx, prepared) = transaction.canonical_parts();
+        let (tx, prepared) = transaction.prepared_parts();
         let sql = if tx.driver() == DatabaseDriver::Postgres {
             format!(
                 "UPDATE {} SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-                ingress_substrate::canonical_relation(prepared, ingress_substrate::CanonicalRelation::Messages)
+                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
             )
         } else {
             "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL".to_owned()
@@ -497,8 +497,10 @@ impl SmIngressRepository {
         wire_h: WireHandledCount,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressUowError> {
-        ingress_substrate::insert_sm_ref(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::insert_sm_ref_in_prepared_transaction(
+            tx,
+            prepared,
             sm_ingress_id,
             ordinal,
             wire_h,
@@ -513,9 +515,15 @@ impl SmIngressRepository {
         sm_ingress_id: SmIngressId,
         wire_h: WireHandledCount,
     ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressUowError> {
-        ingress_substrate::lookup_wire_binding(transaction.transaction_mut(), sm_ingress_id, wire_h)
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::lookup_wire_binding_in_prepared_transaction(
+            tx,
+            prepared,
+            sm_ingress_id,
+            wire_h,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn lookup(
@@ -617,18 +625,19 @@ impl SmIngressStreamRepository {
         stream_id: &SmSessionId,
         id: SmIngressId,
     ) -> Result<(), IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            ("INSERT INTO ", " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING"),
             "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING",
         );
-        transaction
-            .transaction_mut()
-            .execute(
-                sql,
-                crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
-            )
-            .await?;
+        tx.execute(
+            &sql,
+            crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
+        )
+        .await?;
         Ok(())
     }
 
@@ -660,14 +669,23 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<SmIngressId, IngressUowError> {
-        const POSTGRES: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING";
+        const POSTGRES: (&str, &str) = (
+            "INSERT INTO ",
+            " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+        );
         const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
         let minted = SmIngressId::new();
-        let inserted = transaction
-            .transaction_mut()
+        let inserted = tx
             .execute(
-                sql,
+                &sql,
                 crate::db_params![
                     minted.to_storage().to_string(),
                     stream_id.as_str().to_string()
@@ -677,14 +695,19 @@ impl SmIngressStreamRepository {
         if inserted == 1 {
             return Ok(minted);
         }
-        const SELECT_POSTGRES: &str =
-            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?";
+        const SELECT_POSTGRES: (&str, &str) =
+            ("SELECT sm_ingress_id::text FROM ", " WHERE stream_id = ?");
         const SELECT_SQLITE: &str =
             "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, SELECT_POSTGRES, SELECT_SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            SELECT_POSTGRES,
+            SELECT_SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let stored: String = rows
             .next()
@@ -725,12 +748,21 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
-        const POSTGRES: &str = "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const POSTGRES: (&str, &str) = (
+            "SELECT sm_ingress_id::text, handled_ordinal::text FROM ",
+            " WHERE stream_id = ? FOR UPDATE",
+        );
         const SQLITE: &str = "SELECT sm_ingress_id, CAST(handled_ordinal AS TEXT) FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -751,13 +783,38 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
-        const POSTGRES: &str =
-            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        let (tx, prepared) = transaction.prepared_parts();
+        Self::lookup_unclaimed_in_transaction(tx, prepared, stream_id).await
+    }
+
+    /// Retirement still uses unqualified scans, deletion and retention refresh.
+    /// Keep its lookup on the same legacy path until that whole closure is qualified.
+    pub(crate) async fn lookup_unclaimed_for_retirement(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<SmIngressId>, IngressUowError> {
+        Self::lookup_unclaimed_in_transaction(transaction.transaction_mut(), None, stream_id).await
+    }
+
+    async fn lookup_unclaimed_in_transaction(
+        tx: &mut Transaction<'_>,
+        prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<SmIngressId>, IngressUowError> {
+        const POSTGRES: (&str, &str) = (
+            "SELECT sm_ingress_id::text FROM ",
+            " WHERE stream_id = ? FOR UPDATE",
+        );
         const SQLITE: &str = "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -804,8 +861,10 @@ impl SmIngressStreamRepository {
         offered: IngressOrdinal,
         checkpoint_h: WireHandledCount,
     ) -> Result<FrontierOutcome, IngressUowError> {
-        ingress_substrate::advance_frontier(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::advance_frontier_in_prepared_transaction(
+            tx,
+            prepared,
             sm_ingress_id,
             offered,
             checkpoint_h,
@@ -819,7 +878,8 @@ impl SmIngressStreamRepository {
         sm_ingress_id: SmIngressId,
         h: WireHandledCount,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::flush_checkpoint(transaction.transaction_mut(), sm_ingress_id, h)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::flush_checkpoint_in_prepared_transaction(tx, prepared, sm_ingress_id, h)
             .await
             .map_err(Into::into)
     }
@@ -828,9 +888,14 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<Option<WireHandledCount>, IngressUowError> {
-        ingress_substrate::load_stream_checkpoint(transaction.transaction_mut(), sm_ingress_id)
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::load_stream_checkpoint_in_prepared_transaction(
+            tx,
+            prepared,
+            sm_ingress_id,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn delete_unclaimed(

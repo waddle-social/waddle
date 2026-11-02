@@ -1,5 +1,7 @@
 //! Canonical UoW statements must not follow a hostile PostgreSQL search path.
 
+mod sm;
+
 use super::{CanonicalMessageRepository, IngressUnitOfWork, IngressUowTransaction};
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};

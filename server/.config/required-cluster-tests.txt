@@ -253,3 +253,8 @@ waddle-server::ingress_relation_guard_lab candidate_temp_shadowing_requires_drai
 # temporary shadows, and preserve the SQLite shared-memory path.
 waddle-server ingress_uow::canonical_qualified_tests::attested_canonical_statements_ignore_hostile_temporary_shadows
 waddle-server ingress_uow::canonical_qualified_tests::sqlite_shared_memory_canonical_replay_and_rollback
+
+# P2.1 prepared SM enrollment, binding, frontier and checkpoint statements
+# must target the attested schema; retirement remains outside this slice.
+waddle-server ingress_uow::canonical_qualified_tests::sm::attested_sm_pair_ignores_hostile_shadows_and_missing_relations
+waddle-server ingress_uow::canonical_qualified_tests::sm::sqlite_shared_memory_sm_pair_replay_and_rollback

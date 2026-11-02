@@ -1,6 +1,6 @@
 use super::{
     dialect_sql, discard_database_error, gc_retained_child_sql, DateTime, IngressSubstrateError,
-    MessageKey, Transaction, Utc,
+    MessageKey, PreparedAttestedReceiptWriter, Transaction, Utc,
 };
 
 /// Invalidate only while holding the canonical row lock; this is scheduling
@@ -9,12 +9,26 @@ pub(crate) async fn invalidate_retention(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
-    tx.execute(
-        dialect_sql(
-            tx.driver(),
-            "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?::uuid",
-            "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?",
+    invalidate_retention_in_prepared_transaction(tx, None, message_key).await
+}
+
+pub(super) async fn invalidate_retention_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+) -> Result<(), IngressSubstrateError> {
+    let sql = super::substrate::prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        super::substrate::PreparedIngressRelation::Messages,
+        (
+            "UPDATE ",
+            " SET retention_eligible_at = NULL WHERE message_key = ?::uuid",
         ),
+        "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?",
+    );
+    tx.execute(
+        &sql,
         crate::db_params![message_key.to_storage().to_string()],
     )
     .await
