@@ -10,9 +10,10 @@ use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketStream};
 use waddle_server::test_support::supervised_io::{
-    spawn_io_custodian, spawn_supervised_io, AdmissionError, CustodianState, InboundExit, Limits,
-    OutboundExit, QueueItem, RetirementMode, ShutdownProtocol, StopReason, TransportLimits,
-    WriteProgress, WriteReceipt, WriteSender,
+    spawn_io_custodian, spawn_supervised_io, AdmissionError, CustodianState, InboundExit,
+    InboundTerminal, IoCustodianInventory, Limits, OutboundExit, OutboundTerminal, QueueItem,
+    RetirementMode, ShutdownProtocol, StopReason, TransportLimits, WriteProgress, WriteReceipt,
+    WriteSender,
 };
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 
@@ -31,6 +32,28 @@ struct StallSink<S> {
     inner: S,
     stall: Stall,
     blocked: Option<oneshot::Sender<()>>,
+}
+
+struct FailingStartSend;
+
+impl Sink<Message> for FailingStartSend {
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+        Err(std::io::Error::other("injected outbound failure"))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl<S: Sink<Message, Error = Error> + Unpin> Sink<Message> for StallSink<S> {
@@ -1012,8 +1035,15 @@ async fn cleanup_pending_remains_visible_until_a_stalled_pump_is_joined() {
         .expect("writer is blocked in its poll")
         .expect("flush-entry signal");
 
+    let connection_ref = supervisor.connection_ref().clone();
     let custodian = spawn_io_custodian(supervisor, Duration::from_millis(25));
-    let observer = custodian.observer();
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    inventory
+        .try_retain(&custodian)
+        .expect("retain stalled connection independently");
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("reacquire exact physical connection");
     custodian.request_stop(StopReason::LeaseLost);
     timeout(TEST_TIMEOUT, async {
         while observer.state() != CustodianState::CleanupPending {
@@ -1023,6 +1053,8 @@ async fn cleanup_pending_remains_visible_until_a_stalled_pump_is_joined() {
     .await
     .expect("deadline publishes cleanup pending while the task has not yielded");
     assert_eq!(observer.state(), CustodianState::CleanupPending);
+    assert_eq!(inventory.prune_joined(), 0);
+    assert!(inventory.observe(&connection_ref).is_some());
     assert_eq!(attempted.progress(), WriteProgress::Attempted);
 
     gate.release();
@@ -1033,6 +1065,8 @@ async fn cleanup_pending_remains_visible_until_a_stalled_pump_is_joined() {
         CustodianState::Joined
     );
     assert_eq!(attempted.progress(), WriteProgress::Uncertain);
+    assert_eq!(inventory.prune_joined(), 1);
+    assert!(inventory.observe(&connection_ref).is_none());
     peer_observes_drop(&mut peer).await;
 }
 
@@ -1061,6 +1095,11 @@ async fn independent_custodian_joins_peer_after_a_pump_panic() {
             .expect("custodian joins both handles after panic"),
         CustodianState::Joined
     );
+    let summary = observer
+        .terminal_summary()
+        .expect("terminal outcomes retained");
+    assert_eq!(summary.inbound, InboundTerminal::Panicked);
+    assert_eq!(summary.outbound, OutboundTerminal::Stopped);
 }
 
 #[tokio::test]
@@ -1082,7 +1121,71 @@ async fn independent_custodian_joins_peer_after_a_pump_abort() {
             .expect("custodian joins both handles after abort"),
         CustodianState::Joined
     );
+    let summary = observer
+        .terminal_summary()
+        .expect("terminal outcomes retained");
+    assert_eq!(summary.inbound, InboundTerminal::Aborted);
+    assert_eq!(summary.outbound, OutboundTerminal::Stopped);
     peer_observes_drop(&mut peer).await;
+}
+
+#[tokio::test]
+async fn independent_custodian_retains_typed_inbound_and_outbound_io_failures() {
+    let reader = futures::stream::iter([Err(std::io::Error::other("injected inbound failure"))]);
+    let (supervisor, _outbound, _inbound) = spawn_supervised_io(
+        ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        reader,
+        futures::sink::drain::<Message>(),
+        TransportLimits::new(
+            Limits::new(2, 8).expect("inbound limits"),
+            Limits::new(2, 8).expect("outbound limits"),
+        ),
+        ShutdownProtocol::new(Message::Close(None), |_: &std::convert::Infallible| false),
+        Message::len,
+        Message::is_close,
+    );
+    let inbound_custodian = spawn_io_custodian(supervisor, TEST_TIMEOUT);
+    let inbound_observer = inbound_custodian.observer();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, inbound_observer.wait_until_joined())
+            .await
+            .expect("join after inbound I/O failure"),
+        CustodianState::Joined
+    );
+    let inbound_summary = inbound_observer
+        .terminal_summary()
+        .expect("inbound failure summary");
+    assert_eq!(inbound_summary.inbound, InboundTerminal::IoFailure);
+    assert_eq!(inbound_summary.outbound, OutboundTerminal::Stopped);
+
+    let (supervisor, outbound, _inbound) = spawn_supervised_io(
+        ConnectionRef::fresh(NodeLeaseIdentity::local_process()),
+        futures::stream::pending::<Result<Message, std::io::Error>>(),
+        FailingStartSend,
+        TransportLimits::new(
+            Limits::new(2, 8).expect("inbound limits"),
+            Limits::new(2, 8).expect("outbound limits"),
+        ),
+        ShutdownProtocol::new(Message::Close(None), |_: &std::io::Error| false),
+        Message::len,
+        Message::is_close,
+    );
+    outbound
+        .try_send(Message::binary(vec![1]), 1)
+        .expect("admit failing write");
+    let outbound_custodian = spawn_io_custodian(supervisor, TEST_TIMEOUT);
+    let outbound_observer = outbound_custodian.observer();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, outbound_observer.wait_until_joined())
+            .await
+            .expect("join after outbound I/O failure"),
+        CustodianState::Joined
+    );
+    let outbound_summary = outbound_observer
+        .terminal_summary()
+        .expect("outbound failure summary");
+    assert_eq!(outbound_summary.inbound, InboundTerminal::Stopped);
+    assert_eq!(outbound_summary.outbound, OutboundTerminal::IoFailure);
 }
 
 #[tokio::test]

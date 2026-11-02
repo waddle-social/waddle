@@ -7,6 +7,7 @@
 //! durable-custody claim.
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
+use std::collections::HashMap;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -96,6 +97,8 @@ pub enum StopReason {
     OutboundIoFailure,
     PumpExited,
     ShutdownDeadline,
+    /// Interrupts the pumps after local lease loss, but is not an authority
+    /// fence for a write already crossing the sink effect boundary.
     LeaseLost,
 }
 
@@ -408,6 +411,55 @@ pub enum CustodianState {
     Joined,
 }
 
+/// Terminal outcome of the inbound pump, summarized without retaining its
+/// generic I/O error value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundTerminal {
+    Stopped,
+    PeerClosed,
+    Overloaded,
+    IoFailure,
+    Panicked,
+    Aborted,
+    JoinFailure,
+}
+
+/// Terminal outcome of the outbound pump, summarized without retaining its
+/// generic I/O error value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundTerminal {
+    Stopped,
+    ShutdownClose,
+    PeerClosedReplyFlushed,
+    QueueClosed,
+    IoFailure,
+    Panicked,
+    Aborted,
+    JoinFailure,
+}
+
+/// Bounded, typed evidence retained after both pump JoinHandles return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustodianSummary {
+    connection_ref: ConnectionRef,
+    /// Reader pump's independently observed terminal outcome.
+    pub inbound: InboundTerminal,
+    /// Writer pump's independently observed terminal outcome.
+    pub outbound: OutboundTerminal,
+}
+
+impl CustodianSummary {
+    /// Physical transport these pump outcomes belong to.
+    pub fn connection_ref(&self) -> &ConnectionRef {
+        &self.connection_ref
+    }
+
+    /// Whether these terminal outcomes belong to the supplied transport.
+    pub fn is_for(&self, connection_ref: &ConnectionRef) -> bool {
+        &self.connection_ref == connection_ref
+    }
+}
+
 /// Control handle for a custodian that owns a physical connection's two pumps.
 ///
 /// The custodian runs independently of any Kameo actor and remains responsible
@@ -423,6 +475,7 @@ struct CustodianClient {
     force_stop: CancellationToken,
     admission_open: Arc<Mutex<bool>>,
     state: watch::Receiver<CustodianState>,
+    summary: Arc<Mutex<Option<CustodianSummary>>>,
 }
 
 /// Observation-only view of custodian state that does not keep control alive.
@@ -430,6 +483,100 @@ struct CustodianClient {
 pub struct IoCustodianObserver {
     connection_ref: ConnectionRef,
     state: watch::Receiver<CustodianState>,
+    summary: Arc<Mutex<Option<CustodianSummary>>>,
+}
+
+/// Refusal to retain an observation in the bounded physical-connection index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CustodianInventoryError {
+    /// An inventory must be able to retain at least one custodian.
+    #[error("custodian inventory capacity must be positive")]
+    ZeroCapacity,
+    /// This exact physical connection already has a retained custodian entry.
+    #[error("custodian inventory already contains this connection")]
+    DuplicateConnection,
+    /// Every inventory slot is occupied by a custodian not yet joined.
+    #[error("custodian inventory is full")]
+    Full,
+}
+
+/// Bounded, observation-only index of physical-connection custodians.
+///
+/// The index does not keep a control handle alive. It lets an independent
+/// owner reacquire state after an actor loses all of its local handles, and it
+/// keeps unfinished cleanup discoverable until an explicit prune of Joined
+/// entries.
+#[derive(Clone)]
+pub struct IoCustodianInventory {
+    capacity: usize,
+    entries: Arc<Mutex<HashMap<ConnectionRef, IoCustodianObserver>>>,
+}
+
+impl IoCustodianInventory {
+    /// Create an inventory with a fixed maximum number of physical sockets.
+    pub fn new(capacity: usize) -> Result<Self, CustodianInventoryError> {
+        if capacity == 0 {
+            return Err(CustodianInventoryError::ZeroCapacity);
+        }
+        Ok(Self {
+            capacity,
+            entries: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Retain observation for a custodian unless its exact connection is
+    /// already indexed or the bounded inventory is full.
+    pub fn try_retain(&self, custodian: &IoCustodianHandle) -> Result<(), CustodianInventoryError> {
+        let connection_ref = custodian.connection_ref().clone();
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if entries.contains_key(&connection_ref) {
+            return Err(CustodianInventoryError::DuplicateConnection);
+        }
+        if entries.len() >= self.capacity {
+            return Err(CustodianInventoryError::Full);
+        }
+        entries.insert(connection_ref, custodian.observer());
+        Ok(())
+    }
+
+    /// Reacquire observation by exact physical-connection identity.
+    pub fn observe(&self, connection_ref: &ConnectionRef) -> Option<IoCustodianObserver> {
+        let entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.get(connection_ref).cloned()
+    }
+
+    /// Number of retained observations, including cleanup that is still
+    /// pending and Joined entries not yet explicitly pruned.
+    pub fn len(&self) -> usize {
+        let entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.len()
+    }
+
+    /// Whether the index currently retains no observations.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Remove only entries whose two pump handles are confirmed Joined.
+    /// CleanupPending and all other unfinished states remain discoverable.
+    pub fn prune_joined(&self) -> usize {
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let before = entries.len();
+        entries.retain(|_, observer| observer.state() != CustodianState::Joined);
+        before - entries.len()
+    }
 }
 
 impl IoCustodianHandle {
@@ -454,8 +601,19 @@ impl IoCustodianHandle {
         self.client.stop.reason()
     }
 
+    /// Terminal results become available after both pump handles have joined.
+    pub fn terminal_summary(&self) -> Option<CustodianSummary> {
+        let summary = match self.client.summary.lock() {
+            Ok(summary) => summary,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        summary.clone()
+    }
+
     /// Request an out-of-band stop without sending through an application data
-    /// mailbox. This is suitable for stop and node-lease-loss paths.
+    /// mailbox. Lease loss uses this to interrupt the pumps; it does not fence
+    /// a write that has passed `poll_ready` and can still call `start_send`.
+    /// Any live cutover needs an authority gate at that effect boundary.
     pub fn request_stop(&self, reason: StopReason) {
         if self.state() == CustodianState::Joined {
             return;
@@ -475,6 +633,7 @@ impl IoCustodianHandle {
         IoCustodianObserver {
             connection_ref: self.client.connection_ref.clone(),
             state: self.client.state.clone(),
+            summary: self.client.summary.clone(),
         }
     }
 
@@ -508,6 +667,16 @@ impl IoCustodianObserver {
     /// JoinHandles have returned.
     pub fn state(&self) -> CustodianState {
         *self.state.borrow()
+    }
+
+    /// Terminal results become available after the custodian has joined both
+    /// pump handles. The summary retains typed outcomes, not error payloads.
+    pub fn terminal_summary(&self) -> Option<CustodianSummary> {
+        let summary = match self.summary.lock() {
+            Ok(summary) => summary,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        summary.clone()
     }
 
     /// Wait until both pump handles have returned. If the custodian task itself
@@ -546,6 +715,8 @@ where
     let force_stop = supervisor.force_stop.clone();
     let admission_open = supervisor.admission_open.clone();
     let (state_tx, state_rx) = watch::channel(CustodianState::Running);
+    let summary = Arc::new(Mutex::new(None));
+    let custodian_summary = summary.clone();
 
     tokio::spawn(async move {
         let mut inbound = None;
@@ -589,7 +760,18 @@ where
             Some(result) => result,
             None => supervisor.outbound.join().await,
         };
-        drop(supervisor.joined(inbound, outbound));
+        let joined = supervisor.joined(inbound, outbound);
+        let summary = CustodianSummary {
+            connection_ref: joined.connection_ref.clone(),
+            inbound: summarize_inbound(&joined.inbound),
+            outbound: summarize_outbound(&joined.outbound),
+        };
+        let mut retained_summary = match custodian_summary.lock() {
+            Ok(retained_summary) => retained_summary,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *retained_summary = Some(summary);
+        drop(retained_summary);
         state_tx.send_replace(CustodianState::Joined);
     });
 
@@ -600,7 +782,33 @@ where
             force_stop,
             admission_open,
             state: state_rx,
+            summary,
         }),
+    }
+}
+
+fn summarize_inbound<E>(result: &Result<InboundExit<E>, JoinError>) -> InboundTerminal {
+    match result {
+        Ok(InboundExit::Stopped) => InboundTerminal::Stopped,
+        Ok(InboundExit::PeerClosed) => InboundTerminal::PeerClosed,
+        Ok(InboundExit::Overloaded) => InboundTerminal::Overloaded,
+        Ok(InboundExit::IoFailure(_)) => InboundTerminal::IoFailure,
+        Err(error) if error.is_panic() => InboundTerminal::Panicked,
+        Err(error) if error.is_cancelled() => InboundTerminal::Aborted,
+        Err(_) => InboundTerminal::JoinFailure,
+    }
+}
+
+fn summarize_outbound<E>(result: &Result<OutboundExit<E>, JoinError>) -> OutboundTerminal {
+    match result {
+        Ok(OutboundExit::Stopped) => OutboundTerminal::Stopped,
+        Ok(OutboundExit::ShutdownClose) => OutboundTerminal::ShutdownClose,
+        Ok(OutboundExit::PeerClosedReplyFlushed) => OutboundTerminal::PeerClosedReplyFlushed,
+        Ok(OutboundExit::QueueClosed) => OutboundTerminal::QueueClosed,
+        Ok(OutboundExit::IoFailure(_)) => OutboundTerminal::IoFailure,
+        Err(error) if error.is_panic() => OutboundTerminal::Panicked,
+        Err(error) if error.is_cancelled() => OutboundTerminal::Aborted,
+        Err(_) => OutboundTerminal::JoinFailure,
     }
 }
 

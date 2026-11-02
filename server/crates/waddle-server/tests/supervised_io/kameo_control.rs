@@ -7,9 +7,9 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use waddle_server::test_support::supervised_io::{
-    spawn_io_custodian, spawn_supervised_io, CustodianState, IoCustodianHandle,
-    IoCustodianObserver, Limits, QueueItem, ShutdownProtocol, StopReason, TransportLimits,
-    WriteSender,
+    spawn_io_custodian, spawn_supervised_io, CustodianInventoryError, CustodianState,
+    InboundTerminal, IoCustodianHandle, IoCustodianInventory, Limits, OutboundTerminal, QueueItem,
+    ShutdownProtocol, StopReason, TransportLimits, WriteSender,
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
 
@@ -162,19 +162,14 @@ fn spawn_custodian() -> (
     )
 }
 
-async fn assert_custodian_joined(observer: &IoCustodianObserver) {
-    assert_eq!(
-        timeout(Duration::from_secs(5), observer.wait_until_joined())
-            .await
-            .expect("independent custodian joins both pumps"),
-        CustodianState::Joined
-    );
-}
-
 #[tokio::test]
 async fn actor_stop_drops_control_and_independent_custodian_joins_pumps() {
     let (custodian, _outbound, _inbound) = spawn_custodian();
-    let observer = custodian.observer();
+    let connection_ref = custodian.connection_ref().clone();
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    inventory
+        .try_retain(&custodian)
+        .expect("retain observation independently of actor");
     let (dropped_tx, dropped_rx) = oneshot::channel();
     let actor = CustodianProbe::spawn(CustodianProbe {
         custodian: Some(custodian),
@@ -189,13 +184,31 @@ async fn actor_stop_drops_control_and_independent_custodian_joins_pumps() {
         .await
         .expect("actor is dropped")
         .expect("drop signal");
-    assert_custodian_joined(&observer).await;
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("reacquire after the actor dropped its only control handle");
+    assert_eq!(
+        timeout(Duration::from_secs(5), observer.wait_until_joined())
+            .await
+            .expect("independent custodian joins both pumps"),
+        CustodianState::Joined
+    );
+    let summary = observer
+        .terminal_summary()
+        .expect("joined outcomes retained");
+    assert!(summary.is_for(&connection_ref));
+    assert_eq!(summary.inbound, InboundTerminal::Stopped);
+    assert_eq!(summary.outbound, OutboundTerminal::Stopped);
 }
 
 #[tokio::test]
 async fn actor_panic_drops_control_and_independent_custodian_joins_pumps() {
     let (custodian, _outbound, _inbound) = spawn_custodian();
-    let observer = custodian.observer();
+    let connection_ref = custodian.connection_ref().clone();
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    inventory
+        .try_retain(&custodian)
+        .expect("retain observation independently of actor");
     let (dropped_tx, dropped_rx) = oneshot::channel();
     let actor = CustodianProbe::spawn(CustodianProbe {
         custodian: Some(custodian),
@@ -210,5 +223,58 @@ async fn actor_panic_drops_control_and_independent_custodian_joins_pumps() {
         .await
         .expect("panicked actor is dropped")
         .expect("drop signal");
-    assert_custodian_joined(&observer).await;
+    let observer = inventory
+        .observe(&connection_ref)
+        .expect("reacquire after the actor dropped its only control handle");
+    assert_eq!(
+        timeout(Duration::from_secs(5), observer.wait_until_joined())
+            .await
+            .expect("independent custodian joins both pumps"),
+        CustodianState::Joined
+    );
+}
+
+#[tokio::test]
+async fn custodian_inventory_refuses_duplicates_and_full_entries_and_prunes_only_joined() {
+    let (first, _first_outbound, _first_inbound) = spawn_custodian();
+    let (second, _second_outbound, _second_inbound) = spawn_custodian();
+    let first_ref = first.connection_ref().clone();
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+
+    assert_eq!(
+        IoCustodianInventory::new(0).err(),
+        Some(CustodianInventoryError::ZeroCapacity)
+    );
+    inventory.try_retain(&first).expect("first entry fits");
+    assert_eq!(
+        inventory.try_retain(&first),
+        Err(CustodianInventoryError::DuplicateConnection)
+    );
+    assert_eq!(
+        inventory.try_retain(&second),
+        Err(CustodianInventoryError::Full)
+    );
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory.prune_joined(), 0, "running entry remains indexed");
+
+    first.request_stop(StopReason::Requested);
+    let first_observer = inventory
+        .observe(&first_ref)
+        .expect("unfinished remains indexed");
+    assert_eq!(
+        timeout(Duration::from_secs(5), first_observer.wait_until_joined())
+            .await
+            .expect("join first pumps"),
+        CustodianState::Joined
+    );
+    assert_eq!(inventory.prune_joined(), 1);
+    assert!(inventory.observe(&first_ref).is_none());
+
+    inventory
+        .try_retain(&second)
+        .expect("joined entry freed its slot");
+    second.request_stop(StopReason::Requested);
+    timeout(Duration::from_secs(5), second.wait_until_joined())
+        .await
+        .expect("join second pumps");
 }
