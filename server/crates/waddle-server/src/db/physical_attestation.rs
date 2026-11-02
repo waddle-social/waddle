@@ -86,7 +86,7 @@ impl PgRoleName {
 }
 
 /// The complete identity expected before a physical connection is lent out.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalAttestationConfig {
     lineage: AttestedLineage,
     postgres: PgIdentity,
@@ -181,17 +181,28 @@ impl AttestedPgPool {
         self.pool.num_idle()
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn max_connections(&self) -> u32 {
         self.pool.options().get_max_connections()
+    }
+
+    pub(crate) fn has_same_attestation_config(&self, other: &Self) -> bool {
+        self.writer_capability.config == other.writer_capability.config
+    }
+
+    /// Refuse to combine the pool while any test or internal raw checkout is
+    /// still outstanding. Paired-pool constructors validate every member
+    /// before consuming either wrapper.
+    pub(crate) fn ensure_no_active_leases(&self) -> Result<(), PhysicalAttestationError> {
+        if self.pool.size() as usize != self.pool.num_idle() {
+            return Err(PhysicalAttestationError::ActivePoolLease);
+        }
+        Ok(())
     }
 
     pub(crate) fn into_parts(
         self,
     ) -> Result<(PgPool, AttestedPostgresWriterCapability), PhysicalAttestationError> {
-        if self.pool.size() as usize != self.pool.num_idle() {
-            return Err(PhysicalAttestationError::ActivePoolLease);
-        }
+        self.ensure_no_active_leases()?;
         Ok((self.pool, self.writer_capability))
     }
 }

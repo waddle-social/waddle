@@ -9,7 +9,8 @@ use sqlx::{Connection, PgConnection};
 use waddle_server::config::LineageConfig;
 #[cfg(feature = "test-support")]
 use waddle_server::db::bootstrap::{
-    attach_verified_global_runtime, verify_global_runtime, verify_store_lineage_runtime,
+    attach_verified_global_runtime, attach_verified_global_runtime_with_control_plane,
+    verify_global_runtime, verify_store_lineage_runtime, ControlPlanePoolLimits,
     RuntimeAttachmentError, RuntimePoolLimits, MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
 };
 use waddle_server::db::lineage::{
@@ -2099,11 +2100,258 @@ async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_cap
     };
 
     assert_verified_pool_capacity(&fixture, &installed, limits).await;
+    assert_verified_control_plane_pool(&fixture, &installed, limits).await;
+    assert_attested_pool_pair_refusals(&fixture, &installed).await;
     assert_verified_expected_identity(&fixture, &installed, limits).await;
     assert_verified_budget_validation(&fixture, &installed, limits).await;
     assert_verified_revoked_grants(&fixture, &installed, limits).await;
     assert_verified_ledger(&fixture, &installed, limits).await;
     fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_control_plane_pool(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    let other_schema_options =
+        PgConnectOptions::from_str(&url_with_schema(&fixture.base_url, "public"))
+            .expect("other-schema options")
+            .username(&fixture.runtime);
+    assert!(
+        attach_verified_global_runtime_with_control_plane(
+            fixture.runtime_options.clone(),
+            other_schema_options,
+            installed.clone(),
+            &fixture.lineage,
+            limits,
+            ControlPlanePoolLimits {
+                connections: 1,
+                acquire_timeout: Duration::from_millis(500),
+            },
+        )
+        .await
+        .is_err(),
+        "a control-plane pool attached to the wrong active schema must refuse"
+    );
+
+    let attached = attach_verified_global_runtime_with_control_plane(
+        fixture.runtime_options.clone(),
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        &fixture.lineage,
+        limits,
+        ControlPlanePoolLimits {
+            connections: 1,
+            acquire_timeout: Duration::from_millis(500),
+        },
+    )
+    .await
+    .expect("verified attachment with separate control-plane pool");
+    let observations =
+        waddle_server::test_support::observe_verified_attachment(&attached, &fixture.admin)
+            .await
+            .expect("inspect separately attested control-plane pool");
+    assert!(observations.has_control_plane_pool);
+    assert_eq!(
+        observations.control_plane_identity,
+        Some((
+            fixture.database_name.clone(),
+            fixture.target.clone(),
+            fixture.runtime.clone(),
+        )),
+        "control plane uses the same physical database, schema, and runtime login"
+    );
+    assert!(observations.second_control_plane_blocked);
+    assert!(observations.main_available_while_control_plane_busy);
+    assert!(observations.control_plane_available_while_main_busy);
+
+    // The idle control-plane session must be re-attested on every checkout,
+    // including after trusted lineage or grant state changes.
+    let wrong_lineage = LineageUuid::new();
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(wrong_lineage.to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("drift trusted lineage after attachment");
+    assert!(
+        waddle_server::test_support::probe_verified_control_plane(&attached)
+            .await
+            .is_err(),
+        "control-plane checkout must refuse changed lineage"
+    );
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(fixture.lineage.lineage_uuid.to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("restore trusted lineage");
+    waddle_server::test_support::probe_verified_control_plane(&attached)
+        .await
+        .expect("control-plane checkout recovers after lineage is restored");
+
+    sqlx::query(&format!(
+        "REVOKE EXECUTE ON FUNCTION {}.read_physical_identity() FROM {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke trusted attestor grant after attachment");
+    assert!(
+        waddle_server::test_support::probe_verified_control_plane(&attached)
+            .await
+            .is_err(),
+        "control-plane checkout must refuse revoked attestor access"
+    );
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION {}.read_physical_identity() TO {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore trusted attestor grant");
+    waddle_server::test_support::probe_verified_control_plane(&attached)
+        .await
+        .expect("control-plane checkout recovers after the attestor grant is restored");
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_attested_pool_pair_refusals(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+) {
+    let wrong_lineage = {
+        let mut lineage = fixture.lineage.clone();
+        lineage.lineage_uuid = LineageUuid::new();
+        fixture.with_lineage(lineage)
+    };
+    let main = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("attested main pool");
+    let control_plane = attested_pool(
+        fixture.runtime_options.clone(),
+        wrong_lineage,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("attested mismatched control-plane pool");
+    assert!(matches!(
+        waddle_server::test_support::database_pool_from_attested_postgres_pools(
+            "mismatched attested pools",
+            main,
+            Some((control_plane, 1)),
+            1,
+            1,
+        )
+        .await,
+        Err(DatabaseError::PhysicalAttestation(
+            PhysicalAttestationError::Mismatch {
+                field: "control-plane pool attestation configuration"
+            }
+        ))
+    ));
+
+    let main = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("attested main pool");
+    let control_plane = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("attested control-plane pool with excess capacity");
+    assert!(matches!(
+        waddle_server::test_support::database_pool_from_attested_postgres_pools(
+            "oversized control-plane pool",
+            main,
+            Some((control_plane, 1)),
+            1,
+            1,
+        )
+        .await,
+        Err(DatabaseError::AttestedPoolLaneCapacityMismatch {
+            expected: 1,
+            actual: 2
+        })
+    ));
+
+    let main = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("attested main pool with active lease");
+    let main_lease = main.acquire_for_test().await.expect("hold main pool lease");
+    let control_plane = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("attested control-plane pool");
+    assert!(matches!(
+        waddle_server::test_support::database_pool_from_attested_postgres_pools(
+            "leased main pool",
+            main,
+            Some((control_plane, 1)),
+            1,
+            1,
+        )
+        .await,
+        Err(DatabaseError::PhysicalAttestation(
+            PhysicalAttestationError::ActivePoolLease
+        ))
+    ));
+    drop(main_lease);
+
+    let main = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        2,
+        Duration::from_secs(3),
+    )
+    .expect("attested main pool");
+    let control_plane = attested_pool(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("attested control-plane pool with active lease");
+    let control_plane_lease = control_plane
+        .acquire_for_test()
+        .await
+        .expect("hold control-plane pool lease");
+    assert!(matches!(
+        waddle_server::test_support::database_pool_from_attested_postgres_pools(
+            "leased control-plane pool",
+            main,
+            Some((control_plane, 1)),
+            1,
+            1,
+        )
+        .await,
+        Err(DatabaseError::PhysicalAttestation(
+            PhysicalAttestationError::ActivePoolLease
+        ))
+    ));
+    drop(control_plane_lease);
 }
 
 #[cfg(feature = "test-support")]
@@ -2120,9 +2368,10 @@ async fn assert_verified_pool_capacity(
     )
     .await
     .expect("verified restricted global attachment");
-    let observations = waddle_server::test_support::observe_verified_attachment(&attached)
-        .await
-        .expect("inspect private attachment and reserved admission");
+    let observations =
+        waddle_server::test_support::observe_verified_attachment(&attached, &fixture.admin)
+            .await
+            .expect("inspect private attachment and reserved admission");
     assert!(!observations.has_control_plane_pool);
     assert!(!observations.has_control_system_execute);
     assert!(observations.second_main_blocked);

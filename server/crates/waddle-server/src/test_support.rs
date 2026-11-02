@@ -80,11 +80,35 @@ pub async fn database_pool_from_attested_postgres_pool(
     DatabasePool::from_attested_postgres_pool(name, pool, main_budget, ingress_budget).await
 }
 
+/// Wrap attested main/ingress and optional control-plane pools for integration
+/// tests. All supplied pools must share the same attestation contract.
+#[cfg(feature = "test-support")]
+pub async fn database_pool_from_attested_postgres_pools(
+    name: &str,
+    pool: AttestedPgPool,
+    control_plane_pool: Option<(AttestedPgPool, u32)>,
+    main_budget: u32,
+    ingress_budget: u32,
+) -> Result<DatabasePool, crate::db::DatabaseError> {
+    DatabasePool::from_attested_postgres_pools(
+        name,
+        pool,
+        control_plane_pool,
+        main_budget,
+        ingress_budget,
+    )
+    .await
+}
+
 /// Read-only observations of a verified attachment with one slot per lane.
 #[cfg(feature = "test-support")]
 pub struct VerifiedAttachmentObservations {
     pub has_control_plane_pool: bool,
     pub has_control_system_execute: bool,
+    pub control_plane_identity: Option<(String, String, String)>,
+    pub second_control_plane_blocked: bool,
+    pub main_available_while_control_plane_busy: bool,
+    pub control_plane_available_while_main_busy: bool,
     pub second_main_blocked: bool,
     pub second_ingress_blocked: bool,
 }
@@ -94,6 +118,7 @@ pub struct VerifiedAttachmentObservations {
 #[cfg(feature = "test-support")]
 pub async fn observe_verified_attachment(
     attachment: &VerifiedGlobalAttachment,
+    observer: &PgPool,
 ) -> Result<VerifiedAttachmentObservations, DatabaseError> {
     let database = attachment.database_for_test();
     let has_control_plane_pool = database.has_control_plane_pool();
@@ -110,6 +135,103 @@ pub async fn observe_verified_attachment(
             .await?
             .ok_or_else(|| DatabaseError::QueryFailed("missing privilege result".to_owned()))?
             .get::<bool>(0)?
+    };
+
+    let (
+        control_plane_identity,
+        second_control_plane_blocked,
+        main_available_while_control_plane_busy,
+        control_plane_available_while_main_busy,
+    ) = if has_control_plane_pool {
+        let guard = database.control_plane_guard().await?;
+        let mut rows = guard
+            .query(
+                "SELECT pg_catalog.current_database(), pg_catalog.current_schema()::text, \
+                 session_user::text",
+                (),
+            )
+            .await?;
+        let identity = rows
+            .next()
+            .await?
+            .ok_or_else(|| DatabaseError::QueryFailed("missing control-plane identity".into()))?;
+        let identity = (
+            identity.get::<String>(0)?,
+            identity.get::<String>(1)?,
+            identity.get::<String>(2)?,
+        );
+
+        // Keep a statement active on one reserved pool while checking that
+        // its own capacity is bounded and the other pool remains available.
+        // Observe the server-side query before probing the second slot so the
+        // capacity assertion does not depend on task scheduling latency.
+        let control_plane_marker = "p21_control_plane_capacity_sentinel";
+        let control_plane_query =
+            format!("SELECT pg_catalog.pg_sleep(1) /* {control_plane_marker} */");
+        let slow_control_plane_database = database.clone();
+        let slow_control_plane = tokio::spawn(async move {
+            slow_control_plane_database
+                .control_plane_guard()
+                .await?
+                .query(&control_plane_query, ())
+                .await?;
+            Ok::<(), DatabaseError>(())
+        });
+        wait_for_active_pool_query(observer, control_plane_marker).await?;
+        let second_control_plane_blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(75), async {
+                database
+                    .control_plane_guard()
+                    .await?
+                    .query("SELECT 1", ())
+                    .await
+            })
+            .await
+            .is_err();
+        let main_available_while_control_plane_busy =
+            tokio::time::timeout(std::time::Duration::from_millis(150), async {
+                database.guard().await?.query("SELECT 1", ()).await
+            })
+            .await
+            .is_ok();
+        slow_control_plane
+            .await
+            .map_err(|error| DatabaseError::QueryFailed(error.to_string()))??;
+
+        let main_marker = "p21_main_capacity_sentinel";
+        let main_query = format!("SELECT pg_catalog.pg_sleep(1) /* {main_marker} */");
+        let slow_main_database = database.clone();
+        let slow_main = tokio::spawn(async move {
+            slow_main_database
+                .guard()
+                .await?
+                .query(&main_query, ())
+                .await?;
+            Ok::<(), DatabaseError>(())
+        });
+        wait_for_active_pool_query(observer, main_marker).await?;
+        let control_plane_available_while_main_busy =
+            tokio::time::timeout(std::time::Duration::from_millis(150), async {
+                database
+                    .control_plane_guard()
+                    .await?
+                    .query("SELECT 1", ())
+                    .await
+            })
+            .await
+            .is_ok();
+        slow_main
+            .await
+            .map_err(|error| DatabaseError::QueryFailed(error.to_string()))??;
+
+        (
+            Some(identity),
+            second_control_plane_blocked,
+            main_available_while_control_plane_busy,
+            control_plane_available_while_main_busy,
+        )
+    } else {
+        (None, false, false, false)
     };
 
     let mut main = database.begin().await?;
@@ -134,9 +256,55 @@ pub async fn observe_verified_attachment(
     Ok(VerifiedAttachmentObservations {
         has_control_plane_pool,
         has_control_system_execute,
+        control_plane_identity,
+        second_control_plane_blocked,
+        main_available_while_control_plane_busy,
+        control_plane_available_while_main_busy,
         second_main_blocked,
         second_ingress_blocked,
     })
+}
+
+#[cfg(feature = "test-support")]
+async fn wait_for_active_pool_query(observer: &PgPool, marker: &str) -> Result<(), DatabaseError> {
+    let wait = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let active: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = pg_catalog.current_database() AND state = 'active' \
+                 AND query LIKE $1)",
+            )
+            .bind(format!("%{marker}%"))
+            .fetch_one(observer)
+            .await?;
+            if active {
+                return Ok::<(), DatabaseError>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .map_err(|_| DatabaseError::QueryFailed("pool capacity query did not start".into()))?;
+    wait
+}
+
+/// Probe the attached control-plane lane after a test has changed trusted
+/// database state. This lets PostgreSQL integration tests prove that every
+/// checkout re-runs the physical attestor and fails closed on drift.
+#[cfg(feature = "test-support")]
+pub async fn probe_verified_control_plane(
+    attachment: &VerifiedGlobalAttachment,
+) -> Result<(), DatabaseError> {
+    let mut rows = attachment
+        .database_for_test()
+        .control_plane_guard()
+        .await?
+        .query("SELECT 1", ())
+        .await?;
+    rows.next()
+        .await?
+        .ok_or_else(|| DatabaseError::QueryFailed("control-plane probe returned no row".into()))?;
+    Ok(())
 }
 
 /// Characterize that startup-only detached sessions are closed after a

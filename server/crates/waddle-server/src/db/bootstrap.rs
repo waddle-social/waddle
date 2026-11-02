@@ -70,13 +70,22 @@ pub enum RuntimeAttachmentError {
 /// Resource safety bound for this dark constructor, not a PostgreSQL limit.
 pub const MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS: u32 = 1024;
 
-/// Separate admission limits over one physically attested PostgreSQL pool.
-/// Their sum is bounded by [`MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS`] to avoid
-/// excessive pool allocation; it is not a PostgreSQL capacity assertion.
+/// Separate admission limits over the physically attested main pool.
+/// Main and ingress share one backend pool but cannot borrow admission from
+/// each other. Their combined size plus any control-plane pool is bounded by
+/// [`MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS`].
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimePoolLimits {
     pub main_connections: u32,
     pub ingress_connections: u32,
+    pub acquire_timeout: Duration,
+}
+
+/// Capacity for a separately attested control-plane pool. Its admission
+/// capacity is independent from the main and ingress lanes.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlPlanePoolLimits {
+    pub connections: u32,
     pub acquire_timeout: Duration,
 }
 
@@ -112,6 +121,43 @@ pub async fn attach_verified_global_runtime(
     expected: &AttestedLineage,
     limits: RuntimePoolLimits,
 ) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    attach_verified_global_runtime_inner(options, None, attestation, expected, limits).await
+}
+
+/// Attach a global runtime database with a separate physically attested
+/// control-plane pool. Both pools use the same expected physical identity,
+/// lineage, and runtime login, but retain independent connection and admission
+/// budgets. The control-plane pool is checked before this private attachment
+/// is returned; a failed checkout cannot fall back to an ordinary pool or
+/// reopen a DSN.
+///
+/// This dark constructor does not wire startup, perform owner DDL, audit all
+/// runtime grants, drain existing sessions, or fence a PostgreSQL primary.
+pub async fn attach_verified_global_runtime_with_control_plane(
+    options: PgConnectOptions,
+    control_plane_options: PgConnectOptions,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+    control_plane_limits: ControlPlanePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    attach_verified_global_runtime_inner(
+        options,
+        Some((control_plane_options, control_plane_limits)),
+        attestation,
+        expected,
+        limits,
+    )
+    .await
+}
+
+async fn attach_verified_global_runtime_inner(
+    options: PgConnectOptions,
+    control_plane: Option<(PgConnectOptions, ControlPlanePoolLimits)>,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
     let total = limits
         .main_connections
         .checked_add(limits.ingress_connections)
@@ -122,6 +168,20 @@ pub async fn attach_verified_global_runtime(
     if limits.ingress_connections == 0 {
         return Err(DatabaseError::PoolSizeZero { which: "ingress" }.into());
     }
+    if let Some((_, control_plane_limits)) = &control_plane {
+        if control_plane_limits.connections == 0 {
+            return Err(DatabaseError::PoolSizeZero {
+                which: "control-plane",
+            }
+            .into());
+        }
+    }
+    let total = match &control_plane {
+        Some((_, limits)) => total
+            .checked_add(limits.connections)
+            .ok_or(DatabaseError::PoolSizeOverflow)?,
+        None => total,
+    };
     if total > MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS {
         return Err(RuntimeAttachmentError::PoolCapacityExceeded {
             requested: total,
@@ -135,11 +195,34 @@ pub async fn attach_verified_global_runtime(
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
 
-    let pool = attested_pool(options, attestation, total, limits.acquire_timeout)
-        .map_err(DatabaseError::from)?;
-    let database = Database::from_attested_postgres_pool_with_ingress(
+    let main_pool_size = limits
+        .main_connections
+        .checked_add(limits.ingress_connections)
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    let has_control_plane = control_plane.is_some();
+    let pool = attested_pool(
+        options,
+        attestation.clone(),
+        main_pool_size,
+        limits.acquire_timeout,
+    )
+    .map_err(DatabaseError::from)?;
+    let control_plane_pool = control_plane
+        .map(|(options, control_plane_limits)| {
+            attested_pool(
+                options,
+                attestation,
+                control_plane_limits.connections,
+                control_plane_limits.acquire_timeout,
+            )
+            .map(|pool| (pool, control_plane_limits.connections))
+            .map_err(DatabaseError::from)
+        })
+        .transpose()?;
+    let database = Database::from_attested_postgres_pool_with_ingress_and_control_plane(
         "global",
         pool,
+        control_plane_pool,
         limits.main_connections,
         limits.ingress_connections,
     )
@@ -149,6 +232,19 @@ pub async fn attach_verified_global_runtime(
         action: None,
     };
     verify_global_runtime(&database, &config, expected).await?;
+    if has_control_plane {
+        let mut rows = database
+            .control_plane_guard()
+            .await?
+            .query("SELECT pg_catalog.current_database()", ())
+            .await?;
+        if rows.next().await?.is_none() {
+            return Err(DatabaseError::QueryFailed(
+                "control-plane attachment returned no database identity".to_owned(),
+            )
+            .into());
+        }
+    }
     Ok(VerifiedGlobalAttachment {
         _database: database,
     })

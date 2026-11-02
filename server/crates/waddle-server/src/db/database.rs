@@ -84,7 +84,7 @@ pub enum DatabaseError {
     #[error("{which} pool size must be at least 1 (got 0)")]
     PoolSizeZero { which: &'static str },
 
-    #[error("combined main and ingress pool size exceeds the supported range")]
+    #[error("combined main, ingress and control-plane pool size exceeds the supported range")]
     PoolSizeOverflow,
 
     #[error(
@@ -301,7 +301,7 @@ impl Database {
     #[cfg(feature = "test-support")]
     pub(crate) fn from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Self {
         let main_budget = pool.max_connections();
-        Self::from_attested_postgres_pool_with_budgets(name, pool, main_budget, None)
+        Self::from_attested_postgres_pool_with_budgets(name, pool, main_budget, None, None)
             .expect("the attested pool's default main budget matches its own capacity")
     }
 
@@ -316,6 +316,23 @@ impl Database {
             pool,
             main_budget,
             Some(ingress_budget),
+            None,
+        )
+    }
+
+    pub(crate) async fn from_attested_postgres_pool_with_ingress_and_control_plane(
+        name: &str,
+        pool: AttestedPgPool,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pool_with_budgets(
+            name,
+            pool,
+            main_budget,
+            Some(ingress_budget),
+            control_plane_pool,
         )
     }
 
@@ -324,6 +341,7 @@ impl Database {
         pool: AttestedPgPool,
         main_budget: u32,
         ingress_budget: Option<u32>,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
     ) -> Result<Self, DatabaseError> {
         if main_budget == 0 {
             return Err(DatabaseError::PoolSizeZero { which: "main" });
@@ -337,19 +355,63 @@ impl Database {
                 .ok_or(DatabaseError::PoolSizeOverflow)?,
             None => main_budget,
         };
-        let (pool, attested_pg_writer) = pool.into_parts()?;
-        let actual = pool.options().get_max_connections();
+        let actual = pool.max_connections();
         if actual != expected {
             return Err(DatabaseError::AttestedPoolLaneCapacityMismatch { expected, actual });
         }
+
+        if let Some((control_plane_pool, control_plane_budget)) = &control_plane_pool {
+            if *control_plane_budget == 0 {
+                return Err(DatabaseError::PoolSizeZero {
+                    which: "control-plane",
+                });
+            }
+            if !pool.has_same_attestation_config(control_plane_pool) {
+                return Err(PhysicalAttestationError::Mismatch {
+                    field: "control-plane pool attestation configuration",
+                }
+                .into());
+            }
+            let actual = control_plane_pool.max_connections();
+            if actual != *control_plane_budget {
+                return Err(DatabaseError::AttestedPoolLaneCapacityMismatch {
+                    expected: *control_plane_budget,
+                    actual,
+                });
+            }
+        }
+
+        // Check every wrapper before consuming either one. An outstanding
+        // raw test lease must not leave a half-combined pool pair.
+        pool.ensure_no_active_leases()?;
+        if let Some((control_plane_pool, _)) = &control_plane_pool {
+            control_plane_pool.ensure_no_active_leases()?;
+        }
+
+        let (pool, attested_pg_writer) = pool.into_parts()?;
         let acquire_timeout = pool.options().get_acquire_timeout();
+        let (control_plane_backend, control_plane_admission) = match control_plane_pool {
+            Some((pool, budget)) => {
+                let (pool, _control_plane_capability) = pool.into_parts()?;
+                let acquire_timeout = pool.options().get_acquire_timeout();
+                (
+                    Some(DatabaseBackend::Postgres(pool)),
+                    Some(PoolAdmission::new(
+                        budget,
+                        acquire_timeout,
+                        PoolLane::ControlPlane,
+                    )),
+                )
+            }
+            None => (None, None),
+        };
         Ok(Self {
             admission: PoolAdmission::new(main_budget, acquire_timeout, PoolLane::Main),
             ingress_admission: ingress_budget
                 .map(|size| PoolAdmission::new(size, acquire_timeout, PoolLane::Ingress)),
             backend: DatabaseBackend::Postgres(pool),
-            control_plane_backend: None,
-            control_plane_admission: None,
+            control_plane_backend,
+            control_plane_admission,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             // PgConnectOptions can carry startup parameters that SQLx's URL

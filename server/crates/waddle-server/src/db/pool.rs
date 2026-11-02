@@ -41,17 +41,45 @@ impl DatabasePool {
         main_budget: u32,
         ingress_budget: u32,
     ) -> Result<Self, DatabaseError> {
+        Self::from_attested_postgres_pools(name, pool, None, main_budget, ingress_budget).await
+    }
+
+    /// Wrap physically attested main/ingress and optional control-plane pools.
+    /// The control-plane pool retains its independent capacity and admission
+    /// class; it must carry the same physical/lineage/runtime attestation as
+    /// the main pool.
+    pub async fn from_attested_postgres_pools(
+        name: &str,
+        pool: AttestedPgPool,
+        control_plane_pool: Option<(AttestedPgPool, u32)>,
+        main_budget: u32,
+        ingress_budget: u32,
+    ) -> Result<Self, DatabaseError> {
         info!(
             main_budget,
             ingress_budget, "Wrapping attested database pool"
         );
-        let global_db = Database::from_attested_postgres_pool_with_ingress(
-            name,
-            pool,
-            main_budget,
-            ingress_budget,
-        )
-        .await?;
+        let global_db = match control_plane_pool {
+            Some(control_plane_pool) => {
+                Database::from_attested_postgres_pool_with_ingress_and_control_plane(
+                    name,
+                    pool,
+                    Some(control_plane_pool),
+                    main_budget,
+                    ingress_budget,
+                )
+                .await?
+            }
+            None => {
+                Database::from_attested_postgres_pool_with_ingress(
+                    name,
+                    pool,
+                    main_budget,
+                    ingress_budget,
+                )
+                .await?
+            }
+        };
         Ok(Self::from_database(global_db))
     }
 
