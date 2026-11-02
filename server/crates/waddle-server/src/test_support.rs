@@ -18,11 +18,17 @@ use crate::pending_delivery::DatabasePendingDeliveryStorage;
 use std::sync::Arc;
 
 #[cfg(feature = "test-support")]
+use crate::config::LineageConfig;
+#[cfg(feature = "test-support")]
+use crate::db::bootstrap::VerifiedGlobalAttachment;
+#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPgPool;
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 #[cfg(feature = "test-support")]
 use crate::db::Database;
 #[cfg(feature = "test-support")]
-use crate::db::{bootstrap::VerifiedGlobalAttachment, DatabaseError};
+use crate::db::DatabaseError;
 #[cfg(feature = "test-support")]
 use crate::ingress_substrate::with_pooled_receipt_commit_ack_lost;
 #[cfg(feature = "test-support")]
@@ -32,8 +38,6 @@ use crate::ingress_uow::{
     begin_raw_ingress_writer_with_capability, EffectReceiptRepository, IngressUnitOfWork,
     IngressUowError,
 };
-#[cfg(feature = "test-support")]
-use crate::{config::LineageConfig, db::physical_attestation::AttestedPostgresWriterCapability};
 #[cfg(feature = "test-support")]
 use sqlx::postgres::PgPool;
 

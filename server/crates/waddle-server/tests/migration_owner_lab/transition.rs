@@ -1,12 +1,20 @@
 //! Three-role, disposable PostgreSQL owner transition characterization.
 
-use super::*;
+use super::{url_with_database, url_with_option, wait_for_application};
+use std::str::FromStr;
+use std::time::Duration;
+
 use sha2::{Digest, Sha256};
+use sqlx::postgres::{PgConnectOptions, PgPool};
+use sqlx::{Connection, PgConnection};
+use waddle_server::config::LineageConfig;
+use waddle_server::db::lineage::{self, AttestedLineage, DeploymentUuid};
+use waddle_server::db::physical_attestation::PgRoleName;
 use waddle_server::db::{
-    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
-    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
-    DisposableEpochTransitionError, DisposableEpochTransitionFault,
-    DisposableEpochTransitionObservation,
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab, Database,
+    DatabaseConfig, DatabaseDriver, DisposableEpochTransitionAttempt,
+    DisposableEpochTransitionConfig, DisposableEpochTransitionError,
+    DisposableEpochTransitionFault, DisposableEpochTransitionObservation, MigrationRunner,
 };
 
 const CANDIDATE: &str =

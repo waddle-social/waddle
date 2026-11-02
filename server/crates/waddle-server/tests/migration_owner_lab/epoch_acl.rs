@@ -1,6 +1,13 @@
 //! PostgreSQL catalog and real separated-login checks for the dark diagnostic.
 
-use super::*;
+use super::{
+    run_dark_postgres_owner, url_with_database, url_with_option, DarkMigrationOwnerError, Fixture,
+};
+use std::str::FromStr;
+use std::time::Duration;
+
+use sqlx::postgres::{PgConnectOptions, PgPool};
+use sqlx::{Connection, PgConnection};
 use waddle_server::db::{inspect_dark_postgres_epoch_acl, DarkEpochAclStage};
 use waddle_server::ingress_substrate::EPOCH_GUARDED_TABLES;
 

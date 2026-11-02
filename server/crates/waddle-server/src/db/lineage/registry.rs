@@ -521,7 +521,8 @@ impl LineageReport {
 #[cfg(test)]
 mod transport_classification_tests {
     use super::{is_transport_error, status_for_error, LineageStatus};
-    use crate::db::{physical_attestation::PhysicalAttestationError, DatabaseError};
+    use crate::db::physical_attestation::PhysicalAttestationError;
+    use crate::db::DatabaseError;
 
     #[derive(Debug)]
     struct FakePgError(&'static str);

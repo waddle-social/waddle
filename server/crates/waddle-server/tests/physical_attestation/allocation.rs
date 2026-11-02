@@ -1,8 +1,21 @@
-use super::*;
-use waddle_server::db::physical_attestation::{
-    allocation_lab_postgres_ddl, FixtureAllocationError, FixtureFrame, FixtureStream,
-    ALLOCATION_LAB_SQLITE_DDL,
+use super::super::super::{
+    test_url, typed_bounds, wait_for_blocked_application, Fixture, CATALOG_GRANT_LOCK,
 };
+use super::super::{
+    direct_pin, postgres_fixture, seed_pg_direct, seed_sqlite_direct, sqlite_count, sqlite_exec,
+    sqlite_fixture,
+};
+use super::{installed_v1009, pg_attempt, request, sqlite_attempt};
+use std::sync::Arc;
+use std::time::Duration;
+
+use sqlx::{Connection, PgConnection};
+use waddle_server::db::physical_attestation::{
+    allocation_lab_postgres_ddl, DarkIngressAuthorityError, DirectAdmissionLab,
+    DirectAdmissionLimits, FixtureAllocationError, FixtureConnection, FixtureFrame, FixtureStream,
+    PhysicalAttestationConfig, ALLOCATION_LAB_SQLITE_DDL,
+};
+use waddle_server::db::Database;
 use waddle_xmpp::Stanza;
 
 fn other(body: &str) -> Stanza {
