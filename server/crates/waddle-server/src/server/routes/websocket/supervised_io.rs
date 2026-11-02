@@ -1209,8 +1209,9 @@ impl StartupCompletionSignal {
 impl Drop for StartupCompletionSignal {
     fn drop(&mut self) {
         if let Some(completed) = self.sender.take() {
-            completed.send_replace(true);
+            // A waiter can publish terminal state as soon as the watch changes.
             self.finished.store(true, Ordering::Release);
+            completed.send_replace(true);
         }
     }
 }
