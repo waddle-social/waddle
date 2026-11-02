@@ -15,7 +15,9 @@ use waddle_server::db::lineage::{
 use waddle_server::db::{
     Database, DatabaseConfig, DatabaseDriver, DatabaseError, MigrationLedgerError,
 };
-use waddle_server::inbox::bootstrap_inbox_owner_schema;
+use waddle_server::inbox::{
+    bootstrap_inbox_owner_schema, DatabaseInboxStorage, InboxRuntimeAttachError,
+};
 use waddle_server::pending_delivery::bootstrap_pending_delivery_owner_schema;
 use waddle_server::sm_persistence::bootstrap_portable_sm_owner_schema;
 
@@ -1208,6 +1210,141 @@ async fn inbox_schema_owner_requires_a_schema_writer() {
         "restricted login cannot repair inbox schema"
     );
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair() {
+    use waddle_xmpp::inbox::storage::InboxStorage;
+
+    let config = DatabaseConfig {
+        pool_size: 1,
+        ..DatabaseConfig::default()
+    };
+    let db = Database::from_config("runtime inbox", &config)
+        .await
+        .expect("SQLite database");
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(db.clone()).await,
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            ..
+        })
+    ));
+    bootstrap_inbox_owner_schema(&db)
+        .await
+        .expect("owner prepares inbox");
+    let guard = db.guard().await.expect("SQLite connection");
+    guard
+        .execute(
+            "INSERT INTO inbox_entries \
+             (user_jid, partner_jid, kind, last_stanza_id, last_updated) \
+             VALUES ('alice@example.test', 'bob@example.test', 'direct', 'stanza-1', 1)",
+            (),
+        )
+        .await
+        .expect("owner seeds inbox entry");
+    drop(guard);
+    let storage = DatabaseInboxStorage::attach_existing(db.clone())
+        .await
+        .expect("attach existing SQLite inbox");
+    let user = "alice@example.test".parse().expect("valid user JID");
+    let entries = storage.list(&user).await.expect("inbox read");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].partner.to_string(), "bob@example.test");
+    drop(storage);
+
+    let guard = db.guard().await.expect("SQLite connection");
+    guard
+        .execute("CREATE TEMP TABLE Inbox_Entries (shadow TEXT)", ())
+        .await
+        .expect("create session-local shadow");
+    drop(guard);
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(db.clone()).await,
+        Err(InboxRuntimeAttachError::SqliteTemporaryShadow)
+    ));
+    let guard = db.guard().await.expect("SQLite connection");
+    guard
+        .execute("DROP TABLE temp.inbox_entries", ())
+        .await
+        .expect("remove temporary shadow");
+    drop(guard);
+    for (create, remove) in [
+        (
+            "CREATE TEMP TABLE ingress_effect_intents (shadow TEXT)",
+            "DROP TABLE temp.ingress_effect_intents",
+        ),
+        (
+            "CREATE TEMP VIEW Ingress_Effect_Receipts AS SELECT 1 AS shadow",
+            "DROP VIEW temp.ingress_effect_receipts",
+        ),
+        (
+            "CREATE TEMP TABLE Ingress_Messages (message_key TEXT, terminal_at TEXT)",
+            "DROP TABLE temp.ingress_messages",
+        ),
+    ] {
+        let guard = db.guard().await.expect("SQLite connection");
+        guard
+            .execute(create, ())
+            .await
+            .expect("create ledger shadow");
+        drop(guard);
+        assert!(matches!(
+            DatabaseInboxStorage::attach_existing(db.clone()).await,
+            Err(InboxRuntimeAttachError::SqliteTemporaryShadow)
+        ));
+        let guard = db.guard().await.expect("SQLite connection");
+        guard
+            .execute(remove, ())
+            .await
+            .expect("remove ledger shadow");
+    }
+    DatabaseInboxStorage::attach_existing(db.clone())
+        .await
+        .expect("attach after removing ledger shadows");
+    let guard = db.guard().await.expect("SQLite connection");
+    guard
+        .execute("DROP INDEX idx_inbox_entries_user_updated", ())
+        .await
+        .expect("remove required index");
+    drop(guard);
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(db.clone()).await,
+        Err(InboxRuntimeAttachError::MissingIndex {
+            table: "inbox_entries",
+            index: "idx_inbox_entries_user_updated"
+        })
+    ));
+    let guard = db.guard().await.expect("SQLite connection");
+    let mut rows = guard
+        .query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_inbox_entries_user_updated'",
+            (),
+        )
+        .await
+        .expect("inspect missing index");
+    assert!(rows.next().await.expect("index result").is_none());
+
+    let partial = Database::in_memory("partial inbox")
+        .await
+        .expect("partial SQLite database");
+    let guard = partial.guard().await.expect("partial SQLite connection");
+    guard
+        .execute(
+            "CREATE TABLE inbox_entries (user_jid TEXT, partner_jid TEXT)",
+            (),
+        )
+        .await
+        .expect("create partially provisioned relation");
+    drop(guard);
+    assert!(matches!(
+        DatabaseInboxStorage::attach_existing(partial).await,
+        Err(InboxRuntimeAttachError::Relation {
+            relation: "inbox_entries",
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

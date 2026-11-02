@@ -4,12 +4,16 @@
 //! verifier is not wired into normal startup until the remaining store DDL,
 //! role topology and physical attestation gates are resolved.
 
+use std::time::Duration;
+
+use sqlx::postgres::PgConnectOptions;
 use thiserror::Error;
 use tracing::info;
 
 use crate::config::LineageConfig;
 
 use super::lineage::{self, AttestedLineage, LineageAction, LineageError, LineageUuid};
+use super::physical_attestation::{attested_pool, PhysicalAttestationConfig};
 use super::{Database, DatabaseDriver, DatabaseError, MigrationRunner, Transaction};
 
 #[derive(Debug, Error)]
@@ -53,8 +57,99 @@ pub enum RuntimeAttachmentError {
     MissingExpectedPostgresIdentity,
     #[error("runtime attachment identity differs from the expected committed installation")]
     ExpectedIdentityMismatch,
+    #[error(
+        "verified runtime pool requests {requested} connections, exceeding the resource safety limit of {maximum}"
+    )]
+    PoolCapacityExceeded { requested: u32, maximum: u32 },
     #[error(transparent)]
     Database(#[from] DatabaseError),
+}
+
+/// Resource safety bound for this dark constructor, not a PostgreSQL limit.
+pub const MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS: u32 = 1024;
+
+/// Separate admission limits over one physically attested PostgreSQL pool.
+/// Their sum is bounded by [`MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS`] to avoid
+/// excessive pool allocation; it is not a PostgreSQL capacity assertion.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimePoolLimits {
+    pub main_connections: u32,
+    pub ingress_connections: u32,
+    pub acquire_timeout: Duration,
+}
+
+/// An attested global database whose lineage and migration ledger were
+/// verified before this handle was created. The ledger verification describes
+/// that transaction's snapshot. The database remains private until startup,
+/// store and runtime-authority boundaries are closed in a later slice.
+pub struct VerifiedGlobalAttachment {
+    _database: Database,
+}
+
+#[cfg(feature = "test-support")]
+impl VerifiedGlobalAttachment {
+    pub(crate) fn database_for_test(&self) -> &Database {
+        &self._database
+    }
+}
+
+/// Construct one physically attested PostgreSQL pool with independent main
+/// and ingress admission, then verify its physical capability, qualified
+/// lineage and complete migration ledger in the same read-only transaction.
+///
+/// `expected` is a separate operator-supplied installation identity; it must
+/// not be obtained from this pool or its capability. This function compares
+/// that input with the attestor configuration, but does not establish the
+/// input's provenance, audit all runtime grants, drain existing sessions or
+/// fence a PostgreSQL primary. The endpoint must retain a server session
+/// across checkout and transaction start. No schema repair, owner bootstrap
+/// or store initialization is performed.
+pub async fn attach_verified_global_runtime(
+    options: PgConnectOptions,
+    attestation: PhysicalAttestationConfig,
+    expected: &AttestedLineage,
+    limits: RuntimePoolLimits,
+) -> Result<VerifiedGlobalAttachment, RuntimeAttachmentError> {
+    let total = limits
+        .main_connections
+        .checked_add(limits.ingress_connections)
+        .ok_or(DatabaseError::PoolSizeOverflow)?;
+    if limits.main_connections == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "main" }.into());
+    }
+    if limits.ingress_connections == 0 {
+        return Err(DatabaseError::PoolSizeZero { which: "ingress" }.into());
+    }
+    if total > MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS {
+        return Err(RuntimeAttachmentError::PoolCapacityExceeded {
+            requested: total,
+            maximum: MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
+        });
+    }
+    if expected.postgres_identity.is_none() {
+        return Err(RuntimeAttachmentError::MissingExpectedPostgresIdentity);
+    }
+    if attestation.expected_lineage() != expected {
+        return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+    }
+
+    let pool = attested_pool(options, attestation, total, limits.acquire_timeout)
+        .map_err(DatabaseError::from)?;
+    let database = Database::from_attested_postgres_pool_with_ingress(
+        "global",
+        pool,
+        limits.main_connections,
+        limits.ingress_connections,
+    )
+    .await?;
+    let config = LineageConfig {
+        deployment_uuid: Some(expected.deployment_uuid),
+        action: None,
+    };
+    verify_global_runtime(&database, &config, expected).await?;
+    Ok(VerifiedGlobalAttachment {
+        _database: database,
+    })
 }
 
 /// The existing owner startup path, made explicit so a later credential split
@@ -155,7 +250,7 @@ pub async fn verify_global_runtime(
     let (mut tx, driver, lineage_table, ledger_table) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
@@ -177,12 +272,41 @@ pub async fn verify_store_lineage_runtime(
     let (mut tx, driver, lineage_table, _) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
     tx.commit().await?;
     Ok(attested)
+}
+
+async fn verify_runtime_lineage(
+    db: &Database,
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+    expected: &AttestedLineage,
+    lineage_table: &str,
+) -> Result<AttestedLineage, RuntimeAttachmentError> {
+    if let Some(capability) = db.attested_pg_writer_capability() {
+        db.verify_attested_pg_writer_capability(&capability)
+            .map_err(DatabaseError::from)?;
+        if &capability.attested_lineage_for_deployment(config.deployment_uuid)? != expected {
+            return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+        }
+        capability.attest_transaction(tx).await?;
+        Ok(
+            lineage::verify_qualified_with_attested_identity_in_transaction(
+                tx,
+                config,
+                lineage_table,
+                capability.identity(),
+            )
+            .await?,
+        )
+    } else {
+        Ok(lineage::verify_qualified_in_transaction(tx, driver, config, lineage_table).await?)
+    }
 }
 
 async fn begin_runtime_lineage_check<'a>(

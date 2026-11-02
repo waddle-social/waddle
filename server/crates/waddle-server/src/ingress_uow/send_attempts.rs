@@ -117,7 +117,8 @@ impl SendAttemptRepository {
             recovered,
             previously_started,
         };
-        let sql = format!("INSERT INTO ingress_send_attempts (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
+        let attempts = attempt_relation(tx);
+        let sql = format!("INSERT INTO {attempts} (message_key, kind, semantic_identity_hash, recipient, node_id, node_incarnation, lease_token, expires_at_ms, state, recovered) VALUES ({key}, ?, ?, ?, ?, ?, ?, {clock} + ?, 0, ?) ON CONFLICT (message_key, kind, semantic_identity_hash, recipient) DO UPDATE SET node_id = excluded.node_id, node_incarnation = excluded.node_incarnation, lease_token = excluded.lease_token, expires_at_ms = excluded.expires_at_ms, state = 0, recovered = excluded.recovered");
         tx.transaction_mut()
             .execute(
                 &sql,
@@ -145,9 +146,13 @@ impl SendAttemptRepository {
     ) -> Result<Option<SendAttemptStatus>, IngressUowError> {
         lock(tx, obligation).await?;
         let (key, clock) = dialect(tx);
-        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM ingress_send_attempts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let attempts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
+        );
+        let sql = format!("SELECT state, CASE WHEN expires_at_ms <= {clock} THEN 1 ELSE 0 END, recovered FROM {attempts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = transaction
             .query(
                 &sql,
                 crate::db_params![
@@ -240,10 +245,23 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
         lock(tx, obligation).await?;
-        let mut rows = tx.transaction_mut().query(
-            "SELECT 1 FROM sm_ingress_appends WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?",
-            crate::db_params![obligation.message.to_storage().to_string(), obligation.receipt.kind.to_storage(), obligation.receipt.semantic_identity_hash.to_vec(), obligation.recipient.to_string()]
-        ).await?;
+        let (transaction, prepared) = tx.prepared_parts();
+        let appends = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::SmAppends,
+        );
+        let sql = format!("SELECT 1 FROM {appends} WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?");
+        let mut rows = transaction
+            .query(
+                &sql,
+                crate::db_params![
+                    obligation.message.to_storage().to_string(),
+                    obligation.receipt.kind.to_storage(),
+                    obligation.receipt.semantic_identity_hash.to_vec(),
+                    obligation.recipient.to_string()
+                ],
+            )
+            .await?;
         Ok(rows.next().await?.is_some())
     }
 
@@ -252,9 +270,13 @@ impl SendAttemptRepository {
         obligation: &SendObligation,
     ) -> Result<bool, IngressUowError> {
         let (key, _) = dialect(tx);
-        let sql = format!("SELECT 1 FROM ingress_carbon_receipts WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let receipts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::CarbonReceipts,
+        );
+        let sql = format!("SELECT 1 FROM {receipts} WHERE message_key = {key} AND kind = ? AND semantic_identity_hash = ? AND recipient = ?");
+        let mut rows = transaction
             .query(
                 &sql,
                 crate::db_params![
@@ -275,10 +297,13 @@ impl SendAttemptRepository {
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
         let (_, clock) = dialect(tx);
+        let attempts = attempt_relation(tx);
         transition(
             tx,
             lease,
-            &format!("UPDATE ingress_send_attempts SET state = 1, expires_at_ms = {clock} + {STARTED_GRACE_MS}"),
+            &format!(
+                "UPDATE {attempts} SET state = 1, expires_at_ms = {clock} + {STARTED_GRACE_MS}"
+            ),
             &format!("state = 0 AND expires_at_ms > {clock}"),
         )
         .await
@@ -290,10 +315,11 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
+        let attempts = attempt_relation(tx);
         transition(
             tx,
             lease,
-            "UPDATE ingress_send_attempts SET state = 2",
+            &format!("UPDATE {attempts} SET state = 2"),
             "state = 1",
         )
         .await
@@ -305,24 +331,28 @@ impl SendAttemptRepository {
         tx: &mut IngressUowTransaction<'_>,
         lease: &SendLease,
     ) -> Result<bool, IngressUowError> {
-        transition(
-            tx,
-            lease,
-            if lease.recovered && lease.previously_started {
-                // A definite failure of THIS retry does not prove the older
-                // unknown attempt failed. Retain the earlier start evidence.
-                "UPDATE ingress_send_attempts SET state = 1, expires_at_ms = 0"
-            } else if lease.recovered {
-                // Even a known uninvoked reservation must remain eligible for
-                // offline handoff if its socket disappeared before the retry.
-                "UPDATE ingress_send_attempts SET state = 0, expires_at_ms = 0"
-            } else {
-                "DELETE FROM ingress_send_attempts"
-            },
-            "state IN (0, 1)",
-        )
-        .await
+        let attempts = attempt_relation(tx);
+        let action = if lease.recovered && lease.previously_started {
+            // A definite failure of THIS retry does not prove the older
+            // unknown attempt failed. Retain the earlier start evidence.
+            format!("UPDATE {attempts} SET state = 1, expires_at_ms = 0")
+        } else if lease.recovered {
+            // Even a known uninvoked reservation must remain eligible for
+            // offline handoff if its socket disappeared before the retry.
+            format!("UPDATE {attempts} SET state = 0, expires_at_ms = 0")
+        } else {
+            format!("DELETE FROM {attempts}")
+        };
+        transition(tx, lease, &action, "state IN (0, 1)").await
     }
+}
+
+fn attempt_relation(tx: &mut IngressUowTransaction<'_>) -> String {
+    let (_, prepared) = tx.prepared_parts();
+    crate::ingress_substrate::prepared_ingress_relation(
+        prepared,
+        crate::ingress_substrate::PreparedIngressRelation::SendAttempts,
+    )
 }
 
 fn dialect(tx: &mut IngressUowTransaction<'_>) -> (&'static str, &'static str) {

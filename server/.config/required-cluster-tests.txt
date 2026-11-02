@@ -170,6 +170,21 @@ waddle-server::clustering_shutdown_deadline fatal_fence_during_first_retirement_
 waddle-server::sqlx_cancelled_begin cancelled_ordinary_begin_never_reuses_an_open_postgres_transaction
 waddle-server::sqlx_cancelled_begin postgres_begin_patch_preserves_nested_and_rejected_begin
 
+# P2.1 (#2116/#2046): shared-pool admission remains held until SQLx returns
+# or closes each physical checkout, including cancellation and shutdown.
+# The BEGIN wire-gate tests require a loopback TCP PostgreSQL fixture that
+# accepts plaintext locally, or a loopback tunnel that encrypts upstream.
+# They reject IPv6 URLs and host, hostaddr, and port URL query overrides.
+waddle-server::postgres_admission_cleanup postgres_wire_proxy_rejects_remote_and_host_overrides
+waddle-server::postgres_admission_cleanup checkout_return_retains_lane_after_commit_rollback_drop_and_guard_query
+waddle-server::postgres_admission_cleanup cancelled_begin_drops_floating_acquisition_before_releasing_admission
+waddle-server::postgres_admission_cleanup cancelled_begin_before_send_retains_lane_until_cleanup
+waddle-server::postgres_admission_cleanup cancelled_accepted_begin_rolls_back_before_pool_return
+waddle-server::postgres_admission_cleanup accepted_begin_negative_control_detects_missing_rollback
+waddle-server::postgres_admission_cleanup cancelled_query_and_commit_hold_the_lane_until_cleanup
+waddle-server::postgres_admission_cleanup stuck_return_is_bounded_and_closes_the_checkout_before_reusing_admission
+waddle-server::postgres_admission_cleanup runtime_shutdown_disposes_pending_return_and_drop_after_shutdown
+
 # P2.1 (#2116/#2046): owner bootstrap and restricted read-only attachment.
 waddle-server::owner_bootstrap owner_bootstrap_commits_before_restricted_runtime_attachment
 waddle-server::owner_bootstrap runtime_attachment_rejects_wrong_identity_schema_and_pending_ledger
@@ -197,9 +212,14 @@ waddle-server::physical_attestation lost_commit_ack_resolves_by_fresh_exact_oper
 waddle-server::physical_attestation cancelled_lock_wait_is_indeterminate_and_same_id_retry_converges
 waddle-server::physical_attestation installer_direct_privilege_drift_aborts_before_install
 waddle-server::physical_attestation installer_lock_timeout_reports_indeterminate_without_mutation
+waddle-server::physical_attestation typed_authority_waits_before_read_and_rejects_future_epoch
+waddle-server::physical_attestation typed_receipt_holds_relation_without_singleton_row_lock
+waddle-server::physical_attestation typed_authority_fails_closed_on_identity_epoch_and_lock_timeout
+waddle-server::physical_attestation typed_sqlite_authority_uses_shared_foundation_and_immediate_transaction
 
 # P2.1 (#2116/#2046): pooled receipt and ordinary unit-of-work transactions
 # must read the committed epoch after waiting on an activation transition.
+waddle-server ingress_substrate::authority_tests::postgres_alias_identity_mismatch_fails_closed
 waddle-server ingress_substrate::authority_tests::postgres_pooled_receipt_uses_fresh_epoch_after_waiting_on_activation
 waddle-server ingress_uow::recovery_receipts::tests::postgres_ordinary_begin_reads_committed_epoch_after_waiting_on_transition
 
@@ -213,6 +233,12 @@ waddle-server ingress_uow::raw_writer_tests::postgres_raw_writer_completes_with_
 waddle-server ingress_uow::raw_writer_tests::postgres_substrate_begin_bounds_epoch_wait
 waddle-server::physical_attestation full_identity_writer_preserves_v1009_candidate_and_temp_shadow_contracts
 waddle-server::physical_attestation full_identity_writer_fails_closed_for_database_schema_pool_and_attestor_drift
+waddle-server::physical_attestation attested_shared_pool_keeps_main_and_ingress_admission_disjoint
+waddle-server::physical_attestation attested_database_actor_creates_and_reads_auth_session_on_one_attested_backend
+waddle-server::physical_attestation attested_pool_rejects_temp_privilege_drift_on_fresh_and_reused_sessions
+waddle-server::physical_attestation actual_v1009_restricted_role_uow_receipt_and_descendant_compatibility
+waddle-server::physical_attestation candidate_guard_restricted_role_uow_receipt_and_descendant_compatibility
+waddle-server::physical_attestation full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_outcomes
 
 # Dark P2.1 candidate: execute every role and relation-lock laboratory case.
 waddle-server::ingress_relation_guard_lab candidate_guards_all_tables_with_select_only_epoch_login
@@ -222,3 +248,37 @@ waddle-server::ingress_relation_guard_lab candidate_waits_for_transition_and_rea
 waddle-server::ingress_relation_guard_lab candidate_transition_waits_for_two_independent_writers
 waddle-server::ingress_relation_guard_lab candidate_rejects_pinned_repeatable_read_and_stale_savepoint_proof
 waddle-server::ingress_relation_guard_lab candidate_temp_shadowing_requires_drain_and_qualified_writes
+
+# P2.1 canonical UoW statements must use the attested schema despite hostile
+# temporary shadows, and preserve the SQLite shared-memory path.
+waddle-server ingress_uow::canonical_qualified_tests::attested_canonical_statements_ignore_hostile_temporary_shadows
+waddle-server ingress_uow::canonical_qualified_tests::sqlite_shared_memory_canonical_replay_and_rollback
+
+# P2.1 prepared SM enrollment, binding, frontier and checkpoint statements
+# must target the attested schema; retirement remains outside this slice.
+waddle-server ingress_uow::canonical_qualified_tests::sm::attested_sm_pair_ignores_hostile_shadows_and_missing_relations
+waddle-server ingress_uow::canonical_qualified_tests::sm::sqlite_shared_memory_sm_pair_replay_and_rollback
+
+# Prepared principal assertions must use the attested sessions table.
+waddle-server ingress_uow::canonical_qualified_tests::principal::attested_principal_ignores_hostile_schema_and_locks_trusted_session
+waddle-server ingress_uow::canonical_qualified_tests::principal::sqlite_principal_assertion_remains_on_shared_pool
+
+# A real direct-message acceptance must keep canonical, SM, archive, inbox,
+# dispatch and receipt writes on the same attested schema and transaction.
+waddle-server ingress_uow::canonical_qualified_tests::acceptance::attested_direct_acceptance_targets_one_schema_and_rolls_back
+
+# No-store acceptance must keep custody, policy receipts and retention proof
+# inside the same attested transaction, even with hostile schema shadows.
+waddle-server ingress_uow::canonical_qualified_tests::no_store::attested_no_store_acceptance_qualifies_terminalization_and_rolls_back
+
+# Inbox attachment checks the owner schema, bounded PostgreSQL waits and the
+# SQLite connection's inbox/recovery ledger shadow protections.
+waddle-server::physical_attestation inbox_runtime_attach_checks_attested_read_only_schema
+waddle-server::physical_attestation inbox_runtime_attach_bounds_lock_wait_and_releases_main_lane
+waddle-server::physical_attestation inbox_attach_timeout_setup_does_not_pin_snapshot
+waddle-server::owner_bootstrap inbox_runtime_attachment_checks_existing_sqlite_schema_without_repair
+waddle-server inbox::runtime_attach::tests::postgres_timeout_display_units_and_invalid_values
+
+# Prepared archive-position, carbon receipt and send-attempt statements
+# must ignore hostile schemas; full live delivery remains blocked.
+waddle-server ingress_uow::canonical_qualified_tests::post_commit_repositories::attested_send_attempt_repositories_ignore_hostile_schema

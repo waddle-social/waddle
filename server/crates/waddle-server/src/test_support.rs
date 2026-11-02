@@ -18,10 +18,15 @@ use crate::db::physical_attestation::AttestedPgPool;
 #[cfg(feature = "test-support")]
 use crate::db::Database;
 #[cfg(feature = "test-support")]
+use crate::db::{bootstrap::VerifiedGlobalAttachment, DatabaseError};
+#[cfg(feature = "test-support")]
+use crate::ingress_substrate::with_pooled_receipt_commit_ack_lost;
+#[cfg(feature = "test-support")]
 use crate::ingress_substrate::PostgresIngressSubstrate;
 #[cfg(feature = "test-support")]
 use crate::ingress_uow::{
-    begin_raw_ingress_writer_with_capability, IngressUnitOfWork, IngressUowError,
+    begin_raw_ingress_writer_with_capability, EffectReceiptRepository, IngressUnitOfWork,
+    IngressUowError,
 };
 #[cfg(feature = "test-support")]
 use crate::{config::LineageConfig, db::physical_attestation::AttestedPostgresWriterCapability};
@@ -62,6 +67,86 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
 #[cfg(feature = "test-support")]
 pub fn database_from_attested_postgres_pool(name: &str, pool: AttestedPgPool) -> Database {
     Database::from_attested_postgres_pool(name, pool)
+}
+
+/// Wrap a physically attested pool in separate ordinary and ingress lanes.
+#[cfg(feature = "test-support")]
+pub async fn database_pool_from_attested_postgres_pool(
+    name: &str,
+    pool: AttestedPgPool,
+    main_budget: u32,
+    ingress_budget: u32,
+) -> Result<DatabasePool, crate::db::DatabaseError> {
+    DatabasePool::from_attested_postgres_pool(name, pool, main_budget, ingress_budget).await
+}
+
+/// Read-only observations of a verified attachment with one slot per lane.
+#[cfg(feature = "test-support")]
+pub struct VerifiedAttachmentObservations {
+    pub has_control_plane_pool: bool,
+    pub has_control_system_execute: bool,
+    pub second_main_blocked: bool,
+    pub second_ingress_blocked: bool,
+}
+
+/// Exercise the private attachment without exposing its database or a raw
+/// query interface. Transactions are read-only and remain inside this helper.
+#[cfg(feature = "test-support")]
+pub async fn observe_verified_attachment(
+    attachment: &VerifiedGlobalAttachment,
+) -> Result<VerifiedAttachmentObservations, DatabaseError> {
+    let database = attachment.database_for_test();
+    let has_control_plane_pool = database.has_control_plane_pool();
+    let has_control_system_execute = {
+        let guard = database.guard().await?;
+        let mut rows = guard
+            .query(
+                "SELECT pg_catalog.has_function_privilege(current_user, \
+                 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE')",
+                (),
+            )
+            .await?;
+        rows.next()
+            .await?
+            .ok_or_else(|| DatabaseError::QueryFailed("missing privilege result".to_owned()))?
+            .get::<bool>(0)?
+    };
+
+    let mut main = database.begin().await?;
+    main.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let ingress_database = database.ingress_lane();
+    let mut ingress = ingress_database.begin().await?;
+    ingress.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let second_main_blocked =
+        tokio::time::timeout(std::time::Duration::from_millis(200), database.begin())
+            .await
+            .is_err();
+    drop(main);
+    let mut next_main = database.begin().await?;
+    next_main.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let second_ingress_blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        ingress_database.begin(),
+    )
+    .await
+    .is_err();
+
+    Ok(VerifiedAttachmentObservations {
+        has_control_plane_pool,
+        has_control_system_execute,
+        second_main_blocked,
+        second_ingress_blocked,
+    })
+}
+
+/// Characterize that startup-only detached sessions are closed after a
+/// reserved shared-pool lane has been created.
+#[cfg(feature = "test-support")]
+pub async fn detached_startup_connection_is_available(database: &Database) -> bool {
+    database
+        .detached_postgres_startup_connection()
+        .await
+        .is_ok()
 }
 
 /// Wrap an ordinary PostgreSQL pool without attaching any physical writer
@@ -156,6 +241,100 @@ pub async fn attested_uow_candidate_write(
         .await?;
     transaction.commit().await?;
     Ok(())
+}
+
+/// Record and read back a receipt through one attested UoW transaction. The
+/// tuple reports exact-key presence, completion status, and receipt-key count
+/// before that same caller-owned transaction commits.
+#[cfg(feature = "test-support")]
+pub async fn attested_uow_receipt_write(
+    database: &Database,
+    lineage: LineageConfig,
+    key: waddle_xmpp::ingress::MessageKey,
+    kind: crate::ingress_substrate::EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<(bool, bool, usize), IngressUowError> {
+    let unit_of_work =
+        IngressUnitOfWork::open(database.clone(), lineage)?.with_attested_pg_writer()?;
+    let mut transaction = unit_of_work.begin().await?;
+    EffectReceiptRepository::record_receipt(&mut transaction, key, kind, hash).await?;
+    let present = EffectReceiptRepository::contains(&mut transaction, key, kind, hash).await?;
+    let complete = EffectReceiptRepository::receipts_complete(&mut transaction, key).await?;
+    let keys = EffectReceiptRepository::keys(&mut transaction, key).await?;
+    transaction.commit().await?;
+    Ok((present, complete, keys.len()))
+}
+
+/// Record one canonical direct-effect receipt and scheduler descendant through
+/// the same physically attested UoW transaction. An optional barrier exposes
+/// only the backend PID and keeps that repository transaction open for an
+/// owner-transition lock-order test.
+#[cfg(feature = "test-support")]
+pub async fn attested_uow_receipt_and_descendant_write(
+    database: &Database,
+    lineage: LineageConfig,
+    key: waddle_xmpp::ingress::MessageKey,
+    digest: waddle_xmpp::ingress::SemanticDigest,
+    intent: waddle_xmpp::ingress::IngressEffectIntent,
+    descendant: uuid::Uuid,
+    barrier: Option<(
+        tokio::sync::oneshot::Sender<i32>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> Result<waddle_xmpp::ingress::ProtocolEpoch, IngressUowError> {
+    use crate::ingress_uow::{
+        CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
+    };
+
+    let unit_of_work = IngressUnitOfWork::open(database.clone(), lineage)?;
+    let mut transaction = unit_of_work.begin().await?;
+    let epoch = transaction.protocol_epoch();
+    CanonicalMessageRepository::record_message(&mut transaction, key, &digest, None).await?;
+    EffectIntentRepository::reconcile(&mut transaction, key, std::slice::from_ref(&intent), false)
+        .await?;
+    let receipt = crate::ingress::receipt_key(&intent)?;
+    EffectReceiptRepository::record_receipt(
+        &mut transaction,
+        key,
+        receipt.kind,
+        &receipt.semantic_identity_hash,
+    )
+    .await?;
+    EffectDescendantRepository::attach(&mut transaction, key, &intent.semantic_key(), descendant)
+        .await?;
+
+    if let Some((ready, release)) = barrier {
+        let mut rows = transaction
+            .transaction_mut()
+            .query("SELECT pg_catalog.pg_backend_pid()", ())
+            .await?;
+        let pid = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::EpochProofMissing)?
+            .get::<i32>(0)?;
+        drop(rows);
+        let _ = ready.send(pid);
+        let _ = release.await;
+    }
+
+    transaction.commit().await?;
+    Ok(epoch)
+}
+
+/// Simulate a lost successful COMMIT acknowledgement while retaining the
+/// actual commit, then exercise the pooled receipt path's exact-key readback.
+#[cfg(feature = "test-support")]
+pub async fn attested_pooled_receipt_write_after_lost_ack(
+    database: &Database,
+    key: waddle_xmpp::ingress::MessageKey,
+    kind: crate::ingress_substrate::EffectReceiptKind,
+    hash: &[u8; 32],
+) -> Result<(), IngressUowError> {
+    with_pooled_receipt_commit_ack_lost(async {
+        EffectReceiptRepository::record_receipt_pooled(database, key, kind, hash).await
+    })
+    .await
 }
 
 /// Hold an attested UoW's epoch row lock until the caller releases it. Only

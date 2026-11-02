@@ -43,11 +43,22 @@ impl MamArchiveRepository {
         let mut ordered: Vec<&BareJid> = archives.iter().collect();
         ordered.sort();
         ordered.dedup();
+        let schema = transaction.receipt_schema().map(str::to_owned);
         for archive in ordered {
             if let Some(connection) = transaction.transaction_mut().postgres_connection() {
-                waddle_xmpp::mam::lock_archive_sequence_on_connection(connection, archive)
-                    .await
-                    .map_err(waddle_xmpp::mam::MamTxStoreError::Database)?;
+                match schema.as_deref() {
+                    Some(schema) => {
+                        waddle_xmpp::mam::lock_archive_sequence_on_connection_in_schema(
+                            connection, schema, archive,
+                        )
+                        .await
+                    }
+                    None => {
+                        waddle_xmpp::mam::lock_archive_sequence_on_connection(connection, archive)
+                            .await
+                    }
+                }
+                .map_err(waddle_xmpp::mam::MamTxStoreError::Database)?;
             } else {
                 let connection = transaction
                     .transaction_mut()
@@ -67,15 +78,30 @@ impl MamArchiveRepository {
         message: &ArchivedMessage,
         expectation: ArchiveExpectation,
     ) -> Result<MamTxStoreOutcome, IngressUowError> {
+        let schema = transaction.receipt_schema().map(str::to_owned);
         let outcome = if let Some(connection) = transaction.transaction_mut().postgres_connection()
         {
-            waddle_xmpp::mam::store_archived_message_on_connection(
-                connection,
-                archive_jid,
-                message,
-                expectation,
-            )
-            .await?
+            match schema.as_deref() {
+                Some(schema) => {
+                    waddle_xmpp::mam::store_archived_message_on_connection_in_schema(
+                        connection,
+                        schema,
+                        archive_jid,
+                        message,
+                        expectation,
+                    )
+                    .await?
+                }
+                None => {
+                    waddle_xmpp::mam::store_archived_message_on_connection(
+                        connection,
+                        archive_jid,
+                        message,
+                        expectation,
+                    )
+                    .await?
+                }
+            }
         } else {
             let connection = transaction
                 .transaction_mut()
@@ -161,16 +187,18 @@ impl InboxRepository {
             thread.as_ref(),
         )
         .await?;
+        let (tx, prepared) = transaction.prepared_parts();
         let entry = if apply {
-            crate::inbox::upsert_in_transaction(
-                transaction.transaction_mut(),
+            crate::inbox::upsert_in_prepared_transaction(
+                tx,
+                prepared,
                 user,
                 entry,
                 increment_unread,
             )
             .await?
         } else {
-            crate::inbox::get_in_transaction(transaction.transaction_mut(), user, &entry).await?
+            crate::inbox::get_in_prepared_transaction(tx, prepared, user, &entry).await?
         };
         Ok((entry, apply))
     }
@@ -281,14 +309,23 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT 1 FROM {} WHERE message_key = ?::uuid FOR UPDATE",
+                ingress_substrate::prepared_ingress_relation(
+                    prepared,
+                    ingress_substrate::PreparedIngressRelation::Messages
+                )
+            )
+        } else {
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?".to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         Ok(rows.next().await?.is_some())
     }
@@ -298,14 +335,24 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-            "SELECT 1 FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT 1 FROM {} WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+                ingress_substrate::prepared_ingress_relation(
+                    prepared,
+                    ingress_substrate::PreparedIngressRelation::Messages
+                )
+            )
+        } else {
+            "SELECT 1 FROM ingress_messages WHERE message_key = ? AND terminal_at IS NOT NULL"
+                .to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         Ok(rows.next().await?.is_some())
     }
@@ -316,8 +363,10 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         envelope: Option<&MessageEnvelope>,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_message(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::record_message_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             digest,
             envelope,
@@ -357,8 +406,10 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
         envelope: &MessageEnvelope,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_room_canonical_envelope(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::record_room_envelope_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             envelope,
         )
@@ -370,7 +421,8 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Option<MessageEnvelope>, IngressUowError> {
-        ingress_substrate::load_envelope(transaction.transaction_mut(), message_key)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::load_envelope_in_prepared_transaction(tx, prepared, message_key)
             .await
             .map_err(Into::into)
     }
@@ -380,14 +432,20 @@ impl CanonicalMessageRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<DateTime<Utc>, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM ingress_messages WHERE message_key = ?::uuid",
-            "SELECT created_at FROM ingress_messages WHERE message_key = ?",
-        );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM {} WHERE message_key = ?::uuid",
+                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
+            )
+        } else {
+            "SELECT created_at FROM ingress_messages WHERE message_key = ?".to_owned()
+        };
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         let row = rows
             .next()
@@ -407,13 +465,9 @@ impl CanonicalMessageRepository {
         digest: &SemanticDigest,
         mint: impl FnOnce() -> MessageKey,
     ) -> Result<AliasResolution, IngressUowError> {
-        ingress_substrate::resolve_and_record_alias(
-            transaction.transaction_mut(),
-            sender,
-            target,
-            origin_id,
-            digest,
-            mint,
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::resolve_alias_in_prepared_transaction(
+            tx, prepared, sender, target, origin_id, digest, mint,
         )
         .await
         .map_err(Into::into)
@@ -427,15 +481,20 @@ impl CanonicalMessageRepository {
         if !Self::lock(transaction, message_key).await? {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
-        let sql = dialect_sql(
-            transaction,
-            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL",
-        );
-        transaction
-            .transaction_mut()
-            .execute(sql, crate::db_params![message_key.to_storage().to_string()])
-            .await?;
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = if tx.driver() == DatabaseDriver::Postgres {
+            format!(
+                "UPDATE {} SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+                ingress_substrate::prepared_ingress_relation(prepared, ingress_substrate::PreparedIngressRelation::Messages)
+            )
+        } else {
+            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL".to_owned()
+        };
+        tx.execute(
+            &sql,
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
         Ok(())
     }
 
@@ -444,8 +503,10 @@ impl CanonicalMessageRepository {
         message_key: MessageKey,
         proven_terminal_at: DateTime<Utc>,
     ) -> Result<TerminalizeOutcome, IngressUowError> {
-        ingress_substrate::terminalize_message(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::terminalize_message_in_prepared_transaction(
+            tx,
+            prepared,
             message_key,
             proven_terminal_at,
         )
@@ -466,8 +527,10 @@ impl SmIngressRepository {
         wire_h: WireHandledCount,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressUowError> {
-        ingress_substrate::insert_sm_ref(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::insert_sm_ref_in_prepared_transaction(
+            tx,
+            prepared,
             sm_ingress_id,
             ordinal,
             wire_h,
@@ -482,9 +545,15 @@ impl SmIngressRepository {
         sm_ingress_id: SmIngressId,
         wire_h: WireHandledCount,
     ) -> Result<Option<(MessageKey, IngressOrdinal)>, IngressUowError> {
-        ingress_substrate::lookup_wire_binding(transaction.transaction_mut(), sm_ingress_id, wire_h)
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::lookup_wire_binding_in_prepared_transaction(
+            tx,
+            prepared,
+            sm_ingress_id,
+            wire_h,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn lookup(
@@ -586,18 +655,19 @@ impl SmIngressStreamRepository {
         stream_id: &SmSessionId,
         id: SmIngressId,
     ) -> Result<(), IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            ("INSERT INTO ", " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING"),
             "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING",
         );
-        transaction
-            .transaction_mut()
-            .execute(
-                sql,
-                crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
-            )
-            .await?;
+        tx.execute(
+            &sql,
+            crate::db_params![id.to_storage().to_string(), stream_id.as_str().to_owned()],
+        )
+        .await?;
         Ok(())
     }
 
@@ -629,14 +699,23 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<SmIngressId, IngressUowError> {
-        const POSTGRES: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING";
+        const POSTGRES: (&str, &str) = (
+            "INSERT INTO ",
+            " (sm_ingress_id, stream_id) VALUES (?::uuid, ?) ON CONFLICT (stream_id) DO NOTHING",
+        );
         const SQLITE: &str = "INSERT INTO ingress_sm_streams (sm_ingress_id, stream_id) VALUES (?, ?) ON CONFLICT (stream_id) DO NOTHING";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
         let minted = SmIngressId::new();
-        let inserted = transaction
-            .transaction_mut()
+        let inserted = tx
             .execute(
-                sql,
+                &sql,
                 crate::db_params![
                     minted.to_storage().to_string(),
                     stream_id.as_str().to_string()
@@ -646,14 +725,19 @@ impl SmIngressStreamRepository {
         if inserted == 1 {
             return Ok(minted);
         }
-        const SELECT_POSTGRES: &str =
-            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ?";
+        const SELECT_POSTGRES: (&str, &str) =
+            ("SELECT sm_ingress_id::text FROM ", " WHERE stream_id = ?");
         const SELECT_SQLITE: &str =
             "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, SELECT_POSTGRES, SELECT_SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            SELECT_POSTGRES,
+            SELECT_SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let stored: String = rows
             .next()
@@ -694,12 +778,21 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<(SmIngressId, u64)>, IngressUowError> {
-        const POSTGRES: &str = "SELECT sm_ingress_id::text, handled_ordinal::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        const POSTGRES: (&str, &str) = (
+            "SELECT sm_ingress_id::text, handled_ordinal::text FROM ",
+            " WHERE stream_id = ? FOR UPDATE",
+        );
         const SQLITE: &str = "SELECT sm_ingress_id, CAST(handled_ordinal AS TEXT) FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -720,13 +813,38 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         stream_id: &SmSessionId,
     ) -> Result<Option<SmIngressId>, IngressUowError> {
-        const POSTGRES: &str =
-            "SELECT sm_ingress_id::text FROM ingress_sm_streams WHERE stream_id = ? FOR UPDATE";
+        let (tx, prepared) = transaction.prepared_parts();
+        Self::lookup_unclaimed_in_transaction(tx, prepared, stream_id).await
+    }
+
+    /// Retirement still uses unqualified scans, deletion and retention refresh.
+    /// Keep its lookup on the same legacy path until that whole closure is qualified.
+    pub(crate) async fn lookup_unclaimed_for_retirement(
+        transaction: &mut IngressUowTransaction<'_>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<SmIngressId>, IngressUowError> {
+        Self::lookup_unclaimed_in_transaction(transaction.transaction_mut(), None, stream_id).await
+    }
+
+    async fn lookup_unclaimed_in_transaction(
+        tx: &mut Transaction<'_>,
+        prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
+        stream_id: &SmSessionId,
+    ) -> Result<Option<SmIngressId>, IngressUowError> {
+        const POSTGRES: (&str, &str) = (
+            "SELECT sm_ingress_id::text FROM ",
+            " WHERE stream_id = ? FOR UPDATE",
+        );
         const SQLITE: &str = "SELECT sm_ingress_id FROM ingress_sm_streams WHERE stream_id = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![stream_id.as_str().to_string()])
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::SmStreams,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
+            .query(&sql, crate::db_params![stream_id.as_str().to_string()])
             .await?;
         let Some(row) = rows.next().await? else {
             return Ok(None);
@@ -773,8 +891,10 @@ impl SmIngressStreamRepository {
         offered: IngressOrdinal,
         checkpoint_h: WireHandledCount,
     ) -> Result<FrontierOutcome, IngressUowError> {
-        ingress_substrate::advance_frontier(
-            transaction.transaction_mut(),
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::advance_frontier_in_prepared_transaction(
+            tx,
+            prepared,
             sm_ingress_id,
             offered,
             checkpoint_h,
@@ -788,7 +908,8 @@ impl SmIngressStreamRepository {
         sm_ingress_id: SmIngressId,
         h: WireHandledCount,
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::flush_checkpoint(transaction.transaction_mut(), sm_ingress_id, h)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::flush_checkpoint_in_prepared_transaction(tx, prepared, sm_ingress_id, h)
             .await
             .map_err(Into::into)
     }
@@ -797,9 +918,14 @@ impl SmIngressStreamRepository {
         transaction: &mut IngressUowTransaction<'_>,
         sm_ingress_id: SmIngressId,
     ) -> Result<Option<WireHandledCount>, IngressUowError> {
-        ingress_substrate::load_stream_checkpoint(transaction.transaction_mut(), sm_ingress_id)
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::load_stream_checkpoint_in_prepared_transaction(
+            tx,
+            prepared,
+            sm_ingress_id,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn delete_unclaimed(
@@ -828,15 +954,24 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<bool, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?",
-            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?",
-        );
+        let driver = transaction.transaction_mut().driver();
+        let schema = receipt_schema(transaction);
+        let sql = if driver == DatabaseDriver::Postgres {
+            match schema {
+                Some(schema) => format!(
+                    "SELECT 1 FROM {}.ingress_effect_receipts WHERE message_key = ?::uuid \
+                     AND kind = ? AND semantic_identity_hash = ?",
+                    ingress_substrate::quote_postgres_identifier(schema)
+                ),
+                None => "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?".to_owned(),
+            }
+        } else {
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?".to_owned()
+        };
         let mut rows = transaction
             .transaction_mut()
             .query(
-                sql,
+                &sql,
                 crate::db_params![
                     message_key.to_storage().to_string(),
                     kind.to_storage(),
@@ -853,18 +988,41 @@ impl EffectReceiptRepository {
         kind: EffectReceiptKind,
         hash: &[u8; 32],
     ) -> Result<(), IngressUowError> {
-        ingress_substrate::record_receipt(transaction.transaction_mut(), message_key, kind, hash)
+        let schema = receipt_schema(transaction).map(str::to_owned);
+        if let Some(schema) = schema {
+            ingress_substrate::record_receipt_in_prepared_transaction(
+                transaction.transaction_mut(),
+                message_key,
+                kind,
+                hash,
+                Some(&schema),
+            )
+            .await?;
+            Ok(())
+        } else {
+            ingress_substrate::record_receipt(
+                transaction.transaction_mut(),
+                message_key,
+                kind,
+                hash,
+            )
             .await
             .map_err(Into::into)
+        }
     }
 
     pub async fn receipts_complete(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<bool, IngressUowError> {
-        Self::receipts_complete_on_transaction(transaction.transaction_mut(), message_key)
-            .await
-            .map_err(Into::into)
+        let schema = receipt_schema(transaction).map(str::to_owned);
+        ingress_substrate::receipts_complete_in_schema(
+            transaction.transaction_mut(),
+            message_key,
+            schema.as_deref(),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub(crate) async fn receipts_complete_on_transaction(
@@ -881,14 +1039,27 @@ impl EffectReceiptRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid",
-            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?",
-        );
+        let driver = transaction.transaction_mut().driver();
+        let schema = receipt_schema(transaction);
+        let sql = if driver == DatabaseDriver::Postgres {
+            match schema {
+                Some(schema) => format!(
+                    "SELECT kind, semantic_identity_hash FROM {}.ingress_effect_receipts \
+                     WHERE message_key = ?::uuid",
+                    ingress_substrate::quote_postgres_identifier(schema)
+                ),
+                None => "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?::uuid".to_owned(),
+            }
+        } else {
+            "SELECT kind, semantic_identity_hash FROM ingress_effect_receipts WHERE message_key = ?"
+                .to_owned()
+        };
         let mut rows = transaction
             .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -976,30 +1147,29 @@ impl EffectIntentRepository {
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
     ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
-        let sql = dialect_sql(
-            transaction,
-            "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Messages,
+            ("SELECT 1 FROM ", " WHERE message_key = ?::uuid FOR UPDATE"),
             "SELECT 1 FROM ingress_messages WHERE message_key = ?",
         );
-        let mut rows = transaction
-            .transaction_mut()
-            .query(sql, crate::db_params![message_key.to_storage().to_string()])
+        let mut rows = tx
+            .query(
+                &sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
             .await?;
         if rows.next().await?.is_none() {
             return Err(IngressUowError::EffectIntentMessageMissing);
         }
         drop(rows);
-        let postgres = transaction
-            .transaction_mut()
-            .postgres_connection()
-            .is_some();
-        Ok(
-            load_effects(transaction.transaction_mut(), message_key, postgres)
-                .await?
-                .into_iter()
-                .map(|row| row.intent)
-                .collect(),
-        )
+        Ok(load_effects(tx, prepared, message_key)
+            .await?
+            .into_iter()
+            .map(|row| row.intent)
+            .collect())
     }
 
     pub async fn reconcile(
@@ -1008,29 +1178,37 @@ impl EffectIntentRepository {
         planned: &[IngressEffectIntent],
         existing_authority: bool,
     ) -> Result<ReconcileVerdict, IngressUowError> {
-        Self::reconcile_on_transaction(
-            transaction.transaction_mut(),
-            message_key,
-            planned,
-            existing_authority,
-        )
-        .await
+        let (tx, prepared) = transaction.prepared_parts();
+        Self::reconcile_prepared(tx, prepared, message_key, planned, existing_authority).await
     }
 
+    #[cfg(test)]
     pub(super) async fn reconcile_on_transaction(
         transaction: &mut Transaction<'_>,
         message_key: MessageKey,
         planned: &[IngressEffectIntent],
         existing_authority: bool,
     ) -> Result<ReconcileVerdict, IngressUowError> {
-        let postgres = transaction.postgres_connection().is_some();
+        Self::reconcile_prepared(transaction, None, message_key, planned, existing_authority).await
+    }
+
+    async fn reconcile_prepared(
+        transaction: &mut Transaction<'_>,
+        prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
+        message_key: MessageKey,
+        planned: &[IngressEffectIntent],
+        existing_authority: bool,
+    ) -> Result<ReconcileVerdict, IngressUowError> {
+        let sql = ingress_substrate::prepared_ingress_sql(
+            transaction.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Messages,
+            ("SELECT 1 FROM ", " WHERE message_key = ?::uuid FOR UPDATE"),
+            "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+        );
         let mut message = transaction
             .query(
-                if postgres {
-                    "SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"
-                } else {
-                    "SELECT 1 FROM ingress_messages WHERE message_key = ?"
-                },
+                &sql,
                 crate::db_params![message_key.to_storage().to_string()],
             )
             .await?;
@@ -1040,10 +1218,14 @@ impl EffectIntentRepository {
         drop(message);
 
         let planned = canonical_effects(planned)?;
-        let recorded = load_effects(transaction, message_key, postgres).await?;
-        if let Some(manifest) = ingress_substrate::load_envelope(transaction, message_key)
-            .await?
-            .and_then(|envelope| envelope.room_manifest().cloned())
+        let recorded = load_effects(transaction, prepared, message_key).await?;
+        if let Some(manifest) = ingress_substrate::load_envelope_in_prepared_transaction(
+            transaction,
+            prepared,
+            message_key,
+        )
+        .await?
+        .and_then(|envelope| envelope.room_manifest().cloned())
         {
             // Deferred system archives seal before their position is assigned.
             // Only a None -> stored ordinal refinement may differ from that
@@ -1081,10 +1263,15 @@ impl EffectIntentRepository {
             .transpose()?
             .unwrap_or(0);
         if !omissions.is_empty() {
-            ingress_substrate::invalidate_retention(transaction, message_key).await?;
+            ingress_substrate::invalidate_retention_in_prepared_transaction(
+                transaction,
+                prepared,
+                message_key,
+            )
+            .await?;
         }
         for intent in omissions {
-            insert_effect(transaction, message_key, ordinal, intent, postgres).await?;
+            insert_effect(transaction, prepared, message_key, ordinal, intent).await?;
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or(IngressUowError::EffectIntentOrdinalOverflow)?;
@@ -1117,17 +1304,20 @@ fn canonical_effects(
 
 async fn load_effects(
     transaction: &mut Transaction<'_>,
+    prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
-    postgres: bool,
 ) -> Result<Vec<RecordedEffect>, IngressUowError> {
-    let mut rows = transaction.query(
-        if postgres {
-            "SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ingress_effect_intents WHERE message_key = ?::uuid ORDER BY effect_ordinal"
-        } else {
-            "SELECT kind, semantic_identity_hash, CAST(effect_ordinal AS TEXT), payload_version, payload FROM ingress_effect_intents WHERE message_key = ? ORDER BY effect_ordinal"
-        },
-        crate::db_params![message_key.to_storage().to_string()],
-    ).await?;
+    let sql = ingress_substrate::prepared_ingress_sql(
+        transaction.driver(), prepared, ingress_substrate::PreparedIngressRelation::Effects,
+        ("SELECT kind::int, semantic_identity_hash, effect_ordinal::text, payload_version::int, payload FROM ", " WHERE message_key = ?::uuid ORDER BY effect_ordinal"),
+        "SELECT kind, semantic_identity_hash, CAST(effect_ordinal AS TEXT), payload_version, payload FROM ingress_effect_intents WHERE message_key = ? ORDER BY effect_ordinal",
+    );
+    let mut rows = transaction
+        .query(
+            &sql,
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await?;
     let mut recorded = Vec::new();
     while let Some(row) = rows.next().await? {
         let kind =
@@ -1378,20 +1568,29 @@ fn inbox_omission_is_recorded_audience(
 
 async fn insert_effect(
     transaction: &mut Transaction<'_>,
+    prepared: Option<&ingress_substrate::PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     ordinal: u64,
     intent: &IngressEffectIntent,
-    postgres: bool,
 ) -> Result<(), IngressUowError> {
     let (kind, payload) = intent.with_encoded_v1(|kind, payload| (kind, payload.to_vec()))?;
-    transaction.execute(
-        if postgres {
-            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)"
-        } else {
-            "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, ?, ?, ?, 1, ?)"
-        },
-        crate::db_params![message_key.to_storage().to_string(), ordinal.to_string(), i64::from(kind), semantic_identity_hash(intent).to_vec(), payload],
-    ).await?;
+    let sql = ingress_substrate::prepared_ingress_sql(
+        transaction.driver(), prepared, ingress_substrate::PreparedIngressRelation::Effects,
+        ("INSERT INTO ", " (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?::uuid, ?::numeric, ?, ?, 1, ?)"),
+        "INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES (?, ?, ?, ?, 1, ?)",
+    );
+    transaction
+        .execute(
+            &sql,
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                ordinal.to_string(),
+                i64::from(kind),
+                semantic_identity_hash(intent).to_vec(),
+                payload
+            ],
+        )
+        .await?;
     Ok(())
 }
 
@@ -1416,13 +1615,22 @@ impl PrincipalRepository {
         transaction: &mut IngressUowTransaction<'_>,
         principal: &AuthenticatedPrincipalRef,
     ) -> Result<PrincipalAssertion, IngressUowError> {
-        const POSTGRES: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE";
+        const POSTGRES: (&str, &str) = (
+            "SELECT expires_at FROM ",
+            " WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ? FOR SHARE",
+        );
         const SQLITE: &str = "SELECT expires_at FROM sessions WHERE user_jid = ? AND auth_context_id = ? AND auth_context_version = ? AND principal_auth_epoch = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        let mut rows = transaction
-            .transaction_mut()
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Sessions,
+            POSTGRES,
+            SQLITE,
+        );
+        let mut rows = tx
             .query(
-                sql,
+                &sql,
                 crate::db_params![
                     principal.bare_jid().to_string(),
                     principal.auth_context_id().as_uuid().to_string(),
@@ -1477,22 +1685,36 @@ impl DeliveryEffectRepository {
         delivery_key: DeliveryKey,
         message_key: MessageKey,
     ) -> Result<MessageWriteOutcome, IngressUowError> {
-        ingress_substrate::record_delivery(transaction.transaction_mut(), delivery_key, message_key)
-            .await
-            .map_err(Into::into)
+        let (tx, prepared) = transaction.prepared_parts();
+        ingress_substrate::record_delivery_in_prepared_transaction(
+            tx,
+            prepared,
+            delivery_key,
+            message_key,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn lookup(
         transaction: &mut IngressUowTransaction<'_>,
         delivery_key: DeliveryKey,
     ) -> Result<Option<MessageKey>, IngressUowError> {
-        const POSTGRES: &str =
-            "SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid";
         const SQLITE: &str = "SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?";
-        let sql = dialect_sql(transaction, POSTGRES, SQLITE);
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(
+            tx.driver(),
+            prepared,
+            ingress_substrate::PreparedIngressRelation::Deliveries,
+            (
+                "SELECT message_key::text FROM ",
+                " WHERE delivery_key = ?::uuid",
+            ),
+            SQLITE,
+        );
         lookup_message_key(
             transaction,
-            sql,
+            &sql,
             crate::db_params![delivery_key.to_storage().to_string()],
         )
         .await
@@ -1510,9 +1732,15 @@ fn dialect_sql(
     }
 }
 
+fn receipt_schema<'transaction, 'database>(
+    transaction: &'transaction IngressUowTransaction<'database>,
+) -> Option<&'transaction str> {
+    transaction.receipt_schema()
+}
+
 async fn lookup_message_key(
     transaction: &mut IngressUowTransaction<'_>,
-    sql: &'static str,
+    sql: &str,
     params: impl crate::db::IntoParams,
 ) -> Result<Option<MessageKey>, IngressUowError> {
     let sqlite_sql;
@@ -1618,10 +1846,14 @@ impl ClaimRepository {
             EntityType::SmSession.as_db_str(),
             stream_id.as_str()
         );
-        let mut rows = transaction
-            .transaction_mut()
+        let (tx, prepared) = transaction.prepared_parts();
+        let sql = ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
+            ingress_substrate::PreparedIngressRelation::Claims,
+            ("SELECT 1 FROM ", " WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE"),
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ?");
+        let mut rows = tx
             .query(
-                "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+                &sql,
                 crate::db_params![
                     entity,
                     authority.identity().node_id.clone(),

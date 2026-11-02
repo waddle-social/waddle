@@ -1,7 +1,8 @@
-//! Dark P2.1 PostgreSQL physical-connection attestation capability.
+//! PostgreSQL physical-connection attestation capability.
 //!
-//! Normal startup does not call this module. The installer and pool hook are
-//! exercised against disposable PostgreSQL before they become authority.
+//! The hook-bearing pool can be attached only through the private `Database`
+//! constructor. Normal startup still uses its existing pool until trusted
+//! owner-to-runtime identity configuration is wired.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -11,18 +12,18 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{PgConnection, Row};
 use thiserror::Error;
 
-#[cfg(feature = "test-support")]
 use super::lineage::LineageError;
 use super::lineage::LINEAGE_FORMAT;
 use super::lineage::{
     AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseIdentity, PgDatabaseName, PgIdentity,
     PgSchemaIdentity, PgSchemaName,
 };
-#[cfg(feature = "test-support")]
 use super::DatabaseError;
 
 mod installer;
 pub use installer::{inspect_installation, install, InstallationStatus};
+mod typed_authority;
+pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 
 const FUNCTION_NAME: &str = "read_physical_identity";
 
@@ -36,8 +37,12 @@ pub enum PhysicalAttestationError {
     WrongConfiguredLogin,
     #[error("configured installer login differs from the provisioned installer login")]
     WrongInstallerLogin,
+    #[error("the runtime login has effective TEMP privilege on the attested database")]
+    RuntimeTempPrivilege,
     #[error("physical attestation capability belongs to a different PostgreSQL pool")]
     WrongPool,
+    #[error("cannot bind an attested pool while a raw checkout is still active")]
+    ActivePoolLease,
     #[error("physical attestation capability requires PostgreSQL")]
     PostgresRequired,
     #[error("physical connection identity differs at {field}")]
@@ -98,36 +103,32 @@ pub struct PhysicalAttestationConfig {
 /// server session across checkout and transaction start; transaction- and
 /// statement-pooling proxies are unsupported unless session pinning is
 /// independently guaranteed.
-#[derive(Clone)]
+/// It deliberately exposes no reconnect URL: [`PgConnectOptions`] can carry
+/// startup parameters such as `search_path` that SQLx's lossy URL rendering
+/// does not preserve.
 pub struct AttestedPgPool {
     pool: PgPool,
-    #[cfg(feature = "test-support")]
     writer_capability: AttestedPostgresWriterCapability,
 }
 
-/// Opaque authority for dark PostgreSQL ingress writers. It is created only
+/// Opaque authority for PostgreSQL ingress writers. It is created only
 /// together with the hook-bearing pool and carries the full physical identity
 /// and lineage expected by the trusted SECURITY DEFINER attestor.
-#[cfg(feature = "test-support")]
 #[derive(Clone)]
 pub(crate) struct AttestedPostgresWriterCapability {
     binding: std::sync::Arc<()>,
     config: PhysicalAttestationConfig,
 }
 
-#[cfg(feature = "test-support")]
 impl AttestedPostgresWriterCapability {
-    #[cfg(feature = "test-support")]
     pub(crate) fn identity(&self) -> &PgIdentity {
         self.config.postgres()
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn belongs_to(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.binding, &other.binding)
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) async fn attest_transaction(
         &self,
         transaction: &mut super::Transaction<'_>,
@@ -140,7 +141,6 @@ impl AttestedPostgresWriterCapability {
             .map_err(DatabaseError::from)
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn attested_lineage_for_deployment(
         &self,
         configured: Option<DeploymentUuid>,
@@ -159,9 +159,17 @@ impl AttestedPostgresWriterCapability {
 }
 
 impl AttestedPgPool {
-    /// Acquire through the same hook-bearing SQLx pool that carries this
-    /// wrapper's capability.
-    pub async fn acquire(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
+    /// Acquire a session internally without exposing a production raw-pool
+    /// checkout API. The capability-bearing wrapper stays within this crate.
+    pub(crate) async fn acquire(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
+        self.pool.acquire().await
+    }
+
+    /// Raw checkout for integration tests that characterize connection hooks.
+    /// A checked-out connection must be dropped before the wrapper can be
+    /// consumed into a `Database`; `into_parts` fails while any lease remains.
+    #[cfg(feature = "test-support")]
+    pub async fn acquire_for_test(&self) -> Result<PoolConnection<sqlx::Postgres>, sqlx::Error> {
         self.pool.acquire().await
     }
 
@@ -174,8 +182,17 @@ impl AttestedPgPool {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn into_parts(self) -> (PgPool, AttestedPostgresWriterCapability) {
-        (self.pool, self.writer_capability)
+    pub(crate) fn max_connections(&self) -> u32 {
+        self.pool.options().get_max_connections()
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> Result<(PgPool, AttestedPostgresWriterCapability), PhysicalAttestationError> {
+        if self.pool.size() as usize != self.pool.num_idle() {
+            return Err(PhysicalAttestationError::ActivePoolLease);
+        }
+        Ok((self.pool, self.writer_capability))
     }
 }
 
@@ -219,6 +236,10 @@ impl PhysicalAttestationConfig {
 
     fn postgres(&self) -> &PgIdentity {
         &self.postgres
+    }
+
+    pub(crate) fn expected_lineage(&self) -> &AttestedLineage {
+        &self.lineage
     }
 
     fn function_path(&self) -> String {
@@ -411,6 +432,71 @@ pub async fn attest_connection(
     verify_identity(&snapshot, config)
 }
 
+async fn reject_runtime_temp_privilege(
+    connection: &mut PgConnection,
+) -> Result<(), PhysicalAttestationError> {
+    let can_create_temp: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_database_privilege(\
+             current_user, pg_catalog.current_database(), 'TEMP'\
+         )",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if can_create_temp {
+        return Err(PhysicalAttestationError::RuntimeTempPrivilege);
+    }
+    Ok(())
+}
+
+async fn discard_temporary_relations(
+    connection: &mut PgConnection,
+) -> Result<(), PhysicalAttestationError> {
+    // Existing TEMP relations outlive their creator's TEMP privilege. Clear
+    // them on each session checkout so unqualified application reads cannot
+    // fall through to a retained shadow when a durable relation is absent.
+    sqlx::query("DISCARD TEMP")
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn normalize_search_path(
+    connection: &mut PgConnection,
+    config: &PhysicalAttestationConfig,
+) -> Result<(), PhysicalAttestationError> {
+    let target = &config.postgres().schema.name.0;
+    // An omitted pg_temp is implicitly searched before every explicit schema
+    // for relations. Listing it last keeps an existing temp relation from
+    // shadowing a durable relation in the attested target schema.
+    let path = format!("{}, pg_temp", quote_identifier(target));
+    sqlx::query_scalar::<_, String>("SELECT pg_catalog.set_config('search_path', $1, false)")
+        .bind(&path)
+        .fetch_one(&mut *connection)
+        .await?;
+
+    let row = sqlx::query(
+        "SELECT pg_catalog.current_schema()::text, \
+         pg_catalog.current_schemas(false)::text[]",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let active_schema: Option<String> = row.try_get(0)?;
+    let explicit_schemas: Vec<String> = row.try_get(1)?;
+    let target_is_first = explicit_schemas
+        .first()
+        .is_some_and(|schema| schema == target);
+    let only_target_then_temp = explicit_schemas.len() <= 2
+        && explicit_schemas
+            .get(1)
+            .is_none_or(|schema| schema.starts_with("pg_temp_"));
+    if active_schema.as_deref() != Some(target) || !target_is_first || !only_target_then_temp {
+        return Err(PhysicalAttestationError::Mismatch {
+            field: "normalized search path",
+        });
+    }
+    Ok(())
+}
+
 /// A dark pool constructor: no production caller currently invokes it.
 ///
 /// The endpoint must preserve a PostgreSQL server session across the
@@ -437,7 +523,26 @@ pub fn attested_pool(
         .after_connect(move |connection, _| {
             let config = on_connect.clone();
             Box::pin(async move {
-                attest_connection(connection, &config)
+                attest_connection(connection, &config).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                reject_runtime_temp_privilege(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                discard_temporary_relations(connection).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                normalize_search_path(connection, &config)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                // Close the grant-drift window introduced by the normalization
+                // queries: the last check runs immediately before SQLx lends
+                // this newly connected session to a caller.
+                reject_runtime_temp_privilege(connection)
                     .await
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
             })
@@ -451,7 +556,23 @@ pub fn attested_pool(
                 // such transaction before reading the current lineage. A
                 // failed ROLLBACK hard-closes the connection.
                 sqlx::query("ROLLBACK").execute(&mut *connection).await?;
-                attest_connection(connection, &config)
+                attest_connection(connection, &config).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                reject_runtime_temp_privilege(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                discard_temporary_relations(connection).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                normalize_search_path(connection, &config)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                reject_runtime_temp_privilege(connection)
                     .await
                     .map(|()| true)
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
@@ -460,7 +581,6 @@ pub fn attested_pool(
         .connect_lazy_with(options);
     Ok(AttestedPgPool {
         pool,
-        #[cfg(feature = "test-support")]
         writer_capability: AttestedPostgresWriterCapability {
             binding: std::sync::Arc::new(()),
             config,

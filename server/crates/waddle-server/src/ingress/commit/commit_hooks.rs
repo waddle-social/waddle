@@ -57,6 +57,21 @@ mod injected {
         pub static ALLOW_CLUSTERED_ROOM_MANIFESTS: bool;
         pub static OBSERVED_CLASS: std::cell::Cell<Option<super::IngressDecisionClass>>;
         pub static FAILURE: std::cell::RefCell<Option<IngressUowError>>;
+        pub static SEARCH_PATH: String;
+    }
+    pub(crate) async fn apply_search_path(
+        tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    ) -> Result<(), IngressUowError> {
+        let Ok(path) = SEARCH_PATH.try_with(Clone::clone) else {
+            return Ok(());
+        };
+        tx.transaction_mut()
+            .execute(
+                "SELECT pg_catalog.set_config('search_path', ?, true)",
+                crate::db_params![path],
+            )
+            .await?;
+        Ok(())
     }
     pub(crate) fn consume_serialization_failure() -> bool {
         SERIALIZATION_FAILURES

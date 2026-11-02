@@ -1,18 +1,18 @@
 //! Implementation behind the parent module facade.
 
 use super::authority;
+use super::refresh_retention;
 use super::Arc;
 use super::BareJid;
 use super::DbRetryClass;
 use super::Error;
 use super::Instant;
+use super::MessageEnvelope;
 use super::OriginId;
 use super::StdDuration;
 use super::Uuid;
 #[cfg(test)]
 use super::FAIL_ORPHAN_SWEEP;
-use super::{invalidate_retention, refresh_retention};
-use super::{lookup_wire_binding, MessageEnvelope};
 use super::{
     resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
     NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
@@ -23,7 +23,6 @@ use super::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
 use super::{DateTime, Duration, Utc};
 use super::{Digest, Sha256};
 use super::{SmIngressAppendKey, SmIngressReceiptKind};
-#[cfg(feature = "test-support")]
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 
 /// The time an origin-id alias remains available after its message becomes
@@ -88,6 +87,8 @@ pub enum IngressSubstrateError {
     InvalidStoredTimestamp,
     #[error("ingress substrate returned a malformed semantic digest")]
     InvalidStoredDigest,
+    #[error("persisted ingress alias identity is malformed or inconsistent with its hash")]
+    AliasIdentityConflict,
     #[error("ingress alias disappeared during concurrent resolution")]
     AliasMissingAfterConflict,
     #[error("ingress sm ordinal is already bound to a different message")]
@@ -102,6 +103,8 @@ pub enum IngressSubstrateError {
     EpochChangedDuringPreparation,
     #[error("the ingress relation prelock requires READ COMMITTED isolation")]
     ReadCommittedRequired,
+    #[error("the pooled receipt COMMIT outcome is indeterminate")]
+    ReceiptCommitIndeterminate,
 }
 
 /// Outcome of adding a child identity that requires a live message row.
@@ -262,9 +265,8 @@ impl PostgresIngressSubstrate {
         self.begin_inner().await
     }
 
-    /// Start a disposable dark writer using the full-identity capability
-    /// retained by its physically attested pool. This path is not wired into
-    /// runtime startup.
+    /// Start a writer using the full-identity capability retained by its
+    /// physically attested pool.
     #[cfg(feature = "test-support")]
     pub(crate) async fn begin_with_attested_pg_writer(
         &self,
@@ -291,7 +293,9 @@ impl PostgresIngressSubstrate {
                 retry_class: DbRetryClass::NotRetryable,
             });
         }
-        let epoch = acquire_epoch_lock_first_with_capability(&mut tx, capability).await?;
+        let epoch = prepare_attested_receipt_transaction(&mut tx, capability)
+            .await?
+            .protocol_epoch();
         if epoch > supported_protocol_epoch() {
             return Err(IngressSubstrateError::UnsupportedLiveEpoch);
         }
@@ -399,7 +403,14 @@ impl PostgresIngressSubstrate {
 pub(crate) async fn acquire_epoch_lock_first(
     tx: &mut Transaction<'_>,
 ) -> Result<ProtocolEpoch, IngressSubstrateError> {
-    read_live_epoch_for_share(tx)
+    acquire_epoch_lock_first_in_prepared_transaction(tx, None).await
+}
+
+async fn acquire_epoch_lock_first_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    read_live_epoch_for_share_in_prepared_transaction(tx, prepared)
         .await
         .map_err(|error| match error {
             EpochLockError::Database(error) => discard_database_error(error),
@@ -413,7 +424,14 @@ pub(crate) async fn acquire_epoch_lock_first(
 pub(in crate::ingress_substrate) async fn acquire_supported_epoch_lock_first(
     tx: &mut Transaction<'_>,
 ) -> Result<ProtocolEpoch, IngressSubstrateError> {
-    let live = acquire_epoch_lock_first(tx).await?;
+    acquire_supported_epoch_in_prepared_transaction(tx, None).await
+}
+
+pub(in crate::ingress_substrate) async fn acquire_supported_epoch_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    let live = acquire_epoch_lock_first_in_prepared_transaction(tx, prepared).await?;
     if live > supported_protocol_epoch() {
         return Err(IngressSubstrateError::UnsupportedLiveEpoch);
     }
@@ -432,9 +450,30 @@ pub(in crate::ingress_substrate) enum EpochLockError {
 pub(in crate::ingress_substrate) async fn read_live_epoch_for_share(
     tx: &mut Transaction<'_>,
 ) -> Result<ProtocolEpoch, EpochLockError> {
+    read_live_epoch_for_share_in_prepared_transaction(tx, None).await
+}
+
+async fn read_live_epoch_for_share_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+) -> Result<ProtocolEpoch, EpochLockError> {
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "SELECT epoch FROM {} WHERE id = 1 FOR SHARE",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Epoch)
+        );
+        qualified.as_str()
+    } else {
+        READ_EPOCH_POSTGRES
+    };
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), READ_EPOCH_POSTGRES, READ_EPOCH_SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                READ_EPOCH_SQLITE
+            },
             (),
         )
         .await
@@ -459,23 +498,48 @@ pub async fn record_message(
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
 ) -> Result<(), IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !insert_message(tx, message_key, digest, envelope).await? {
-        authority::complete_message_envelope(tx, message_key, digest, envelope).await?;
+    record_message_in_prepared_transaction(tx, None, message_key, digest, envelope).await
+}
+
+pub(crate) async fn record_message_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+    envelope: Option<&MessageEnvelope>,
+) -> Result<(), IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !insert_message(tx, prepared, message_key, digest, envelope).await? {
+        authority::complete_message_envelope(tx, prepared, message_key, digest, envelope).await?;
     }
     Ok(())
 }
 
 pub(in crate::ingress_substrate) async fn insert_message(
     tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
     digest: &SemanticDigest,
     envelope: Option<&MessageEnvelope>,
 ) -> Result<bool, IngressSubstrateError> {
     let (digest_version, digest_bytes) = digest.to_storage();
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "INSERT INTO {} (message_key, digest_version, digest, envelope_version, envelope) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT (message_key) DO NOTHING",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        INSERT_MESSAGE_POSTGRES
+    };
     let inserted = tx
         .execute(
-            dialect_sql(tx.driver(), INSERT_MESSAGE_POSTGRES, INSERT_MESSAGE_SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                INSERT_MESSAGE_SQLITE
+            },
             crate::db_params![
                 message_key.to_storage().to_string(),
                 i32::from(digest_version),
@@ -503,9 +567,21 @@ pub async fn resolve_and_record_alias(
     digest: &SemanticDigest,
     mint: impl FnOnce() -> MessageKey,
 ) -> Result<AliasResolution, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
+    resolve_alias_in_prepared_transaction(tx, None, sender, target, origin_id, digest, mint).await
+}
+
+pub(crate) async fn resolve_alias_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+    mint: impl FnOnce() -> MessageKey,
+) -> Result<AliasResolution, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
     let alias_key = AliasStorageKey::new(sender, target, origin_id);
-    if let Some(stored) = locked_alias(tx, &alias_key).await? {
+    if let Some(stored) = locked_alias(tx, prepared, &alias_key).await? {
         return Ok(resolve_alias(true, digest, Some(&stored), mint));
     }
 
@@ -514,12 +590,26 @@ pub async fn resolve_and_record_alias(
         AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Inserted(key)) => key,
         _ => return Err(IngressSubstrateError::AliasMissingAfterConflict),
     };
-    if !insert_message(tx, candidate_key, digest, None).await? {
+    if !insert_message(tx, prepared, candidate_key, digest, None).await? {
         return Err(IngressSubstrateError::MessageContentConflict);
     }
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "INSERT INTO {} (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key) VALUES (?, ?, ?, ?, ?, ?::uuid) ON CONFLICT (alias_key_hash) DO NOTHING",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Aliases)
+        );
+        qualified.as_str()
+    } else {
+        INSERT_ALIAS_POSTGRES
+    };
     let inserted = tx
         .execute(
-            dialect_sql(tx.driver(), INSERT_ALIAS_POSTGRES, INSERT_ALIAS_SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                INSERT_ALIAS_SQLITE
+            },
             crate::db_params![
                 alias_key.hash.to_vec(),
                 alias_key.sender.to_string(),
@@ -535,18 +625,28 @@ pub async fn resolve_and_record_alias(
         return Ok(candidate);
     }
 
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "DELETE FROM {} WHERE message_key = ?::uuid",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        DELETE_CANDIDATE_POSTGRES
+    };
     tx.execute(
-        dialect_sql(
-            tx.driver(),
-            DELETE_CANDIDATE_POSTGRES,
-            DELETE_CANDIDATE_SQLITE,
-        ),
+        if tx.driver() == DatabaseDriver::Postgres {
+            postgres
+        } else {
+            DELETE_CANDIDATE_SQLITE
+        },
         crate::db_params![candidate_key.to_storage().to_string()],
     )
     .await
     .map_err(discard_database_error)?;
 
-    let stored = locked_alias(tx, &alias_key)
+    let stored = locked_alias(tx, prepared, &alias_key)
         .await?
         .ok_or(IngressSubstrateError::AliasMissingAfterConflict)?;
     Ok(resolve_alias(true, digest, Some(&stored), || candidate_key))
@@ -565,14 +665,33 @@ pub async fn insert_sm_ref(
     wire_h: WireHandledCount,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, message_key).await? {
+    insert_sm_ref_in_prepared_transaction(tx, None, sm_ingress_id, ordinal, wire_h, message_key)
+        .await
+}
+
+pub(crate) async fn insert_sm_ref_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    sm_ingress_id: SmIngressId,
+    ordinal: IngressOrdinal,
+    wire_h: WireHandledCount,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
-    let generation = authority::wire_generation(tx, sm_ingress_id, wire_h).await?;
+    let generation = authority::wire_generation(tx, prepared, sm_ingress_id, wire_h).await?;
+    let insert = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::SmRefs,
+        INSERT_SM_REF_POSTGRES,
+        INSERT_SM_REF_SQLITE,
+    );
     let inserted = tx
         .execute(
-            dialect_sql(tx.driver(), INSERT_SM_REF_POSTGRES, INSERT_SM_REF_SQLITE),
+            &insert,
             crate::db_params![
                 sm_ingress_id.to_storage().to_string(),
                 ordinal.to_storage().to_string(),
@@ -584,12 +703,20 @@ pub async fn insert_sm_ref(
         .await
         .map_err(discard_database_error)?;
     if inserted == 1 {
-        invalidate_retention(tx, message_key).await?;
+        super::retention::invalidate_retention_in_prepared_transaction(tx, prepared, message_key)
+            .await?;
         return Ok(MessageWriteOutcome::Recorded);
     }
+    let read = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::SmRefs,
+        READ_SM_REF_POSTGRES,
+        READ_SM_REF_SQLITE,
+    );
     let existing = stored_child_message_key(
         tx,
-        dialect_sql(tx.driver(), READ_SM_REF_POSTGRES, READ_SM_REF_SQLITE),
+        &read,
         crate::db_params![
             sm_ingress_id.to_storage().to_string(),
             ordinal.to_storage().to_string(),
@@ -597,7 +724,14 @@ pub async fn insert_sm_ref(
     )
     .await?;
     if existing == Some(message_key)
-        && lookup_wire_binding(tx, sm_ingress_id, wire_h).await? == Some((message_key, ordinal))
+        && authority::lookup_wire_binding_in_prepared_transaction(
+            tx,
+            prepared,
+            sm_ingress_id,
+            wire_h,
+        )
+        .await?
+            == Some((message_key, ordinal))
     {
         Ok(MessageWriteOutcome::AlreadyRecorded)
     } else {
@@ -616,17 +750,27 @@ pub async fn record_delivery(
     delivery_key: DeliveryKey,
     message_key: MessageKey,
 ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, message_key).await? {
+    record_delivery_in_prepared_transaction(tx, None, delivery_key, message_key).await
+}
+
+pub(crate) async fn record_delivery_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    delivery_key: DeliveryKey,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(MessageWriteOutcome::MessageVanished);
     }
+    let insert = prepared_ingress_sql(
+        tx.driver(), prepared, PreparedIngressRelation::Deliveries,
+        ("INSERT INTO ", " (delivery_key, message_key) VALUES (?::uuid, ?::uuid) ON CONFLICT (delivery_key) DO NOTHING"),
+        INSERT_DELIVERY_SQLITE,
+    );
     let inserted = tx
         .execute(
-            dialect_sql(
-                tx.driver(),
-                INSERT_DELIVERY_POSTGRES,
-                INSERT_DELIVERY_SQLITE,
-            ),
+            &insert,
             crate::db_params![
                 delivery_key.to_storage().to_string(),
                 message_key.to_storage().to_string(),
@@ -637,9 +781,19 @@ pub async fn record_delivery(
     if inserted == 1 {
         return Ok(MessageWriteOutcome::Recorded);
     }
+    let read = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Deliveries,
+        (
+            "SELECT message_key::text FROM ",
+            " WHERE delivery_key = ?::uuid",
+        ),
+        READ_DELIVERY_SQLITE,
+    );
     let existing = stored_child_message_key(
         tx,
-        dialect_sql(tx.driver(), READ_DELIVERY_POSTGRES, READ_DELIVERY_SQLITE),
+        &read,
         crate::db_params![delivery_key.to_storage().to_string()],
     )
     .await?;
@@ -656,17 +810,32 @@ pub async fn terminalize_message(
     message_key: MessageKey,
     proven_terminal_at: DateTime<Utc>,
 ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
-    acquire_supported_epoch_lock_first(tx).await?;
-    if !lock_message_for_child(tx, message_key).await? {
+    terminalize_message_in_prepared_transaction(tx, None, message_key, proven_terminal_at).await
+}
+
+pub(crate) async fn terminalize_message_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    proven_terminal_at: DateTime<Utc>,
+) -> Result<TerminalizeOutcome, IngressSubstrateError> {
+    acquire_supported_epoch_in_prepared_transaction(tx, prepared).await?;
+    if !lock_message_for_child_in_prepared_transaction(tx, prepared, message_key).await? {
         return Ok(TerminalizeOutcome::MessageVanished);
     }
+    let sql = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Messages,
+        (
+            "UPDATE ",
+            " SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid AND terminal_at IS NULL",
+        ),
+        TERMINALIZE_MESSAGE_SQLITE,
+    );
     let changed = tx
         .execute(
-            dialect_sql(
-                tx.driver(),
-                TERMINALIZE_MESSAGE_POSTGRES,
-                TERMINALIZE_MESSAGE_SQLITE,
-            ),
+            &sql,
             crate::db_params![
                 proven_terminal_at.to_rfc3339(),
                 message_key.to_storage().to_string(),
@@ -675,10 +844,16 @@ pub async fn terminalize_message(
         .await
         .map_err(discard_database_error)?;
     if changed == 1 {
-        refresh_retention(tx, message_key, proven_terminal_at).await?;
+        super::retention::refresh_retention_in_prepared_transaction(
+            tx,
+            prepared,
+            message_key,
+            proven_terminal_at,
+        )
+        .await?;
         return Ok(TerminalizeOutcome::Terminalized);
     }
-    if message_exists(tx, message_key).await? {
+    if message_exists_in_prepared_transaction(tx, prepared, message_key).await? {
         Ok(TerminalizeOutcome::AlreadyTerminal)
     } else {
         Ok(TerminalizeOutcome::MessageVanished)
@@ -1227,18 +1402,17 @@ pub(in crate::ingress_substrate) async fn gc_candidate_batch(
     })
 }
 
-/// Prepare a dark writer from the physical attestor's complete identity.
+/// Prepare a writer from the physical attestor's complete identity.
 ///
 /// The schema-qualified epoch relation lock is the first SQL operation after
 /// transaction isolation and timeout setup. Only then does the writer run
 /// the trusted physical attestor on this same transaction connection, before
 /// reading the epoch or taking application locks. This path never derives
 /// identity from the active search path or DSN.
-#[cfg(feature = "test-support")]
-pub(crate) async fn acquire_epoch_lock_first_with_capability(
+pub(crate) async fn prepare_attested_receipt_transaction(
     tx: &mut Transaction<'_>,
     capability: &AttestedPostgresWriterCapability,
-) -> Result<ProtocolEpoch, IngressSubstrateError> {
+) -> Result<PreparedAttestedReceiptWriter, IngressSubstrateError> {
     if tx.driver() != DatabaseDriver::Postgres {
         return Err(IngressSubstrateError::Database {
             retry_class: DbRetryClass::NotRetryable,
@@ -1299,6 +1473,27 @@ pub(crate) async fn acquire_epoch_lock_first_with_capability(
     }
     drop(isolation_rows);
 
+    // PostgreSQL searches the temporary schema before ordinary schemas unless
+    // it is explicitly ordered. Keep the attested schema first and pg_temp
+    // last for the remainder of this transaction; receipt SQL is also
+    // explicitly schema-qualified at its repository boundary.
+    let search_path = format!("{}, pg_temp", quote_postgres_identifier(&expected.name.0));
+    let mut search_path_rows = tx
+        .query(
+            "SELECT pg_catalog.set_config('search_path', ?, true)",
+            crate::db_params![search_path],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    search_path_rows
+        .next()
+        .await
+        .map_err(discard_database_error)?
+        .ok_or(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        })?;
+    drop(search_path_rows);
+
     let fresh_epoch = read_epoch_in_relation(tx, &relation, false).await?;
     let mut proof = tx
         .query(
@@ -1320,10 +1515,107 @@ pub(crate) async fn acquire_epoch_lock_first_with_capability(
     if locked_epoch != fresh_epoch {
         return Err(IngressSubstrateError::EpochChangedDuringPreparation);
     }
-    Ok(locked_epoch)
+    Ok(PreparedAttestedReceiptWriter {
+        protocol_epoch: locked_epoch,
+        schema: expected.name.0.clone(),
+    })
 }
 
-#[cfg(feature = "test-support")]
+/// Evidence that the transaction was prepared on the attested PostgreSQL
+/// connection before application locks or writes. The type stays private to
+/// the crate and is stored inside the owning UoW transaction.
+pub(crate) struct PreparedAttestedReceiptWriter {
+    protocol_epoch: ProtocolEpoch,
+    schema: String,
+}
+
+impl PreparedAttestedReceiptWriter {
+    pub(crate) fn protocol_epoch(&self) -> ProtocolEpoch {
+        self.protocol_epoch
+    }
+
+    pub(crate) fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+/// The relations selected by prepared ingress UoW statements.
+#[derive(Clone, Copy)]
+pub(crate) enum PreparedIngressRelation {
+    Epoch,
+    Messages,
+    Aliases,
+    SmRefs,
+    SmStreams,
+    Sessions,
+    Effects,
+    Deliveries,
+    DeliveryReceipts,
+    CarbonReceipts,
+    EffectReceipts,
+    EffectDescendants,
+    SendAttempts,
+    SmAppends,
+    PendingDelivery,
+    #[cfg(feature = "clustering")]
+    Claims,
+    InboxEntries,
+    ArchiveDispatch,
+}
+
+/// Only a prepared transaction can supply a schema; callers cannot pass an
+/// untrusted schema string through the ingress repository boundary.
+pub(crate) fn prepared_ingress_relation(
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    relation: PreparedIngressRelation,
+) -> String {
+    let name = match relation {
+        PreparedIngressRelation::Epoch => "ingress_protocol_epoch",
+        PreparedIngressRelation::Messages => "ingress_messages",
+        PreparedIngressRelation::Aliases => "ingress_origin_aliases",
+        PreparedIngressRelation::SmRefs => "ingress_sm_refs",
+        PreparedIngressRelation::SmStreams => "ingress_sm_streams",
+        PreparedIngressRelation::Sessions => "sessions",
+        PreparedIngressRelation::Effects => "ingress_effect_intents",
+        PreparedIngressRelation::Deliveries => "ingress_deliveries",
+        PreparedIngressRelation::DeliveryReceipts => "ingress_delivery_receipts",
+        PreparedIngressRelation::CarbonReceipts => "ingress_carbon_receipts",
+        PreparedIngressRelation::EffectReceipts => "ingress_effect_receipts",
+        PreparedIngressRelation::EffectDescendants => "ingress_effect_descendants",
+        PreparedIngressRelation::SendAttempts => "ingress_send_attempts",
+        PreparedIngressRelation::SmAppends => "sm_ingress_appends",
+        PreparedIngressRelation::PendingDelivery => "pending_delivery",
+        #[cfg(feature = "clustering")]
+        PreparedIngressRelation::Claims => "clustering_claims",
+        PreparedIngressRelation::InboxEntries => "inbox_entries",
+        PreparedIngressRelation::ArchiveDispatch => "ingress_archive_dispatch",
+    };
+    match prepared {
+        Some(prepared) => format!("{}.{name}", quote_postgres_identifier(prepared.schema())),
+        None => name.to_owned(),
+    }
+}
+
+/// Build PostgreSQL from fixed text on either side of an allowlisted relation.
+/// Raw transactions select its bare name; SQLite uses its original statement.
+pub(crate) fn prepared_ingress_sql(
+    driver: DatabaseDriver,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    relation: PreparedIngressRelation,
+    postgres: (&'static str, &'static str),
+    sqlite: &'static str,
+) -> std::borrow::Cow<'static, str> {
+    match driver {
+        DatabaseDriver::Postgres => std::borrow::Cow::Owned(format!(
+            "{}{}{}",
+            postgres.0,
+            prepared_ingress_relation(prepared, relation),
+            postgres.1
+        )),
+        DatabaseDriver::Sqlite => std::borrow::Cow::Borrowed(sqlite),
+    }
+}
+
 async fn read_epoch_in_relation(
     tx: &mut Transaction<'_>,
     relation: &str,
@@ -1351,8 +1643,7 @@ async fn read_epoch_in_relation(
         .map_err(|_| IngressSubstrateError::UnsupportedLiveEpoch)
 }
 
-#[cfg(feature = "test-support")]
-fn quote_postgres_identifier(identifier: &str) -> String {
+pub(crate) fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
@@ -1467,19 +1758,69 @@ impl<'a> AliasStorageKey<'a> {
 
 pub(in crate::ingress_substrate) async fn locked_alias(
     tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     key: &AliasStorageKey<'_>,
 ) -> Result<Option<StoredAlias>, IngressSubstrateError> {
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "SELECT m.message_key::text, m.digest_version, m.digest, a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id FROM {} a JOIN {} m USING (message_key) WHERE a.alias_key_hash = ? FOR UPDATE OF m",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Aliases),
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Messages),
+        );
+        qualified.as_str()
+    } else {
+        LOCK_ALIAS_POSTGRES
+    };
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), LOCK_ALIAS_POSTGRES, LOCK_ALIAS_SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                LOCK_ALIAS_SQLITE
+            },
             crate::db_params![key.hash.to_vec()],
         )
         .await
         .map_err(discard_database_error)?;
     match rows.next().await.map_err(discard_database_error)? {
-        Some(row) => decode_stored_alias(&row).map(Some),
+        Some(row) => {
+            validate_stored_alias_identity(&row, key)?;
+            decode_stored_alias(&row).map(Some)
+        }
         None => Ok(None),
     }
+}
+
+fn validate_stored_alias_identity(
+    row: &Row,
+    key: &AliasStorageKey<'_>,
+) -> Result<(), IngressSubstrateError> {
+    let sender_text: String = row.get(3).map_err(discard_database_error)?;
+    let target_kind: i64 = row.get(4).map_err(discard_database_error)?;
+    let target_jid: String = row.get(5).map_err(discard_database_error)?;
+    let origin_text: String = row.get(6).map_err(discard_database_error)?;
+
+    let sender = sender_text
+        .parse::<BareJid>()
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target_kind =
+        i32::try_from(target_kind).map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let target = NormalizedTarget::from_storage(target_kind, &target_jid)
+        .map_err(|_| IngressSubstrateError::AliasIdentityConflict)?;
+    let origin = OriginId::new(origin_text.clone());
+
+    if sender != *key.sender
+        || sender_text != key.sender.to_string()
+        || target.to_storage() != key.target
+        || target_kind != key.target.kind()
+        || target_jid != key.target.jid()
+        || origin != *key.origin_id
+        || origin_text != key.origin_id.as_str()
+    {
+        return Err(IngressSubstrateError::AliasIdentityConflict);
+    }
+    Ok(())
 }
 
 pub(in crate::ingress_substrate) fn decode_stored_alias(
@@ -1523,13 +1864,28 @@ pub(in crate::ingress_substrate) async fn stored_child_message_key(
         .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
 }
 
-pub(in crate::ingress_substrate) async fn lock_message_for_child(
+pub(in crate::ingress_substrate) async fn lock_message_for_child_in_prepared_transaction(
     tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
+    let qualified;
+    let postgres = if prepared.is_some() {
+        qualified = format!(
+            "SELECT 1 FROM {} WHERE message_key = ?::uuid FOR UPDATE",
+            prepared_ingress_relation(prepared, PreparedIngressRelation::Messages)
+        );
+        qualified.as_str()
+    } else {
+        LOCK_MESSAGE_POSTGRES
+    };
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), LOCK_MESSAGE_POSTGRES, LOCK_MESSAGE_SQLITE),
+            if tx.driver() == DatabaseDriver::Postgres {
+                postgres
+            } else {
+                LOCK_MESSAGE_SQLITE
+            },
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
@@ -1537,13 +1893,29 @@ pub(in crate::ingress_substrate) async fn lock_message_for_child(
     Ok(rows.next().await.map_err(discard_database_error)?.is_some())
 }
 
+#[cfg(test)]
 pub(in crate::ingress_substrate) async fn message_exists(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
 ) -> Result<bool, IngressSubstrateError> {
+    message_exists_in_prepared_transaction(tx, None, message_key).await
+}
+
+async fn message_exists_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+) -> Result<bool, IngressSubstrateError> {
+    let sql = prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        PreparedIngressRelation::Messages,
+        ("SELECT 1 FROM ", " WHERE message_key = ?::uuid"),
+        MESSAGE_EXISTS_SQLITE,
+    );
     let mut rows = tx
         .query(
-            dialect_sql(tx.driver(), MESSAGE_EXISTS_POSTGRES, MESSAGE_EXISTS_SQLITE),
+            &sql,
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
@@ -1799,43 +2171,37 @@ pub(in crate::ingress_substrate) const DELETE_CANDIDATE_POSTGRES: &str =
     r#"DELETE FROM ingress_messages WHERE message_key = ?::uuid"#;
 pub(in crate::ingress_substrate) const DELETE_CANDIDATE_SQLITE: &str =
     r#"DELETE FROM ingress_messages WHERE message_key = ?"#;
-pub(in crate::ingress_substrate) const INSERT_SM_REF_POSTGRES: &str = r#"
-            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
+pub(in crate::ingress_substrate) const INSERT_SM_REF_POSTGRES: (&str, &str) = (
+    r#"
+            INSERT INTO "#,
+    r#" (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
             VALUES (?::uuid, ?::numeric, ?, ?, ?::uuid)
             ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
-            "#;
+            "#,
+);
 pub(in crate::ingress_substrate) const INSERT_SM_REF_SQLITE: &str = r#"
             INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
             "#;
-pub(in crate::ingress_substrate) const READ_SM_REF_POSTGRES: &str = r#"
-        SELECT message_key::text FROM ingress_sm_refs
+pub(in crate::ingress_substrate) const READ_SM_REF_POSTGRES: (&str, &str) = (
+    r#"
+        SELECT message_key::text FROM "#,
+    r#"
         WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric
-        "#;
+        "#,
+);
 pub(in crate::ingress_substrate) const READ_SM_REF_SQLITE: &str = r#"
         SELECT message_key FROM ingress_sm_refs
         WHERE sm_ingress_id = ? AND ingress_ordinal = ?
         "#;
-pub(in crate::ingress_substrate) const INSERT_DELIVERY_POSTGRES: &str = r#"
-            INSERT INTO ingress_deliveries (delivery_key, message_key)
-            VALUES (?::uuid, ?::uuid)
-            ON CONFLICT (delivery_key) DO NOTHING
-            "#;
 pub(in crate::ingress_substrate) const INSERT_DELIVERY_SQLITE: &str = r#"
             INSERT INTO ingress_deliveries (delivery_key, message_key)
             VALUES (?, ?)
             ON CONFLICT (delivery_key) DO NOTHING
             "#;
-pub(in crate::ingress_substrate) const READ_DELIVERY_POSTGRES: &str =
-    r#"SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid"#;
 pub(in crate::ingress_substrate) const READ_DELIVERY_SQLITE: &str =
     r#"SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?"#;
-pub(in crate::ingress_substrate) const TERMINALIZE_MESSAGE_POSTGRES: &str = r#"
-            UPDATE ingress_messages
-            SET terminal_at = ?::timestamptz
-            WHERE message_key = ?::uuid AND terminal_at IS NULL
-            "#;
 pub(in crate::ingress_substrate) const TERMINALIZE_MESSAGE_SQLITE: &str = r#"
             UPDATE ingress_messages
             SET terminal_at = ?
@@ -1939,14 +2305,16 @@ pub(in crate::ingress_substrate) const GC_DELETE_MESSAGE_SQLITE: &str = r#"
                   )
                 "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_POSTGRES: &str = r#"
-            SELECT m.message_key::text, m.digest_version, m.digest
+            SELECT m.message_key::text, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
             FOR UPDATE OF m
             "#;
 pub(in crate::ingress_substrate) const LOCK_ALIAS_SQLITE: &str = r#"
-            SELECT m.message_key, m.digest_version, m.digest
+            SELECT m.message_key, m.digest_version, m.digest,
+                   a.sender_bare_jid, a.target_kind, a.target_jid, a.origin_id
             FROM ingress_origin_aliases a
             JOIN ingress_messages m USING (message_key)
             WHERE a.alias_key_hash = ?
@@ -1956,8 +2324,6 @@ pub(in crate::ingress_substrate) const LOCK_MESSAGE_POSTGRES: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"#;
 pub(in crate::ingress_substrate) const LOCK_MESSAGE_SQLITE: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ? "#;
-pub(in crate::ingress_substrate) const MESSAGE_EXISTS_POSTGRES: &str =
-    r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid"#;
 pub(in crate::ingress_substrate) const MESSAGE_EXISTS_SQLITE: &str =
     r#"SELECT 1 FROM ingress_messages WHERE message_key = ?"#;
 // Eligibility is shared with the CNPG query; see the retention predicate in
