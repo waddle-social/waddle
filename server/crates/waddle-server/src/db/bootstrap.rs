@@ -155,7 +155,7 @@ pub async fn verify_global_runtime(
     let (mut tx, driver, lineage_table, ledger_table) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
@@ -177,12 +177,41 @@ pub async fn verify_store_lineage_runtime(
     let (mut tx, driver, lineage_table, _) =
         begin_runtime_lineage_check(db, config, expected).await?;
     let attested =
-        lineage::verify_qualified_in_transaction(&mut tx, driver, config, &lineage_table).await?;
+        verify_runtime_lineage(db, &mut tx, driver, config, expected, &lineage_table).await?;
     if &attested != expected {
         return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
     }
     tx.commit().await?;
     Ok(attested)
+}
+
+async fn verify_runtime_lineage(
+    db: &Database,
+    tx: &mut Transaction<'_>,
+    driver: DatabaseDriver,
+    config: &LineageConfig,
+    expected: &AttestedLineage,
+    lineage_table: &str,
+) -> Result<AttestedLineage, RuntimeAttachmentError> {
+    if let Some(capability) = db.attested_pg_writer_capability() {
+        db.verify_attested_pg_writer_capability(&capability)
+            .map_err(DatabaseError::from)?;
+        if &capability.attested_lineage_for_deployment(config.deployment_uuid)? != expected {
+            return Err(RuntimeAttachmentError::ExpectedIdentityMismatch);
+        }
+        capability.attest_transaction(tx).await?;
+        Ok(
+            lineage::verify_qualified_with_attested_identity_in_transaction(
+                tx,
+                config,
+                lineage_table,
+                capability.identity(),
+            )
+            .await?,
+        )
+    } else {
+        Ok(lineage::verify_qualified_in_transaction(tx, driver, config, lineage_table).await?)
+    }
 }
 
 async fn begin_runtime_lineage_check<'a>(

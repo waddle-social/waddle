@@ -7,6 +7,8 @@ use std::time::Duration;
 use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use waddle_server::config::LineageConfig;
+#[cfg(feature = "test-support")]
+use waddle_server::db::bootstrap::{verify_global_runtime, verify_store_lineage_runtime};
 use waddle_server::db::lineage::{
     self, AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseName, PgSchemaName,
 };
@@ -1243,6 +1245,134 @@ async fn prepare_attested_writer_fixture(fixture: &Fixture) -> (String, Physical
             .expect("grant disposable writer fixture privileges");
     }
     (boundary_url, config)
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn restricted_attested_runtime_verifies_lineage_without_control_system_grant() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let owner = Database::from_config(
+        "runtime attachment owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
+    )
+    .await
+    .expect("owner database");
+    MigrationRunner::single()
+        .run(&owner)
+        .await
+        .expect("complete migration ledger");
+    drop(owner);
+    let installed = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install restricted physical attestor");
+    for relation in ["_lineage", "_migrations"] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{relation} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant runtime catalog read");
+    }
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        installed,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("attested pool");
+    let database = waddle_server::test_support::database_from_attested_postgres_pool(
+        "restricted runtime attachment",
+        pool,
+    );
+    let runtime_config = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let guard = database.guard().await.expect("restricted runtime checkout");
+    let mut privilege = guard
+        .query(
+            "SELECT pg_catalog.has_function_privilege(current_user, \
+             'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE')",
+            (),
+        )
+        .await
+        .expect("inspect direct system identity grant");
+    assert!(!privilege
+        .next()
+        .await
+        .expect("privilege row")
+        .expect("privilege value")
+        .get::<bool>(0)
+        .expect("decode privilege"));
+    drop(privilege);
+    drop(guard);
+
+    assert_eq!(
+        verify_global_runtime(&database, &runtime_config, &fixture.lineage)
+            .await
+            .expect("restricted global attachment"),
+        fixture.lineage
+    );
+    assert_eq!(
+        verify_store_lineage_runtime(&database, &runtime_config, &fixture.lineage)
+            .await
+            .expect("restricted store attachment"),
+        fixture.lineage
+    );
+    let mut wrong = fixture.lineage.clone();
+    wrong.lineage_uuid = LineageUuid::new();
+    assert!(verify_global_runtime(&database, &runtime_config, &wrong)
+        .await
+        .is_err());
+    assert!(
+        verify_store_lineage_runtime(&database, &runtime_config, &wrong)
+            .await
+            .is_err()
+    );
+
+    let mut wrong_schema = fixture.lineage.clone();
+    wrong_schema
+        .postgres_identity
+        .as_mut()
+        .expect("PostgreSQL fixture identity")
+        .schema
+        .oid += 1;
+    assert!(
+        verify_global_runtime(&database, &runtime_config, &wrong_schema)
+            .await
+            .is_err()
+    );
+
+    sqlx::query(&format!(
+        "DELETE FROM {}._migrations WHERE version = \
+         (SELECT MAX(version) FROM {}._migrations)",
+        fixture.target, fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("make the committed migration ledger incomplete");
+    assert!(
+        verify_global_runtime(&database, &runtime_config, &fixture.lineage)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        verify_store_lineage_runtime(&database, &runtime_config, &fixture.lineage)
+            .await
+            .expect("store attachment checks lineage without a global ledger"),
+        fixture.lineage
+    );
+
+    drop(database);
+    fixture.cleanup().await;
 }
 
 #[cfg(feature = "test-support")]

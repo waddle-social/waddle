@@ -17,7 +17,8 @@ pub use engine::{
     verify_via_pg_pool, verify_via_sqlite_pool, AdoptOutcome, AttestedLineage,
 };
 pub(crate) use engine::{
-    verify_in_transaction, verify_qualified_in_transaction, LINEAGE_ADVISORY_LOCK_KEY,
+    verify_in_transaction, verify_qualified_in_transaction,
+    verify_qualified_with_attested_identity_in_transaction, LINEAGE_ADVISORY_LOCK_KEY,
 };
 pub use error::LineageError;
 pub use record::{
