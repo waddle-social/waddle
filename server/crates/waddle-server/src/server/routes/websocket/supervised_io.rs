@@ -407,8 +407,9 @@ pub enum CustodianState {
     Running,
     /// Stop was requested or one pump ended; the custodian is joining both.
     Stopping,
-    /// The retirement deadline expired and at least one pump still needs a
-    /// confirmed join. This state never claims the socket has terminated.
+    /// At least one started pump still lacks confirmed join proof because the
+    /// retirement deadline elapsed or its owner was lost. This never claims
+    /// the socket has terminated.
     CleanupPending,
     /// Both pump JoinHandles returned, including cancellation or panic results.
     Joined,
@@ -1170,6 +1171,81 @@ struct ReservedReaperSetup<ReadError, WriteError> {
     cleanup_pending_published: Arc<AtomicBool>,
 }
 
+/// Lets the fallback monitor wait until cancellation or panic has dropped all
+/// remaining startup handoffs before deciding inventory capacity.
+struct StartupCompletionGuard(Option<oneshot::Sender<()>>);
+
+impl StartupCompletionGuard {
+    fn new(completed: oneshot::Sender<()>) -> Self {
+        Self(Some(completed))
+    }
+}
+
+impl Drop for StartupCompletionGuard {
+    fn drop(&mut self) {
+        if let Some(completed) = self.0.take() {
+            let _ = completed.send(());
+        }
+    }
+}
+
+struct ReaperMonitorSetup {
+    reaper: JoinHandle<()>,
+    startup_finished: oneshot::Receiver<()>,
+    connection_ref: ConnectionRef,
+    state: watch::Receiver<CustodianState>,
+    state_tx: watch::Sender<CustodianState>,
+    summary: Arc<Mutex<Option<CustodianSummary>>>,
+    inventory: IoCustodianInventory,
+    reservation_id: u64,
+    started_pump_count: Arc<AtomicU8>,
+    cleanup_pending_published: Arc<AtomicBool>,
+}
+
+/// Reconcile an unexpectedly exited reaper after the starter can no longer
+/// spawn pumps. A zero-pump start is abandoned; otherwise cleanup stays pending
+/// because this monitor has no join proof for every started handle.
+async fn monitor_reserved_reaper(setup: ReaperMonitorSetup) {
+    let ReaperMonitorSetup {
+        reaper,
+        startup_finished,
+        connection_ref,
+        state,
+        state_tx,
+        summary,
+        inventory,
+        reservation_id,
+        started_pump_count,
+        cleanup_pending_published,
+    } = setup;
+    let _ = reaper.await;
+    let _ = startup_finished.await;
+
+    let current_state = *state.borrow();
+    if custodian_state_is_terminal(current_state) || current_state == CustodianState::CleanupPending
+    {
+        return;
+    }
+
+    if started_pump_count.load(Ordering::Acquire) == 0 {
+        let mut retained_summary = match summary.lock() {
+            Ok(retained_summary) => retained_summary,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *retained_summary = Some(CustodianSummary {
+            connection_ref: connection_ref.clone(),
+            inbound: InboundTerminal::NotStarted,
+            outbound: OutboundTerminal::NotStarted,
+        });
+        drop(retained_summary);
+        state_tx.send_replace(CustodianState::StartupAbandoned);
+        inventory.release_active_without_pumps(&connection_ref, reservation_id);
+    } else {
+        cleanup_pending_published.store(true, Ordering::Release);
+        state_tx.send_replace(CustodianState::CleanupPending);
+    }
+}
+
 async fn run_reserved_start<ReadError, WriteError>(
     setup: ReservedReaperSetup<ReadError, WriteError>,
 ) where
@@ -1776,12 +1852,21 @@ where
     let (ready_tx, ready_rx) = oneshot::channel();
     let (inbound_start_tx, inbound_start_rx) = oneshot::channel();
     let (outbound_start_tx, outbound_start_rx) = oneshot::channel();
+    let (startup_finished_tx, startup_finished_rx) = oneshot::channel();
+    let _startup_completion_guard = StartupCompletionGuard::new(startup_finished_tx);
+    let started_pump_count = Arc::new(AtomicU8::new(0));
 
     // The reservation remains armed until the reaper exists and has the
     // channels needed to recover every later startup cancellation or panic.
     let failure_state_tx = state_tx.clone();
     let failure_cleanup_pending_published = cleanup_pending_published.clone();
-    tokio::spawn(run_reserved_start(ReservedReaperSetup {
+    let monitor_state_tx = state_tx.clone();
+    let monitor_state = state_rx.clone();
+    let monitor_summary = summary.clone();
+    let monitor_inventory = inventory.clone();
+    let monitor_started_pump_count = started_pump_count.clone();
+    let monitor_cleanup_pending_published = cleanup_pending_published.clone();
+    let reaper = tokio::spawn(run_reserved_start(ReservedReaperSetup {
         connection_ref: connection_ref.clone(),
         stop: prepared.stop.clone(),
         force_stop: prepared.force_stop.clone(),
@@ -1800,6 +1885,18 @@ where
         reservation_id,
         exit_point: reaper_exit_point,
         cleanup_pending_published: cleanup_pending_published.clone(),
+    }));
+    tokio::spawn(monitor_reserved_reaper(ReaperMonitorSetup {
+        reaper,
+        startup_finished: startup_finished_rx,
+        connection_ref: connection_ref.clone(),
+        state: monitor_state,
+        state_tx: monitor_state_tx,
+        summary: monitor_summary,
+        inventory: monitor_inventory,
+        reservation_id,
+        started_pump_count: monitor_started_pump_count,
+        cleanup_pending_published: monitor_cleanup_pending_published,
     }));
 
     reservation
@@ -1826,6 +1923,7 @@ where
         }
         prepared.inbound.await
     });
+    started_pump_count.fetch_add(1, Ordering::Release);
     PumpHandoff::new(inbound_task, inbound_owner_tx).transfer();
 
     hook(ReservedStartStage::BetweenPumpSpawns).await;
@@ -1835,6 +1933,7 @@ where
         }
         prepared.outbound.await
     });
+    started_pump_count.fetch_add(1, Ordering::Release);
     PumpHandoff::new(outbound_task, outbound_owner_tx).transfer();
 
     hook(ReservedStartStage::AfterOutboundSpawn).await;

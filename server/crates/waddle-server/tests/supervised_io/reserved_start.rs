@@ -39,17 +39,31 @@ fn paused_start(
     target: ReservedStartStage,
     panic_after_release: bool,
 ) -> (StartTask, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    paused_start_with_reaper_exit(reservation, target, panic_after_release, None)
+}
+
+fn paused_start_with_reaper_exit(
+    reservation: IoCustodianReservation,
+    target: ReservedStartStage,
+    panic_after_release: bool,
+    exit_point: Option<ReservedReaperExitPoint>,
+) -> (StartTask, oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let barrier = Arc::new(Mutex::new(Some((entered_tx, release_rx))));
+    let config = ReservedIoStartConfig::new(
+        test_limits(),
+        ShutdownProtocol::new(0_u8, |_: &Infallible| false),
+        |_| 1,
+        |_| false,
+        Duration::from_millis(40),
+    );
+    let config = match exit_point {
+        Some(exit_point) => config.with_test_reaper_exit_point(exit_point),
+        None => config,
+    };
     let task = tokio::spawn(reservation.start_with_hook(
-        ReservedIoStartConfig::new(
-            test_limits(),
-            ShutdownProtocol::new(0_u8, |_: &Infallible| false),
-            |_| 1,
-            |_| false,
-            Duration::from_millis(40),
-        ),
+        config,
         |_| async {
             (
                 futures::stream::pending::<Result<u8, Infallible>>(),
@@ -98,6 +112,23 @@ async fn wait_terminal(
     timeout(TEST_TIMEOUT, observer.wait_until_joined())
         .await
         .expect("custodian completes every started pump join")
+}
+
+async fn wait_for_state(
+    observer: &waddle_server::test_support::supervised_io::IoCustodianObserver,
+    expected: CustodianState,
+) -> CustodianState {
+    timeout(TEST_TIMEOUT, async {
+        loop {
+            let state = observer.state();
+            if state == expected {
+                return state;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("custodian publishes the expected lifecycle state")
 }
 
 async fn panic_before_building_pump_halves() -> (
@@ -325,6 +356,82 @@ async fn reaper_loss_returns_typed_error_and_keeps_cleanup_pending_indexed() {
         assert!(observer.terminal_summary().is_none());
         assert_eq!(inventory.prune_joined(), 0);
     }
+}
+
+#[tokio::test]
+async fn reaper_loss_then_starter_cancellation_finishes_no_start_and_retains_partial_cleanup() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+
+    let no_start_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let no_start = inventory
+        .reserve(no_start_ref.clone())
+        .expect("reserve no-start connection");
+    let (no_start_task, no_start_entered, no_start_release) = paused_start_with_reaper_exit(
+        no_start,
+        ReservedStartStage::BeforeInboundSpawn,
+        false,
+        Some(ReservedReaperExitPoint::BeforeCommit),
+    );
+    timeout(TEST_TIMEOUT, no_start_entered)
+        .await
+        .expect("starter pauses before either pump")
+        .expect("no-start barrier notification");
+    let no_start_observer = inventory_observer(&inventory, &no_start_ref).await;
+    no_start_task.abort();
+    assert!(no_start_task
+        .await
+        .err()
+        .expect("starter cancellation is reported")
+        .is_cancelled());
+    let _ = no_start_release.send(());
+    assert_eq!(
+        wait_terminal(&no_start_observer).await,
+        CustodianState::StartupAbandoned
+    );
+    assert!(!no_start_observer.cleanup_pending_was_published());
+    let no_start_summary = no_start_observer
+        .terminal_summary()
+        .expect("no-start outcome retained");
+    assert_eq!(no_start_summary.inbound, InboundTerminal::NotStarted);
+    assert_eq!(no_start_summary.outbound, OutboundTerminal::NotStarted);
+    assert!(inventory.is_empty(), "no started pump releases capacity");
+
+    let partial_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let partial = inventory
+        .reserve(partial_ref.clone())
+        .expect("released capacity accepts the next connection");
+    let (partial_task, partial_entered, partial_release) = paused_start_with_reaper_exit(
+        partial,
+        ReservedStartStage::BetweenPumpSpawns,
+        false,
+        Some(ReservedReaperExitPoint::BeforeCommit),
+    );
+    timeout(TEST_TIMEOUT, partial_entered)
+        .await
+        .expect("starter pauses after the inbound handle handoff")
+        .expect("partial-start barrier notification");
+    let partial_observer = inventory_observer(&inventory, &partial_ref).await;
+    partial_task.abort();
+    assert!(partial_task
+        .await
+        .err()
+        .expect("partial starter cancellation is reported")
+        .is_cancelled());
+    let _ = partial_release.send(());
+    assert_eq!(
+        wait_for_state(&partial_observer, CustodianState::CleanupPending).await,
+        CustodianState::CleanupPending
+    );
+    assert!(partial_observer.cleanup_pending_was_published());
+    assert!(partial_observer.terminal_summary().is_none());
+    assert_eq!(inventory.len(), 1, "partial cleanup keeps its slot");
+    assert_eq!(
+        inventory
+            .reserve(ConnectionRef::fresh(NodeLeaseIdentity::local_process()))
+            .err(),
+        Some(CustodianInventoryError::Full)
+    );
+    assert_eq!(inventory.prune_joined(), 0);
 }
 
 #[tokio::test]
