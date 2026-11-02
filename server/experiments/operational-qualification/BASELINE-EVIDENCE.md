@@ -9,10 +9,11 @@ evidence, not an authorization to execute or an automatic qualification result.
 ## Frozen fanout profile
 
 The profile has 12 synthetic clients in one room: clients 1 and 2 alternate as
-senders, and clients 3 through 12 are the expected recipients. Sender echoes are
-not included in the expected pairs. Each repetition has 15 seconds of warmup,
-60 seconds of measurement and 5 seconds of drain, with one 512-byte offer per
-second and no retries. Two repetitions are separated by a 10-second cooldown.
+senders within each repetition, starting with client 1 each time (76 and 74
+offers respectively). Clients 3 through 12 are the expected recipients. Sender
+echoes are not included in the expected pairs. Each repetition has 15 seconds
+of warmup, 60 seconds of measurement and 5 seconds of drain, with one 512-byte
+offer per second and no retries. Two repetitions have a 10-second cooldown.
 The delivery timeout is 5 seconds and the maximum generator lag is 100 ms.
 These values define the accounting exercise; they are not agreed latency or
 capacity budgets. This small profile does not represent a reconnect storm, a
@@ -120,6 +121,8 @@ fail when prerequisites are absent. Restore hosted CI as described in the
 | Full mailbox, blocked writer, exhausted pool or slow room | Bounded resources, overload outcomes and unrelated-user progress | unverified |
 | Crash around SM append, write and client ACK | Correct retained/replayed obligations and frontier | unverified |
 | Lost relay hint, restart, stale route or owner movement | Reconciliation without duplicate effects or uncertain fallback | unverified |
+| Planned and unplanned database failover | Commit outcome, WAL/timeline and application reconciliation across each distinct transition | unverified |
+| Real process SIGKILL and committed Recreate transition | Claim/session custody, restart recovery and bounded cleanup on the actual topology | unverified |
 | Actor/pump panic, drain or deadline expiry | Explicit cancellation, bounded termination and idempotent cleanup | unverified |
 | Retention/GC during pending work | Custody retained until safe retirement and bounded cleanup | unverified |
 | Authorization/blocking changes during queued work | Authority-boundary revalidation and account isolation | unverified |
