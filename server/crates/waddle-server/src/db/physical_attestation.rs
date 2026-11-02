@@ -24,6 +24,12 @@ mod installer;
 pub use installer::{inspect_installation, install, InstallationStatus};
 mod typed_authority;
 #[cfg(feature = "test-support")]
+pub use typed_authority::{
+    pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab, AdmissionPinLabError,
+    PinAllocationBinding, PinOutcome, PinRecovery, PinState, PinTerminalDisposition,
+    PIN_LAB_SQLITE_DDL,
+};
+#[cfg(feature = "test-support")]
 pub(crate) use typed_authority::{prelock_epoch_relation, read_epoch_after_prelock};
 pub use typed_authority::{DarkIngressAuthority, DarkIngressAuthorityError, TransactionBounds};
 #[cfg(feature = "test-support")]

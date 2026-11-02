@@ -24,6 +24,15 @@ use crate::ingress_substrate::supported_protocol_epoch;
 mod retention_lab;
 #[cfg(feature = "test-support")]
 pub use retention_lab::{RetentionLab, RetentionLabBatch};
+#[cfg(feature = "test-support")]
+#[path = "admission_pin_lab.rs"]
+mod admission_pin_lab;
+#[cfg(feature = "test-support")]
+pub use admission_pin_lab::{
+    pin_lab_postgres_ddl, AdmissionPin, AdmissionPinLab, AdmissionPinLabError,
+    PinAllocationBinding, PinOutcome, PinRecovery, PinState, PinTerminalDisposition,
+    PIN_LAB_SQLITE_DDL,
+};
 
 /// Bounds on checkout and the first PostgreSQL relation-lock wait.
 #[derive(Debug, Clone, Copy)]
