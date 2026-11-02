@@ -80,7 +80,16 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
             (),
         )
         .await?;
-        bound_postgres_waits(&mut tx).await?;
+        crate::db::read_only_timeout::bound_postgres_waits(&mut tx)
+            .await
+            .map_err(|error| match error {
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                    InboxRuntimeAttachError::InvalidTimeoutSetting { setting }
+                }
+                crate::db::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                    InboxRuntimeAttachError::Database(error)
+                }
+            })?;
         capability.attest_transaction(&mut tx).await?;
         let expected = &capability.identity().schema.name.0;
         let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
@@ -160,58 +169,6 @@ pub(super) async fn verify(db: &Database) -> Result<(), InboxRuntimeAttachError>
     verify_critical_columns(&mut tx, db.driver(), &schema).await?;
     tx.commit().await?;
     Ok(())
-}
-
-/// SHOW and SET LOCAL do not establish the repeatable-read snapshot. Install
-/// bounds before the attestor reads identity without relaxing tighter limits.
-async fn bound_postgres_waits(tx: &mut Transaction<'_>) -> Result<(), InboxRuntimeAttachError> {
-    for (setting, show, cap, set) in [
-        (
-            "lock_timeout",
-            "SHOW lock_timeout",
-            5_000,
-            "SET LOCAL lock_timeout = '5s'",
-        ),
-        (
-            "statement_timeout",
-            "SHOW statement_timeout",
-            10_000,
-            "SET LOCAL statement_timeout = '10s'",
-        ),
-    ] {
-        let mut rows = tx.query(show, ()).await?;
-        let value: String = rows
-            .next()
-            .await?
-            .ok_or(InboxRuntimeAttachError::InvalidTimeoutSetting { setting })?
-            .get(0)?;
-        drop(rows);
-        let millis = timeout_millis(&value)
-            .ok_or(InboxRuntimeAttachError::InvalidTimeoutSetting { setting })?;
-        if millis == 0 || millis > cap {
-            tx.execute(set, ()).await?;
-        }
-    }
-    Ok(())
-}
-
-fn timeout_millis(value: &str) -> Option<u64> {
-    let value = value.trim();
-    if let Ok(millis) = value.parse::<u64>() {
-        return Some(millis);
-    }
-    for (suffix, multiplier) in [
-        ("ms", 1),
-        ("min", 60_000),
-        ("s", 1_000),
-        ("h", 3_600_000),
-        ("d", 86_400_000),
-    ] {
-        if let Some(number) = value.strip_suffix(suffix) {
-            return number.trim().parse::<u64>().ok()?.checked_mul(multiplier);
-        }
-    }
-    None
 }
 
 async fn verify_indexes(
@@ -381,7 +338,7 @@ async fn verify_critical_columns(
 
 #[cfg(test)]
 mod tests {
-    use super::timeout_millis;
+    use crate::db::read_only_timeout::timeout_millis;
 
     #[test]
     fn postgres_timeout_display_units_and_invalid_values() {

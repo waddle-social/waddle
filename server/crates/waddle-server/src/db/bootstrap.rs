@@ -57,6 +57,8 @@ pub enum RuntimeAttachmentError {
     MissingExpectedPostgresIdentity,
     #[error("runtime attachment identity differs from the expected committed installation")]
     ExpectedIdentityMismatch,
+    #[error("could not verify the PostgreSQL {setting} bound for runtime attachment")]
+    InvalidTimeoutSetting { setting: &'static str },
     #[error(
         "verified runtime pool requests {requested} connections, exceeding the resource safety limit of {maximum}"
     )]
@@ -340,6 +342,18 @@ async fn begin_runtime_lineage_check<'a>(
             (),
         )
         .await?;
+        if db.attested_pg_writer_capability().is_some() {
+            super::read_only_timeout::bound_postgres_waits(&mut tx)
+                .await
+                .map_err(|error| match error {
+                    super::read_only_timeout::ReadOnlyTimeoutError::InvalidSetting { setting } => {
+                        RuntimeAttachmentError::InvalidTimeoutSetting { setting }
+                    }
+                    super::read_only_timeout::ReadOnlyTimeoutError::Database(error) => {
+                        RuntimeAttachmentError::Database(error)
+                    }
+                })?;
+        }
         let schema = &expected
             .postgres_identity
             .as_ref()

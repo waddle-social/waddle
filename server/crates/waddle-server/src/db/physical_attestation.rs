@@ -523,6 +523,15 @@ pub fn attested_pool(
         .after_connect(move |connection, _| {
             let config = on_connect.clone();
             Box::pin(async move {
+                // SQLx can abandon a checkout while PostgreSQL is still
+                // waiting inside the attestor. Bound the server-side work
+                // before the first identity query, then restore the session
+                // settings before lending this connection.
+                let timeouts = super::read_only_timeout::bound_postgres_session_waits(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
                 attest_connection(connection, &config).await.map_err(|_| {
                     sqlx::Error::Protocol("physical attestation refused".to_owned())
                 })?;
@@ -544,6 +553,12 @@ pub fn attested_pool(
                 // this newly connected session to a caller.
                 reject_runtime_temp_privilege(connection)
                     .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                timeouts
+                    .restore(connection)
+                    .await
                     .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
             })
         })
@@ -556,6 +571,11 @@ pub fn attested_pool(
                 // such transaction before reading the current lineage. A
                 // failed ROLLBACK hard-closes the connection.
                 sqlx::query("ROLLBACK").execute(&mut *connection).await?;
+                let timeouts = super::read_only_timeout::bound_postgres_session_waits(connection)
+                    .await
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
                 attest_connection(connection, &config).await.map_err(|_| {
                     sqlx::Error::Protocol("physical attestation refused".to_owned())
                 })?;
@@ -574,8 +594,13 @@ pub fn attested_pool(
                     })?;
                 reject_runtime_temp_privilege(connection)
                     .await
-                    .map(|()| true)
-                    .map_err(|_| sqlx::Error::Protocol("physical attestation refused".to_owned()))
+                    .map_err(|_| {
+                        sqlx::Error::Protocol("physical attestation refused".to_owned())
+                    })?;
+                timeouts.restore(connection).await.map_err(|_| {
+                    sqlx::Error::Protocol("physical attestation refused".to_owned())
+                })?;
+                Ok(true)
             })
         })
         .connect_lazy_with(options);

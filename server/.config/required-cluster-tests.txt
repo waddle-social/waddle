@@ -282,3 +282,8 @@ waddle-server inbox::runtime_attach::tests::postgres_timeout_display_units_and_i
 # Prepared archive-position, carbon receipt and send-attempt statements
 # must ignore hostile schemas; full live delivery remains blocked.
 waddle-server ingress_uow::canonical_qualified_tests::post_commit_repositories::attested_send_attempt_repositories_ignore_hostile_schema
+
+# Attested main-lane lineage readiness refuses checkout ambiguity and recovers.
+waddle-server::physical_attestation attested_main_lineage_registry_refuses_drift_and_recovers_after_timeout
+waddle-server::physical_attestation verified_global_attachment_checks_identity_ledger_grants_and_shared_capacity
+waddle-server::physical_attestation attestation_hooks_preserve_role_and_session_wait_limits

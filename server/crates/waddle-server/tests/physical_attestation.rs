@@ -941,23 +941,25 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
         tokio::spawn(async move { pool.acquire_for_test().await.map(|_| ()) })
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity \
-             WHERE query LIKE '%read_physical_identity%' AND wait_event_type = 'Lock')",
+    let blocked_pid: i32 = loop {
+        let blocked: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_catalog.pg_stat_activity \
+             WHERE datname = $1 AND usename = $2 AND wait_event_type = 'Lock'",
         )
-        .fetch_one(&fixture.admin)
+        .bind(&fixture.database_name)
+        .bind(&fixture.runtime)
+        .fetch_optional(&fixture.admin)
         .await
         .expect("inspect blocked attestation hook");
-        if blocked {
-            break;
+        if let Some(pid) = blocked {
+            break pid;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
             "hook never reached lock"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
     assert!(
         !acquiring.is_finished(),
         "blocked hook cannot lend connection"
@@ -967,6 +969,23 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
         .await
         .expect_err("cancelled acquire")
         .is_cancelled());
+    tokio::time::timeout(Duration::from_secs(7), async {
+        loop {
+            let present: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(blocked_pid)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("inspect cancelled attestation hook");
+            if !present {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("server bounds the cancelled hook while the DDL lock remains held");
     sqlx::query("ROLLBACK")
         .execute(&mut blocker)
         .await
@@ -977,6 +996,147 @@ async fn cancelled_attestation_hook_does_not_lend_a_connection() {
         .await
         .expect("replacement passes attestation");
     drop(member);
+    pool.close().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn attestation_hooks_preserve_role_and_session_wait_limits() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let config = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install attestation");
+    for (setting, value) in [("lock_timeout", "2s"), ("statement_timeout", "4s")] {
+        sqlx::query(&format!(
+            "ALTER ROLE {} SET {setting} = '{value}'",
+            fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("set tighter runtime role limit");
+    }
+    let pool = Arc::new(
+        attested_pool(
+            fixture.runtime_options.clone(),
+            config,
+            1,
+            Duration::from_secs(4),
+        )
+        .expect("attested pool"),
+    );
+    let mut member = pool.acquire_for_test().await.expect("fresh checkout");
+    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&mut *member)
+        .await
+        .expect("fresh lock timeout");
+    let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *member)
+        .await
+        .expect("fresh statement timeout");
+    assert_eq!(
+        (lock_timeout.as_str(), statement_timeout.as_str()),
+        ("2s", "4s")
+    );
+    sqlx::query("SET lock_timeout = '7s'")
+        .execute(&mut *member)
+        .await
+        .expect("set looser session lock timeout");
+    sqlx::query("SET statement_timeout = '12s'")
+        .execute(&mut *member)
+        .await
+        .expect("set looser session statement timeout");
+    drop(member);
+    let mut member = pool.acquire_for_test().await.expect("reused checkout");
+    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&mut *member)
+        .await
+        .expect("restored lock timeout");
+    let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *member)
+        .await
+        .expect("restored statement timeout");
+    assert_eq!(
+        (lock_timeout.as_str(), statement_timeout.as_str()),
+        ("7s", "12s")
+    );
+    drop(member);
+    // Each tight limit must actually terminate a blocked hook, not merely be
+    // restored after a successful checkout.
+    for (lock_limit, statement_limit) in [("2s", "4s"), ("0", "2s")] {
+        let mut member = pool.acquire_for_test().await.expect("checkout for limit");
+        for (setting, value) in [
+            ("lock_timeout", lock_limit),
+            ("statement_timeout", statement_limit),
+        ] {
+            sqlx::query(&format!("SET {setting} = '{value}'"))
+                .execute(&mut *member)
+                .await
+                .expect("set tighter session limit");
+        }
+        let pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+            .fetch_one(&mut *member)
+            .await
+            .expect("read reused session PID");
+        let mut blocker = fixture.admin.begin().await.expect("begin lock holder");
+        sqlx::query(&format!(
+            "LOCK TABLE {}._lineage IN ACCESS EXCLUSIVE MODE",
+            fixture.target
+        ))
+        .execute(&mut *blocker)
+        .await
+        .expect("block reused-session attestation");
+        drop(member);
+        let acquiring = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move { pool.acquire_for_test().await.map(|_| ()) })
+        };
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity \
+                     WHERE pid = $1 AND wait_event_type = 'Lock')",
+                )
+                .bind(pid)
+                .fetch_one(&fixture.admin)
+                .await
+                .expect("observe tight reused session");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reused session reaches the attestor");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity \
+                     WHERE pid = $1 AND wait_event_type = 'Lock')",
+                )
+                .bind(pid)
+                .fetch_one(&fixture.admin)
+                .await
+                .expect("observe tight timeout");
+                if !waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reused hook preserves the tighter session timeout");
+        acquiring.abort();
+        let _ = acquiring.await;
+        blocker.rollback().await.expect("release attestation lock");
+    }
+    drop(pool.acquire_for_test().await.expect("replacement checkout"));
     pool.close().await;
     fixture.cleanup().await;
 }
@@ -5199,4 +5359,357 @@ async fn full_identity_receipt_writer_targets_real_tables_and_reconciles_commit_
     drop(database);
     writer_admin.close().await;
     fixture.cleanup().await;
+}
+
+/// Exercise the actual readiness registry on a physically attested main lane.
+/// A checkout refusal can surface as an ambiguous timeout, so neither it nor a
+/// saturated lane may reuse an earlier success.
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn attested_main_lineage_registry_refuses_drift_and_recovers_after_timeout() {
+    use futures::FutureExt;
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let result = std::panic::AssertUnwindSafe(attested_main_registry_case(&fixture))
+        .catch_unwind()
+        .await;
+    fixture.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn attested_main_registry_case(fixture: &Fixture) {
+    use waddle_server::db::lineage::{
+        DurableStore, LineageRegistry, LineageRegistryBuilder, LineageStatus,
+    };
+
+    async fn report(
+        registry: &LineageRegistry,
+        config: &LineageConfig,
+    ) -> waddle_server::db::lineage::LineageReport {
+        registry.attest(config, true, Duration::from_secs(2)).await
+    }
+    async fn assert_ready(registry: &LineageRegistry, config: &LineageConfig) {
+        let result = report(registry, config).await;
+        assert!(
+            result.is_attested(),
+            "expected attested: {:?}",
+            result.failures()
+        );
+    }
+    async fn assert_unavailable(registry: &LineageRegistry, config: &LineageConfig) {
+        let result = report(registry, config).await;
+        assert!(
+            !result.is_attested(),
+            "a prior success must not hide attestation refusal"
+        );
+        assert!(result
+            .failures()
+            .iter()
+            .any(|(store, status)| *store == DurableStore::Global
+                && matches!(
+                    status,
+                    LineageStatus::ProbeTimeout
+                        | LineageStatus::ProbeError
+                        | LineageStatus::VerificationFailed
+                )));
+    }
+
+    let installed = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install trusted attestor");
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}._lineage TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant runtime lineage read");
+    let can_read_system: bool = sqlx::query_scalar("SELECT pg_catalog.has_function_privilege($1, 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE')")
+        .bind(&fixture.runtime).fetch_one(&fixture.admin).await.expect("runtime control privilege");
+    assert!(
+        !can_read_system,
+        "the runtime must use the trusted attestor"
+    );
+    let pool = attested_pool(
+        fixture.runtime_options.clone(),
+        installed,
+        1,
+        Duration::from_secs(3),
+    )
+    .expect("attested pool");
+    let database =
+        waddle_server::test_support::database_from_attested_postgres_pool("readiness", pool);
+    let config = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let mut builder = LineageRegistryBuilder::default();
+    builder.register_database(DurableStore::Global, database.clone());
+    let registry = builder.seal();
+    assert_ready(&registry, &config).await;
+
+    // The legacy SQL still cannot read the control function. The registry's
+    // successful attestation came through the exact restricted pool instead.
+    assert!(matches!(
+        lineage::verify(&database, &config).await,
+        Err(DatabaseError::Lineage(
+            lineage::LineageError::SystemIdentifierUnavailable
+        ))
+    ));
+    let wrong = LineageConfig {
+        deployment_uuid: Some(DeploymentUuid(uuid::Uuid::new_v4())),
+        action: None,
+    };
+    let result = report(&registry, &wrong).await;
+    assert_eq!(
+        result.failures(),
+        &[(DurableStore::Global, LineageStatus::DeploymentUuidMismatch)]
+    );
+    assert_ready(&registry, &config).await;
+    let operator_action = LineageConfig {
+        deployment_uuid: config.deployment_uuid,
+        action: Some(lineage::LineageAction::Enroll),
+    };
+    let result = report(&registry, &operator_action).await;
+    assert_eq!(
+        result.failures(),
+        &[(DurableStore::Global, LineageStatus::VerificationFailed)]
+    );
+    assert_ready(&registry, &config).await;
+
+    let attacker = format!("readiness_shadow_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {attacker}"))
+        .execute(&fixture.admin)
+        .await
+        .expect("hostile schema");
+    sqlx::query(&format!(
+        "CREATE TABLE {attacker}._lineage (LIKE {}._lineage INCLUDING ALL)",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("hostile lineage");
+    sqlx::query(&format!(
+        "INSERT INTO {attacker}._lineage SELECT * FROM {}._lineage",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("forged row");
+    sqlx::query(&format!("UPDATE {attacker}._lineage SET lineage_uuid = $1"))
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&fixture.admin)
+        .await
+        .expect("forged identity");
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA {attacker} TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("hostile schema usage");
+    sqlx::query(&format!(
+        "GRANT SELECT ON {attacker}._lineage TO {}",
+        fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("hostile lineage access");
+    database
+        .guard()
+        .await
+        .expect("poison guard")
+        .execute(
+            &format!("SET search_path = {attacker}, {}", fixture.target),
+            (),
+        )
+        .await
+        .expect("poison returned session");
+    assert_ready(&registry, &config).await;
+
+    sqlx::query(&format!(
+        "ALTER TABLE {}._lineage RENAME TO hidden_readiness_lineage",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("hide trusted lineage");
+    assert_unavailable(&registry, &config).await;
+    sqlx::query(&format!(
+        "ALTER TABLE {}.hidden_readiness_lineage RENAME TO _lineage",
+        fixture.target
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore trusted lineage");
+    assert_ready(&registry, &config).await;
+
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("alter trusted identity");
+    assert_unavailable(&registry, &config).await;
+    sqlx::query(&format!(
+        "UPDATE {}._lineage SET lineage_uuid = $1 WHERE id = 1",
+        fixture.target
+    ))
+    .bind(fixture.lineage.lineage_uuid.to_string())
+    .execute(&fixture.admin)
+    .await
+    .expect("restore trusted identity");
+    assert_ready(&registry, &config).await;
+
+    sqlx::query(&format!(
+        "REVOKE SELECT ON {}._lineage FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke runtime lineage read");
+    let result = report(&registry, &config).await;
+    assert_eq!(
+        result.failures(),
+        &[(DurableStore::Global, LineageStatus::VerificationFailed)]
+    );
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}._lineage TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore runtime lineage read");
+    assert_ready(&registry, &config).await;
+
+    sqlx::query(&format!(
+        "REVOKE EXECUTE ON FUNCTION {}.read_physical_identity() FROM {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke attestor");
+    assert_unavailable(&registry, &config).await;
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION {}.read_physical_identity() TO {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore attestor");
+    assert_ready(&registry, &config).await;
+
+    sqlx::query(&format!(
+        "GRANT TEMPORARY ON DATABASE {} TO {}",
+        fixture.database_name, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant forbidden TEMP");
+    assert_unavailable(&registry, &config).await;
+    sqlx::query(&format!(
+        "REVOKE TEMPORARY ON DATABASE {} FROM {}",
+        fixture.database_name, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke forbidden TEMP");
+    assert_ready(&registry, &config).await;
+
+    // Hold the only main-lane transaction beyond the readiness deadline. The
+    // cancelled checkout must not reuse last_good or leak the admission permit.
+    let held = database.begin().await.expect("hold main admission");
+    let saturated = registry
+        .attest(&config, true, Duration::from_millis(75))
+        .await;
+    assert_eq!(
+        saturated.failures(),
+        &[(DurableStore::Global, LineageStatus::ProbeTimeout)]
+    );
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if report(&registry, &config).await.is_attested() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("main lane becomes available after cancellation");
+    assert_ready(&registry, &config).await;
+
+    // Block the attestor itself, not just admission to the pool. Cancelling
+    // that in-flight checkout must release capacity after the lock is gone.
+    let mut blocker = fixture.admin.begin().await.expect("begin lock holder");
+    sqlx::query(&format!(
+        "LOCK TABLE {}._lineage IN ACCESS EXCLUSIVE MODE",
+        fixture.target
+    ))
+    .execute(&mut *blocker)
+    .await
+    .expect("block physical attestation");
+    let (blocked, observed) = tokio::join!(
+        registry.attest(&config, true, Duration::from_secs(2)),
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            loop {
+                let waiting: Option<i32> = sqlx::query_scalar(
+                    "SELECT pid FROM pg_catalog.pg_stat_activity \
+                     WHERE datname = $1 AND usename = $2 AND wait_event_type = 'Lock'",
+                )
+                .bind(&fixture.database_name)
+                .bind(&fixture.runtime)
+                .fetch_optional(&fixture.admin)
+                .await
+                .expect("observe attestation wait");
+                if let Some(pid) = waiting {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    );
+    let blocked_pid = observed.expect("attestation reaches the blocked PostgreSQL operation");
+    assert_eq!(
+        blocked.failures(),
+        &[(DurableStore::Global, LineageStatus::ProbeTimeout)]
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let present: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            )
+            .bind(blocked_pid)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe cancelled attestation");
+            if !present {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("cancelled attestation releases its blocked operation");
+    blocker.rollback().await.expect("release attestation lock");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if report(&registry, &config).await.is_attested() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("main lane recovers after in-flight cancellation");
 }

@@ -92,6 +92,13 @@ impl LineageStatus {
 pub trait LineageAttestor: Send + Sync {
     async fn attest(&self, config: &LineageConfig) -> Result<AttestedLineage, DatabaseError>;
     fn driver(&self) -> DatabaseDriver;
+
+    /// Whether a previously proven identity may survive an unavailable probe.
+    /// Attested pool hooks can turn an identity refusal into a checkout timeout,
+    /// so that pool must not treat such uncertainty as a proven identity.
+    fn allow_sticky_unavailable(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -144,11 +151,27 @@ impl SqlxLineageAttestor {
 #[async_trait]
 impl LineageAttestor for DatabaseLineageAttestor {
     async fn attest(&self, config: &LineageConfig) -> Result<AttestedLineage, DatabaseError> {
-        verify(&self.database, config).await
+        let Some(capability) = self.database.attested_pg_writer_capability() else {
+            return verify(&self.database, config).await;
+        };
+        let expected = capability.attested_lineage_for_deployment(config.deployment_uuid)?;
+        crate::db::bootstrap::verify_store_lineage_runtime(&self.database, config, &expected)
+            .await
+            .map_err(|error| match error {
+                crate::db::bootstrap::RuntimeAttachmentError::Database(error) => error,
+                _ => crate::db::physical_attestation::PhysicalAttestationError::Mismatch {
+                    field: "runtime lineage attachment",
+                }
+                .into(),
+            })
     }
 
     fn driver(&self) -> DatabaseDriver {
         self.database.driver()
+    }
+
+    fn allow_sticky_unavailable(&self) -> bool {
+        !self.database.uses_attested_postgres_pool()
     }
 }
 
@@ -160,6 +183,10 @@ impl LineageAttestor for ControlPlaneLineageAttestor {
 
     fn driver(&self) -> DatabaseDriver {
         self.database.driver()
+    }
+
+    fn allow_sticky_unavailable(&self) -> bool {
+        !self.database.uses_attested_postgres_pool()
     }
 }
 
@@ -186,11 +213,9 @@ pub enum LineageTopology {
     Probe {
         attestor: Arc<dyn LineageAttestor>,
         /// Set once on the first successful attestation. A pool's identity
-        /// is immutable for the process lifetime (the DSN never changes and
-        /// a proven boundary cannot silently become a different database
-        /// through the same healthy pool), so a later TRANSPORT failure on a
-        /// previously-proven store must not eject the node from the
-        /// endpoint set. Definitive lineage errors always fail regardless.
+        /// is treated as stable across transport failures for legacy pools.
+        /// Physically attested pools refuse sticky success when a later probe
+        /// is unavailable because their checkout hook may conceal a refusal.
         last_good: std::sync::OnceLock<AttestedLineage>,
     },
     Alias {
@@ -259,8 +284,8 @@ impl LineageRegistry {
 
     /// `probe_timeout` bounds EACH boundary's probe individually so one
     /// stalled pool cannot withhold another boundary's already-definitive
-    /// answer from the report; a timed-out probe reports as the transient
-    /// `probe_timeout` status (sticky-eligible on a proven boundary).
+    /// answer from the report. A timed-out probe uses a proven result only
+    /// when that attestor permits sticky unavailability.
     pub async fn attest(
         &self,
         config: &LineageConfig,
@@ -286,23 +311,24 @@ impl LineageRegistry {
             });
         let results = join_all(probes.map(|(store, attestor, last_good)| async move {
             let driver = attestor.driver();
+            let allow_sticky = attestor.allow_sticky_unavailable();
             let outcome = tokio::time::timeout(probe_timeout, attestor.attest(config)).await;
-            (store, driver, last_good, outcome)
+            (store, driver, last_good, allow_sticky, outcome)
         }))
         .await;
         let mut postgres = Vec::new();
-        for (store, driver, last_good, outcome) in results {
+        for (store, driver, last_good, allow_sticky, outcome) in results {
             if clustering_enabled && driver == DatabaseDriver::Sqlite {
                 failures.push((store, LineageStatus::ClusteredSqlite));
                 continue;
             }
             let result = match outcome {
                 Ok(result) => result,
-                // A stalled probe is reachability, not an answer: keep a
-                // proven boundary's attestation, otherwise report the
-                // transient probe_timeout status for this store alone.
-                Err(_) => match last_good.get() {
-                    Some(proven) => {
+                // A legacy probe may treat a stall as reachability. An
+                // attested pool must fail closed: its hook can conceal a
+                // definite identity refusal behind the same timeout.
+                Err(_) => match (allow_sticky, last_good.get()) {
+                    (true, Some(proven)) => {
                         tracing::warn!(
                             store = %store,
                             "lineage probe timed out on a previously proven boundary; keeping the proven attestation"
@@ -312,7 +338,7 @@ impl LineageRegistry {
                         }
                         continue;
                     }
-                    None => {
+                    _ => {
                         failures.push((store, LineageStatus::ProbeTimeout));
                         continue;
                     }
@@ -325,14 +351,10 @@ impl LineageRegistry {
                         postgres.push((store, attested, identity));
                     }
                 }
-                // Sticky success: ONLY a whitelisted transport-level error
-                // (connection loss, pool exhaustion) on a boundary this
-                // process already proved keeps the proven attestation — a
-                // pool cannot silently become a different database while it
-                // stays reachable. Every database-level error (any SQLSTATE:
-                // dropped table, revoked grants, decode failures) and every
-                // typed lineage error is definitive and always fails.
-                Err(error) => match (is_transport_error(&error), last_good.get()) {
+                // Legacy sticky success applies only to a whitelisted
+                // transport-level error on an already proven boundary.
+                // Attested-pool hook errors are ambiguous and do not stick.
+                Err(error) => match (allow_sticky && is_transport_error(&error), last_good.get()) {
                     (false, _) | (_, None) => {
                         tracing::warn!(
                             store = %store,
