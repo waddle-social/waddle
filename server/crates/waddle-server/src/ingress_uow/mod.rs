@@ -457,6 +457,9 @@ mod tests;
 #[cfg(test)]
 mod lock_timeout_tests;
 
+#[cfg(all(test, feature = "clustering"))]
+mod archive_lock_order_tests;
+
 #[cfg(test)]
 mod canonical_qualified_tests;
 
