@@ -17,10 +17,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
-import json
 from pathlib import Path
-import re
-import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 
@@ -146,122 +143,6 @@ def report_failure(missing: list[TestId], failing: list[TestId], executed: set[T
             print(f"  ... {len(names) - EXECUTED_PER_BINARY_LIMIT} more", file=sys.stderr)
 
 
-def git_output(root: Path, *arguments: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *arguments],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError as error:
-        raise InputError(f"cannot inspect candidate Git state: {error}") from error
-    if result.returncode != 0:
-        raise InputError("cannot inspect candidate Git state")
-    return result.stdout
-
-
-def candidate_sha(root: Path, expected: str) -> str:
-    if not re.fullmatch(r"[0-9a-f]{40}", expected):
-        raise InputError("candidate SHA must be a full lowercase 40-character Git SHA")
-    actual = git_output(root, "rev-parse", "--verify", "HEAD^{commit}").strip()
-    if actual != expected:
-        raise InputError(f"candidate SHA mismatch: expected {expected}, found {actual}")
-
-    # The shard runner writes its JUnit and sidecar outputs under this exact
-    # generated directory after tests start. Exclude those artifacts, while
-    # still checking every tracked file and every other untracked source file.
-    for arguments, label in ((["diff", "--cached", "--quiet", "HEAD", "--"], "index"),
-                             (["diff", "--quiet", "--"], "worktree")):
-        try:
-            diff = subprocess.run(
-                ["git", "-C", str(root), *arguments],
-                check=False,
-            )
-        except OSError as error:
-            raise InputError(f"cannot inspect candidate Git state: {error}") from error
-        if diff.returncode != 0:
-            if diff.returncode == 1:
-                raise InputError(f"candidate {label} is dirty")
-            raise InputError(f"cannot inspect candidate {label}")
-    untracked = git_output(
-        root,
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-        "--",
-        ".",
-        ":(exclude)server/.ci/nextest-archive/**",
-    )
-    if untracked:
-        raise InputError("candidate worktree has untracked files outside the nextest evidence directory")
-    return actual
-
-
-def repo_relative_file(path: Path, root: Path) -> tuple[Path, str, str]:
-    try:
-        resolved = path.resolve(strict=True)
-    except OSError as error:
-        raise InputError(f"{path}: cannot read evidence input") from error
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError as error:
-        raise InputError("evidence inputs must be inside the candidate repository") from error
-    if not resolved.is_file():
-        raise InputError(f"{path}: evidence input is not a regular file")
-    return resolved, relative.as_posix(), sha256(resolved)
-
-
-def repo_relative_output(path: Path, root: Path) -> Path:
-    resolved = path.resolve(strict=False)
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError as error:
-        raise InputError("evidence output must be inside the candidate repository") from error
-    if relative.as_posix() != "server/.ci/nextest-archive/qualification-evidence.json":
-        raise InputError("evidence output must use the nextest qualification-evidence path")
-    if not resolved.parent.is_dir():
-        raise InputError("evidence output directory does not exist")
-    if resolved.exists():
-        raise InputError("evidence output already exists")
-    return resolved
-
-
-def validate_lane_inputs(root: Path, required_path: Path, report_paths: list[Path]) -> None:
-    expected_required = root / "server/.config/required-cluster-tests.txt"
-    try:
-        actual_required = required_path.resolve(strict=True)
-        expected_required = expected_required.resolve(strict=True)
-    except OSError as error:
-        raise InputError("required PostgreSQL lane inventory is missing") from error
-    if actual_required != expected_required:
-        raise InputError("evidence must use the committed PostgreSQL lane test inventory")
-
-    expected_reports = {
-        root / f"server/.ci/nextest-archive/shard-{partition}/junit-{selection}.xml"
-        for partition in range(1, 5)
-        for selection in ("whole", "shared")
-    }
-    try:
-        actual_reports = {path.resolve(strict=True) for path in report_paths}
-    except OSError as error:
-        raise InputError("one or more required nextest JUnit reports are missing") from error
-    if len(report_paths) != len(expected_reports) or actual_reports != expected_reports:
-        raise InputError("evidence requires all eight shard JUnit reports from the required lane")
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as error:
-        raise InputError(f"{path}: cannot hash evidence input") from error
-    return digest.hexdigest()
-
-
 def parse_test_id(value: str) -> TestId:
     binary, separator, name = value.partition(" ")
     if not separator:
@@ -289,122 +170,21 @@ def required_test_outcomes(
             outcome = "failed"
         elif test in executed:
             outcome = "passed"
-        elif test in skipped:
-            outcome = "skipped"
         else:
             outcome = "missing"
         outcomes.append({"test": str(test), "outcome": outcome})
     return outcomes
 
 
-def build_evidence(
-    *,
-    root: Path,
-    expected_sha: str,
-    required_path: Path,
-    report_paths: list[Path],
-    required: list[TestId],
-    required_digest: str,
-    executed: set[TestId],
-    failed: set[TestId],
-    skipped: set[TestId],
-    report_digests: dict[Path, str],
-) -> dict[str, object]:
-    actual_sha = candidate_sha(root, expected_sha)
-    _, required_relative, current_digest = repo_relative_file(required_path, root)
-    try:
-        committed = subprocess.run(
-            ["git", "-C", str(root), "show", f"{actual_sha}:server/.config/required-cluster-tests.txt"],
-            capture_output=True, check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise InputError("cannot read committed required-test list") from error
-    if required_digest != hashlib.sha256(committed).hexdigest() or current_digest != required_digest:
-        raise InputError("parsed required-test list differs from committed candidate")
-    report_files: list[tuple[str, str]] = []
-    for path in report_paths:
-        resolved, relative, _ = repo_relative_file(path, root)
-        digest = report_digests.get(resolved)
-        if digest is None:
-            raise InputError(f"{path}: report bytes were not captured during parsing")
-        if sha256(resolved) != digest:
-            raise InputError(f"{path}: JUnit report changed after parsing")
-        report_files.append((relative, digest))
-    report_files.sort()
-
-    required_set = set(required)
-    executed_outcomes = {
-        parse_test_id(outcome["test"]): outcome["outcome"]
-        for outcome in required_test_outcomes(required, executed, failed, skipped)
-    }
-    anchors: dict[str, dict[str, object]] = {}
-    for name, anchor_ids in PREREQUISITE_ANCHORS.items():
-        anchor_tests = [parse_test_id(anchor) for anchor in anchor_ids]
-        if any(test not in required_set for test in anchor_tests):
-            validate_anchor_inventory(required)
-        incomplete = [test for test in anchor_tests if executed_outcomes.get(test) != "passed"]
-        if incomplete:
-            raise InputError(f"required reports did not pass {name} prerequisite anchor: {incomplete[0]}")
-        anchors[name] = {"outcome": "passed", "tests": [str(test) for test in anchor_tests]}
-
-    return {
-        "schema_version": 1,
-        "lane_id": LANE_ID,
-        "candidate": {"commit_sha": actual_sha, "worktree": "clean"},
-        "inputs": {
-            "required_tests": {
-                "path": required_relative,
-                "sha256": required_digest,
-            },
-            "junit_reports": [
-                {"path": path, "sha256": digest} for path, digest in report_files
-            ],
-        },
-        "required_test_gate": {
-            "outcome": "passed",
-            "required_count": len(required),
-            "executed_count": len(executed),
-            "required_tests": required_test_outcomes(required, executed, failed, skipped),
-            "executed_inventory": [str(test) for test in sorted(executed)],
-        },
-        "prerequisite_anchors": anchors,
-        "qualification": "not_assessed",
-        "unverified": {
-            "image": "unverified",
-            "topology": "unverified",
-            "resource_enforcement": "unverified",
-            "workload": "unverified",
-            "faults": "unverified",
-            "deployment": "unverified",
-        },
-    }
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--required", type=Path, required=True, help="committed required-test list")
     parser.add_argument("--executed-out", type=Path, help="write every executed test name here")
-    parser.add_argument("--evidence-out", type=Path,
-                        help="write a clean-candidate evidence sidecar after a complete pass")
-    parser.add_argument("--candidate-sha",
-                        help="expected full Git SHA; required with --evidence-out")
     parser.add_argument("reports", type=Path, nargs="+", help="nextest JUnit reports")
     args = parser.parse_args()
     try:
-        required, required_digest = parse_required(args.required)
-        executed, failed, skipped, report_digests = executed_tests(args.reports)
-        evidence_output = None
-        evidence_root = None
-        if args.evidence_out is not None:
-            if not args.candidate_sha:
-                raise InputError("--candidate-sha is required with --evidence-out")
-            evidence_root = Path(
-                git_output(Path.cwd(), "rev-parse", "--show-toplevel").strip()
-            ).resolve()
-            evidence_output = repo_relative_output(args.evidence_out, evidence_root)
-            candidate_sha(evidence_root, args.candidate_sha)
-            validate_lane_inputs(evidence_root, args.required, args.reports)
-            validate_anchor_inventory(required)
+        required, _ = parse_required(args.required)
+        executed, failed, skipped, _ = executed_tests(args.reports)
     except InputError as error:
         print(error, file=sys.stderr)
         return 2
@@ -419,25 +199,6 @@ def main() -> int:
         print(f"{len(missing) + len(failing)} of {len(required)} required tests did not pass "
               f"({len(executed)} tests executed in {len(args.reports)} reports)", file=sys.stderr)
         return 1
-    if evidence_output is not None:
-        try:
-            assert evidence_root is not None
-            record = build_evidence(
-                root=evidence_root,
-                expected_sha=args.candidate_sha,
-                required_path=args.required,
-                report_paths=args.reports,
-                required=required,
-                required_digest=required_digest,
-                executed=executed,
-                failed=failed,
-                skipped=skipped,
-                report_digests=report_digests,
-            )
-            evidence_output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-        except (InputError, OSError) as error:
-            print(f"{evidence_output}: cannot write evidence sidecar: {error}", file=sys.stderr)
-            return 2
     print(f"All {len(required)} required tests executed and passed "
           f"({len(executed)} tests executed in {len(args.reports)} reports)")
     return 0

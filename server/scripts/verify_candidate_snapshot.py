@@ -47,11 +47,12 @@ def validate_symlink(source: Path, path: Path) -> None:
 
 
 def verify(candidate: str, source: Path) -> None:
+    git_environment = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
     object_format = subprocess.check_output(
-        ["git", "rev-parse", "--show-object-format"], text=True
+        ["git", "rev-parse", "--show-object-format"], text=True, env=git_environment
     ).strip()
     tree = subprocess.check_output(
-        ["git", "ls-tree", "-r", "-t", "-z", "--full-tree", candidate]
+        ["git", "ls-tree", "-r", "-t", "-z", "--full-tree", candidate], env=git_environment
     )
     expected = {}
     for record in tree.split(b"\0"):

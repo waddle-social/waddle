@@ -109,17 +109,33 @@ paths in the required PostgreSQL/multiprocess/WebSocket CI lane. The lane must
 fail when prerequisites are absent. Restore hosted CI as described in the
 [CI pause plan](../../../docs/planning/2046-ci-pause.md) before release.
 
-The existing `server/scripts/run-nextest-shards.sh` runner writes
+The `server/scripts/run-nextest-shards.sh` runner writes
 `.ci/nextest-archive/qualification-evidence.json` only after its required-test
-check passes. The sidecar binds the clean candidate commit to the required-list
-and JUnit report hashes, records every required outcome and the executed test
-inventory, and requires PostgreSQL, multiprocess, real cross-node resume, and
-relay/WebSocket anchor tests. The runner builds from one Nix store snapshot
-verified against the committed Git tree, and the gate compares the parsed
-required-list bytes with the committed list. It contains no database URL or
-report contents. Concurrent runner invocations fail rather than mix reports.
-After an interrupted run, confirm that its processes have stopped before
-removing a stale `.ci/nextest-archive/.qualification-run.lock` directory.
+check passes. The runner verifies a run-specific Nix store snapshot against the
+committed Git tree. It adds the full commit SHA and a fresh 256-bit run ID to
+four shard derivations, rejects outputs already present in the local store, and
+builds those exact shards through a trusted local Nix daemon with remote builders
+and substitution disabled and sandboxing required. The archive and ordinary
+build dependencies may be reused from the trusted Nix store or caches, and the
+archive build may use configured builders. It checks the shard build identities
+and reads all eight JUnit files directly from the resulting store paths.
+Diagnostic copies are not evidence inputs.
+
+The atomically written sidecar records the candidate, run ID, source,
+derivations, outputs, required-list and JUnit hashes, required outcomes, and
+executed inventory. PostgreSQL, multiprocess, real cross-node resume, and
+relay/WebSocket anchor tests must be present and pass. It contains no database
+URL or report contents. Concurrent runner invocations fail rather than mix
+reports. Treat a sidecar as incomplete while the
+`.ci/nextest-archive/.qualification-run.lock` directory exists. After an
+interrupted run, first confirm that its runner and child processes have stopped.
+Then, from `server/`, run `bash scripts/run-nextest-shards.sh --recover-stale-lock`.
+Recovery removes any old sidecar before releasing the stale lock; do not remove
+the lock by hand. The persistent `.ci/nextest-archive/.qualification-run.guard`
+prevents recovery from unlocking a live runner and must not be removed or
+replaced. The claim depends on the
+integrity of the local Git repository, Nix daemon, store, and host; it is not
+an independent remote attestation.
 Its `qualification` value is always `not_assessed`; it does not establish image
 identity, deployed topology, resource enforcement, workload results, fault
 results, or deployment state. A missing sidecar or a failed lane supplies no
