@@ -5962,3 +5962,204 @@ async fn attested_main_registry_case(fixture: &Fixture) {
     .await
     .expect("main lane recovers after in-flight cancellation");
 }
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn attested_control_plane_lineage_registry_uses_its_restricted_pool() {
+    use futures::FutureExt;
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let result = std::panic::AssertUnwindSafe(attested_control_plane_registry_case(&fixture))
+        .catch_unwind()
+        .await;
+    fixture.cleanup().await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn attested_control_plane_registry_case(fixture: &Fixture) {
+    use waddle_server::db::lineage::{
+        ControlPlaneLineageAttestor, DurableStore, LineageAttestor, LineageRegistryBuilder,
+        LineageStatus,
+    };
+
+    let installed = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install restricted physical attestor");
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}._lineage TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("grant restricted runtime lineage read");
+    let can_read_system: bool = sqlx::query_scalar(
+        "SELECT pg_catalog.has_function_privilege($1, \
+         'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE')",
+    )
+    .bind(&fixture.runtime)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("inspect restricted runtime privilege");
+    assert!(
+        !can_read_system,
+        "runtime must not execute pg_control_system"
+    );
+
+    let database_pool = waddle_server::test_support::database_pool_from_attested_postgres_pools(
+        "attested control-plane readiness",
+        attested_pool(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            2,
+            Duration::from_secs(3),
+        )
+        .expect("attested main pool"),
+        Some((
+            attested_pool(
+                fixture.runtime_options.clone(),
+                installed.clone(),
+                1,
+                Duration::from_secs(3),
+            )
+            .expect("attested control-plane pool"),
+            1,
+        )),
+        1,
+        1,
+    )
+    .await
+    .expect("paired attested pools");
+    let database = database_pool.global().clone();
+    let config = LineageConfig {
+        deployment_uuid: Some(fixture.lineage.deployment_uuid),
+        action: None,
+    };
+    let mut builder = LineageRegistryBuilder::default();
+    builder.register_database(DurableStore::Global, database.clone());
+    builder.register_control_plane(DurableStore::ControlPlane, database.clone());
+    let registry = builder.seal();
+    let initial = registry.attest(&config, true, Duration::from_secs(3)).await;
+    assert!(
+        initial.is_attested(),
+        "both restricted pools attest: {:?}",
+        initial.failures()
+    );
+
+    let wrong_deployment = LineageConfig {
+        deployment_uuid: Some(DeploymentUuid(uuid::Uuid::new_v4())),
+        action: None,
+    };
+    let report = registry
+        .attest(&wrong_deployment, true, Duration::from_secs(3))
+        .await;
+    for store in [DurableStore::Global, DurableStore::ControlPlane] {
+        assert!(report
+            .failures()
+            .contains(&(store, LineageStatus::DeploymentUuidMismatch)));
+    }
+
+    let operator_action = LineageConfig {
+        deployment_uuid: config.deployment_uuid,
+        action: Some(lineage::LineageAction::Enroll),
+    };
+    let report = registry
+        .attest(&operator_action, true, Duration::from_secs(3))
+        .await;
+    for store in [DurableStore::Global, DurableStore::ControlPlane] {
+        assert!(report
+            .failures()
+            .contains(&(store, LineageStatus::VerificationFailed)));
+    }
+    assert!(registry
+        .attest(&config, true, Duration::from_secs(3))
+        .await
+        .is_attested());
+
+    // An attested main pool without an attested control-plane capability must
+    // fail closed before the legacy privileged verifier can be considered.
+    let main_only = waddle_server::test_support::database_from_attested_postgres_pool(
+        "missing attested control plane",
+        attested_pool(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            1,
+            Duration::from_secs(3),
+        )
+        .expect("attested main-only pool"),
+    );
+    let error = ControlPlaneLineageAttestor::new(main_only)
+        .attest(&config)
+        .await
+        .expect_err("missing attested control-plane capability must refuse");
+    assert!(matches!(
+        error,
+        DatabaseError::PhysicalAttestation(PhysicalAttestationError::Mismatch {
+            field: "attested control-plane pool capability"
+        })
+    ));
+
+    // Legacy raw PostgreSQL handles retain their existing control-plane
+    // verifier and remain independent of the attested-pool capability path.
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let raw_database = Database::from_config(
+        "legacy raw control-plane readiness",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url).with_control_plane_pool(1),
+    )
+    .await
+    .expect("legacy raw database with separate control-plane pool");
+    assert_eq!(
+        ControlPlaneLineageAttestor::new(raw_database)
+            .attest(&config)
+            .await
+            .expect("legacy control-plane verifier"),
+        fixture.lineage
+    );
+
+    // The c-plane pool has one slot. Hold it only after the registry has a
+    // known-good result; global readiness must still pass while the c-plane
+    // probe times out, and both lanes must recover after release.
+    let marker = format!("p21_control_lineage_busy_{}", uuid::Uuid::new_v4());
+    let query = format!("SELECT pg_catalog.pg_sleep(1) /* {marker} */");
+    let slow_database = database.clone();
+    let slow_control_plane = tokio::spawn(async move {
+        slow_database
+            .control_plane_guard()
+            .await?
+            .query(&query, ())
+            .await?;
+        Ok::<(), DatabaseError>(())
+    });
+    wait_for_active_query(&fixture.admin, &marker).await;
+    let saturated = registry
+        .attest(&config, true, Duration::from_millis(250))
+        .await;
+    assert_eq!(
+        saturated.failures(),
+        &[(DurableStore::ControlPlane, LineageStatus::ProbeTimeout)]
+    );
+    database
+        .guard()
+        .await
+        .expect("main lane remains independently available")
+        .query("SELECT 1", ())
+        .await
+        .expect("main query while control plane is saturated");
+    slow_control_plane
+        .await
+        .expect("join held control-plane query")
+        .expect("held control-plane query completes");
+    let recovered = registry.attest(&config, true, Duration::from_secs(3)).await;
+    assert!(
+        recovered.is_attested(),
+        "control-plane readiness recovers: {:?}",
+        recovered.failures()
+    );
+}

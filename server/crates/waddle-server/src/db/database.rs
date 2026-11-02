@@ -195,6 +195,9 @@ pub struct Database {
     /// node/claim liveness statements — see [`Database::control_plane_guard`].
     pub(in crate::db) control_plane_backend: Option<DatabaseBackend>,
     pub(in crate::db) control_plane_admission: Option<PoolAdmission>,
+    /// Present only when the control-plane backend is the exact hook-bearing
+    /// pool paired with its physical attestation capability.
+    pub(in crate::db) control_plane_pg_writer: Option<Box<AttestedPostgresWriterCapability>>,
     pub(in crate::db) name: String,
     pub(in crate::db) driver: DatabaseDriver,
     /// The configured DSN for URL-backed handles (ADR-0017 Phase 3 Slice 4
@@ -266,6 +269,7 @@ impl Database {
             backend: DatabaseBackend::Sqlite(pool),
             control_plane_backend: None,
             control_plane_admission: None,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: DatabaseDriver::Sqlite,
             database_url: if storage == SqlitePoolStorage::InMemory {
@@ -288,6 +292,7 @@ impl Database {
             backend: DatabaseBackend::Postgres(pool),
             control_plane_backend: None,
             control_plane_admission: None,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             database_url: "postgres:external-pool".to_string(),
@@ -390,21 +395,23 @@ impl Database {
 
         let (pool, attested_pg_writer) = pool.into_parts()?;
         let acquire_timeout = pool.options().get_acquire_timeout();
-        let (control_plane_backend, control_plane_admission) = match control_plane_pool {
-            Some((pool, budget)) => {
-                let (pool, _control_plane_capability) = pool.into_parts()?;
-                let acquire_timeout = pool.options().get_acquire_timeout();
-                (
-                    Some(DatabaseBackend::Postgres(pool)),
-                    Some(PoolAdmission::new(
-                        budget,
-                        acquire_timeout,
-                        PoolLane::ControlPlane,
-                    )),
-                )
-            }
-            None => (None, None),
-        };
+        let (control_plane_backend, control_plane_admission, control_plane_pg_writer) =
+            match control_plane_pool {
+                Some((pool, budget)) => {
+                    let (pool, control_plane_capability) = pool.into_parts()?;
+                    let acquire_timeout = pool.options().get_acquire_timeout();
+                    (
+                        Some(DatabaseBackend::Postgres(pool)),
+                        Some(PoolAdmission::new(
+                            budget,
+                            acquire_timeout,
+                            PoolLane::ControlPlane,
+                        )),
+                        Some(Box::new(control_plane_capability)),
+                    )
+                }
+                None => (None, None, None),
+            };
         Ok(Self {
             admission: PoolAdmission::new(main_budget, acquire_timeout, PoolLane::Main),
             ingress_admission: ingress_budget
@@ -412,6 +419,7 @@ impl Database {
             backend: DatabaseBackend::Postgres(pool),
             control_plane_backend,
             control_plane_admission,
+            control_plane_pg_writer,
             name: name.to_string(),
             driver: DatabaseDriver::Postgres,
             // PgConnectOptions can carry startup parameters that SQLx's URL
@@ -422,6 +430,50 @@ impl Database {
             database_url: "postgres://[attested-pool?mode=memory".to_owned(),
             attested_pg_writer: Some(attested_pg_writer),
         })
+    }
+
+    /// Build a private logical view over only the attested control-plane pool.
+    /// It shares that pool's admission semaphore and capability, with no main,
+    /// ingress, or nested control-plane lane available to the verifier.
+    pub(crate) fn attested_control_plane_lineage_view(
+        &self,
+        configured_deployment: Option<lineage::DeploymentUuid>,
+    ) -> Result<(Self, lineage::AttestedLineage), DatabaseError> {
+        if self.attested_pg_writer.is_none() {
+            return Err(PhysicalAttestationError::Mismatch {
+                field: "attested main pool capability",
+            }
+            .into());
+        }
+        let backend = self.control_plane_backend.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let admission = self.control_plane_admission.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let capability = self
+            .control_plane_pg_writer
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            })?;
+        let expected = capability.attested_lineage_for_deployment(configured_deployment)?;
+
+        let mut view = self.clone();
+        view.backend = backend;
+        view.admission = admission;
+        view.ingress_admission = None;
+        view.control_plane_backend = None;
+        view.control_plane_admission = None;
+        view.control_plane_pg_writer = None;
+        view.database_url = "postgres://[attested-control-plane-pool?mode=memory".to_owned();
+        view.attested_pg_writer = Some(capability);
+        Ok((view, expected))
     }
 
     /// Whether this handle owns the exact hook-bearing pool created by the
@@ -527,6 +579,7 @@ impl Database {
             ingress_admission: None,
             control_plane_backend,
             control_plane_admission,
+            control_plane_pg_writer: None,
             name: name.to_string(),
             driver: config.driver,
             database_url: config.database_url.clone(),

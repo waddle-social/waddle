@@ -178,7 +178,21 @@ impl LineageAttestor for DatabaseLineageAttestor {
 #[async_trait]
 impl LineageAttestor for ControlPlaneLineageAttestor {
     async fn attest(&self, config: &LineageConfig) -> Result<AttestedLineage, DatabaseError> {
-        verify_via_control_plane(&self.database, config).await
+        if !self.database.uses_attested_postgres_pool() {
+            return verify_via_control_plane(&self.database, config).await;
+        }
+        let (database, expected) = self
+            .database
+            .attested_control_plane_lineage_view(config.deployment_uuid)?;
+        crate::db::bootstrap::verify_store_lineage_runtime(&database, config, &expected)
+            .await
+            .map_err(|error| match error {
+                crate::db::bootstrap::RuntimeAttachmentError::Database(error) => error,
+                _ => crate::db::physical_attestation::PhysicalAttestationError::Mismatch {
+                    field: "control-plane runtime lineage attachment",
+                }
+                .into(),
+            })
     }
 
     fn driver(&self) -> DatabaseDriver {
