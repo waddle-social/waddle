@@ -931,15 +931,17 @@ async fn exercise(lab: &mut Lab) -> anyhow::Result<()> {
     // A previously committed empty acceptance must not become authority for a
     // newly planned effect on replay.
     let empty_key = MessageKey::new();
-    let mut empty = lab.begin().await?;
-    ensure!(matches!(
-        crate::ingress_substrate::record_message_in_relation_guard_lab(
-            &mut empty, empty_key, &digest
-        )
-        .await?,
-        crate::ingress_substrate::MessageWriteOutcome::Recorded
-    ));
-    empty.transaction.commit().await?;
+    {
+        let mut empty = lab.begin().await?;
+        ensure!(matches!(
+            crate::ingress_substrate::record_message_in_relation_guard_lab(
+                &mut empty, empty_key, &digest
+            )
+            .await?,
+            crate::ingress_substrate::MessageWriteOutcome::Recorded
+        ));
+        empty.transaction.commit().await?;
+    }
     ensure!(
         matches!(
             lab.write(empty_key, &digest, &intent, Uuid::new_v4()).await,

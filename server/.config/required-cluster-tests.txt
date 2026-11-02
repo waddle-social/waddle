@@ -248,6 +248,7 @@ waddle-server::ingress_relation_guard_lab candidate_waits_for_transition_and_rea
 waddle-server::ingress_relation_guard_lab candidate_transition_waits_for_two_independent_writers
 waddle-server::ingress_relation_guard_lab candidate_rejects_pinned_repeatable_read_and_stale_savepoint_proof
 waddle-server::ingress_relation_guard_lab candidate_temp_shadowing_requires_drain_and_qualified_writes
+waddle-server::ingress_relation_uow_lab restricted_relation_guarded_chain_uses_one_attested_transaction
 
 # P2.1 canonical UoW statements must use the attested schema despite hostile
 # temporary shadows, and preserve the SQLite shared-memory path.
