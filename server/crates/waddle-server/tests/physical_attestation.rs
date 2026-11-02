@@ -8,7 +8,10 @@ use sqlx::postgres::{PgConnectOptions, PgPool};
 use sqlx::{Connection, PgConnection};
 use waddle_server::config::LineageConfig;
 #[cfg(feature = "test-support")]
-use waddle_server::db::bootstrap::{verify_global_runtime, verify_store_lineage_runtime};
+use waddle_server::db::bootstrap::{
+    attach_verified_global_runtime, verify_global_runtime, verify_store_lineage_runtime,
+    RuntimeAttachmentError, RuntimePoolLimits, MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
+};
 use waddle_server::db::lineage::{
     self, AttestedLineage, DeploymentUuid, LineageUuid, PgDatabaseName, PgSchemaName,
 };
@@ -17,9 +20,9 @@ use waddle_server::db::physical_attestation::{
     DarkIngressAuthorityError, InstallationStatus, PgRoleName, PhysicalAttestationConfig,
     PhysicalAttestationError, TransactionBounds,
 };
-#[cfg(feature = "test-support")]
-use waddle_server::db::MigrationRunner;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
+#[cfg(feature = "test-support")]
+use waddle_server::db::{DatabaseError, MigrationLedgerError, MigrationRunner};
 use waddle_server::ingress::EffectReceiptKey;
 use waddle_server::ingress_substrate::EffectReceiptKind;
 #[cfg(feature = "test-support")]
@@ -1373,6 +1376,368 @@ async fn restricted_attested_runtime_verifies_lineage_without_control_system_gra
 
     drop(database);
     fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn verified_global_attachment_checks_identity_ledger_grants_and_shared_capacity() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let boundary_url = url_with_schema(&fixture.base_url, &fixture.target);
+    let owner = Database::from_config(
+        "verified attachment owner",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, boundary_url),
+    )
+    .await
+    .expect("owner database");
+    MigrationRunner::single()
+        .run(&owner)
+        .await
+        .expect("complete migration ledger");
+    drop(owner);
+    let installed = install(
+        &fixture.installer_options,
+        fixture.config(),
+        fixture.operation_id,
+    )
+    .await
+    .expect("install restricted physical attestor");
+    for relation in ["_lineage", "_migrations"] {
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.{relation} TO {}",
+            fixture.target, fixture.runtime
+        ))
+        .execute(&fixture.admin)
+        .await
+        .expect("grant restricted catalog read");
+    }
+    let limits = RuntimePoolLimits {
+        main_connections: 1,
+        ingress_connections: 1,
+        acquire_timeout: Duration::from_secs(3),
+    };
+
+    assert_verified_pool_capacity(&fixture, &installed, limits).await;
+    assert_verified_expected_identity(&fixture, &installed, limits).await;
+    assert_verified_budget_validation(&fixture, &installed, limits).await;
+    assert_verified_revoked_grants(&fixture, &installed, limits).await;
+    assert_verified_ledger(&fixture, &installed, limits).await;
+    fixture.cleanup().await;
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_pool_capacity(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    let attached = attach_verified_global_runtime(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        &fixture.lineage,
+        limits,
+    )
+    .await
+    .expect("verified restricted global attachment");
+    let observations = waddle_server::test_support::observe_verified_attachment(&attached)
+        .await
+        .expect("inspect private attachment and reserved admission");
+    assert!(!observations.has_control_plane_pool);
+    assert!(!observations.has_control_system_execute);
+    assert!(observations.second_main_blocked);
+    assert!(observations.second_ingress_blocked);
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_expected_identity(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    let mut wrong = fixture.lineage.clone();
+    wrong.lineage_uuid = LineageUuid::new();
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &wrong,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::ExpectedIdentityMismatch)
+    ));
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            fixture.with_lineage(wrong.clone()),
+            &fixture.lineage,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::ExpectedIdentityMismatch)
+    ));
+    assert!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            fixture.with_lineage(wrong.clone()),
+            &wrong,
+            RuntimePoolLimits {
+                acquire_timeout: Duration::from_millis(500),
+                ..limits
+            }
+        )
+        .await
+        .is_err(),
+        "agreement between configured identities cannot override the physical database"
+    );
+    let mut wrong_schema = fixture.lineage.clone();
+    wrong_schema
+        .postgres_identity
+        .as_mut()
+        .expect("PostgreSQL fixture identity")
+        .schema
+        .oid += 1;
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &wrong_schema,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::ExpectedIdentityMismatch)
+    ));
+    let mut missing_identity = fixture.lineage.clone();
+    missing_identity.postgres_identity = None;
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &missing_identity,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::MissingExpectedPostgresIdentity)
+    ));
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.admin_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::Database(
+            DatabaseError::PhysicalAttestation(PhysicalAttestationError::WrongConfiguredLogin)
+        ))
+    ));
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_budget_validation(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    for (main, ingress, which) in [(0, 1, "main"), (1, 0, "ingress")] {
+        assert!(matches!(
+            attach_verified_global_runtime(
+                fixture.runtime_options.clone(),
+                installed.clone(),
+                &fixture.lineage,
+                RuntimePoolLimits {
+                    main_connections: main,
+                    ingress_connections: ingress,
+                    ..limits
+                }
+            )
+            .await,
+            Err(RuntimeAttachmentError::Database(DatabaseError::PoolSizeZero {
+                which: actual
+            })) if actual == which
+        ));
+    }
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            RuntimePoolLimits {
+                main_connections: u32::MAX,
+                ingress_connections: 1,
+                ..limits
+            }
+        )
+        .await,
+        Err(RuntimeAttachmentError::Database(
+            DatabaseError::PoolSizeOverflow
+        ))
+    ));
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            RuntimePoolLimits {
+                main_connections: MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS,
+                ingress_connections: 1,
+                ..limits
+            }
+        )
+        .await,
+        Err(RuntimeAttachmentError::PoolCapacityExceeded {
+            requested,
+            maximum: MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS
+        }) if requested == MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS + 1
+    ));
+    let at_limit = attach_verified_global_runtime(
+        fixture.runtime_options.clone(),
+        installed.clone(),
+        &fixture.lineage,
+        RuntimePoolLimits {
+            main_connections: MAX_VERIFIED_RUNTIME_POOL_CONNECTIONS - 1,
+            ingress_connections: 1,
+            ..limits
+        },
+    )
+    .await
+    .expect("the resource safety bound itself is accepted");
+    drop(at_limit);
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_revoked_grants(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    sqlx::query(&format!(
+        "REVOKE SELECT ON {}._migrations FROM {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke runtime ledger read");
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::Database(_))
+    ));
+    sqlx::query(&format!(
+        "GRANT SELECT ON {}._migrations TO {}",
+        fixture.target, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore runtime ledger read");
+
+    sqlx::query(&format!(
+        "REVOKE EXECUTE ON FUNCTION {}.read_physical_identity() FROM {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("revoke attestor execution");
+    assert!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            RuntimePoolLimits {
+                acquire_timeout: Duration::from_millis(500),
+                ..limits
+            }
+        )
+        .await
+        .is_err(),
+        "an unavailable physical attestor cannot produce a verified handle"
+    );
+    sqlx::query(&format!(
+        "GRANT EXECUTE ON FUNCTION {}.read_physical_identity() TO {}",
+        fixture.trusted, fixture.runtime
+    ))
+    .execute(&fixture.admin)
+    .await
+    .expect("restore attestor execution");
+}
+
+#[cfg(feature = "test-support")]
+async fn assert_verified_ledger(
+    fixture: &Fixture,
+    installed: &PhysicalAttestationConfig,
+    limits: RuntimePoolLimits,
+) {
+    let (version, checksum): (i64, String) = sqlx::query_as(&format!(
+        "SELECT version, checksum FROM {}._migrations ORDER BY version DESC LIMIT 1",
+        fixture.target
+    ))
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("save last migration checksum");
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum = NULL WHERE version = $1",
+        fixture.target
+    ))
+    .bind(version)
+    .execute(&fixture.admin)
+    .await
+    .expect("remove committed checksum");
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::Database(
+            DatabaseError::MigrationLedger(MigrationLedgerError::MissingChecksum { .. })
+        ))
+    ));
+    let persisted_checksum: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT checksum FROM {}._migrations WHERE version = $1",
+        fixture.target
+    ))
+    .bind(version)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("read unchanged checksum");
+    assert_eq!(persisted_checksum, None, "attachment must not backfill");
+    sqlx::query(&format!(
+        "UPDATE {}._migrations SET checksum = $1 WHERE version = $2",
+        fixture.target
+    ))
+    .bind(checksum)
+    .bind(version)
+    .execute(&fixture.admin)
+    .await
+    .expect("restore checksum");
+    sqlx::query(&format!(
+        "DELETE FROM {}._migrations WHERE version = $1",
+        fixture.target
+    ))
+    .bind(version)
+    .execute(&fixture.admin)
+    .await
+    .expect("remove latest migration record");
+    assert!(matches!(
+        attach_verified_global_runtime(
+            fixture.runtime_options.clone(),
+            installed.clone(),
+            &fixture.lineage,
+            limits
+        )
+        .await,
+        Err(RuntimeAttachmentError::Database(
+            DatabaseError::MigrationLedger(MigrationLedgerError::PendingMigration { .. })
+        ))
+    ));
 }
 
 #[cfg(feature = "test-support")]

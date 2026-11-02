@@ -18,6 +18,8 @@ use crate::db::physical_attestation::AttestedPgPool;
 #[cfg(feature = "test-support")]
 use crate::db::Database;
 #[cfg(feature = "test-support")]
+use crate::db::{bootstrap::VerifiedGlobalAttachment, DatabaseError};
+#[cfg(feature = "test-support")]
 use crate::ingress_substrate::with_pooled_receipt_commit_ack_lost;
 #[cfg(feature = "test-support")]
 use crate::ingress_substrate::PostgresIngressSubstrate;
@@ -76,6 +78,65 @@ pub async fn database_pool_from_attested_postgres_pool(
     ingress_budget: u32,
 ) -> Result<DatabasePool, crate::db::DatabaseError> {
     DatabasePool::from_attested_postgres_pool(name, pool, main_budget, ingress_budget).await
+}
+
+/// Read-only observations of a verified attachment with one slot per lane.
+#[cfg(feature = "test-support")]
+pub struct VerifiedAttachmentObservations {
+    pub has_control_plane_pool: bool,
+    pub has_control_system_execute: bool,
+    pub second_main_blocked: bool,
+    pub second_ingress_blocked: bool,
+}
+
+/// Exercise the private attachment without exposing its database or a raw
+/// query interface. Transactions are read-only and remain inside this helper.
+#[cfg(feature = "test-support")]
+pub async fn observe_verified_attachment(
+    attachment: &VerifiedGlobalAttachment,
+) -> Result<VerifiedAttachmentObservations, DatabaseError> {
+    let database = attachment.database_for_test();
+    let has_control_plane_pool = database.has_control_plane_pool();
+    let has_control_system_execute = {
+        let guard = database.guard().await?;
+        let mut rows = guard
+            .query(
+                "SELECT pg_catalog.has_function_privilege(current_user, \
+                 'pg_catalog.pg_control_system()'::pg_catalog.regprocedure, 'EXECUTE')",
+                (),
+            )
+            .await?;
+        rows.next()
+            .await?
+            .ok_or_else(|| DatabaseError::QueryFailed("missing privilege result".to_owned()))?
+            .get::<bool>(0)?
+    };
+
+    let mut main = database.begin().await?;
+    main.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let ingress_database = database.ingress_lane();
+    let mut ingress = ingress_database.begin().await?;
+    ingress.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let second_main_blocked =
+        tokio::time::timeout(std::time::Duration::from_millis(200), database.begin())
+            .await
+            .is_err();
+    drop(main);
+    let mut next_main = database.begin().await?;
+    next_main.execute("SET TRANSACTION READ ONLY", ()).await?;
+    let second_ingress_blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        ingress_database.begin(),
+    )
+    .await
+    .is_err();
+
+    Ok(VerifiedAttachmentObservations {
+        has_control_plane_pool,
+        has_control_system_execute,
+        second_main_blocked,
+        second_ingress_blocked,
+    })
 }
 
 /// Characterize that startup-only detached sessions are closed after a

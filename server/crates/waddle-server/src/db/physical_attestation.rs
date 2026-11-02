@@ -238,6 +238,10 @@ impl PhysicalAttestationConfig {
         &self.postgres
     }
 
+    pub(crate) fn expected_lineage(&self) -> &AttestedLineage {
+        &self.lineage
+    }
+
     fn function_path(&self) -> String {
         format!(
             "{}.{}",
