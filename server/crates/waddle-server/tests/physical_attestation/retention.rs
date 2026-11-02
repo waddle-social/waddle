@@ -1161,6 +1161,121 @@ async fn sqlite_pin_validates_recorded_route_and_survives_reopen() {
     ));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SqliteReplacement {
+    AllocationKey,
+    AdmissionId,
+    Rowid,
+}
+
+async fn assert_sqlite_pin_rejects_replace(replacement: SqliteReplacement) {
+    use waddle_server::db::physical_attestation::{AdmissionPinLab, PinOutcome};
+
+    let (db, retention) = sqlite_fixture().await;
+    sqlite_exec(
+        &db,
+        "CREATE TABLE pending_delivery (row_id TEXT PRIMARY KEY)",
+    )
+    .await;
+    let (pin, envelope, intent) = direct_pin(uuid::Uuid::new_v4(), "bob@example.test/laptop");
+    seed_sqlite_direct(&db, &pin, envelope, intent).await;
+    let lab = AdmissionPinLab::sqlite(&db, typed_bounds()).expect("shared pin lab");
+    assert_eq!(lab.admit(&pin).await.expect("admit"), PinOutcome::Created);
+    assert_eq!(
+        sqlite_count(&db, "PRAGMA recursive_triggers").await,
+        0,
+        "exercise the runtime connection's default trigger setting"
+    );
+
+    let mut replacement_key = pin.key.clone();
+    let replacement_id = if replacement == SqliteReplacement::AdmissionId {
+        replacement_key.message_key = MessageKey::from_storage(uuid::Uuid::new_v4());
+        pin.admission_id
+    } else {
+        if replacement == SqliteReplacement::Rowid {
+            replacement_key.message_key = MessageKey::from_storage(uuid::Uuid::new_v4());
+        }
+        uuid::Uuid::new_v4()
+    };
+    let guard = db.guard().await.expect("runtime guard");
+    guard.execute("CREATE TEMP TABLE ingress_admission_pins AS SELECT * FROM main.ingress_admission_pins WHERE 0", ()).await.expect("shadow pin table");
+    let sql = if replacement == SqliteReplacement::Rowid {
+        "INSERT OR REPLACE INTO main.ingress_admission_pins (rowid, message_key, receipt_kind, semantic_identity_hash, resource, admission_id, payload, received_at) SELECT rowid, ?, ?, ?, ?, ?, ?, ? FROM main.ingress_admission_pins"
+    } else {
+        "INSERT OR REPLACE INTO main.ingress_admission_pins (message_key, receipt_kind, semantic_identity_hash, resource, admission_id, payload, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    };
+    let replacement = guard
+        .execute(
+            sql,
+            waddle_server::db_params![
+                replacement_key.message_key.to_storage().to_string(),
+                replacement_key.kind.to_storage(),
+                replacement_key.semantic_identity_hash.to_vec(),
+                replacement_key.resource.to_string(),
+                replacement_id.to_string(),
+                "forged payload",
+                (pin.received_at + ChronoDuration::seconds(1)).to_rfc3339()
+            ],
+        )
+        .await;
+    assert!(replacement.is_err(), "replacement must not remove a pin");
+    guard.execute("INSERT INTO main.ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES (?, ?, ?)", waddle_server::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec()]).await.expect("settle route");
+    guard
+        .execute(
+            "UPDATE main.ingress_messages SET retention_eligible_at = ? WHERE message_key = ?",
+            waddle_server::db_params![
+                (now() - ALIAS_RETENTION).to_rfc3339(),
+                pin.key.message_key.to_storage().to_string()
+            ],
+        )
+        .await
+        .expect("old frontier");
+    drop(guard);
+
+    let recovered = lab
+        .lookup(&pin.key)
+        .await
+        .expect("lookup")
+        .expect("pin retained");
+    assert_eq!(recovered.admission_id, pin.admission_id);
+    assert_eq!(recovered.payload, pin.payload);
+    assert_eq!(recovered.received_at, pin.received_at);
+    if replacement_key.message_key != pin.key.message_key {
+        assert!(lab
+            .lookup(&replacement_key)
+            .await
+            .expect("lookup replacement")
+            .is_none());
+    }
+    assert_eq!(
+        retention.collect(now(), 1).await.expect("collect").deleted,
+        0
+    );
+    assert_eq!(
+        sqlite_count(&db, "SELECT COUNT(*) FROM main.ingress_messages").await,
+        1
+    );
+    assert_eq!(
+        sqlite_count(&db, "SELECT COUNT(*) FROM main.ingress_admission_pins").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn sqlite_pin_rejects_replace_by_allocation_key() {
+    assert_sqlite_pin_rejects_replace(SqliteReplacement::AllocationKey).await;
+}
+
+#[tokio::test]
+async fn sqlite_pin_rejects_replace_by_admission_id() {
+    assert_sqlite_pin_rejects_replace(SqliteReplacement::AdmissionId).await;
+}
+
+#[tokio::test]
+async fn sqlite_pin_rejects_replace_by_rowid() {
+    assert_sqlite_pin_rejects_replace(SqliteReplacement::Rowid).await;
+}
+
 #[tokio::test]
 async fn sqlite_collector_first_refuses_new_pin_and_temp_shadows() {
     use waddle_server::db::physical_attestation::{AdmissionPinLab, AdmissionPinLabError};

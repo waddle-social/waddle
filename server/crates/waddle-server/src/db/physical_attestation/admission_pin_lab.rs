@@ -54,6 +54,7 @@ pub fn pin_lab_postgres_ddl(expected: &PhysicalAttestationConfig) -> String {
 
 /// Unregistered laboratory schema for the shared SQLite runtime database.
 pub const PIN_LAB_SQLITE_DDL: &str = r#"
+-- A hidden rowid would provide a third REPLACE collision target.
 CREATE TABLE main.ingress_admission_pins (
     message_key TEXT NOT NULL,
     receipt_kind INTEGER NOT NULL,
@@ -63,7 +64,18 @@ CREATE TABLE main.ingress_admission_pins (
     payload TEXT NOT NULL,
     received_at TEXT NOT NULL,
     PRIMARY KEY (message_key, receipt_kind, semantic_identity_hash, resource)
-);
+) WITHOUT ROWID;
+-- REPLACE can delete conflicting rows without firing DELETE triggers when
+-- recursive_triggers is disabled. Reject both possible unique collisions first.
+CREATE TRIGGER main.ingress_admission_pins_immutable_insert
+BEFORE INSERT ON ingress_admission_pins
+WHEN EXISTS (
+    SELECT 1 FROM main.ingress_admission_pins
+    WHERE admission_id = NEW.admission_id
+       OR (message_key = NEW.message_key AND receipt_kind = NEW.receipt_kind
+           AND semantic_identity_hash = NEW.semantic_identity_hash AND resource = NEW.resource)
+)
+BEGIN SELECT RAISE(ABORT, 'laboratory admission pins are immutable'); END;
 CREATE TRIGGER main.ingress_admission_pins_immutable_update
 BEFORE UPDATE ON ingress_admission_pins BEGIN SELECT RAISE(ABORT, 'laboratory admission pins are immutable'); END;
 CREATE TRIGGER main.ingress_admission_pins_immutable_delete
@@ -513,6 +525,25 @@ async fn admit_sqlite(
             Err(AdmissionPinLabError::Conflict)
         };
     }
+    // BEGIN IMMEDIATE excludes concurrent writers. Avoid invoking the
+    // immutability trigger for a known ID collision so it remains a typed
+    // conflict rather than an opaque database error.
+    let mut conflicts = tx
+        .query(
+            "SELECT 1 FROM main.ingress_admission_pins WHERE admission_id = ?",
+            crate::db_params![pin.admission_id.to_string()],
+        )
+        .await
+        .map_err(|_| DarkIngressAuthorityError::Database)?;
+    if conflicts
+        .next()
+        .await
+        .map_err(|_| DarkIngressAuthorityError::Database)?
+        .is_some()
+    {
+        return Err(AdmissionPinLabError::Conflict);
+    }
+    drop(conflicts);
     let payload = encode_payload(&pin.payload)?;
     let inserted = tx.execute("INSERT INTO main.ingress_admission_pins (message_key, receipt_kind, semantic_identity_hash, resource, admission_id, payload, received_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", crate::db_params![pin.key.message_key.to_storage().to_string(), pin.key.kind.to_storage(), pin.key.semantic_identity_hash.to_vec(), pin.key.resource.to_string(), pin.admission_id.to_string(), payload, pin.received_at.to_rfc3339()]).await.map_err(|_| DarkIngressAuthorityError::Database)?;
     if inserted != 1 {
