@@ -75,7 +75,7 @@ fn input(principal: &AuthenticatedPrincipalRef, resource: &str, origin: &str) ->
     }
 }
 
-async fn seed(
+pub(super) async fn seed(
     fixture: &Fixture,
     ingress_budget: u32,
 ) -> (
@@ -174,7 +174,7 @@ async fn seed(
     (uow, principals[0].clone(), principals[1].clone())
 }
 
-async fn wait_alias_insert(fixture: &Fixture, pid: i64) {
+pub(super) async fn wait_alias_insert(fixture: &Fixture, pid: i64) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let waiting: bool = sqlx::query_scalar("SELECT COALESCE((SELECT state = 'active' AND wait_event_type = 'Lock' AND query LIKE '%INSERT INTO%ingress_origin_aliases%' FROM pg_catalog.pg_stat_activity WHERE pid = $1), false)")
@@ -351,7 +351,7 @@ async fn restricted_postgres_first_insert_races_preserve_the_first_source_case()
     }
 }
 
-async fn wait_savepoint_sleep(fixture: &Fixture, pid: i64, command: &str) {
+pub(super) async fn wait_savepoint_sleep(fixture: &Fixture, pid: i64, command: &str) {
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
@@ -478,7 +478,12 @@ async fn restricted_postgres_savepoint_cancellation_drops_uow_and_recovers_one_s
     }
 }
 
-async fn wait_backend_query(fixture: &Fixture, pid: i64, needle: &str, event_type: &str) {
+pub(super) async fn wait_backend_query(
+    fixture: &Fixture,
+    pid: i64,
+    needle: &str,
+    event_type: &str,
+) {
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             let waiting: bool = sqlx::query_scalar(

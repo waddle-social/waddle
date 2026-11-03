@@ -113,6 +113,9 @@ pub struct IngressUnitOfWork {
     fencing: IngressFencing,
 }
 
+/// A private witness that the repository owns the complete transaction.
+pub(crate) struct OwnedAliasScope(());
+
 #[derive(Clone, Copy)]
 enum EpochPreparation {
     InstalledGuard,

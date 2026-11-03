@@ -12,12 +12,19 @@ use waddle_xmpp::auth::{
 use waddle_xmpp::ingress::{ConnectionGeneration, DigestContext, DigestInput, NormalizedTarget};
 
 async fn fixture() -> (Database, IngressUnitOfWork, IngressSubmission) {
-    let db = Database::from_config(
-        "ingress-commit",
-        &DatabaseConfig::new(DatabaseDriver::Sqlite, ":memory:"),
-    )
-    .await
-    .expect("database");
+    fixture_with_pool_size(None).await
+}
+
+async fn fixture_with_pool_size(
+    pool_size: Option<u32>,
+) -> (Database, IngressUnitOfWork, IngressSubmission) {
+    let mut config = DatabaseConfig::new(DatabaseDriver::Sqlite, ":memory:");
+    if let Some(pool_size) = pool_size {
+        config.pool_size = pool_size;
+    }
+    let db = Database::from_config("ingress-commit", &config)
+        .await
+        .expect("database");
     MigrationRunner::single()
         .run(&db)
         .await
@@ -309,4 +316,39 @@ async fn missing_room_stanza_id_is_storage_failure_without_commit() {
         IngressUowError::MissingRoomStanzaId
     ));
     assert_eq!(messages(&db).await, 0);
+}
+
+#[tokio::test]
+async fn sqlite_unprepared_origin_replay_preserves_existing_temp_resolution() {
+    let (db, uow, mut submission) = fixture_with_pool_size(Some(1)).await;
+    waddle_xmpp_core::xep0359::add_origin_id(
+        &mut submission.plan.sanitized_message,
+        "sqlite-origin",
+    );
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![submission.principal.bare_jid().clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("digest with origin");
+    let conn = db.guard().await.expect("SQLite guard");
+    conn.execute("CREATE TEMP TABLE ingress_origin_aliases (alias_key_hash BLOB PRIMARY KEY, sender_bare_jid TEXT NOT NULL, target_kind INTEGER NOT NULL, target_jid TEXT NOT NULL, origin_id TEXT NOT NULL, message_key TEXT NOT NULL)", ()).await.expect("temporary legacy shadow");
+    drop(conn);
+    let first = commit_submission(&uow, &submission, 1)
+        .await
+        .expect("initial SQLite commit");
+    let replay = commit_submission(&uow, &submission, 1)
+        .await
+        .expect("SQLite replay");
+    assert_eq!(first.message_key, replay.message_key);
+    assert_eq!(first.alias, crate::ingress::AliasOutcomeClass::Inserted);
+    assert_eq!(replay.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let conn = db.guard().await.expect("same SQLite connection");
+    let mut rows = conn.query("SELECT (SELECT COUNT(*) FROM temp.ingress_origin_aliases), (SELECT COUNT(*) FROM main.ingress_origin_aliases)", ()).await.expect("shadow counts");
+    let row = rows.next().await.expect("row").expect("counts");
+    assert_eq!(row.get::<i64>(0).expect("temp count"), 1);
+    assert_eq!(row.get::<i64>(1).expect("main count"), 0);
 }

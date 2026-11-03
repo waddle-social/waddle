@@ -81,6 +81,25 @@ mod injected {
         pub static OBSERVED_CLASS: std::cell::Cell<Option<super::IngressDecisionClass>>;
         pub static FAILURE: std::cell::RefCell<Option<IngressUowError>>;
         pub static SEARCH_PATH: String;
+        pub static ALIAS_TEST_BOUNDS: (std::time::Duration, std::time::Duration);
+        pub static ALIAS_OBSERVED_BOUNDS: std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>;
+    }
+    pub(crate) async fn observe_alias_bounds(
+        tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    ) -> Result<(), IngressUowError> {
+        let Ok(observed) = ALIAS_OBSERVED_BOUNDS.try_with(std::sync::Arc::clone) else {
+            return Ok(());
+        };
+        let mut rows = tx.transaction_mut().query(
+            "SELECT (extract(epoch FROM current_setting('lock_timeout')::interval) * 1000)::bigint, (extract(epoch FROM current_setting('statement_timeout')::interval) * 1000)::bigint",
+            (),
+        ).await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::EpochProofMissing)?;
+        *observed.lock().expect("test timeout observation lock") = Some((row.get(0)?, row.get(1)?));
+        Ok(())
     }
     pub(crate) async fn apply_search_path(
         tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,

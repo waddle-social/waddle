@@ -1,6 +1,7 @@
 //! Canonical UoW statements must not follow a hostile PostgreSQL search path.
 
 mod acceptance;
+mod live_alias;
 mod no_store;
 mod post_commit_repositories;
 mod principal;

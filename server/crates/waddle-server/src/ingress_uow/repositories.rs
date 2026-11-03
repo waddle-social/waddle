@@ -585,6 +585,31 @@ impl CanonicalMessageRepository {
             .map_err(|_| IngressUowError::InvalidStoredMessageTimestamp)
     }
 
+    /// Resolve a prepared PostgreSQL origin while owning the complete UOW.
+    /// Every error and cancellation drops the outer transaction, including an
+    /// in-flight savepoint; the transaction returns only on full success.
+    pub(crate) async fn resolve_prepared_origin_owned<'a>(
+        mut transaction: IngressUowTransaction<'a>,
+        sender: &BareJid,
+        target: &NormalizedTarget,
+        origin_id: &OriginId,
+        digest: &SemanticDigest,
+    ) -> Result<(IngressUowTransaction<'a>, AliasResolution), IngressUowError> {
+        let scope = super::OwnedAliasScope(());
+        let resolved = {
+            let (tx, prepared) = transaction.prepared_parts();
+            if tx.driver() != DatabaseDriver::Postgres {
+                return Err(IngressUowError::PostgresRequired);
+            }
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+            ingress_substrate::resolve_prepared_origin_in_scope(
+                tx, prepared, &scope, sender, target, origin_id, digest,
+            )
+            .await?
+        };
+        Ok((transaction, resolved))
+    }
+
     pub async fn resolve_and_record_alias(
         transaction: &mut IngressUowTransaction<'_>,
         sender: &BareJid,

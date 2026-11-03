@@ -8,12 +8,21 @@ pub(crate) use authority::MucArchiveContext;
 mod canonical_sender;
 pub(crate) use canonical_sender::canonical_sender_pooled;
 mod maintenance;
+mod owned_alias;
 mod retention;
 #[cfg(test)]
 mod source_alias;
 pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
+};
+pub(crate) use owned_alias::resolve_prepared_origin_in_scope;
+#[cfg(test)]
+pub(crate) use owned_alias::{
+    AliasGate as OwnedAliasGate, SavepointPhase as OwnedAliasSavepointPhase,
+    AFTER_INSERT as OWNED_ALIAS_AFTER_INSERT, AFTER_LOCK as OWNED_ALIAS_AFTER_LOCK,
+    AFTER_MISS as OWNED_ALIAS_AFTER_MISS, AFTER_PROBE as OWNED_ALIAS_AFTER_PROBE,
+    STALL_SAVEPOINT as OWNED_ALIAS_STALL_SAVEPOINT,
 };
 pub(crate) use retention::{
     invalidate_retention, invalidate_retention_in_prepared_transaction, refresh_retention,
