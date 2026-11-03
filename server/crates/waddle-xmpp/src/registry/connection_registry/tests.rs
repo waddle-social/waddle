@@ -566,6 +566,45 @@ async fn test_send_to_closed_channel_does_not_remove_replacement() {
 }
 
 #[tokio::test]
+async fn write_acceptance_survives_closed_send_retry_to_same_jid_replacement() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("retry-write-acceptance");
+    let (old_tx, old_rx) = mpsc::channel(1);
+    let (new_tx, mut new_rx) = mpsc::channel(1);
+    registry.register(jid.clone(), old_tx);
+    assert!(registry
+        .send_to(
+            &jid,
+            Stanza::Message(make_test_message("first@example.com"))
+        )
+        .await
+        .is_sent());
+
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+    let stanza = Stanza::Message(make_test_message("retry@example.com"));
+    let expected = stanza.to_element();
+    let send = registry.send_to_with_write_acceptance(&jid, stanza, acceptance);
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    registry.register(jid.clone(), new_tx);
+    drop(old_rx);
+    assert!(send.await.is_sent());
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let queued = new_rx.recv().await.expect("replacement received frame");
+    assert_eq!(queued.stanza.to_element(), expected);
+    assert_eq!(queued.kind, DeliveryKind::DirectFrame);
+    queued
+        .write_acceptance
+        .as_ref()
+        .expect("acceptance transferred to replacement")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
+}
+
+#[tokio::test]
 async fn test_send_to_waits_for_capacity_instead_of_dropping() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("user1");
@@ -1594,28 +1633,34 @@ fn cloned_binding_endpoint_observes_provisional_and_sealed_refusal() {
     );
     let retained_endpoint = endpoint.clone();
 
-    assert_eq!(
+    assert!(matches!(
         retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
             "reserved@example.com"
         )))),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional)
-    );
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Provisional,
+            ..
+        }
+    ));
     assert!(receiver.try_recv().is_err());
 
     assert!(retained_endpoint.activate(owner, &binding_ref));
-    assert_eq!(
+    assert!(matches!(
         endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
             "accepted@example.com"
         )))),
         EndpointEnqueueOutcome::AcceptedOrUnknown
-    );
+    ));
     assert!(endpoint.seal(owner, &binding_ref));
-    assert_eq!(
+    assert!(matches!(
         retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
             "reserved@example.com"
         )))),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Sealed)
-    );
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Sealed,
+            ..
+        }
+    ));
     assert!(
         receiver.try_recv().is_ok(),
         "sealing preserves accepted work"
@@ -1714,7 +1759,10 @@ fn provisional_enqueue_and_exact_activation_are_linearized() {
         });
 
         match outcome {
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Provisional) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::Provisional,
+                ..
+            } => {
                 assert!(
                     receiver.try_recv().is_err(),
                     "pre-activation send was refused"
@@ -1738,20 +1786,26 @@ fn endpoint_outcomes_distinguish_accepted_full_and_closed() {
     let outbound =
         || OutboundStanza::new(Stanza::Message(make_test_message("endpoint@example.com")));
 
-    assert_eq!(
+    assert!(matches!(
         entry.endpoint.try_send(outbound()),
         EndpointEnqueueOutcome::AcceptedOrUnknown
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         entry.endpoint.try_send(outbound()),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Full)
-    );
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Full,
+            ..
+        }
+    ));
     assert!(receiver.try_recv().is_ok());
     drop(receiver);
-    assert_eq!(
+    assert!(matches!(
         entry.endpoint.try_send(outbound()),
-        EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed)
-    );
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::ChannelClosed,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

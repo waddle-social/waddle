@@ -78,7 +78,8 @@ impl ConnectionEntry {
             .commit_reserved(reservation.permit, outbound)
         {
             EndpointEnqueueOutcome::AcceptedOrUnknown => AcceptedOrUnknown,
-            EndpointEnqueueOutcome::ProvenNotEnqueued(rejection) => match rejection {
+            EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => match reason {
+                EndpointEnqueueRejection::BindingMismatch => DefinitelyNotEnqueued(BindingMismatch),
                 EndpointEnqueueRejection::Provisional => DefinitelyNotEnqueued(Provisional),
                 EndpointEnqueueRejection::Sealed => DefinitelyNotEnqueued(Sealed),
                 EndpointEnqueueRejection::ChannelClosed => DefinitelyNotEnqueued(ChannelClosed),
@@ -203,27 +204,28 @@ impl ConnectionRegistry {
             Some(entry) => entry.value().endpoint.clone(),
             None => return SendResult::NotConnected,
         };
-        let outbound = OutboundStanza::with_write_acceptance(stanza.clone(), acceptance.clone());
+        let outbound = OutboundStanza::with_write_acceptance(stanza, acceptance);
         match endpoint.send(outbound).await {
             EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                outbound,
+            } => {
                 self.remove_if_sender_closed_owner(jid, &endpoint);
                 if let Some(entry) = self.connections.get(jid) {
                     let current = entry.value().endpoint.clone();
                     drop(entry);
                     if !current.same_binding(&endpoint) {
-                        return match current
-                            .send(OutboundStanza::with_write_acceptance(stanza, acceptance))
-                            .await
-                        {
+                        return match current.send(*outbound).await {
                             EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-                            EndpointEnqueueOutcome::ProvenNotEnqueued(
-                                EndpointEnqueueRejection::ChannelClosed,
-                            ) => {
+                            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                                reason: EndpointEnqueueRejection::ChannelClosed,
+                                ..
+                            } => {
                                 self.remove_if_sender_closed_owner(jid, &current);
                                 SendResult::ChannelClosed
                             }
-                            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => {
+                            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => {
                                 SendResult::NotConnected
                             }
                         };
@@ -231,7 +233,7 @@ impl ConnectionRegistry {
                 }
                 SendResult::ChannelClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => SendResult::NotConnected,
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
         }
     }
 
@@ -263,30 +265,34 @@ impl ConnectionRegistry {
             }
         };
 
-        match endpoint.send(OutboundStanza::new(stanza.clone())).await {
+        match endpoint.send(OutboundStanza::new(stanza)).await {
             EndpointEnqueueOutcome::AcceptedOrUnknown => {
                 debug!("Stanza queued for delivery");
                 SendResult::Sent
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                outbound,
+            } => {
                 debug!("Outbound channel closed, connection may have dropped");
                 self.remove_if_sender_closed_owner(jid, &endpoint);
                 if let Some(entry) = self.connections.get(jid) {
                     let current = entry.value().endpoint.clone();
                     drop(entry);
                     if !current.same_binding(&endpoint) {
-                        return match current.send(OutboundStanza::new(stanza)).await {
+                        return match current.send(*outbound).await {
                             EndpointEnqueueOutcome::AcceptedOrUnknown => {
                                 debug!("Stanza queued for replacement connection");
                                 SendResult::Sent
                             }
-                            EndpointEnqueueOutcome::ProvenNotEnqueued(
-                                EndpointEnqueueRejection::ChannelClosed,
-                            ) => {
+                            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                                reason: EndpointEnqueueRejection::ChannelClosed,
+                                ..
+                            } => {
                                 self.remove_if_sender_closed_owner(jid, &current);
                                 SendResult::ChannelClosed
                             }
-                            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => {
+                            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => {
                                 SendResult::NotConnected
                             }
                         };
@@ -294,7 +300,7 @@ impl ConnectionRegistry {
                 }
                 SendResult::ChannelClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => SendResult::NotConnected,
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
         }
     }
 
@@ -325,11 +331,14 @@ impl ConnectionRegistry {
         };
         match endpoint.send(OutboundStanza::new(stanza)).await {
             EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                ..
+            } => {
                 self.remove_if_sender_closed_owner(jid, &endpoint);
                 SendResult::ChannelClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => SendResult::NotConnected,
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
         }
     }
 
@@ -356,11 +365,14 @@ impl ConnectionRegistry {
         let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
         match endpoint.send(outbound).await {
             EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                ..
+            } => {
                 self.remove_if_sender_closed_owner(jid, &endpoint);
                 SendResult::ChannelClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => SendResult::NotConnected,
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
         }
     }
 
@@ -398,11 +410,14 @@ impl ConnectionRegistry {
         let outbound = OutboundStanza::for_pending_flush(stanza, row_id, original_receipt_at);
         match endpoint.send(outbound).await {
             EndpointEnqueueOutcome::AcceptedOrUnknown => SendResult::Sent,
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                ..
+            } => {
                 self.remove_if_sender_closed_owner(jid, &endpoint);
                 SendResult::ChannelClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => SendResult::NotConnected,
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => SendResult::NotConnected,
         }
     }
 
@@ -477,7 +492,10 @@ impl ConnectionRegistry {
                 }
                 BroadcastOutcome::Delivered
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Full) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::Full,
+                ..
+            } => {
                 crate::telemetry::reliability::increment_broadcast_dropped_full();
                 // Keep per-recipient detail at debug only — the
                 // aggregated broadcast log at the call site already
@@ -492,12 +510,15 @@ impl ConnectionRegistry {
                 );
                 BroadcastOutcome::DroppedFull
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::ChannelClosed,
+                ..
+            } => {
                 crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 self.remove_if_sender_closed(jid);
                 BroadcastOutcome::DroppedClosed
             }
-            EndpointEnqueueOutcome::ProvenNotEnqueued(_) => {
+            EndpointEnqueueOutcome::ProvenNotEnqueued { .. } => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 BroadcastOutcome::NotConnected
             }
@@ -682,5 +703,59 @@ fn map_reserve_rejection(rejection: EndpointEnqueueRejection) -> PendingFlushRes
         EndpointEnqueueRejection::Provisional | EndpointEnqueueRejection::Sealed => {
             PendingFlushReserveError::NotAdmitted
         }
+        EndpointEnqueueRejection::BindingMismatch => {
+            unreachable!("capacity reservation does not commit a permit")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConnectionEntry, OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
+        PendingFlushCommitRejection, PendingFlushReservation, Stanza,
+    };
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn pending_flush_maps_a_foreign_permit_to_binding_mismatch() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let entry = ConnectionEntry::new(sender.clone());
+        let (foreign_sender, mut foreign_receiver) = mpsc::channel(1);
+        let foreign = ConnectionEntry::new(foreign_sender.clone());
+        let permit = foreign
+            .endpoint
+            .try_reserve_owned()
+            .expect("reserve foreign queue");
+        let reservation = PendingFlushReservation {
+            jid: "bob@example.test/phone".parse().expect("full JID"),
+            owner: entry.binding_id(),
+            binding_ref: entry.binding_ref().cloned(),
+            endpoint: entry.endpoint.clone(),
+            permit,
+        };
+        let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+        let outcome = entry.commit_pending_flush(
+            reservation,
+            OutboundStanza::with_write_acceptance(
+                Stanza::Message(xmpp_parsers::message::Message::new(None)),
+                acceptance,
+            ),
+        );
+
+        assert_eq!(
+            outcome,
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::BindingMismatch
+            )
+        );
+        assert_eq!(sender.capacity(), 1);
+        assert_eq!(foreign_sender.capacity(), 1);
+        assert!(receiver.try_recv().is_err());
+        assert!(foreign_receiver.try_recv().is_err());
+        assert!(matches!(
+            accepted.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
     }
 }

@@ -3,8 +3,32 @@
 Status: dark failure characterization and implementation inventory for
 [#2137](https://github.com/waddle-social/waddle/issues/2137) under
 [#2046](https://github.com/waddle-social/waddle/issues/2046). This slice does
-not change production endpoint admission. The ignored regression is intended to
-be enabled only after local and remote enqueue paths share the reviewed gate.
+not publish provisional endpoints in production. The ignored regression is
+intended to be enabled only after local and remote enqueue paths share the
+reviewed gate.
+
+## Endpoint-local envelope and permit boundary
+
+An endpoint's completed pre-enqueue refusal returns the original outbound
+envelope with its reason. The envelope retains its stanza, delivery kind,
+pending row and timestamp, ingress obligation, and write-acceptance callback.
+The refusal boxes the moved envelope so the successful outcome stays small;
+it does not reconstruct or clone the payload.
+Accepted-or-unknown does not return the envelope: a receiver may close while a
+reserved permit is committed, so acceptance is not proof of socket delivery.
+Permits are bound to both the queue and the admission object that reserved
+them; a different binding rejects the permit and returns the envelope. A clone
+of the same binding may commit it. Admission remains locked through enqueue,
+and ordered archive publication retains admission-before-archive lock order.
+
+This boundary is local to an endpoint. Existing `SendResult`,
+`BroadcastOutcome`, archive dispatch, and pending-flush adapters consume
+refused envelopes, except for the existing same-JID closed-channel retry,
+which now reuses the returned envelope. It adds no remote relay or custody
+guarantee and does not change the production publication lifecycle. Cancelling
+an async send while it waits for capacity drops its owned envelope. Sealing a
+binding does not wake a capacity waiter; admission is rechecked when capacity
+is eventually acquired.
 
 ## Observed failure boundary
 

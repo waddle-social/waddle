@@ -67,8 +67,7 @@ impl OutboundWriteAcceptance {
         )
     }
 
-    /// This is deliberately idempotent because a registry send may retry a
-    /// replacement connection while holding a clone of the same acceptance.
+    /// Shared acceptance handles may acknowledge only once.
     pub fn acknowledge(&self) {
         if let Ok(mut sender) = self.0.lock() {
             if let Some(sender) = sender.take() {
@@ -822,15 +821,18 @@ mod tests {
         let owner = candidate.binding_id();
 
         assert!(candidate.entry.seal_binding(owner, &binding_ref));
-        assert_eq!(
+        assert!(matches!(
             candidate
                 .entry
                 .endpoint
                 .try_send(OutboundStanza::new(Stanza::Message(
                     xmpp_parsers::message::Message::new(None),
                 ))),
-            EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Sealed)
-        );
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::Sealed,
+                ..
+            }
+        ));
         assert!(candidate.activate_binding(owner, &binding_ref).is_none());
         assert!(receiver.try_recv().is_err());
     }

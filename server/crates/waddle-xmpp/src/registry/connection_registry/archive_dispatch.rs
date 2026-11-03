@@ -42,7 +42,7 @@ impl ConnectionEntry {
         else {
             return match self.endpoint.try_send(outbound) {
                 EndpointEnqueueOutcome::AcceptedOrUnknown => Ok(()),
-                EndpointEnqueueOutcome::ProvenNotEnqueued(rejection) => Err(rejection),
+                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => Err(reason),
             };
         };
         let key = obligation.key.clone();
@@ -80,7 +80,7 @@ impl ConnectionEntry {
             }
             match sink.try_send(outbound) {
                 EndpointEnqueueOutcome::AcceptedOrUnknown => {}
-                EndpointEnqueueOutcome::ProvenNotEnqueued(rejection) => return Err(rejection),
+                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => return Err(reason),
             }
             for position in positions {
                 let entry = state

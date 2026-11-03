@@ -75,7 +75,11 @@ impl UserActor {
                 self.remove_resource(jid);
                 BroadcastOutcome::DroppedClosed
             }
-            Err(EndpointEnqueueRejection::Provisional | EndpointEnqueueRejection::Sealed) => {
+            Err(
+                EndpointEnqueueRejection::Provisional
+                | EndpointEnqueueRejection::Sealed
+                | EndpointEnqueueRejection::BindingMismatch,
+            ) => {
                 crate::telemetry::reliability::increment_broadcast_not_connected();
                 BroadcastOutcome::NotConnected
             }

@@ -31,13 +31,27 @@ pub(in crate::registry) enum EndpointEnqueueRejection {
     Sealed,
     Full,
     ChannelClosed,
+    BindingMismatch,
 }
 
-/// Result of using the opaque outbound sink.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of using the opaque outbound sink. Only a completed pre-enqueue
+/// refusal returns the original envelope; acceptance is not a delivery proof.
+#[derive(Debug)]
 pub(super) enum EndpointEnqueueOutcome {
     AcceptedOrUnknown,
-    ProvenNotEnqueued(EndpointEnqueueRejection),
+    ProvenNotEnqueued {
+        reason: EndpointEnqueueRejection,
+        outbound: Box<OutboundStanza>,
+    },
+}
+
+impl EndpointEnqueueOutcome {
+    fn refused(reason: EndpointEnqueueRejection, outbound: OutboundStanza) -> Self {
+        Self::ProvenNotEnqueued {
+            reason,
+            outbound: Box::new(outbound),
+        }
+    }
 }
 
 /// Owns the sending half of one socket's outbound queue.
@@ -143,9 +157,9 @@ pub(super) struct BindingOutboundEndpoint {
 
 impl BindingOutboundEndpoint {
     pub(super) fn try_send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
-        match self.with_active(|sink| sink.try_send(outbound)) {
-            Ok(outcome) => outcome,
-            Err(rejection) => EndpointEnqueueOutcome::ProvenNotEnqueued(rejection),
+        match self.admit() {
+            Ok(sink) => sink.try_send(outbound),
+            Err(reason) => EndpointEnqueueOutcome::refused(reason, outbound),
         }
     }
 
@@ -167,17 +181,23 @@ impl BindingOutboundEndpoint {
             .seal(owner, binding_ref)
     }
 
+    /// Cancellation while waiting for capacity drops the owned envelope. A
+    /// seal does not wake a capacity waiter; commit rechecks admission once
+    /// capacity becomes available.
     pub(super) async fn send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
         match self.reserve_owned().await {
             Ok(permit) => self.commit_reserved(permit, outbound),
-            Err(rejection) => EndpointEnqueueOutcome::ProvenNotEnqueued(rejection),
+            Err(reason) => EndpointEnqueueOutcome::refused(reason, outbound),
         }
     }
 
     pub(super) async fn reserve_owned(&self) -> Result<EndpointPermit, EndpointEnqueueRejection> {
         self.check_active()?;
         match self.queue.sender.clone().reserve_owned().await {
-            Ok(permit) => Ok(EndpointPermit(permit)),
+            Ok(permit) => Ok(EndpointPermit {
+                permit,
+                endpoint: self.clone(),
+            }),
             Err(_) => Err(EndpointEnqueueRejection::ChannelClosed),
         }
     }
@@ -185,7 +205,10 @@ impl BindingOutboundEndpoint {
     pub(super) fn try_reserve_owned(&self) -> Result<EndpointPermit, EndpointEnqueueRejection> {
         self.check_active()?;
         match self.queue.sender.clone().try_reserve_owned() {
-            Ok(permit) => Ok(EndpointPermit(permit)),
+            Ok(permit) => Ok(EndpointPermit {
+                permit,
+                endpoint: self.clone(),
+            }),
             Err(mpsc::error::TrySendError::Full(_)) => Err(EndpointEnqueueRejection::Full),
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 Err(EndpointEnqueueRejection::ChannelClosed)
@@ -198,18 +221,27 @@ impl BindingOutboundEndpoint {
         permit: EndpointPermit,
         outbound: OutboundStanza,
     ) -> EndpointEnqueueOutcome {
-        match self.with_active(|sink| {
-            if sink.queue.sender.is_closed() {
-                return EndpointEnqueueOutcome::ProvenNotEnqueued(
-                    EndpointEnqueueRejection::ChannelClosed,
-                );
-            }
-            permit.0.send(outbound);
-            EndpointEnqueueOutcome::AcceptedOrUnknown
-        }) {
-            Ok(outcome) => outcome,
-            Err(rejection) => EndpointEnqueueOutcome::ProvenNotEnqueued(rejection),
+        if !self.same_binding(&permit.endpoint) {
+            return EndpointEnqueueOutcome::refused(
+                EndpointEnqueueRejection::BindingMismatch,
+                outbound,
+            );
         }
+        let sink = match self.admit() {
+            Ok(sink) => sink,
+            Err(reason) => return EndpointEnqueueOutcome::refused(reason, outbound),
+        };
+        if sink.queue.sender.is_closed() {
+            return EndpointEnqueueOutcome::refused(
+                EndpointEnqueueRejection::ChannelClosed,
+                outbound,
+            );
+        }
+        // The receiver may close between this check and send. A consumed
+        // permit is therefore acceptance or unknown, never a retry proof.
+        permit.permit.send(outbound);
+        drop(sink);
+        EndpointEnqueueOutcome::AcceptedOrUnknown
     }
 
     /// Hold binding admission while a sink operation and any associated
@@ -220,6 +252,10 @@ impl BindingOutboundEndpoint {
         &self,
         operation: impl FnOnce(AdmittedOutboundEndpoint<'_>) -> T,
     ) -> Result<T, EndpointEnqueueRejection> {
+        self.admit().map(operation)
+    }
+
+    fn admit(&self) -> Result<AdmittedOutboundEndpoint<'_>, EndpointEnqueueRejection> {
         let admission = self
             .admission
             .lock()
@@ -227,10 +263,10 @@ impl BindingOutboundEndpoint {
         if let Some(rejection) = admission.rejection() {
             return Err(rejection);
         }
-        Ok(operation(AdmittedOutboundEndpoint {
+        Ok(AdmittedOutboundEndpoint {
             queue: &self.queue,
             _admission: admission,
-        }))
+        })
     }
 
     fn check_active(&self) -> Result<(), EndpointEnqueueRejection> {
@@ -280,15 +316,21 @@ impl AdmittedOutboundEndpoint<'_> {
     pub(super) fn try_send(&self, outbound: OutboundStanza) -> EndpointEnqueueOutcome {
         match self.queue.sender.try_send(outbound) {
             Ok(()) => EndpointEnqueueOutcome::AcceptedOrUnknown,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::Full)
+            Err(mpsc::error::TrySendError::Full(outbound)) => {
+                EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::Full, outbound)
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                EndpointEnqueueOutcome::ProvenNotEnqueued(EndpointEnqueueRejection::ChannelClosed)
+            Err(mpsc::error::TrySendError::Closed(outbound)) => {
+                EndpointEnqueueOutcome::refused(EndpointEnqueueRejection::ChannelClosed, outbound)
             }
         }
     }
 }
 
 #[derive(Debug)]
-pub(super) struct EndpointPermit(mpsc::OwnedPermit<OutboundStanza>);
+pub(super) struct EndpointPermit {
+    permit: mpsc::OwnedPermit<OutboundStanza>,
+    endpoint: BindingOutboundEndpoint,
+}
+
+#[cfg(test)]
+mod tests;
