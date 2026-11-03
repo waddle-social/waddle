@@ -351,3 +351,7 @@ waddle-server::physical_attestation sm_attach::portable_sm_attach_accepts_owner_
 waddle-server::physical_attestation sm_attach::portable_sm_attach_observes_owner_ddl_before_snapshot
 # The closed room-archive writer must run its restricted-role PostgreSQL fixture.
 waddle-server::recorded_room_archive recorded_room_archive_owns_its_transaction
+
+# P2.1 pending attachment must inspect a restricted PostgreSQL snapshot.
+waddle-server::physical_attestation pending_attach::pending_runtime_attach_checks_owner_preparation_and_restricted_snapshot
+waddle-server::physical_attestation pending_attach::pending_runtime_attach_observes_owner_ddl_before_snapshot

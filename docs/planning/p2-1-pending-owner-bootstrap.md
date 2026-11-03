@@ -9,3 +9,20 @@ This is a dark [#2116](https://github.com/waddle-social/waddle/issues/2116) slic
 3. Test fresh and repeated SQLite and PostgreSQL bootstrap, existing-schema repair and recovery, and owner versus restricted runtime behavior. Run focused pending-delivery tests, Rust formatting, strict Clippy, and the PostgreSQL test inventory.
 
 No runtime credential switch or read-only pending-delivery attachment is included. Existing constructors still use the current startup credential. Other store constructors and the full transaction authority remain separate work.
+
+## PostgreSQL runtime attachment
+
+`DatabasePendingDeliveryStorage::attach_existing` is a separate, dark
+prerequisite. For an attested PostgreSQL main lane, it locks the three qualified
+pending-delivery tables before taking its read-only repeatable-read snapshot,
+then checks the physical identity, table and index definitions, migration
+markers, and recovery metadata. It neither prepares nor repairs the schema.
+
+The table locks coordinate with conflicting table DDL during the snapshot; they
+do not serialize all catalog changes. In particular, an owner can independently
+change the identity sequence or replace the inspected trigger function while
+the tables are locked. Before activating this attachment, the owner must keep
+schema maintenance quiescent while it runs and for as long as its result is
+relied upon, or provide a separate coordination mechanism. The snapshot is not
+a durable DDL fence or proof of runtime write permissions or operational writer
+readiness.

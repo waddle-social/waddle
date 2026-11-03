@@ -134,8 +134,28 @@ async fn verify_transaction(
                     PendingRuntimeAttachError::Database(error)
                 }
             })?;
-        capability.attest_transaction(tx).await?;
         let expected = &capability.identity().schema.name.0;
+        let quoted = format!("\"{}\"", expected.replace('"', "\"\""));
+        // The pool checks the physical connection on checkout. Lock each
+        // qualified table before the first repeatable-read snapshot: an owner
+        // could otherwise commit table DDL after attestation pins the snapshot
+        // but before the later SELECT takes its relation lock.
+        for table in [
+            "pending_delivery",
+            "pending_delivery_sm_promotions",
+            "pending_delivery_startup_migrations",
+        ] {
+            tx.execute(
+                &format!("LOCK TABLE {quoted}.\"{table}\" IN ACCESS SHARE MODE"),
+                (),
+            )
+            .await
+            .map_err(|source| PendingRuntimeAttachError::Relation {
+                relation: table,
+                source,
+            })?;
+        }
+        capability.attest_transaction(tx).await?;
         let mut rows = tx.query("SELECT pg_catalog.current_schema()", ()).await?;
         let active: Option<String> = rows
             .next()
