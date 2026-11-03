@@ -100,7 +100,8 @@ impl DatabaseInboxStorage {
     /// 10 seconds, preserving tighter session limits. These are not a total
     /// or network deadline. SQLite checks temporary shadows of inbox and recovery
     /// ledger relations only on the connection used for this check.
-    /// This dark API is not startup wiring.
+    /// Attested PostgreSQL inbox startup uses this verifier after the owner
+    /// has prepared the shared global schema.
     pub async fn attach_existing(db: Database) -> Result<Self, super::InboxRuntimeAttachError> {
         super::runtime_attach::verify(&db).await?;
         Ok(Self { db })

@@ -73,7 +73,7 @@ use crate::server::session_janitors::{
 };
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
-use crate::server::{AppState, XmppConfig};
+use crate::server::{AppState, ResolvedXmppDatabaseUrl, XmppConfig};
 use crate::threads::storage::InboxBackedThreadsStorage;
 use crate::vcard::VCardStore;
 use anyhow::{Context, Result};
@@ -276,6 +276,10 @@ enum IngressColocationError {
          use a supported shared-pool store handle"
     )]
     AttestedChildPoolUnsupported,
+    #[error(
+        "an attested PostgreSQL inbox must inherit WADDLE_DATABASE_URL without an explicit inbox override"
+    )]
+    AttestedInboxRequiresInheritedGlobal,
 }
 
 async fn ensure_postgres_ingress_colocation(
@@ -300,10 +304,27 @@ async fn ensure_postgres_ingress_colocation(
 
 /// Open inbox reads on the database/schema used by ingress projection writes.
 /// This startup invariant applies with or without clustering.
+pub(crate) enum InboxStartup {
+    /// The store shares the physically attested global handle, so its lineage
+    /// must be registered as an alias of that exact boundary.
+    AttachedGlobal(Arc<DatabaseInboxStorage>),
+    /// The existing SQLite or ordinary PostgreSQL owner bootstrap path.
+    OwnerInitialized(Arc<DatabaseInboxStorage>),
+}
+
+impl InboxStartup {
+    pub(crate) fn storage(&self) -> &Arc<DatabaseInboxStorage> {
+        match self {
+            Self::AttachedGlobal(storage) | Self::OwnerInitialized(storage) => storage,
+        }
+    }
+}
+
 pub(crate) async fn create_ingress_inbox_storage(
-    database_url: Option<&str>,
+    selection: &ResolvedXmppDatabaseUrl,
     global: &Database,
-) -> Result<Arc<DatabaseInboxStorage>> {
+) -> Result<InboxStartup> {
+    let database_url = selection.as_deref();
     let storage = match global.driver() {
         DatabaseDriver::Sqlite => {
             if database_url.is_some_and(|url| url != global.database_url()) {
@@ -313,12 +334,13 @@ pub(crate) async fn create_ingress_inbox_storage(
         }
         DatabaseDriver::Postgres => {
             if global.uses_attested_postgres_pool() {
-                // This factory opens an independent PostgreSQL pool and then
-                // runs owner-side schema bootstrap. The attested handle does
-                // not expose a reconnectable DSN; startup must provide a
-                // supported store that shares the attested handle after
-                // trusted owner bootstrap.
-                return Err(IngressColocationError::AttestedChildPoolUnsupported.into());
+                // Only inherited selection identifies the already supplied
+                // global handle. Never probe or open an explicit child URL.
+                if !matches!(selection, ResolvedXmppDatabaseUrl::InheritedGlobal(_)) {
+                    return Err(IngressColocationError::AttestedInboxRequiresInheritedGlobal.into());
+                }
+                let storage = DatabaseInboxStorage::attach_existing(global.clone()).await?;
+                return Ok(InboxStartup::AttachedGlobal(Arc::new(storage)));
             }
             let database_url = database_url.unwrap_or_else(|| global.database_url());
             // Opening inbox storage mutates its schema. Check the live identity
@@ -340,7 +362,7 @@ pub(crate) async fn create_ingress_inbox_storage(
             storage
         }
     };
-    Ok(Arc::new(storage))
+    Ok(InboxStartup::OwnerInitialized(Arc::new(storage)))
 }
 
 async fn ensure_mam_ingress_colocation(storage: &SqlxMamStorage, global: &Database) -> Result<()> {
@@ -2025,9 +2047,12 @@ mod ingress_colocation_tests {
         )
         .await
         .expect("documented MAM boots");
-        create_ingress_inbox_storage(Some(&configured("WADDLE_XMPP_INBOX_DATABASE_URL")), &global)
-            .await
-            .expect("documented inbox boots");
+        create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(configured("WADDLE_XMPP_INBOX_DATABASE_URL")),
+            &global,
+        )
+        .await
+        .expect("documented inbox boots");
     }
 
     const LEGACY_MAM_OBJECTS: &[&str] = &[
@@ -2235,13 +2260,19 @@ mod ingress_colocation_tests {
         let global = crate::db::Database::from_config("ingress-colocation", &config)
             .await
             .expect("global");
-        let shared = create_ingress_inbox_storage(Some(global_url.as_str()), &global)
-            .await
-            .expect("colocated inbox");
-        let error = create_ingress_inbox_storage(Some(separate_url.as_str()), &global)
-            .await
-            .err()
-            .expect("startup rejects split inbox schema without clustering");
+        let shared = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(global_url.to_string()),
+            &global,
+        )
+        .await
+        .expect("colocated inbox");
+        let error = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(separate_url.to_string()),
+            &global,
+        )
+        .await
+        .err()
+        .expect("startup rejects split inbox schema without clustering");
         assert!(matches!(
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::PostgresIdentity { .. })
@@ -2274,17 +2305,23 @@ mod ingress_colocation_tests {
             crate::db::Database::open_local("inbox-colocation", directory.path().join("global.db"))
                 .await
                 .expect("global");
-        create_ingress_inbox_storage(Some(global.database_url()), &global)
-            .await
-            .expect("colocated inbox");
+        create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(global.database_url().to_owned()),
+            &global,
+        )
+        .await
+        .expect("colocated inbox");
         let separate =
             crate::db::Database::open_local("separate-inbox", directory.path().join("inbox.db"))
                 .await
                 .expect("separate");
-        let error = create_ingress_inbox_storage(Some(separate.database_url()), &global)
-            .await
-            .err()
-            .expect("startup rejects split inbox database");
+        let error = create_ingress_inbox_storage(
+            &ResolvedXmppDatabaseUrl::Explicit(separate.database_url().to_owned()),
+            &global,
+        )
+        .await
+        .err()
+        .expect("startup rejects split inbox database");
         assert!(matches!(
             error.downcast_ref::<IngressColocationError>(),
             Some(IngressColocationError::SqliteDatabase)
@@ -2308,10 +2345,12 @@ mod ingress_colocation_tests {
             .execute("CREATE TABLE shared_pool_marker (id INTEGER)")
             .await
             .expect("marker");
-        let inbox = create_ingress_inbox_storage(None, &global)
-            .await
-            .expect("shared inbox");
+        let inbox =
+            create_ingress_inbox_storage(&ResolvedXmppDatabaseUrl::EphemeralFallback, &global)
+                .await
+                .expect("shared inbox");
         inbox
+            .storage()
             .database()
             .execute("INSERT INTO shared_pool_marker VALUES (1)")
             .await

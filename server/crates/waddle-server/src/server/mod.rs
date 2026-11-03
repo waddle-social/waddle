@@ -52,7 +52,7 @@ pub use routes::interpret::effects;
 pub use routes::interpret::{build_plan_deps, plan_message_dispatch};
 pub mod xmpp_state;
 
-pub use config::{XmppAcmeConfig, XmppConfig};
+pub use config::{ResolvedXmppDatabaseUrl, XmppAcmeConfig, XmppConfig};
 pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 
 use crate::config::ServerConfig;
@@ -72,8 +72,14 @@ use tracing::info;
 mod tests;
 
 mod lifecycle;
+#[cfg(feature = "test-support")]
+pub(crate) use config::resolve_xmpp_database_url_values;
+#[cfg(feature = "test-support")]
+pub(crate) use http::{create_ingress_inbox_storage, InboxStartup};
 use lifecycle::bootstrap_and_register_store_lineage;
 use lifecycle::bootstrap_mam_lineage;
 pub(crate) use lifecycle::bootstrap_store_lineage;
+#[cfg(feature = "test-support")]
+pub(crate) use lifecycle::register_inbox_lineage;
 pub use lifecycle::start;
 pub use lifecycle::start_with_config;

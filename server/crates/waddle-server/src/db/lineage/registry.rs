@@ -296,6 +296,18 @@ impl LineageRegistry {
         Self { entries }
     }
 
+    /// Inspect the recorded topology in integration tests.
+    #[cfg(feature = "test-support")]
+    pub fn alias_target_for_test(&self, store: DurableStore) -> Option<DurableStore> {
+        self.entries.iter().find_map(|entry| match entry {
+            LineageRegistryEntry {
+                store: found,
+                topology: LineageTopology::Alias { of },
+            } if *found == store => Some(*of),
+            _ => None,
+        })
+    }
+
     /// `probe_timeout` bounds EACH boundary's probe individually so one
     /// stalled pool cannot withhold another boundary's already-definitive
     /// answer from the report. A timed-out probe uses a proven result only

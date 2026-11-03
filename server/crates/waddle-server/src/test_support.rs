@@ -87,6 +87,41 @@ pub async fn websocket_state() -> Arc<WebSocketState> {
     .await
 }
 
+/// Resolve store URL provenance with the same normalization used by startup.
+#[cfg(feature = "test-support")]
+pub fn resolve_xmpp_database_url_for_test(
+    explicit: Option<&str>,
+    global: Option<&str>,
+) -> crate::server::ResolvedXmppDatabaseUrl {
+    crate::server::resolve_xmpp_database_url_values(explicit, global)
+}
+
+/// Opaque test handle for the production inbox startup result and its lineage.
+#[cfg(feature = "test-support")]
+pub struct InboxStartupForTest(crate::server::InboxStartup);
+
+#[cfg(feature = "test-support")]
+impl InboxStartupForTest {
+    pub fn storage(&self) -> Arc<crate::inbox::DatabaseInboxStorage> {
+        Arc::clone(self.0.storage())
+    }
+
+    pub async fn register_lineage(&self, state: &crate::server::AppState) -> anyhow::Result<()> {
+        crate::server::register_inbox_lineage(state, &self.0).await
+    }
+}
+
+/// Exercise the production inbox startup factory with a supplied database.
+#[cfg(feature = "test-support")]
+pub async fn create_inbox_startup_for_test(
+    selection: &crate::server::ResolvedXmppDatabaseUrl,
+    global: &Database,
+) -> anyhow::Result<InboxStartupForTest> {
+    crate::server::create_ingress_inbox_storage(selection, global)
+        .await
+        .map(InboxStartupForTest)
+}
+
 /// Consume a physically attested SQLx pool into the crate's database wrapper.
 /// The pool and its opaque writer capability stay paired by construction.
 #[cfg(feature = "test-support")]

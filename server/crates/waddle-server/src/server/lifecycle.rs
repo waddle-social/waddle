@@ -132,9 +132,9 @@ pub async fn start_with_config(
     // The inbox projection is written inside the ingress transaction, so its
     // rows must live in the global database: SQLite shares the global pool
     // outright; PostgreSQL must be pointed at the same database.
-    let inbox_database_storage =
-        http::create_ingress_inbox_storage(xmpp_config.inbox_database_url.as_deref(), &global_db)
-            .await?;
+    let inbox_startup =
+        http::create_ingress_inbox_storage(&xmpp_config.inbox_database_url, &global_db).await?;
+    let inbox_database_storage = inbox_startup.storage().clone();
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(
@@ -311,12 +311,7 @@ pub async fn start_with_config(
             db_pool.global().clone(),
         );
     }
-    bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::Inbox,
-        inbox_database_storage.database(),
-    )
-    .await?;
+    register_inbox_lineage(&state, &inbox_startup).await?;
     bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::SpacesMetadata,
@@ -458,6 +453,24 @@ pub async fn start_with_config(
             "critical actor service terminated; node fenced and drained: {failure:?}"
         )),
         None => result.map(|()| metrics_flush),
+    }
+}
+
+pub(crate) async fn register_inbox_lineage(
+    state: &AppState,
+    startup: &http::InboxStartup,
+) -> Result<()> {
+    use crate::db::lineage::DurableStore;
+
+    match startup {
+        http::InboxStartup::AttachedGlobal(_) => {
+            state.register_lineage_alias(DurableStore::Inbox, DurableStore::Global);
+            Ok(())
+        }
+        http::InboxStartup::OwnerInitialized(storage) => {
+            bootstrap_and_register_store_lineage(state, DurableStore::Inbox, storage.database())
+                .await
+        }
     }
 }
 

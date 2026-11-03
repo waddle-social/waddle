@@ -6185,3 +6185,7 @@ mod pending_attach;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/sm_attach.rs"]
 mod sm_attach;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/inbox_startup.rs"]
+mod inbox_startup;
