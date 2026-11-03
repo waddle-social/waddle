@@ -241,6 +241,60 @@ questions or the #2116 prerequisite:
   tail is a bounded deduplication horizon, not proof against every later
   fresh-session client resubmission.
 
+### Current-tree contract review, 2026-11-03
+
+A read-only review of the local P2.1 draft at `978c9085` found canonical
+`source_binding`, `owner_decision`, `ingress_owner_rejections`, and paired
+retention checks that were not present in this document's `main@8ecc94bb`
+snapshot. The closed owner-result and readback helpers are still test-only.
+These newer pieces narrow the work but do not clear the three blocking contract
+questions or #2116. No mailbox schema, repository, runtime path, or test was
+added by this review.
+
+1. **Request identity remains blocked.** A candidate operation identity is
+   `RoomAcceptance(MessageKey)`, globally unique across lanes and physical
+   owners. The original source binding, room, sender, digest, occurrence, and
+   first lane/sequence must be checked and retained; an owner-specific
+   `DispatchToRoomRemote` key is attempt provenance. The current relayed-source
+   assertion requires that remote-dispatch effect, so it cannot recover an
+   originally local accepted result after a local-to-remote owner transfer.
+   A successor must first read the exact accepted manifest or rejection before
+   deciding whether any new execution is permitted. A duplicate from another
+   resource may reconcile the original responsibility, but it cannot move the
+   lane or inherit the original response custody.
+2. **Join and source order remain blocked.** Both normal join dispatch and
+   repair need one stable logical origin, proposed as bound full JID plus
+   `OccupancySessionGeneration`, and a server-minted canonical join occurrence
+   in the existing ingress authority. Current repair changes execution origin
+   and sends `canonical: None`. More fundamentally, the current stream lock
+   allocates from `handled + 1`; delaying `h` while admitting a second pending
+   stanza can reuse an ordinal. Select either separate durable registered and
+   handled frontiers or a durable one-pending-occurrence admission gate with
+   bounded buffering and continued SM-control handling. Accepted occupancy
+   must also be recoverable and superseded by later leave/kick/rebind work;
+   replaying an old join must not resurrect it.
+3. **Proof release remains blocked.** A positive release certificate must bind
+   the operation, original source occurrence, exact canonical outcome,
+   recoverable response custody, and contiguous handled checkpoint. An absent
+   session row, relay ACK, child completion, socket write, or elapsed time is
+   not that certificate. Retain an equivalent tombstone after session
+   retirement and start a fresh full parent tail only after authorized release.
+   For cleanup, take sorted lanes before canonical parents, then entry locks.
+   GC takes canonical parents with `SKIP LOCKED`, never a lane, and checks for
+   **any** mailbox row, including terminal rows, in a fresh READ COMMITTED
+   snapshot before deleting dependent deliveries, a rejection child, or the
+   parent. Excluding terminal rows can cause unsafe collection attempts or
+   foreign-key failures; an entry-first cleaner would additionally permit a
+   parent/entry deadlock. Both appender-first and GC-first schedules need real
+   PostgreSQL barrier tests.
+
+The existing ingress commit takes the SM stream lock before canonical
+resolution, so the proposed lane-first order requires an explicit source
+admission redesign. These are architecture findings, not an accepted storage
+contract or evidence of a passing implementation. Keep #1986's DDL and
+repository gate closed until #2116 and the three contracts are resolved and
+reviewed on the implementation tree.
+
 ## Candidate storage contract
 
 The names and physical migration are intentionally not selected. This is a
