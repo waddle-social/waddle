@@ -29,7 +29,7 @@
 use crate::clustering::{NodeAdmissionError, NodeAdmissionPermit, NodeLifecycle};
 use crate::server::routes::websocket::supervised_io::{
     fixed_terminal_text, start_reserved_supervised_io, FixedTerminalText, OrderedInboundTerminal,
-    QueueItem, ReservedIoStartConfig, ShutdownProtocol, WriteAuthority, WriteSender,
+    QueueItem, ReservedIoStartConfig, ShutdownProtocol, StopSignal, WriteAuthority, WriteSender,
 };
 use axum::extract::ws::{Message, WebSocket};
 use futures::future::{poll_fn, BoxFuture};
@@ -909,6 +909,7 @@ pub struct ActorWriteProbe {
     state: Mutex<ActorWriteProbeState>,
     release: std::sync::Condvar,
     entered: tokio::sync::watch::Sender<u64>,
+    attempts: std::sync::atomic::AtomicU64,
     close_armed: std::sync::atomic::AtomicBool,
     close_entered: tokio::sync::watch::Sender<bool>,
     close_release: tokio::sync::Semaphore,
@@ -920,7 +921,6 @@ struct ActorWriteProbeState {
     armed: bool,
     released: bool,
     entries: u64,
-    attempts: u64,
 }
 
 #[cfg(feature = "test-support")]
@@ -932,6 +932,7 @@ impl Default for ActorWriteProbe {
             state: Mutex::new(ActorWriteProbeState::default()),
             release: std::sync::Condvar::new(),
             entered,
+            attempts: std::sync::atomic::AtomicU64::new(0),
             close_armed: std::sync::atomic::AtomicBool::new(false),
             close_entered,
             close_release: tokio::sync::Semaphore::new(0),
@@ -991,10 +992,7 @@ impl ActorWriteProbe {
     }
 
     pub fn attempts(&self) -> u64 {
-        self.state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
-            .attempts
+        self.attempts.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn before_attempt(&self) {
@@ -1017,11 +1015,8 @@ impl ActorWriteProbe {
     }
 
     fn record_attempt(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        state.attempts += 1;
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -1117,7 +1112,12 @@ impl WriteAuthority for FrameAuthority {
         })
     }
 
-    fn attempt(&self, connection_ref: &ConnectionRef, attempt: Box<dyn FnOnce() + '_>) -> bool {
+    fn attempt(
+        &self,
+        connection_ref: &ConnectionRef,
+        stop: &StopSignal,
+        attempt: Box<dyn FnOnce() + '_>,
+    ) -> bool {
         if connection_ref != &self.transport.connection_ref {
             return false;
         }
@@ -1134,36 +1134,39 @@ impl WriteAuthority for FrameAuthority {
                 if let Some(probe) = &probe {
                     probe.before_attempt();
                 }
-                // Tokens are independently cancellable and these checks are
-                // best effort around concurrent cancellation.
-                // The exact source revision and lifecycle generation guard
-                // the synchronous sink enqueue. Lock source, lifecycle, then
-                // phase; no guard survives an await.
+                // The process and live-interruption tokens are independently
+                // cancellable, so those checks remain best effort. Source,
+                // node generation and the first pump stop fence the sink
+                // enqueue. Lock source, node, stop, then transport phase; no
+                // guard survives an await or enters actor/effect-owner locks.
                 let result = self.transport.source.with_current(|| {
                     self.transport.permit.start_send_if_current(|| {
-                        let phase = self
-                            .transport
-                            .phase
-                            .read()
-                            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-                        let phase_matches = matches!(
-                            (self.mode, *phase),
-                            (FrameMode::Data, TransportPhase::Open)
-                                | (FrameMode::LiveDetach, TransportPhase::LiveDetach)
-                        );
-                        if !phase_matches
-                            || self.transport.process_stop.is_cancelled()
-                            || (matches!(self.mode, FrameMode::Data)
-                                && self.transport.live_interrupt.is_cancelled())
-                        {
-                            return Err(());
-                        }
-                        #[cfg(feature = "test-support")]
-                        if let Some(probe) = &probe {
-                            probe.record_attempt();
-                        }
-                        attempt();
-                        Ok(())
+                        stop.start_send_if_running(|| {
+                            let phase = self
+                                .transport
+                                .phase
+                                .read()
+                                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+                            let phase_matches = matches!(
+                                (self.mode, *phase),
+                                (FrameMode::Data, TransportPhase::Open)
+                                    | (FrameMode::LiveDetach, TransportPhase::LiveDetach)
+                            );
+                            if !phase_matches
+                                || self.transport.process_stop.is_cancelled()
+                                || (matches!(self.mode, FrameMode::Data)
+                                    && self.transport.live_interrupt.is_cancelled())
+                            {
+                                return Err(());
+                            }
+                            #[cfg(feature = "test-support")]
+                            if let Some(probe) = &probe {
+                                probe.record_attempt();
+                            }
+                            attempt();
+                            Ok(())
+                        })
+                        .unwrap_or(Err(()))
                     })
                 });
                 matches!(result, Some(Ok(Ok(()))))
@@ -1619,6 +1622,7 @@ impl Drop for RevocationBridge {
 }
 
 impl SocketAdmission {
+    #[cfg(feature = "test-support")]
     async fn start_with_factory<
         R,
         W,

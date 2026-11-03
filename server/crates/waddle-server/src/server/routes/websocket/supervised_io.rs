@@ -142,8 +142,8 @@ pub enum StopReason {
     OutboundIoFailure,
     PumpExited,
     ShutdownDeadline,
-    /// Interrupts the pumps after local lease loss, but is not an authority
-    /// fence for a write already crossing the sink effect boundary.
+    /// Interrupts the pumps after local lease loss. The supervised WebSocket
+    /// data and live-detach paths also fence their synchronous sink enqueue.
     LeaseLost,
 }
 
@@ -198,6 +198,23 @@ impl StopSignal {
         }
         drop(state);
         self.token.cancel();
+    }
+
+    /// Run the synchronous sink enqueue only if no stop has won the state
+    /// lock. A concurrent stop waits until the enqueue returns. Callers may
+    /// check transport authority inside the closure, but must not await,
+    /// cancel or re-enter this signal, or acquire actor/effect-owner locks.
+    pub(crate) fn start_send_if_running<R>(&self, start_send: impl FnOnce() -> R) -> Option<R> {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if state.reason.is_some() {
+            return None;
+        }
+        let result = start_send();
+        drop(state);
+        Some(result)
     }
 
     #[cfg(feature = "test-support")]
@@ -538,7 +555,12 @@ struct WriteRequest<T> {
 /// WebSocket adapter supplies one for every submitted frame.
 pub(crate) trait WriteAuthority: Send + Sync {
     fn revoked(&self) -> futures::future::BoxFuture<'_, ()>;
-    fn attempt(&self, connection_ref: &ConnectionRef, attempt: Box<dyn FnOnce() + '_>) -> bool;
+    fn attempt(
+        &self,
+        connection_ref: &ConnectionRef,
+        stop: &StopSignal,
+        attempt: Box<dyn FnOnce() + '_>,
+    ) -> bool;
 }
 
 impl<T> Drop for WriteRequest<T> {
@@ -1617,9 +1639,9 @@ impl IoCustodianHandle {
     }
 
     /// Request an out-of-band stop without sending through an application data
-    /// mailbox. Lease loss uses this to interrupt the pumps; it does not fence
-    /// a write that has passed `poll_ready` and can still call `start_send`.
-    /// Any live cutover needs an authority gate at that effect boundary.
+    /// mailbox. The supervised WebSocket data and live-detach paths fence
+    /// `start_send` against this stop; generic pump users need their own
+    /// authority gate at that effect boundary.
     pub fn request_stop(&self, reason: StopReason) {
         if custodian_state_is_terminal(self.state()) {
             return;
@@ -3432,7 +3454,7 @@ where
         start_result = Some(Pin::new(&mut *writer).start_send(value));
     };
     let admitted = match authority {
-        Some(ref authority) => authority.attempt(connection_ref, Box::new(attempt)),
+        Some(ref authority) => authority.attempt(connection_ref, stop, Box::new(attempt)),
         None => {
             attempt();
             true

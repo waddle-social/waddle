@@ -27,6 +27,10 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Default)]
 struct SinkState {
     stall_ready: AtomicBool,
+    block_in_ready: AtomicBool,
+    ready_entered: AtomicBool,
+    ready_released: Mutex<bool>,
+    ready_changed: Condvar,
     stall_flush: AtomicBool,
     fail_flush: AtomicBool,
     fail_start_after_close: AtomicBool,
@@ -51,11 +55,17 @@ impl SinkState {
     fn release(&self) {
         self.stall_ready.store(false, Ordering::Release);
         self.stall_flush.store(false, Ordering::Release);
+        self.release_ready();
         *self.blocking_released.lock().expect("gate lock") = true;
         self.blocking_changed.notify_all();
         *self.start_released.lock().expect("start gate lock") = true;
         self.start_changed.notify_all();
         self.waker.wake();
+    }
+
+    fn release_ready(&self) {
+        *self.ready_released.lock().expect("ready gate lock") = true;
+        self.ready_changed.notify_all();
     }
 
     async fn wait_until_blocked(&self) {
@@ -76,6 +86,18 @@ impl SinkState {
             tokio::pin!(notified);
             notified.as_mut().enable();
             if self.ready_polls.load(Ordering::Acquire) > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_for_blocked_ready(&self) {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.ready_entered.load(Ordering::Acquire) {
                 return;
             }
             notified.await;
@@ -121,6 +143,18 @@ impl Sink<Message> for ControlledSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.0.ready_polls.fetch_add(1, Ordering::AcqRel);
         self.0.changed.notify_waiters();
+        if self.0.block_in_ready.load(Ordering::Acquire) {
+            let mut released = self.0.ready_released.lock().expect("ready gate lock");
+            self.0.ready_entered.store(true, Ordering::Release);
+            self.0.changed.notify_waiters();
+            while !*released {
+                released = self
+                    .0
+                    .ready_changed
+                    .wait(released)
+                    .expect("ready gate wait");
+            }
+        }
         self.0.waker.register(cx.waker());
         if self.0.stall_ready.load(Ordering::Acquire) {
             Poll::Pending
@@ -218,6 +252,14 @@ struct Harness {
 }
 
 async fn start(inbound: (usize, usize), outbound: (usize, usize)) -> Harness {
+    start_with_deadline(inbound, outbound, Duration::from_millis(250)).await
+}
+
+async fn start_with_deadline(
+    inbound: (usize, usize),
+    outbound: (usize, usize),
+    retirement_deadline: Duration,
+) -> Harness {
     let inventory = IoCustodianInventory::new(1).expect("inventory");
     let limits = TransportLimits::new(
         Limits::new(inbound.0, inbound.1).expect("inbound limits"),
@@ -246,7 +288,7 @@ async fn start(inbound: (usize, usize), outbound: (usize, usize)) -> Harness {
     let (custodian, input, output) = start_websocket_transport(
         admission,
         limits,
-        Duration::from_millis(250),
+        retirement_deadline,
         |error: &io::Error| error.kind() == io::ErrorKind::BrokenPipe,
         move |connection_ref| {
             assert_eq!(connection_ref, &expected);
@@ -754,6 +796,120 @@ async fn cancelled_before_sink_attempt_is_not_attempted() {
     );
     assert_joined(&h).await;
     assert_eq!(h.sink.starts.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn stop_after_ready_poll_but_before_the_gate_rejects_data_and_live_detach() {
+    for live_detach in [false, true] {
+        let mut h = start_with_deadline((2, 512), (2, 512), TIMEOUT).await;
+        let _release = ReleaseBlockingSinkOnDrop(Arc::clone(&h.sink));
+        h.sink.block_in_ready.store(true, Ordering::Release);
+        let frame = if live_detach {
+            h.output.begin_live_detach().expect("detach");
+            h.output.conflict_error_frame().expect("conflict")
+        } else {
+            h.output.data_frame(Message::text("queued")).expect("data")
+        };
+        let receipt = h.output.submit(frame).await.expect("queue admission");
+        assert!(receipt.is_for(&h.identity));
+        timeout(TIMEOUT, h.sink.wait_for_blocked_ready())
+            .await
+            .expect("readiness entered");
+        assert_eq!(receipt.progress(), WriteProgress::Admitted);
+
+        h.custodian.request_stop(StopReason::LeaseLost);
+        h.custodian.request_stop(StopReason::Requested);
+        assert_eq!(h.custodian.stop_reason(), Some(StopReason::LeaseLost));
+        h.sink.release_ready();
+
+        assert_eq!(
+            timeout(TIMEOUT, receipt.wait_for_terminal())
+                .await
+                .expect("receipt"),
+            WriteProgress::NotAttempted
+        );
+        assert_eq!(h.sink.starts.load(Ordering::Acquire), 0);
+        assert_joined(&h).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn stop_waits_for_data_and_live_detach_start_send_to_return() {
+    for live_detach in [false, true] {
+        let mut h = start_with_deadline((2, 512), (2, 512), TIMEOUT).await;
+        let _release = ReleaseBlockingSinkOnDrop(Arc::clone(&h.sink));
+        h.sink.block_in_start.store(true, Ordering::Release);
+        h.sink.stall_flush.store(true, Ordering::Release);
+        let frame = if live_detach {
+            h.output.begin_live_detach().expect("detach");
+            h.output.conflict_error_frame().expect("conflict")
+        } else {
+            h.output
+                .data_frame(Message::text("in start_send"))
+                .expect("data")
+        };
+        let receipt = h.output.submit(frame).await.expect("queue admission");
+        assert!(receipt.is_for(&h.identity));
+        timeout(TIMEOUT, h.sink.wait_for_blocked_start())
+            .await
+            .expect("start entered");
+        assert_eq!(receipt.progress(), WriteProgress::Admitted);
+
+        let custodian = h.custodian.clone();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let mut stop = tokio::task::spawn_blocking(move || {
+            let _ = started.send(());
+            custodian.request_stop(StopReason::LeaseLost);
+        });
+        started_rx.await.expect("stop caller started");
+        assert!(timeout(Duration::from_millis(40), &mut stop).await.is_err());
+
+        *h.sink.start_released.lock().expect("start gate lock") = true;
+        h.sink.start_changed.notify_all();
+        timeout(TIMEOUT, &mut stop)
+            .await
+            .expect("stop returned after start_send")
+            .expect("stop task");
+        h.custodian.request_stop(StopReason::Requested);
+        assert_eq!(h.custodian.stop_reason(), Some(StopReason::LeaseLost));
+        assert_eq!(h.sink.starts.load(Ordering::Acquire), 1);
+        assert_eq!(
+            timeout(TIMEOUT, receipt.wait_for_terminal())
+                .await
+                .expect("receipt"),
+            WriteProgress::Uncertain
+        );
+        assert_joined(&h).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_ready_terminal_frame_retains_its_existing_stop_behavior() {
+    for transport_close in [false, true] {
+        let mut h = start_with_deadline((2, 512), (2, 512), TIMEOUT).await;
+        let _release = ReleaseBlockingSinkOnDrop(Arc::clone(&h.sink));
+        h.sink.block_in_ready.store(true, Ordering::Release);
+        h.output.begin_shutdown().expect("shutdown");
+        let frame = if transport_close {
+            h.output.transport_close_frame(None).expect("close")
+        } else {
+            h.output.shutdown_error_frame().expect("shutdown frame")
+        };
+        let receipt = h.output.submit(frame).await.expect("queue admission");
+        timeout(TIMEOUT, h.sink.wait_for_blocked_ready())
+            .await
+            .expect("readiness entered");
+        h.custodian.request_stop(StopReason::Requested);
+        h.sink.release_ready();
+        assert_eq!(
+            timeout(TIMEOUT, receipt.wait_for_terminal())
+                .await
+                .expect("receipt"),
+            WriteProgress::Uncertain
+        );
+        assert_eq!(h.sink.starts.load(Ordering::Acquire), 1);
+        assert_joined(&h).await;
+    }
 }
 
 #[tokio::test]

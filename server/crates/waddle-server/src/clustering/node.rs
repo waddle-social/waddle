@@ -133,9 +133,10 @@ impl NodeAdmissionPermit {
     /// lifecycle writer either completes first and rejects the enqueue, or
     /// waits until the enqueue has returned.
     ///
-    /// The closure is intentionally synchronous and must contain only the
-    /// `Sink::start_send` call. It must not await or re-enter this lifecycle.
-    /// The guard is dropped as soon as that call returns; a later flush may
+    /// The closure is intentionally short and synchronous: it may check local
+    /// transport authority and call `Sink::start_send`, but must not await,
+    /// re-enter this lifecycle, or acquire actor/effect-owner locks. The guard
+    /// is dropped as soon as that call returns; a later flush may
     /// still reach the underlying WebSocket after revocation as already-
     /// authorized in-flight work.
     pub(crate) fn start_send_if_current<E>(
