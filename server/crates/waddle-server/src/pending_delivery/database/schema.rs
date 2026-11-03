@@ -1,8 +1,8 @@
 use super::{debug, info, DatabaseDriver, PendingStorageError};
 use crate::db::{Database, IntoParams, Rows, Value};
 
-const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
-const V1014_CLAIM_RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
+pub(super) const LEGACY_MAM_CLEANUP_MARKER: &str = "legacy_mam_query_frames_v1";
+pub(super) const V1014_CLAIM_RESET_MARKER: &str = "ingress_v1014_pending_claim_reset_v1";
 const LEGACY_MAM_CLEANUP_SELECT_BATCH: i64 = 128;
 const LEGACY_MAM_CLEANUP_DELETE_BATCH: usize = 128;
 

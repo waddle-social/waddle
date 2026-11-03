@@ -603,6 +603,10 @@ impl Database {
         self.admission.lane() == PoolLane::Ingress
     }
 
+    pub(crate) fn is_main_lane(&self) -> bool {
+        self.admission.lane() == PoolLane::Main
+    }
+
     /// Test whether two handles carry the very same reserved lane, without
     /// exposing its semaphore or the underlying physical pool.
     #[cfg(feature = "test-support")]
