@@ -22,8 +22,8 @@ pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String 
     String::from_utf8(buf).expect("xmpp_parsers serializes valid UTF-8")
 }
 
-pub(super) fn websocket_stream_open_element(domain: &str) -> Element {
-    Element::builder("open", "urn:ietf:params:xml:ns:xmpp-framing")
+pub(super) fn websocket_stream_open_element(domain: &str, to: Option<&jid::BareJid>) -> Element {
+    let mut open = Element::builder("open", "urn:ietf:params:xml:ns:xmpp-framing")
         .attr(minidom::rxml::xml_ncname!("from").to_owned(), domain)
         .attr(
             minidom::rxml::xml_ncname!("id").to_owned(),
@@ -34,13 +34,16 @@ pub(super) fn websocket_stream_open_element(domain: &str) -> Element {
             minidom::rxml::Namespace::XML,
             minidom::rxml::xml_ncname!("lang").to_owned(),
             "en",
-        )
-        .build()
+        );
+    if let Some(to) = to {
+        open = open.attr(minidom::rxml::xml_ncname!("to").to_owned(), to.to_string());
+    }
+    open.build()
 }
 
 #[cfg(test)]
 pub(super) fn websocket_stream_open_xml(domain: &str) -> String {
-    element_to_xml(websocket_stream_open_element(domain))
+    element_to_xml(websocket_stream_open_element(domain, None))
 }
 
 pub(super) fn websocket_stream_close_element() -> Element {

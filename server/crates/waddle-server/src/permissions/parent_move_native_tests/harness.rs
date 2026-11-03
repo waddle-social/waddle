@@ -184,6 +184,7 @@ impl Harness {
             permission_actor: actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             node_lifecycle: NodeLifecycle::new(),
+            max_websocket_connections: crate::config::MaxWebSocketConnections::default(),
             clustering_claims: ClusteringHandles::default(),
             lineage_config: LineageConfig::default(),
             clustering_enabled: false,

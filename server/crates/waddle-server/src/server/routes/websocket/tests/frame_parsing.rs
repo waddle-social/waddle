@@ -321,6 +321,90 @@ async fn websocket_stream_open_handling_tracks_current_stream_instance() {
 }
 
 #[tokio::test]
+async fn stream_from_is_replaced_and_cleared_by_restart_and_close() {
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let mut conn = WsConnState::new();
+    let first = r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="bob@example.com"/>"#;
+    let second = r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="alice@example.com"/>"#;
+    handle_xmpp_frame(first, "example.com", state.as_ref(), &mut conn).await;
+    assert_eq!(
+        conn.stream_open_from
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("bob@example.com")
+    );
+    let response = handle_xmpp_frame(second, "example.com", state.as_ref(), &mut conn).await;
+    assert_eq!(
+        conn.stream_open_from
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("alice@example.com")
+    );
+    let open = Element::from_str(&response[0]).expect("open");
+    assert_eq!(open.attr("to"), Some("alice@example.com"));
+
+    let payload = BASE64_STANDARD.encode(format!("n,,\x01auth=Bearer {}\x01\x01", session.id));
+    let auth = element_to_xml(
+        Element::builder("auth", waddle_xmpp::ns::SASL)
+            .attr(
+                minidom::rxml::xml_ncname!("mechanism").to_owned(),
+                "OAUTHBEARER",
+            )
+            .append(payload)
+            .build(),
+    );
+    assert_eq!(
+        handle_xmpp_frame(&auth, "example.com", state.as_ref(), &mut conn).await,
+        vec![sasl_success_xml()]
+    );
+    assert!(
+        conn.stream_open_from.is_none(),
+        "SASL1 success restarts the stream"
+    );
+    handle_xmpp_frame(second, "example.com", state.as_ref(), &mut conn).await;
+    assert!(conn.stream_open_from.is_some());
+    handle_xmpp_frame(
+        r#"<close xmlns="urn:ietf:params:xml:ns:xmpp-framing"/>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert!(
+        conn.stream_open_from.is_none(),
+        "closing ends the current stream"
+    );
+}
+
+#[tokio::test]
+async fn bound_stream_open_rejects_foreign_from_and_keeps_cleanup_jid() {
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/device".parse().expect("full JID");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let responses = handle_xmpp_frame(
+        r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" from="bob@example.com"/>"#,
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    assert_eq!(responses.len(), 3);
+    let open = Element::from_str(&responses[0]).expect("open");
+    assert_eq!(open.attr("to"), Some("bob@example.com"));
+    let error = Element::from_str(&responses[1]).expect("stream error");
+    assert!(error
+        .get_child("invalid-from", "urn:ietf:params:xml:ns:xmpp-streams")
+        .is_some());
+    assert_eq!(conn.phase.cleanup_jid(), Some(&jid));
+    assert!(conn.phase.is_closing());
+    assert!(conn.stream_open_from.is_none());
+}
+
+#[tokio::test]
 async fn websocket_rejects_reauthentication_after_successful_sasl() {
     let state = create_test_websocket_state().await;
     let session = create_test_session(state.as_ref(), "alice").await;

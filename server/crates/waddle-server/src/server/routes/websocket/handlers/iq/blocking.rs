@@ -2,8 +2,9 @@ use super::roster::roster_storage_for_state;
 use super::{
     bad_request_iq_error, build_iq_error_xml_typed, chrono, global_database,
     internal_server_error_iq_error, iq_to_xml, mark_span_error, not_authorized_iq_error,
-    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid, warn,
-    BareJid, DatabaseBlockingStorage, FullJid, HashSet, IqConnState, Jid, Stanza, WebSocketState,
+    send_current_presence_from_user_to_jid, send_unavailable_presence_from_user_to_jid,
+    service_unavailable_iq_error, warn, BareJid, DatabaseBlockingStorage, FullJid, HashSet,
+    IqConnState, Jid, Stanza, WebSocketState,
 };
 #[cfg(feature = "clustering")]
 use crate::clustering::route_bridge::RemoteResourceStateUpdate;
@@ -56,15 +57,24 @@ pub(super) async fn handle_blocking_iq(
         waddle_xmpp::xep::xep0191::BlockingRequest::GetBlocklist => {
             return match storage.list_blocked_jid_entries(&user_bare).await {
                 Ok(blocked) => {
-                    state
-                        .deps
-                        .protocol
-                        .connection_registry
-                        .mark_blocklist_interested(sender_jid);
-                    if let Some(owner) = conn_state.registry_owner {
-                        mirror_remote_blocklist_interest(state, sender_jid, owner).await;
-                    }
+                    #[cfg(test)]
+                    super::conn_state::wait_before_resource_metadata_write().await;
+                    let Some(owner) = conn_state.registry_owner.filter(|owner| {
+                        state
+                            .deps
+                            .protocol
+                            .connection_registry
+                            .mark_blocklist_interested_if_owner(sender_jid, owner)
+                    }) else {
+                        return vec![build_iq_error_xml_typed(
+                            iq.id(),
+                            response_from,
+                            response_to,
+                            service_unavailable_iq_error("Resource binding unavailable."),
+                        )];
+                    };
                     *conn_state.blocklist_interested = true;
+                    mirror_remote_blocklist_interest(state, sender_jid, owner).await;
                     vec![iq_to_xml(
                         waddle_xmpp::xep::xep0191::build_blocklist_response(iq, &blocked),
                     )]
@@ -209,7 +219,7 @@ pub(super) async fn handle_blocking_iq(
 async fn mirror_remote_blocklist_interest(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -232,7 +242,7 @@ async fn mirror_remote_blocklist_interest(
 async fn mirror_remote_blocklist_interest(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 

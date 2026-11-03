@@ -16,6 +16,11 @@ Slice W1.9 of the #2046 plan (v9, §3 Wave 1). This document is the deletion and
 - Nothing here changes code. Counts are regenerable with the commands in §0.
 - Test code is counted separately and not itemised.
 
+Post-baseline W1.3 changes, including exact-binding resource metadata writes and
+presence cleanup, are recorded in [the local binding slice](2046-local-binding-id.md).
+This inventory remains a historical baseline; its old token and caller names
+are not current-source claims.
+
 ## Classification
 
 Each read, write or call is classified relative to the [#2046 target authority model](https://github.com/waddle-social/waddle/issues/2046) (one owner per field):

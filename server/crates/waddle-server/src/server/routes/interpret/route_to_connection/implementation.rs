@@ -1529,7 +1529,7 @@ pub(crate) async fn deliver_ordered_local_copy(
         .map(|obligation| obligation.into_relayed_for(target.clone()));
     let socket_enqueue = deps.connection_registry.capture_owned_enqueue_if_owner(
         target.clone(),
-        entry.carbons_enabled.clone(),
+        entry.binding_id(),
         outbound,
     );
     let delivered_kind = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza);

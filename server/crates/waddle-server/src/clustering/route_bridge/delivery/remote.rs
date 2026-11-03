@@ -507,7 +507,7 @@ impl OrderedRelayDeliveryBridge {
                     registration.registration_id == remote_origin.registration_id
                         && registration.socket_generation == remote_origin.socket_generation
                 })
-                .map(|registration| registration.owner.clone())
+                .map(|registration| registration.owner)
             else {
                 return RemoteResourceOriginRefresh::Failed;
             };
@@ -561,7 +561,7 @@ impl OrderedRelayDeliveryBridge {
             return RemoteResourceOriginRefresh::LocalOwner;
         }
         match self
-            .try_register_remote_user_resource(&remote_origin.jid, entry, owner.clone())
+            .try_register_remote_user_resource(&remote_origin.jid, entry, owner)
             .await
         {
             RemoteResourceRegisterOutcome::Registered => self

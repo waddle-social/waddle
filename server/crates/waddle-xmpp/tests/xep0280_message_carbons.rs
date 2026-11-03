@@ -71,7 +71,7 @@ fn xep0280_bodyless_chat_marker_is_eligible_for_carbons() {
 #[tokio::test]
 async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
     use jid::FullJid;
-    use waddle_xmpp::registry::ConnectionRegistry;
+    use waddle_xmpp::registry::{ConnectionRegistry, SocketOutboundEndpoint};
 
     let registry = ConnectionRegistry::new();
     let bare: jid::BareJid = "bob@localhost".parse().expect("bare jid");
@@ -82,12 +82,12 @@ async fn xep0280_carbon_enumeration_excludes_whole_delivery_set() {
     // All three resources online with carbons enabled; web + phone are
     // the same-priority delivery set that received the original stanza,
     // laptop is a lower-priority resource that only gets a carbon.
-    let (web_tx, _web_rx) = tokio::sync::mpsc::channel(4);
-    registry.register_with_carbons(web.clone(), web_tx, true);
-    let (phone_tx, _phone_rx) = tokio::sync::mpsc::channel(4);
-    registry.register_with_carbons(phone.clone(), phone_tx, true);
-    let (laptop_tx, _laptop_rx) = tokio::sync::mpsc::channel(4);
-    registry.register_with_carbons(laptop.clone(), laptop_tx, true);
+    let (web_endpoint, _web_rx) = SocketOutboundEndpoint::channel(4);
+    registry.register_with_carbons(web.clone(), web_endpoint, true);
+    let (phone_endpoint, _phone_rx) = SocketOutboundEndpoint::channel(4);
+    registry.register_with_carbons(phone.clone(), phone_endpoint, true);
+    let (laptop_endpoint, _laptop_rx) = SocketOutboundEndpoint::channel(4);
+    registry.register_with_carbons(laptop.clone(), laptop_endpoint, true);
 
     let delivery_set = vec![web.clone(), phone.clone()];
     let carbon_targets = registry.other_carbon_resources_for_user(&bare, &delivery_set);

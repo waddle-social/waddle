@@ -11,6 +11,7 @@
 
 use crate::ns::SASL;
 use crate::Stanza;
+use jid::BareJid;
 use std::str::FromStr;
 use thiserror::Error;
 use xmpp_parsers::message::Lang;
@@ -33,7 +34,7 @@ pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum InboundFrame {
     /// RFC 7395 `<open>` stream header.
-    Open,
+    Open { from: Option<BareJid> },
     /// RFC 7395 `<close>` stream termination.
     Close,
     /// SASL `<auth>` initial client message.
@@ -91,6 +92,18 @@ pub enum ParseError {
     /// was otherwise malformed.
     #[error("malformed SASL frame: {0}")]
     MalformedSasl(&'static str),
+    /// An RFC 7395 stream open carried an invalid client `from` JID.
+    #[error("invalid stream-open from address")]
+    InvalidOpenFrom,
+    /// An RFC 7395 stream open was not well-formed XML.
+    #[error("malformed stream-open XML")]
+    InvalidOpenXml,
+    /// An RFC 7395 stream open used the wrong namespace.
+    #[error("invalid stream-open namespace")]
+    InvalidOpenNamespace,
+    /// An RFC 7395 stream open contained text or child elements.
+    #[error("nonempty stream-open element")]
+    InvalidOpenContent,
     /// The payload parsed as XML but `xmpp_parsers` could not convert it
     /// into the expected stanza type.
     #[error("invalid {kind} stanza: {err}")]
@@ -128,6 +141,13 @@ pub fn parse_frame_with_metadata(frame: &str) -> Result<ParsedFrame, ParseError>
     let root = peek_root_name(trimmed)
         .ok_or_else(|| ParseError::InvalidXml("missing root element".to_string()))?;
 
+    // Framing and SASL elements can use XML namespace prefixes. Classify by
+    // local name only for these known roots; their parsers still validate the
+    // expanded namespace and the complete XML element.
+    let root = match root.split_once(':') {
+        Some((_, local @ ("open" | "close" | "auth" | "response"))) => local,
+        _ => root,
+    };
     match root {
         "open" => parse_open(trimmed),
         "close" => parse_close(trimmed),
@@ -188,12 +208,24 @@ fn parse_response(frame: &str) -> Result<ParsedFrame, ParseError> {
 }
 
 fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
-    let element =
-        Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
-    require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")?;
-    require_empty_element(&element, "open")?;
+    let element = Element::from_str(frame).map_err(|_| ParseError::InvalidOpenXml)?;
+    require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")
+        .map_err(|_| ParseError::InvalidOpenNamespace)?;
+    require_empty_element(&element, "open").map_err(|_| ParseError::InvalidOpenContent)?;
+    let from = element
+        .attr("from")
+        .map(|value| {
+            let jid = value
+                .parse::<BareJid>()
+                .map_err(|_| ParseError::InvalidOpenFrom)?;
+            if jid.node().is_none() {
+                return Err(ParseError::InvalidOpenFrom);
+            }
+            Ok(jid)
+        })
+        .transpose()?;
     Ok(ParsedFrame {
-        frame: InboundFrame::Open,
+        frame: InboundFrame::Open { from },
         message_stanza_lang: None,
     })
 }

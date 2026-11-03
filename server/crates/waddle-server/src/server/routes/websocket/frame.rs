@@ -37,6 +37,7 @@ use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
 use xmpp_parsers::minidom::Element;
+use xmpp_parsers::stream_error::{DefinedCondition, StreamError};
 
 #[cfg(test)]
 tokio::task_local! {
@@ -288,6 +289,23 @@ impl From<Vec<ResponseFrame>> for ResponseBatch {
     }
 }
 
+fn stream_open_error_response(
+    domain: &str,
+    to: Option<&jid::BareJid>,
+    condition: DefinedCondition,
+) -> ResponseBatch {
+    vec![
+        websocket_stream_open_element(domain, to),
+        Element::from(StreamError {
+            condition,
+            texts: Default::default(),
+            application_specific: Vec::new(),
+        }),
+        websocket_stream_close_element(),
+    ]
+    .into()
+}
+
 /// Handle an XMPP frame per RFC 7395
 #[cfg(test)]
 pub(super) async fn handle_xmpp_frame(
@@ -348,7 +366,12 @@ async fn handle_xmpp_frame_impl(
     }
 
     let WsConnState {
+        connection_ref,
+        binding_ref,
+        #[cfg(test)]
+        resume_binding_attempts,
         phase,
+        stream_open_from,
         authenticated_session,
         occupancy_session,
         sm_state,
@@ -390,6 +413,10 @@ async fn handle_xmpp_frame_impl(
     if SmStanza::is_client_nonza_candidate(frame) {
         if let Some(sm) = SmStanza::parse(frame) {
             let ctx = SmCtx {
+                connection_ref,
+                binding_ref,
+                #[cfg(test)]
+                resume_binding_attempts,
                 phase,
                 sm_state,
                 sm_ingress_fence,
@@ -431,6 +458,24 @@ async fn handle_xmpp_frame_impl(
     let parsed = match waddle_xmpp::protocol::frame::parse_frame_with_metadata(frame) {
         Ok(parsed) => parsed,
         Err(ParseError::Empty) => return ResponseBatch::default(),
+        Err(
+            error @ (ParseError::InvalidOpenFrom
+            | ParseError::InvalidOpenXml
+            | ParseError::InvalidOpenNamespace
+            | ParseError::InvalidOpenContent),
+        ) => {
+            let condition = match error {
+                ParseError::InvalidOpenFrom => DefinedCondition::InvalidFrom,
+                ParseError::InvalidOpenXml => DefinedCondition::NotWellFormed,
+                ParseError::InvalidOpenNamespace => DefinedCondition::InvalidNamespace,
+                ParseError::InvalidOpenContent => DefinedCondition::InvalidXml,
+                _ => unreachable!(),
+            };
+            *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+            *stream_open_from = None;
+            conn.begin_server_stream_open_response();
+            return stream_open_error_response(domain, None, condition);
+        }
         Err(err) => {
             if let Some(responses) = parse_error_responses(frame, &err) {
                 if phase.scram_pending_username().is_some() && is_sasl_parse_failure(frame, &err) {
@@ -452,9 +497,28 @@ async fn handle_xmpp_frame_impl(
     let stanza_lang = parsed.message_stanza_lang;
 
     match parsed.frame {
-        InboundFrame::Open => {
+        InboundFrame::Open { from } => {
             info!("XMPP stream open requested");
-            let open_element = websocket_stream_open_element(domain);
+            let mismatched_principal = from.as_ref().is_some_and(|requested| {
+                phase
+                    .authenticated_bare_jid()
+                    .is_some_and(|principal| requested != principal)
+                    || phase
+                        .bound_jid()
+                        .is_some_and(|principal| requested != &principal.to_bare())
+            });
+            if mismatched_principal {
+                *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                *stream_open_from = None;
+                conn.begin_server_stream_open_response();
+                return stream_open_error_response(
+                    domain,
+                    from.as_ref(),
+                    DefinedCondition::InvalidFrom,
+                );
+            }
+            let open_element = websocket_stream_open_element(domain, from.as_ref());
+            *stream_open_from = from;
             let features_element = build_stream_features_for_phase_element(phase);
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
@@ -487,7 +551,14 @@ async fn handle_xmpp_frame_impl(
                         handle_sasl_scram_client_first(&data, domain, state, phase).await
                     }
                     "OAUTHBEARER" => {
-                        handle_sasl_oauthbearer(&data, state, authenticated_session, phase).await
+                        handle_sasl_oauthbearer(
+                            &data,
+                            state,
+                            stream_open_from.as_ref(),
+                            authenticated_session,
+                            phase,
+                        )
+                        .await
                     }
                     other => {
                         warn!(mechanism = %other, "Unsupported SASL mechanism");
@@ -527,6 +598,7 @@ async fn handle_xmpp_frame_impl(
                 domain,
                 state,
                 scram,
+                stream_open_from.as_ref(),
                 authenticated_session,
                 phase,
             )
@@ -763,7 +835,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {
@@ -824,7 +896,7 @@ async fn ordered_relay_origin_for_inbound_stanza(
     state: &WebSocketState,
     sm_state: &waddle_xmpp::stream_management::StreamManagementState,
     bound_jid: Option<&jid::FullJid>,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     inbound_sequence: Option<OrderedRelayInboundSequence>,
     handoff_tx: Option<&tokio::sync::mpsc::UnboundedSender<OrderedRelayHandoffCompletion>>,
 ) -> Option<OrderedRelayRouteOrigin> {

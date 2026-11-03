@@ -31,13 +31,11 @@
 //! register `ask` that preceded it.
 //!
 //! The unregister mirror carries an `owner` token
-//! (`Option<Arc<AtomicBool>>`, the `carbons_enabled` handle used as the
-//! DashMap ownership token): `Some(token)` removes only if the actor's current
+//! (`Option<waddle_xmpp::registry::LocalConnectionBindingId>`, the local binding
+//! identity also checked by the registry): `Some(token)` removes only if the actor's current
 //! entry is that same session (mirrors `unregister_if_owner`); `None` removes
 //! unconditionally (mirrors a plain `unregister`).
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::Duration;
 
 use jid::FullJid;
@@ -176,7 +174,7 @@ pub(crate) async fn mirror_register_outcome(
 /// module docs). Teardown paths (SM expiry, disconnect cleanup, drain) must
 /// not block for the handler.
 ///
-/// `owner` is the ownership token (the `carbons_enabled` `Arc<AtomicBool>`):
+/// `owner` is the local binding identity:
 /// `Some(token)` prunes only if the actor still holds that session (mirrors
 /// `unregister_if_owner`), `None` prunes unconditionally (mirrors a plain
 /// `unregister`).
@@ -189,7 +187,7 @@ pub(crate) enum MirrorUnregisterOutcome {
 pub(crate) async fn mirror_unregister(
     user_registry: &ActorRef<UserRegistryActor>,
     jid: &FullJid,
-    owner: Option<Arc<AtomicBool>>,
+    owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
 ) -> MirrorUnregisterOutcome {
     match user_registry
         .tell(EnqueueUserResourceUnregister {
@@ -236,7 +234,7 @@ mod tests {
         let jid = full("alice@example.com/phone");
         let (tx, _rx) = mpsc::channel(16);
         let entry = ConnectionEntry::new(tx);
-        let owner = Arc::clone(&entry.carbons_enabled);
+        let owner = entry.binding_id();
 
         assert!(
             mirror_register(&registry, jid.clone(), entry).await,
@@ -281,8 +279,7 @@ mod tests {
         let jid = full("alice@example.com/phone");
         let (tx, _rx) = mpsc::channel(16);
         let entry = ConnectionEntry::new(tx);
-        // A different Arc than the live entry's ownership token.
-        let stale_owner = Arc::new(AtomicBool::new(false));
+        let stale_owner = waddle_xmpp::registry::LocalConnectionBindingId::fresh();
 
         assert!(mirror_register(&registry, jid.clone(), entry).await);
 
@@ -316,12 +313,12 @@ mod tests {
 
         let (tx_old, _rx_old) = mpsc::channel(16);
         let entry_old = ConnectionEntry::new(tx_old);
-        let owner_old = Arc::clone(&entry_old.carbons_enabled);
+        let owner_old = entry_old.binding_id();
         assert!(mirror_register(&registry, jid.clone(), entry_old).await);
 
         let (tx_new, _rx_new) = mpsc::channel(16);
         let entry_new = ConnectionEntry::new(tx_new);
-        let owner_new = Arc::clone(&entry_new.carbons_enabled);
+        let owner_new = entry_new.binding_id();
         assert!(mirror_register(&registry, jid.clone(), entry_new).await);
 
         // Old session tears down: its token no longer owns the entry.

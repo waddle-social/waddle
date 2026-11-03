@@ -380,9 +380,9 @@ fn xep0160_flushed_message_preserves_sender_extensions() {
 /// covered this same property.)
 #[test]
 fn xep0160_claim_offline_flush_cas_fires_once_per_connection() {
-    use waddle_xmpp::registry::ConnectionEntry;
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let entry = ConnectionEntry::new(tx);
+    use waddle_xmpp::registry::{ConnectionEntry, SocketOutboundEndpoint};
+    let (endpoint, _rx) = SocketOutboundEndpoint::channel(8);
+    let entry = ConnectionEntry::new(endpoint);
     // First non-negative-priority presence wins; the presence
     // handler triggers a flush only when this CAS returns true.
     assert!(entry.claim_offline_flush(), "first call wins");

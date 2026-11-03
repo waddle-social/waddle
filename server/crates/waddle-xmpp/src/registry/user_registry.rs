@@ -6,7 +6,6 @@
 //! concerns (Phase 2 of the actor-model migration).
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use super::connection_registry::{
     ConnectionEntry, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    LocalConnectionBindingId,
 };
 use super::user_actor::{
     RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
@@ -101,7 +101,7 @@ struct PendingStaleUserRetirement {
 #[derive(Clone)]
 struct PendingUserUnregister {
     jid: FullJid,
-    owner: Option<Arc<AtomicBool>>,
+    owner: Option<LocalConnectionBindingId>,
 }
 
 enum UserEntryClaimStatus {
@@ -360,16 +360,20 @@ impl UserRegistryActor {
         }
     }
 
-    fn remember_pending_unregister(&mut self, jid: FullJid, owner: Option<Arc<AtomicBool>>) {
+    fn remember_pending_unregister(
+        &mut self,
+        jid: FullJid,
+        owner: Option<LocalConnectionBindingId>,
+    ) {
         // Owner tokens identify an exact resource incarnation.  A timeout can
         // record the same conditional removal both in the ask handler and in
-        // its caller's fallback, so collapse records only when those pointer
+        // its caller's fallback, so collapse records only when those binding
         // identities match as well.
         if self.pending_unregisters.iter().any(|pending| {
             pending.jid == jid
                 && match (&pending.owner, &owner) {
                     (None, None) => true,
-                    (Some(pending_owner), Some(owner)) => Arc::ptr_eq(pending_owner, owner),
+                    (Some(pending_owner), Some(owner)) => pending_owner == owner,
                     _ => false,
                 }
         }) {
@@ -395,7 +399,7 @@ impl UserRegistryActor {
             .users
             .get(&jid.to_bare())
             .and_then(|user| user.resources.get(jid))
-            .map(ConnectionEntry::carbons_handle);
+            .map(ConnectionEntry::binding_id);
         let pending = std::mem::take(&mut self.pending_unregisters);
         let mut matching_owner_pending = None;
         let mut unowned_pending = None;
@@ -412,7 +416,7 @@ impl UserRegistryActor {
                     pending_unregister
                         .owner
                         .as_ref()
-                        .is_some_and(|owner| Arc::ptr_eq(owner, current_owner))
+                        .is_some_and(|owner| owner == current_owner)
                 })
             {
                 matching_owner_pending = Some(pending_unregister);
@@ -435,7 +439,7 @@ impl UserRegistryActor {
             return;
         };
         let retry_jid = pending_unregister.jid.clone();
-        let retry_owner = pending_unregister.owner.clone();
+        let retry_owner = pending_unregister.owner;
         if matches!(
             self.unregister_and_release_if_empty(pending_unregister.jid, pending_unregister.owner)
                 .await,
@@ -625,11 +629,11 @@ impl UserRegistryActor {
     async fn unregister_resource_and_remember_retry(
         &mut self,
         jid: FullJid,
-        owner: Option<Arc<AtomicBool>>,
+        owner: Option<LocalConnectionBindingId>,
     ) -> Result<(), UserRegistryError> {
         let bare_jid = jid.to_bare();
         let retry_jid = jid.clone();
-        let retry_owner = owner.clone();
+        let retry_owner = owner;
         match self.unregister_and_release_if_empty(jid, owner).await {
             UnregisterAndReleaseOutcome::Released
             | UnregisterAndReleaseOutcome::RetainedLiveResources
@@ -655,7 +659,7 @@ impl UserRegistryActor {
     async fn unregister_and_release_if_empty(
         &mut self,
         jid: FullJid,
-        owner: Option<Arc<AtomicBool>>,
+        owner: Option<LocalConnectionBindingId>,
     ) -> UnregisterAndReleaseOutcome {
         let bare_jid = jid.to_bare();
         if self.poisoned_users.contains(&bare_jid) {
@@ -1145,7 +1149,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
 pub struct RegisterUserResourceIfOwnerOrAbsent {
     pub jid: FullJid,
     pub entry: ConnectionEntry,
-    pub owner: Arc<AtomicBool>,
+    pub owner: LocalConnectionBindingId,
 }
 
 impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegistryActor {
@@ -1214,7 +1218,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
 /// terminates the registry actor.
 pub struct UnregisterUserResource {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
@@ -1237,7 +1241,7 @@ impl kameo::message::Message<UnregisterUserResource> for UserRegistryActor {
 /// failures that would terminate this critical registry.
 pub struct EnqueueUserResourceUnregister {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<EnqueueUserResourceUnregister> for UserRegistryActor {
@@ -1261,7 +1265,7 @@ impl kameo::message::Message<EnqueueUserResourceUnregister> for UserRegistryActo
 /// the resume-steal acknowledgement cannot run ahead of registry convergence.
 pub struct UnregisterAndReleaseIfEmpty {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<UnregisterAndReleaseIfEmpty> for UserRegistryActor {
@@ -1273,7 +1277,7 @@ impl kameo::message::Message<UnregisterAndReleaseIfEmpty> for UserRegistryActor 
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let retry_jid = msg.jid.clone();
-        let retry_owner = msg.owner.clone();
+        let retry_owner = msg.owner;
         let outcome = self
             .unregister_and_release_if_empty(msg.jid, msg.owner)
             .await;
@@ -1292,7 +1296,7 @@ impl kameo::message::Message<UnregisterAndReleaseIfEmpty> for UserRegistryActor 
 /// leave janitor inventory behind after a later retry has already converged.
 pub struct UnregisterAndReleaseIfEmptyWithoutPendingRecord {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<UnregisterAndReleaseIfEmptyWithoutPendingRecord>
@@ -1363,7 +1367,7 @@ impl kameo::message::Message<RetryUserRegistryConvergence> for UserRegistryActor
         let mut failed_operations = 0;
         for pending_unregister in pending {
             let retry_jid = pending_unregister.jid.clone();
-            let retry_owner = pending_unregister.owner.clone();
+            let retry_owner = pending_unregister.owner;
             if let UnregisterAndReleaseOutcome::RetryableFailure(reason) = self
                 .unregister_and_release_if_empty(pending_unregister.jid, pending_unregister.owner)
                 .await
@@ -1431,7 +1435,7 @@ impl kameo::message::Message<RetryPendingStaleUserRetirements> for UserRegistryA
 /// post-handler reply-loss cases without guessing which occurred.
 pub struct RecordPendingUserUnregister {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<RecordPendingUserUnregister> for UserRegistryActor {

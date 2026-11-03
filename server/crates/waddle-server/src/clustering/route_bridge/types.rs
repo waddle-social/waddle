@@ -1,6 +1,6 @@
 use super::{
-    Arc, AtomicBool, BTreeMap, BTreeSet, CarbonKind, ConnectionEntry, DeliveryKind, Duration,
-    Entity, FullJidDeliveryOutcome, Future, Keypair, MucProxyOrigin, NodeId, NodeIdentity,
+    Arc, BTreeMap, BTreeSet, CarbonKind, ConnectionEntry, DeliveryKind, Duration, Entity,
+    FullJidDeliveryOutcome, Future, Keypair, MucProxyOrigin, NodeId, NodeIdentity,
     OrderedRelayChannel, OrderedRelayClaim, OrderedRelayDeliveryServices, OrderedRelayMucProxyKind,
     OrderedRelayPayload, Ordering, OriginInboundSequence, Pin, PresenceState, RemoteElement,
     RemoteStanza, RemoteStanzaEnvelope, RosterItem, RosterVersion, Stanza,
@@ -133,6 +133,9 @@ impl From<RemotePresenceStateSnapshot> for PresenceState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteResourceStateSnapshot {
+    /// Physical source transport identity. It is separate from the JID alias,
+    /// source node's local registry binding, and occupancy generation.
+    pub connection_ref: waddle_xmpp::ownership::ConnectionRef,
     pub occupancy_session: Option<waddle_xmpp_core::OccupancySessionGeneration>,
     pub carbons_enabled: bool,
     pub roster_interested: bool,
@@ -148,6 +151,7 @@ impl RemoteResourceStateSnapshot {
         presence_state: Option<PresenceState>,
     ) -> Self {
         Self {
+            connection_ref: entry.connection_ref().clone(),
             occupancy_session: entry.occupancy_session(),
             carbons_enabled: entry.carbons_enabled.load(Ordering::Relaxed),
             roster_interested: entry.roster_interested.load(Ordering::Relaxed),
@@ -398,7 +402,8 @@ pub(super) enum RemoteResourceOriginRefresh {
 pub(super) struct RemoteSocketRegistration {
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
-    pub(super) owner: Arc<AtomicBool>,
+    pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
+    pub(super) owner: waddle_xmpp::registry::LocalConnectionBindingId,
     pub(super) user_owner: NodeId,
 }
 
@@ -426,6 +431,8 @@ pub struct RemoteResourceOriginSnapshot {
 #[derive(Debug, Clone)]
 pub(super) struct RemoteOwnerRegistration {
     pub(super) occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+    /// Exact physical origin retained by the remote-hosted mirror.
+    pub(super) connection_ref: waddle_xmpp::ownership::ConnectionRef,
     /// Exact committed node incarnation observed when this mirror was admitted.
     pub(super) socket_identity: NodeIdentity,
     /// An owner-gated unregister must converge even if its relay handler exits.
@@ -433,7 +440,7 @@ pub(super) struct RemoteOwnerRegistration {
     pub(super) registration_id: RemoteResourceRegistrationId,
     pub(super) socket_node: NodeId,
     pub(super) socket_generation: RemoteResourceSocketGeneration,
-    pub(super) owner: Arc<AtomicBool>,
+    pub(super) owner: waddle_xmpp::registry::LocalConnectionBindingId,
 }
 
 /// Each live mirror has exactly one sweep slot. Freezing a finite round keeps

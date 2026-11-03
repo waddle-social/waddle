@@ -475,7 +475,7 @@ async fn old_and_new_frame_senders_reach_socket_once_through_retained_actor_hand
     let target: jid::FullJid = "b@example.test/tablet".parse().expect("target");
     let (tx, mut rx) = mpsc::channel(1);
     let entry = ConnectionEntry::new(tx);
-    let owner = entry.carbons_handle();
+    let owner = entry.binding_id();
     services
         .connection_registry
         .register_entry(target.clone(), entry);

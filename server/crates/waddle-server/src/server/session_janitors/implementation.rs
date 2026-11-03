@@ -1594,7 +1594,7 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
             // `unregister`. A plain unregister removes whatever currently
             // holds the full JID — which is a live REPLACEMENT session S2 if
             // it rebound the same resource after this session (S1) detached.
-            // The removed entry's `carbons_enabled` would then be S2's token,
+            // The removed entry's binding ID would then be S2's token,
             // so the actor mirror below would evict S2's actor-tree entry
             // too — and under Slice 1 the actor tree is the bare-JID
             // selection source, so S2 would silently stop receiving
@@ -1621,7 +1621,7 @@ pub(in crate::server::session_janitors) async fn run_sm_expiry_sweep_with_custod
                 if crate::server::dual_registration::mirror_unregister(
                     &state.deps.protocol.user_registry,
                     &session.jid,
-                    Some(std::sync::Arc::clone(&entry.carbons_enabled)),
+                    Some(entry.binding_id()),
                 )
                 .await
                     == MirrorUnregisterOutcome::Failed

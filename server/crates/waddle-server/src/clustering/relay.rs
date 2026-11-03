@@ -27,9 +27,16 @@ use crate::server::routes::websocket::AdminListAnswer;
 pub(crate) mod frame_receipts;
 mod muc_cleanup;
 mod remote_resource_compat;
+mod resource_identity_wire;
 use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
 pub use muc_cleanup::{RelayMucCleanup, RelayMucCleanupOutcome};
+pub use resource_identity_wire::{
+    RelayRegisterRemoteUserResourceV5, RelayRemoteResourceRegistrationV5Reply,
+    RelayRemoteResourceRegistrationV5Result, RelayUnregisterRemoteUserResourceV3,
+    RelayUpdateRemoteUserResourceV2, RemoteResourceStateSnapshotV5, REMOTE_RESOURCE_REGISTER_V5_ID,
+    REMOTE_RESOURCE_UNREGISTER_V3_ID, REMOTE_RESOURCE_UPDATE_V2_ID,
+};
 
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;

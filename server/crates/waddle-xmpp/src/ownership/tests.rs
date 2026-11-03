@@ -81,6 +81,140 @@ async fn rotation_notifications_follow_publication_gate_and_coalesce() {
 }
 
 #[test]
+fn identity_stamps_bind_to_the_exact_shared_source() {
+    let initial = NodeIdentity::new("node-a", "epoch-a");
+    let source = SharedNodeIdentity::new(initial.clone());
+    let shared_clone = source.clone();
+    let other_source = SharedNodeIdentity::new(initial.clone());
+    let stamp = source.current_stamp().expect("active identity stamp");
+    let clone_stamp = shared_clone.current_stamp().expect("shared identity stamp");
+    let other_stamp = other_source.current_stamp().expect("other identity stamp");
+
+    assert_eq!(stamp.identity(), &initial);
+    assert_eq!(other_stamp.identity(), &initial);
+    assert_eq!(
+        shared_clone.with_current_stamp(&stamp, Clone::clone),
+        Some(initial.clone())
+    );
+    assert_eq!(
+        source.with_current_stamp(&clone_stamp, Clone::clone),
+        Some(initial)
+    );
+    assert!(other_source.with_current_stamp(&stamp, |_| ()).is_none());
+    assert!(source.with_current_stamp(&other_stamp, |_| ()).is_none());
+}
+
+#[tokio::test]
+async fn identity_stamp_revisions_never_revive_after_aba_rotation() {
+    let first = NodeIdentity::new("node-a", "epoch-a");
+    let second = NodeIdentity::new("node-b", "epoch-b");
+    let source = SharedNodeIdentity::new(first.clone());
+    let original = source.current_stamp().expect("initial stamp");
+
+    source.rotate(second.clone()).await;
+    let middle = source.current_stamp().expect("second stamp");
+    assert!(original.is_revoked());
+    assert!(source.with_current_stamp(&original, |_| ()).is_none());
+    assert_eq!(middle.identity(), &second);
+
+    source.rotate(first.clone()).await;
+    let latest = source.current_stamp().expect("latest stamp");
+    assert!(original.is_revoked());
+    assert!(middle.is_revoked());
+    assert!(source.with_current_stamp(&original, |_| ()).is_none());
+    assert!(source.with_current_stamp(&middle, |_| ()).is_none());
+    assert_eq!(
+        source.with_current_stamp(&latest, Clone::clone),
+        Some(first)
+    );
+    tokio::time::timeout(Duration::from_secs(1), original.revoked())
+        .await
+        .expect("old revocation remains observable");
+}
+
+#[tokio::test]
+async fn identity_stamp_disable_wakes_waiters_and_rejects_effects() {
+    let source = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-a"));
+    let stamp = source.current_stamp().expect("initial stamp");
+    let revoked = stamp.revoked();
+    tokio::pin!(revoked);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut revoked)
+            .await
+            .is_err()
+    );
+
+    source.disable().await;
+    tokio::time::timeout(Duration::from_secs(1), &mut revoked)
+        .await
+        .expect("disable wakes a pending revocation waiter");
+    assert!(stamp.is_revoked());
+    assert!(source.current_stamp().is_none());
+    assert!(source.with_current_stamp(&stamp, |_| ()).is_none());
+    tokio::time::timeout(Duration::from_secs(1), stamp.revoked())
+        .await
+        .expect("revocation also persists for later waiters");
+}
+
+#[tokio::test]
+async fn same_active_identity_rotation_keeps_stamp_and_notifies() {
+    let initial = NodeIdentity::new("node-a", "epoch-a");
+    let source = SharedNodeIdentity::new(initial.clone());
+    let stamp = source.current_stamp().expect("initial stamp");
+    let mut changes = source.subscribe_rotations();
+
+    source.rotate(initial.clone()).await;
+    tokio::time::timeout(Duration::from_secs(1), changes.changed())
+        .await
+        .expect("same identity rotation still notifies")
+        .expect("rotation sender remains open");
+    assert!(!stamp.is_revoked());
+    assert_eq!(
+        source.with_current_stamp(&stamp, Clone::clone),
+        Some(initial)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identity_stamp_effect_and_rotation_are_serialized() {
+    let initial = NodeIdentity::new("node-a", "epoch-a");
+    let next = NodeIdentity::new("node-b", "epoch-b");
+    let source = SharedNodeIdentity::new(initial.clone());
+    let stamp = source.current_stamp().expect("initial stamp");
+    let reader_source = source.clone();
+    let reader_stamp = stamp.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        reader_source.with_current_stamp(&reader_stamp, |identity| {
+            assert!(!reader_stamp.is_revoked());
+            entered_tx.send(()).expect("effect entry observed");
+            release_rx.recv().expect("effect released");
+            assert!(!reader_stamp.is_revoked());
+            identity.clone()
+        })
+    });
+    entered_rx.await.expect("effect entered");
+
+    let rotating = source.clone();
+    let rotation = tokio::spawn(async move { rotating.rotate(next).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while source.rotation_gate.try_read().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rotation acquired the publication gate");
+    assert!(!rotation.is_finished());
+    assert!(!stamp.is_revoked());
+    release_tx.send(()).expect("release effect");
+    assert_eq!(reader.join().expect("effect thread"), Some(initial));
+    rotation.await.expect("rotation completes");
+    assert!(stamp.is_revoked());
+    assert!(source.with_current_stamp(&stamp, |_| ()).is_none());
+}
+
+#[test]
 fn node_identity_local_is_stable() {
     assert_eq!(NodeIdentity::local(), NodeIdentity::local());
 }
@@ -98,10 +232,11 @@ fn poisoned_node_identity_reads_abort_the_process() {
     const CHILD_ENV: &str = "WADDLE_POISONED_IDENTITY_CHILD";
     if let Some(operation) = std::env::var_os(CHILD_ENV) {
         let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
+        let stamp = shared.current_stamp().expect("active identity stamp");
         let writer = shared.clone();
         std::thread::spawn(move || {
             let mut identity = writer.identity.write().expect("unpoisoned identity");
-            identity.node_id = "partially-rotated-node".to_string();
+            identity.identity.node_id = "partially-rotated-node".to_string();
             panic!("writer failed before updating its incarnation");
         })
         .join()
@@ -112,6 +247,12 @@ fn poisoned_node_identity_reads_abort_the_process() {
                 let _ = shared.current();
             }
             "with_current" => shared.with_current(|_| ()),
+            "current_stamp" => {
+                let _ = shared.current_stamp();
+            }
+            "with_current_stamp" => {
+                let _ = shared.with_current_stamp(&stamp, |_| ());
+            }
             "guard_if_current" => {
                 let _ = tokio::runtime::Builder::new_current_thread()
                     .build()
@@ -123,7 +264,13 @@ fn poisoned_node_identity_reads_abort_the_process() {
         return;
     }
 
-    for operation in ["current", "with_current", "guard_if_current"] {
+    for operation in [
+        "current",
+        "with_current",
+        "current_stamp",
+        "with_current_stamp",
+        "guard_if_current",
+    ] {
         let output =
             std::process::Command::new(std::env::current_exe().expect("current test binary"))
                 .args([

@@ -1,10 +1,10 @@
 use super::super::{
-    owner_remote_entry_if_current, Arc, AtomicBool, CarbonKind, ConnectionEntry,
-    ConnectionRegistry, OrderedRelayDeliveryBridge, Ordering, PresenceState, RelayAskError,
-    RelayHandle, RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect,
-    RelayRemoteUserSideEffectReply, RelayRemoteUserSideEffectStatus, RelaySendEffect,
-    RelayTraceContext, RemotePresenceStateSnapshot, RemoteResourceStateSnapshot, RemoteStanza,
-    RemoteUserSideEffect, RosterItem, RosterVersion, Stanza, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+    owner_remote_entry_if_current, CarbonKind, ConnectionEntry, ConnectionRegistry,
+    OrderedRelayDeliveryBridge, Ordering, PresenceState, RelayAskError, RelayHandle,
+    RelayRemoteResourceUpdateStatus, RelayRemoteUserSideEffect, RelayRemoteUserSideEffectReply,
+    RelayRemoteUserSideEffectStatus, RelaySendEffect, RelayTraceContext,
+    RemotePresenceStateSnapshot, RemoteResourceStateSnapshot, RemoteStanza, RemoteUserSideEffect,
+    RosterItem, RosterVersion, Stanza, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
 };
 use crate::ingress::identity::IngressAppendObligationRef;
 use crate::server::routes::interpret::carbons::CarbonFanoutFailure;
@@ -419,7 +419,7 @@ impl OrderedRelayDeliveryBridge {
 pub(in super::super) fn apply_remote_resource_presence_to_registry(
     registry: &ConnectionRegistry,
     jid: &jid::FullJid,
-    owner: &Arc<AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     available: bool,
     priority: i8,
     state: Option<RemotePresenceStateSnapshot>,
