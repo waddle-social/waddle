@@ -418,6 +418,7 @@ pub(super) async fn dispatch_to_room(
         deps.effects
             .set_room_execution(super::effects::RoomExecutionPath::Local {
                 room: room_jid.clone(),
+                client_origin: None,
                 fence: snapshot
                     .claim_fence
                     .clone()

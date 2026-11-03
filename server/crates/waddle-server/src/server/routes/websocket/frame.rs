@@ -8,7 +8,7 @@ use super::sasl::{
     handle_sasl_oauthbearer, handle_sasl_scram_client_first, handle_sasl_scram_response,
     record_scram_failure,
 };
-use super::state::{InboundFrameTerminal, WsConnState};
+use super::state::{authenticated_client_room_origin, InboundFrameTerminal, WsConnState};
 use super::stream_management::{handle_sm_stanza, SmCtx};
 use super::transport_xml::{
     build_handled_count_too_high_stream_error, build_stream_features_for_phase_element,
@@ -26,7 +26,7 @@ use crate::ingress::IngressDecisionClass;
 use crate::ingress::IngressPrincipal;
 use crate::room_effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
-use crate::server::routes::interpret::effects::IngressPlan;
+use crate::server::routes::interpret::effects::{ClientRoomOrigin, IngressPlan};
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 #[cfg(feature = "clustering")]
 use crate::server::routes::interpret::OrderedRelayHandoffHandle;
@@ -37,6 +37,12 @@ use crate::server::routes::interpret::OrderedRelayRouteOriginKind;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::str::FromStr;
 use xmpp_parsers::minidom::Element;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static TEST_LOCAL_ROOM_PLAN_ORIGINS:
+        std::sync::Arc<std::sync::Mutex<Vec<Option<ClientRoomOrigin>>>>;
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum StreamErrorFrame {
@@ -574,6 +580,11 @@ async fn handle_xmpp_frame_impl(
                 }
             }
 
+            let client_room_origin = authenticated_client_room_origin(
+                phase,
+                authenticated_session.as_ref(),
+                *occupancy_session,
+            );
             let reserved_inbound_for_sm = sm_state
                 .enabled
                 .then(|| sm_inbound_completion.reserve(sm_state));
@@ -619,6 +630,7 @@ async fn handle_xmpp_frame_impl(
                             principal,
                             sequence: reserved_inbound_for_sm,
                             origin: ordered_relay_origin,
+                            client_room_origin,
                             backstop,
                         },
                         state,
@@ -915,6 +927,7 @@ struct MessageIngressDispatch {
     principal: waddle_xmpp::auth::AuthenticatedPrincipalRef,
     sequence: Option<OrderedRelayInboundSequence>,
     origin: Option<OrderedRelayRouteOrigin>,
+    client_room_origin: Option<ClientRoomOrigin>,
     backstop: StanzaBackstop,
 }
 
@@ -932,6 +945,7 @@ async fn dispatch_authoritative_message(
         principal,
         sequence,
         origin,
+        client_room_origin,
         backstop,
     } = request;
     let checkpoint = sequence.map(|seq| conn.sm_inbound_completion.checkpoint_for(seq));
@@ -1047,10 +1061,28 @@ async fn dispatch_authoritative_message(
                 crate::server::routes::interpret::reject_malformed_message(message, &sender)
             }
             None => {
-                crate::server::routes::interpret::plan_message_dispatch(machine, message, &deps)
-                    .await
+                crate::server::routes::interpret::plan_message_dispatch_with_client_origin(
+                    machine,
+                    message,
+                    &deps,
+                    client_room_origin.as_ref(),
+                )
+                .await
             }
         };
+        #[cfg(test)]
+        if let crate::server::routes::interpret::effects::RoomExecutionPath::Local {
+            client_origin,
+            ..
+        } = &plan.room_execution
+        {
+            let _ = TEST_LOCAL_ROOM_PLAN_ORIGINS.try_with(|captured| {
+                captured
+                    .lock()
+                    .expect("room plan origin capture")
+                    .push(client_origin.clone());
+            });
+        }
         let submission = IngressSubmission {
             sender,
             identity,

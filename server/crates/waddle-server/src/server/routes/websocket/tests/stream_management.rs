@@ -8737,6 +8737,20 @@ async fn sm_resume_restores_session_and_replays_unacked() {
     assert!(conn.phase.is_resumed());
     assert!(conn.carbons_enabled);
     assert_eq!(conn.occupancy_session, occupancy_session);
+    assert_eq!(
+        super::super::state::authenticated_client_room_origin(
+            &conn.phase,
+            conn.authenticated_session.as_ref(),
+            conn.occupancy_session,
+        ),
+        Some(
+            crate::server::routes::interpret::effects::ClientRoomOrigin {
+                full_jid: jid.clone(),
+                occupancy_session,
+            }
+        ),
+        "the resumed binding retains the detached client room origin"
+    );
     assert!(matches!(
         &conn.phase,
         ConnectionPhase::Ready {

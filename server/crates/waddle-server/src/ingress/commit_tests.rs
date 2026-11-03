@@ -169,6 +169,7 @@ async fn local_unfenced_room_commits_without_snapshot_revision_proof() {
     let (db, uow, mut submission) = fixture().await;
     submission.plan.room_execution = RoomExecutionPath::Local {
         room: "room@muc.example.com".parse().expect("room"),
+        client_origin: None,
         fence: crate::server::routes::interpret::effects::room::RoomFenceRequirement::Unfenced,
         snapshot_generation: 1,
         manifest_snapshot: None,
