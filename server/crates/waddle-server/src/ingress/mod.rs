@@ -47,6 +47,8 @@ pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOut
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
+#[cfg(feature = "clustering")]
+pub mod recorded_room_archive;
 pub(crate) mod room_manifest;
 pub use recorded::{ProgressObligation, RouteProgress};
 pub use room_manifest::{

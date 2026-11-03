@@ -11,6 +11,8 @@ pub mod postgres_proxy;
 pub(crate) mod relation_guard_lab;
 #[cfg(feature = "test-support")]
 pub use relation_guard_lab::verify_disposable_relation_guard_chain;
+#[cfg(all(feature = "test-support", feature = "clustering"))]
+pub use relation_guard_lab::verify_recorded_room_archive;
 #[cfg(feature = "test-support")]
 mod ordered_claim;
 #[cfg(feature = "test-support")]

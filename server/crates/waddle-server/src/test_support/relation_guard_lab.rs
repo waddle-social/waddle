@@ -14,6 +14,8 @@ use uuid::Uuid;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, IngressEffectIntent, MessageKey, ProtocolEpoch, SemanticDigest,
 };
+#[cfg(feature = "clustering")]
+use waddle_xmpp::ownership::ClaimStore;
 
 use crate::config::LineageConfig;
 use crate::db::lineage::{self, AttestedLineage, DeploymentUuid, PgSchemaName};
@@ -237,8 +239,17 @@ async fn role_has_marker(
         .bind(name).bind(marker).fetch_one(connection).await?)
 }
 
+#[cfg(feature = "clustering")]
+mod room_archive;
+#[cfg(feature = "clustering")]
+pub use room_archive::verify_recorded_room_archive;
+
 impl Lab {
     async fn create(admin_url: &str) -> anyhow::Result<Self> {
+        Self::create_with_guard(admin_url, true).await
+    }
+
+    async fn create_with_guard(admin_url: &str, candidate_guard: bool) -> anyhow::Result<Self> {
         let cluster = PgPool::connect(admin_url).await?;
         let mut resources = Provisioning {
             cluster: cluster.clone(),
@@ -302,19 +313,26 @@ impl Lab {
         }
 
         let migration_url = migration_url(admin_url, &database_name, &migrator, &password, &owner)?;
-        let owner_db = Database::from_config("relation-lab-owner", &DatabaseConfig::new(DatabaseDriver::Postgres, migration_url)).await?;
+        let owner_db = Database::from_config("relation-lab-owner", &DatabaseConfig::new(DatabaseDriver::Postgres, migration_url.clone())).await?;
         let lineage = lineage::enroll(&owner_db, &LineageConfig {
             deployment_uuid: Some(DeploymentUuid(Uuid::new_v4())),
             action: None,
         }).await?;
         MigrationRunner::single().run(&owner_db).await?;
+        #[cfg(feature = "clustering")]
+        if !candidate_guard {
+            crate::clustering::claims::PostgresClaimStore::new(owner_db.clone()).ensure_schema().await?;
+            waddle_xmpp::mam::SqlxMamStorage::open(&migration_url).await?;
+        }
         drop(owner_db);
 
         let mut owner_connection = PgConnection::connect_with(&owner_options).await?;
         let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM guarded._migrations")
             .fetch_one(&mut owner_connection).await?;
         ensure!(latest == 1028, "unexpected migration catalog version: {latest}");
-        sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
+        if candidate_guard {
+            sqlx::raw_sql(GUARD).execute(&mut owner_connection).await?;
+        }
         for statement in [
             format!("GRANT SELECT ON guarded._lineage TO {definer}"),
             format!("GRANT SELECT ON guarded.ingress_protocol_epoch, guarded.ingress_epoch_guard_manifest TO {runtime}"),
@@ -322,6 +340,31 @@ impl Lab {
             format!("GRANT SELECT, INSERT ON guarded.ingress_effect_intents, guarded.ingress_effect_receipts, guarded.ingress_deliveries, guarded.ingress_effect_descendants TO {runtime}"),
         ] {
             sqlx::query(&statement).execute(&mut owner_connection).await?;
+        }
+        #[cfg(feature = "clustering")]
+        if !candidate_guard {
+            for statement in [
+                format!("GRANT UPDATE (id) ON guarded.ingress_protocol_epoch TO {runtime}"),
+                format!("REVOKE UPDATE ON guarded.ingress_messages FROM {runtime}"),
+                format!("GRANT UPDATE (terminal_at, retention_eligible_at) ON guarded.ingress_messages TO {runtime}"),
+                format!("GRANT SELECT, UPDATE (entity_type) ON guarded.clustering_claims TO {runtime}"),
+                format!("GRANT UPDATE (payload) ON guarded.ingress_effect_intents TO {runtime}"),
+                format!("GRANT SELECT, INSERT ON guarded.ingress_archive_dispatch TO {runtime}"),
+                format!("GRANT SELECT, INSERT ON guarded.mam_messages TO {runtime}"),
+                format!("GRANT SELECT, INSERT, UPDATE ON guarded.mam_archive_sequences TO {runtime}"),
+            ] {
+                sqlx::query(&statement).execute(&mut owner_connection).await?;
+            }
+            sqlx::query(&format!("CREATE SCHEMA shadow AUTHORIZATION {owner}"))
+                .execute(&mut owner_connection).await?;
+            sqlx::query(&format!("GRANT USAGE ON SCHEMA shadow TO {runtime}"))
+                .execute(&mut owner_connection).await?;
+            for table in ["clustering_claims", "ingress_messages", "ingress_effect_intents", "ingress_effect_receipts", "ingress_archive_dispatch", "mam_messages", "mam_archive_sequences"] {
+                sqlx::query(&format!("CREATE TABLE shadow.{table} (LIKE guarded.{table} INCLUDING ALL)"))
+                    .execute(&mut owner_connection).await?;
+                sqlx::query(&format!("GRANT SELECT, INSERT, UPDATE ON shadow.{table} TO {runtime}"))
+                    .execute(&mut owner_connection).await?;
+            }
         }
         drop(owner_connection);
 
@@ -1257,6 +1300,7 @@ async fn lose_commit_reply(
     target: PgConnectOptions,
     held: std::sync::Arc<tokio::sync::Notify>,
     disconnect: std::sync::Arc<tokio::sync::Notify>,
+    marker: &'static [u8],
 ) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1267,7 +1311,6 @@ async fn lose_commit_reply(
     let saw_commit = std::sync::Arc::new(AtomicBool::new(false));
     let upstream_flag = saw_commit.clone();
     let upstream = async move {
-        const MARKER: &[u8] = b"waddle_relation_lab_business_commit";
         const COMMIT: &[u8] = b"COMMIT\0";
         let mut bytes = [0_u8; 8192];
         let mut tail = Vec::new();
@@ -1280,8 +1323,8 @@ async fn lose_commit_reply(
             let mut scan = tail;
             scan.extend_from_slice(&bytes[..n]);
             if !armed {
-                if let Some(index) = scan.windows(MARKER.len()).position(|part| part == MARKER) {
-                    scan.drain(..index + MARKER.len());
+                if let Some(index) = scan.windows(marker.len()).position(|part| part == marker) {
+                    scan.drain(..index + marker.len());
                     armed = true;
                 }
             }
@@ -1289,7 +1332,7 @@ async fn lose_commit_reply(
                 upstream_flag.store(true, Ordering::SeqCst);
             }
             server_write.write_all(&bytes[..n]).await?;
-            tail = scan[scan.len().saturating_sub(MARKER.len() - 1)..].to_vec();
+            tail = scan[scan.len().saturating_sub(marker.len() - 1)..].to_vec();
         }
     };
     let downstream = async move {
@@ -1325,6 +1368,7 @@ async fn lost_commit_ack(
         lab.runtime_options.clone(),
         held.clone(),
         disconnect.clone(),
+        b"waddle_relation_lab_business_commit",
     ));
     let options = PgConnectOptions::new()
         .host("127.0.0.1")
