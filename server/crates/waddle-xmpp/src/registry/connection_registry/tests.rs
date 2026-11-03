@@ -1,8 +1,11 @@
+use super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
 use super::{
-    mpsc, Arc, BareJid, BroadcastOutcome, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    FullJid, Instant, Ordering, OutboundStanza, OutboundWriteAcceptance, PendingFlushReserveError,
-    SendResult, Stanza,
+    mpsc, Arc, BareJid, BindingAdmissionState, BroadcastOutcome, ConnectionEntry,
+    ConnectionRegistry, DeliveryKind, FullJid, Instant, LocalConnectionBindingId, Ordering,
+    OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
+    PendingFlushCommitRejection, PendingFlushReserveError, SendResult, Stanza,
 };
+use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
 use std::time::Duration;
 use xmpp_parsers::message::{Message, MessageType};
@@ -135,7 +138,7 @@ async fn send_to_if_owner_delivers_only_to_the_owning_session() {
     let jid = test_jid("user1");
     let (tx, mut rx) = mpsc::channel(16);
     let owner = registry.register(jid.clone(), tx);
-    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stale_owner = LocalConnectionBindingId::fresh();
 
     // A non-matching owner token delivers nothing.
     let outcome = registry
@@ -236,7 +239,7 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
 
     let owner = registry.register_entry(jid.clone(), entry.clone());
 
-    assert!(Arc::ptr_eq(&owner, &entry.carbons_enabled));
+    assert_eq!(owner, entry.binding_id());
     assert!(registry.is_carbons_enabled(&jid));
     assert_eq!(
         registry.roster_interested_resources_for_user(&bare),
@@ -260,19 +263,87 @@ async fn test_register_entry_preserves_prebuilt_entry_state_and_sender() {
 }
 
 #[test]
+fn binding_id_survives_clone_and_republication_but_is_independent_of_carbons_state() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("binding");
+    let (sender, _receiver) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(sender);
+    let binding_id = entry.binding_id();
+
+    assert_eq!(entry.clone().binding_id(), binding_id);
+    assert_eq!(
+        registry.register_entry(jid.clone(), entry.clone()),
+        binding_id
+    );
+    assert_eq!(
+        registry.register_entry(jid.clone(), entry.clone()),
+        binding_id
+    );
+
+    let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
+    let mut replacement = ConnectionEntry::new(replacement_sender);
+    replacement.carbons_enabled = entry.carbons_enabled.clone();
+    assert_ne!(replacement.binding_id(), binding_id);
+    assert_ne!(
+        registry.register_entry(jid.clone(), replacement),
+        binding_id
+    );
+    assert!(!registry.is_owned_by(&jid, &binding_id));
+}
+
+#[test]
+fn physical_reference_survives_binding_replacement_and_remote_owner_movement() {
+    let source_incarnation =
+        NodeLeaseIdentity::from_node_identity(&NodeIdentity::new("source-node", "source-epoch"));
+    let connection_ref = ConnectionRef::fresh(source_incarnation.clone());
+    let first_binding = BindingRef::fresh(connection_ref.clone());
+    let (first_sender, _first_receiver) = mpsc::channel(1);
+    let first = ConnectionEntry::new_for_binding(first_sender, first_binding.clone());
+    let (replacement_sender, _replacement_receiver) = mpsc::channel(1);
+    let replacement =
+        ConnectionEntry::new_for_connection(replacement_sender, connection_ref.clone());
+    let (new_socket_sender, _new_socket_receiver) = mpsc::channel(1);
+    let new_socket = ConnectionEntry::new_for_connection(
+        new_socket_sender,
+        ConnectionRef::fresh(source_incarnation),
+    );
+    let (owner_a_sender, _owner_a_receiver) = mpsc::channel(1);
+    let owner_a_mirror =
+        ConnectionEntry::remote_hosted_for_connection(owner_a_sender, connection_ref.clone());
+    let (owner_b_sender, _owner_b_receiver) = mpsc::channel(1);
+    let owner_b_mirror =
+        ConnectionEntry::remote_hosted_for_connection(owner_b_sender, connection_ref.clone());
+
+    assert_eq!(first.connection_ref(), replacement.connection_ref());
+    assert_ne!(first.binding_id(), replacement.binding_id());
+    assert_eq!(first.binding_ref(), Some(&first_binding));
+    assert_ne!(first.binding_ref(), replacement.binding_ref());
+    assert_eq!(first.binding_ref(), first.clone().binding_ref());
+    assert_ne!(first.connection_ref(), new_socket.connection_ref());
+    assert_ne!(first.binding_id(), new_socket.binding_id());
+    assert_eq!(
+        owner_a_mirror.connection_ref(),
+        owner_b_mirror.connection_ref()
+    );
+    assert_ne!(owner_a_mirror.binding_id(), owner_b_mirror.binding_id());
+    assert!(owner_a_mirror.binding_ref().is_none());
+    assert!(owner_b_mirror.binding_ref().is_none());
+}
+
+#[test]
 fn test_register_entry_if_owner_or_absent_refuses_replacement_owner() {
     let registry = ConnectionRegistry::new();
     let jid: FullJid = "user@example.com/web".parse().unwrap();
     let (tx1, _rx1) = mpsc::channel(16);
     let entry1 = ConnectionEntry::new(tx1);
-    let owner1 = entry1.carbons_handle();
+    let owner1 = entry1.binding_id();
 
     assert!(registry.register_entry_if_owner_or_absent(jid.clone(), entry1.clone(), &owner1));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
 
     let (tx2, _rx2) = mpsc::channel(16);
     let entry2 = ConnectionEntry::new(tx2);
-    let owner2 = entry2.carbons_handle();
+    let owner2 = entry2.binding_id();
 
     assert!(!registry.register_entry_if_owner_or_absent(jid.clone(), entry2.clone(), &owner2));
     assert!(registry.entry_if_owner(&jid, &owner1).is_some());
@@ -322,6 +393,39 @@ fn test_blocklist_interest_tracks_only_requesting_resources() {
         registry.blocklist_interested_resources_for_user(&bare),
         vec![web]
     );
+}
+
+#[test]
+fn resource_metadata_rejects_stale_and_absent_bindings() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("metadata");
+    let (old_tx, _old_rx) = mpsc::channel(4);
+    let old_owner = registry.register(jid.clone(), old_tx);
+    let (new_tx, _new_rx) = mpsc::channel(4);
+    let new_owner = registry.register(jid.clone(), new_tx);
+    let mirrored_entry = registry.entry(&jid).expect("current entry");
+
+    assert!(!registry.mark_roster_interested_if_owner(&jid, &old_owner));
+    assert!(!registry.mark_blocklist_interested_if_owner(&jid, &old_owner));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &old_owner, true));
+    assert!(!registry.is_roster_interested(&jid));
+    assert!(!registry.is_blocklist_interested(&jid));
+    assert!(!registry.is_carbons_enabled(&jid));
+
+    assert!(registry.mark_roster_interested_if_owner(&jid, &new_owner));
+    assert!(registry.mark_blocklist_interested_if_owner(&jid, &new_owner));
+    assert!(registry.set_carbons_enabled_if_owner(&jid, &new_owner, true));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &old_owner, false));
+    assert!(mirrored_entry.roster_interested.load(Ordering::Relaxed));
+    assert!(mirrored_entry.blocklist_interested.load(Ordering::Relaxed));
+    assert!(mirrored_entry.is_carbons_enabled());
+    assert!(registry.set_carbons_enabled_if_owner(&jid, &new_owner, false));
+    assert!(!mirrored_entry.is_carbons_enabled());
+
+    assert!(registry.unregister_if_owner(&jid, &new_owner).is_some());
+    assert!(!registry.mark_roster_interested_if_owner(&jid, &new_owner));
+    assert!(!registry.mark_blocklist_interested_if_owner(&jid, &new_owner));
+    assert!(!registry.set_carbons_enabled_if_owner(&jid, &new_owner, true));
 }
 
 #[test]
@@ -459,6 +563,45 @@ async fn test_send_to_closed_channel_does_not_remove_replacement() {
         SendResult::Sent
     ));
     assert!(new_rx.recv().await.is_some());
+}
+
+#[tokio::test]
+async fn write_acceptance_survives_closed_send_retry_to_same_jid_replacement() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("retry-write-acceptance");
+    let (old_tx, old_rx) = mpsc::channel(1);
+    let (new_tx, mut new_rx) = mpsc::channel(1);
+    registry.register(jid.clone(), old_tx);
+    assert!(registry
+        .send_to(
+            &jid,
+            Stanza::Message(make_test_message("first@example.com"))
+        )
+        .await
+        .is_sent());
+
+    let (acceptance, mut accepted) = OutboundWriteAcceptance::new();
+    let stanza = Stanza::Message(make_test_message("retry@example.com"));
+    let expected = stanza.to_element();
+    let send = registry.send_to_with_write_acceptance(&jid, stanza, acceptance);
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    registry.register(jid.clone(), new_tx);
+    drop(old_rx);
+    assert!(send.await.is_sent());
+    assert!(matches!(
+        accepted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let queued = new_rx.recv().await.expect("replacement received frame");
+    assert_eq!(queued.stanza.to_element(), expected);
+    assert_eq!(queued.kind, DeliveryKind::DirectFrame);
+    queued
+        .write_acceptance
+        .as_ref()
+        .expect("acceptance transferred to replacement")
+        .acknowledge();
+    assert_eq!(accepted.try_recv(), Ok(()));
 }
 
 #[tokio::test]
@@ -719,12 +862,9 @@ fn test_register_with_carbons_seeds_initial_flag() {
     let jid = test_jid("user1");
     let (tx, _rx) = mpsc::channel(16);
 
-    let handle = registry.register_with_carbons(jid.clone(), tx, true);
+    let owner = registry.register_with_carbons(jid.clone(), tx, true);
 
-    assert!(
-        handle.load(Ordering::Relaxed),
-        "handle returned by register_with_carbons(.., true) should start enabled"
-    );
+    assert!(registry.is_owned_by(&jid, &owner));
     assert!(
         registry.is_carbons_enabled(&jid),
         "registry should report carbons as enabled for the seeded entry"
@@ -737,9 +877,9 @@ fn test_register_with_carbons_false_leaves_disabled() {
     let jid = test_jid("user2");
     let (tx, _rx) = mpsc::channel(16);
 
-    let handle = registry.register_with_carbons(jid.clone(), tx, false);
+    let owner = registry.register_with_carbons(jid.clone(), tx, false);
 
-    assert!(!handle.load(Ordering::Relaxed));
+    assert!(registry.is_owned_by(&jid, &owner));
     assert!(!registry.is_carbons_enabled(&jid));
 }
 
@@ -899,8 +1039,8 @@ fn sm_stream_replacement_prunes_ended_owner() {
                 registry.register_entry(jid.clone(), ConnectionEntry::new(replacement_tx));
             }
             _ => {
-                let mut replacement = ConnectionEntry::new(replacement_tx);
-                replacement.carbons_enabled = owner.clone();
+                let mut replacement = registry.entry(&jid).expect("current entry");
+                replacement.sm_stream_id = Arc::new(std::sync::Mutex::new(None));
                 assert!(registry.register_entry_if_owner_or_absent(
                     jid.clone(),
                     replacement,
@@ -977,7 +1117,7 @@ fn sm_stream_resumed_successor_rejects_stale_owner_cleanup() {
     registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
     let old_enqueue = registry.capture_owned_enqueue_if_owner(
         jid.clone(),
-        old_owner.clone(),
+        old_owner,
         OutboundStanza::new(Stanza::Message(make_test_message("alice@example.com"))),
     );
     let (new_tx, _new_rx) = mpsc::channel(4);
@@ -1075,6 +1215,123 @@ fn sm_stream_cleanup_keeps_connection_locked_until_reverse_owner_is_pruned() {
         Some(stream_id.clone())
     );
     assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid));
+}
+
+#[test]
+fn retiring_connection_keeps_slot_locked_until_presence_is_removed() {
+    use dashmap::try_result::TryResult;
+    use std::sync::mpsc as sync_mpsc;
+    use std::thread;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Removal {
+        Unconditional,
+        Binding,
+        SmStream,
+        Closed,
+        ClosedOwner,
+    }
+
+    for removal in [
+        Removal::Unconditional,
+        Removal::Binding,
+        Removal::SmStream,
+        Removal::Closed,
+        Removal::ClosedOwner,
+    ] {
+        let registry = Arc::new(ConnectionRegistry::new());
+        let jid = test_jid("presence-cleanup");
+        let (old_tx, old_rx) = mpsc::channel(4);
+        let old_owner = registry.register(jid.clone(), old_tx);
+        let old_endpoint = registry
+            .entry(&jid)
+            .expect("published endpoint")
+            .endpoint
+            .clone();
+        let stream_id = crate::pending_delivery::SmSessionId::new("presence-cleanup-stream");
+        assert!(registry.set_sm_stream_id_if_owner(&jid, &old_owner, Some(stream_id.clone())));
+        assert!(registry.update_presence_state_if_owner(
+            &jid,
+            &old_owner,
+            None,
+            Some("old".to_string()),
+            0,
+            Vec::new(),
+        ));
+        drop(old_rx);
+
+        // Stall the presence removal. The cleanup must keep the connection
+        // slot locked throughout, so the successor cannot publish first.
+        let presence_guard = registry
+            .presence_states
+            .get_mut(&jid)
+            .expect("old presence");
+        let cleanup_registry = registry.clone();
+        let cleanup_jid = jid.clone();
+        let cleanup = thread::spawn(move || match removal {
+            Removal::Unconditional => cleanup_registry.unregister(&cleanup_jid).is_some(),
+            Removal::Binding => cleanup_registry
+                .unregister_if_owner(&cleanup_jid, &old_owner)
+                .is_some(),
+            Removal::SmStream => cleanup_registry
+                .unregister_if_sm_stream_id(&cleanup_jid, &stream_id)
+                .is_some(),
+            Removal::Closed => {
+                cleanup_registry.remove_if_sender_closed(&cleanup_jid);
+                true
+            }
+            Removal::ClosedOwner => {
+                cleanup_registry.remove_if_sender_closed_owner(&cleanup_jid, &old_endpoint);
+                true
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let connection_locked = loop {
+            match registry.connections.try_get(&jid) {
+                TryResult::Locked => break true,
+                TryResult::Absent => break false,
+                TryResult::Present(entry) => drop(entry),
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::yield_now();
+        };
+        if !connection_locked {
+            drop(presence_guard);
+            cleanup.join().expect("cleanup thread");
+            panic!("{removal:?} released the connection slot before clearing presence");
+        }
+
+        let successor_registry = registry.clone();
+        let successor_jid = jid.clone();
+        let (started_tx, started_rx) = sync_mpsc::channel();
+        let (new_tx, _new_rx) = mpsc::channel(4);
+        let successor = thread::spawn(move || {
+            started_tx.send(()).expect("signal successor start");
+            let owner = successor_registry.register(successor_jid.clone(), new_tx);
+            assert!(successor_registry.update_presence_state_if_owner(
+                &successor_jid,
+                &owner,
+                None,
+                Some("successor".to_string()),
+                3,
+                Vec::new(),
+            ));
+            owner
+        });
+        let successor_started = started_rx.recv_timeout(Duration::from_secs(5));
+        drop(presence_guard);
+        assert!(cleanup.join().expect("cleanup thread"));
+        let new_owner = successor.join().expect("successor thread");
+        successor_started.expect("successor began while cleanup held the slot");
+
+        assert!(registry.is_owned_by(&jid, &new_owner), "{removal:?}");
+        let presence = registry.presence_state(&jid).expect("successor presence");
+        assert_eq!(presence.status.as_deref(), Some("successor"), "{removal:?}");
+        assert_eq!(presence.priority, 3, "{removal:?}");
+    }
 }
 
 /// ADR-0017 Phase 1 (Greptile P1 on PR #1177): the SM-expiry janitor must not
@@ -1252,7 +1509,7 @@ fn clear_presence_state_if_owner_refuses_stale_owner() {
 fn update_presence_state_if_owner_refuses_absent_entry() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("ghost");
-    let orphan_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let orphan_owner = LocalConnectionBindingId::fresh();
     assert!(!registry.update_presence_state_if_owner(
         &jid,
         &orphan_owner,
@@ -1355,7 +1612,9 @@ fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner(
                 reservation,
                 OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
             ),
-            SendResult::NotConnected
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::BindingMismatch
+            )
         ));
         assert!(old_receiver.try_recv().is_err());
         assert!(replacement_receiver.try_recv().is_err());
@@ -1363,28 +1622,241 @@ fn pending_flush_reservation_rejects_replacement_with_or_without_explicit_owner(
 }
 
 #[test]
-fn pending_flush_reservation_checks_channel_even_when_owner_is_reused() {
+fn cloned_binding_endpoint_observes_provisional_and_sealed_refusal() {
+    let (socket, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+    let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let owner = LocalConnectionBindingId::fresh();
+    let endpoint = socket.bind(
+        owner,
+        Some(binding_ref.clone()),
+        BindingAdmissionState::Provisional,
+    );
+    let retained_endpoint = endpoint.clone();
+
+    assert!(matches!(
+        retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com"
+        )))),
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Provisional,
+            ..
+        }
+    ));
+    assert!(receiver.try_recv().is_err());
+
+    assert!(retained_endpoint.activate(owner, &binding_ref));
+    assert!(matches!(
+        endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "accepted@example.com"
+        )))),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    assert!(endpoint.seal(owner, &binding_ref));
+    assert!(matches!(
+        retained_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com"
+        )))),
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Sealed,
+            ..
+        }
+    ));
+    assert!(
+        receiver.try_recv().is_ok(),
+        "sealing preserves accepted work"
+    );
+    assert!(receiver.try_recv().is_err());
+    assert!(
+        !endpoint.activate(owner, &binding_ref),
+        "a sealed binding cannot be reactivated"
+    );
+}
+
+#[test]
+fn binding_activation_requires_exact_local_owner_and_attempt() {
+    let (stale_socket, mut stale_receiver) = super::SocketOutboundEndpoint::channel(1);
+    let connection_ref = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let stale_binding = BindingRef::fresh(connection_ref.clone());
+    let stale_candidate =
+        ConnectionEntry::new_provisional_for_binding(stale_socket, stale_binding.clone());
+    let stale_owner = stale_candidate.binding_id();
+
+    let (successor_socket, mut successor_receiver) = super::SocketOutboundEndpoint::channel(1);
+    let successor_binding = BindingRef::fresh(connection_ref);
+    let successor_candidate =
+        ConnectionEntry::new_provisional_for_binding(successor_socket, successor_binding.clone());
+
+    assert!(stale_candidate
+        .activate_binding(stale_owner, &successor_binding)
+        .is_none());
+    assert!(stale_receiver.try_recv().is_err());
+    assert!(
+        successor_candidate
+            .activate_binding(stale_owner, &successor_binding)
+            .is_none(),
+        "a stale owner cannot activate a candidate"
+    );
+    assert!(successor_receiver.try_recv().is_err());
+}
+
+#[test]
+fn provisional_candidate_is_published_only_after_exact_activation() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("provisional");
+    let (endpoint, _receiver) = super::SocketOutboundEndpoint::channel(1);
+    let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+    let owner = candidate.binding_id();
+
+    let entry = candidate
+        .activate_binding(owner, &binding_ref)
+        .expect("exact activation returns a publishable entry");
+    assert_eq!(entry.binding_id(), owner);
+    assert_eq!(entry.binding_ref(), Some(&binding_ref));
+    assert_eq!(registry.connection_count(), 0);
+    assert!(!registry.is_connected(&jid));
+
+    registry.register_entry(jid.clone(), entry);
+    assert_eq!(registry.connection_count(), 1);
+    assert!(registry.is_connected(&jid));
+}
+
+#[test]
+fn provisional_enqueue_and_exact_activation_are_linearized() {
+    for _ in 0..32 {
+        let (socket, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let owner = LocalConnectionBindingId::fresh();
+        let endpoint = socket.bind(
+            owner,
+            Some(binding_ref.clone()),
+            BindingAdmissionState::Provisional,
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let outcome = std::thread::scope(|scope| {
+            let send_endpoint = endpoint.clone();
+            let send_barrier = Arc::clone(&barrier);
+            let send = scope.spawn(move || {
+                send_barrier.wait();
+                send_endpoint.try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+                    "activation-race@example.com",
+                ))))
+            });
+
+            let activate_endpoint = endpoint.clone();
+            let activate_barrier = Arc::clone(&barrier);
+            let activation_ref = binding_ref.clone();
+            let activate = scope.spawn(move || {
+                activate_barrier.wait();
+                activate_endpoint.activate(owner, &activation_ref)
+            });
+
+            barrier.wait();
+            assert!(activate.join().expect("activation thread"));
+            send.join().expect("send thread")
+        });
+
+        match outcome {
+            EndpointEnqueueOutcome::ProvenNotEnqueued {
+                reason: EndpointEnqueueRejection::Provisional,
+                ..
+            } => {
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "pre-activation send was refused"
+                );
+            }
+            EndpointEnqueueOutcome::AcceptedOrUnknown => {
+                assert!(
+                    receiver.try_recv().is_ok(),
+                    "post-activation send was accepted"
+                );
+            }
+            other => panic!("unexpected provisional activation race outcome: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn endpoint_outcomes_distinguish_accepted_full_and_closed() {
+    let (socket, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+    let entry = ConnectionEntry::new(socket);
+    let outbound =
+        || OutboundStanza::new(Stanza::Message(make_test_message("endpoint@example.com")));
+
+    assert!(matches!(
+        entry.endpoint.try_send(outbound()),
+        EndpointEnqueueOutcome::AcceptedOrUnknown
+    ));
+    assert!(matches!(
+        entry.endpoint.try_send(outbound()),
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::Full,
+            ..
+        }
+    ));
+    assert!(receiver.try_recv().is_ok());
+    drop(receiver);
+    assert!(matches!(
+        entry.endpoint.try_send(outbound()),
+        EndpointEnqueueOutcome::ProvenNotEnqueued {
+            reason: EndpointEnqueueRejection::ChannelClosed,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn socket_endpoint_factory_routes_ordinary_registry_send() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("endpoint");
+    let (endpoint, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+    registry.register(jid.clone(), endpoint);
+
+    assert!(matches!(
+        registry
+            .send_to(
+                &jid,
+                Stanza::Message(make_test_message("endpoint@example.com"))
+            )
+            .await,
+        SendResult::Sent
+    ));
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[test]
+fn pending_flush_commit_rechecks_endpoint_admission_after_reservation() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("reserved");
-    let (sender, mut old_receiver) = mpsc::channel(1);
-    let owner = registry.register(jid.clone(), sender);
+    let (endpoint, mut receiver) = super::SocketOutboundEndpoint::channel(1);
+    let binding_ref = BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+    let candidate = ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+    let owner = candidate.binding_id();
+    let entry = candidate
+        .activate_binding(owner, &binding_ref)
+        .expect("exact activation before registry publication");
+    let owner = registry.register_entry(jid.clone(), entry);
     assert!(registry.update_presence(&jid, true, 0));
+
+    let entry = registry
+        .entry_if_owner(&jid, &owner)
+        .expect("registered owner");
     let reservation = registry
         .try_reserve_pending_flush(&jid, Some(&owner))
-        .expect("reserve original connection");
-    let mut replacement = registry.entry(&jid).expect("registered entry");
-    let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
-    replacement.sender = replacement_sender;
-    registry.register_entry(jid, replacement);
-    assert!(matches!(
+        .expect("reserve while active");
+    assert!(entry.seal_binding(owner, &binding_ref));
+
+    assert_eq!(
         registry.send_reserved_pending_flush(
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::NotConnected
-    ));
-    assert!(old_receiver.try_recv().is_err());
-    assert!(replacement_receiver.try_recv().is_err());
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(PendingFlushCommitRejection::Sealed)
+    );
+    assert!(receiver.try_recv().is_err());
 }
 
 #[test]
@@ -1403,7 +1875,9 @@ fn pending_flush_reservation_checks_receiver_before_commit() {
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::ChannelClosed
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::ChannelClosed
+        )
     ));
     assert!(!registry.is_connected(&jid));
 }
@@ -1429,7 +1903,7 @@ fn pending_flush_reservation_preserves_sm_row_metadata() {
                 received_at,
             )
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     let outbound = receiver.try_recv().expect("committed pending frame");
     assert_eq!(outbound.pending_row_id, Some(row_id));
@@ -1457,7 +1931,7 @@ async fn pending_flush_reservation_waits_for_capacity_before_commit() {
             first,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     receiver.recv().await.expect("drain first frame");
     let second = reserve.await.expect("capacity available after drain");
@@ -1466,9 +1940,125 @@ async fn pending_flush_reservation_waits_for_capacity_before_commit() {
             second,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::Sent
+        PendingFlushCommitOutcome::AcceptedOrUnknown
     ));
     assert!(receiver.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender
+        .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com",
+        ))))
+        .expect("fill channel");
+    let owner = registry.register(jid.clone(), sender.clone());
+    assert!(registry.update_presence(&jid, true, 0));
+    let reserve = registry.reserve_pending_flush(&jid, Some(&owner));
+    tokio::pin!(reserve);
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+
+    let entry = registry.entry(&jid).expect("original binding");
+    let binding_ref = entry.binding_ref().expect("local binding attempt");
+    assert!(entry.seal_binding(owner, binding_ref));
+    receiver.recv().await.expect("release channel capacity");
+    let reservation = reserve.await.expect("reserve returns after capacity");
+    assert_eq!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(PendingFlushCommitRejection::Sealed)
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(sender.capacity(), 1, "refusal returns reserved capacity");
+}
+
+#[tokio::test]
+async fn pending_flush_reservation_refuses_same_socket_rebinding_after_capacity_wait() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved");
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender
+        .try_send(OutboundStanza::new(Stanza::Message(make_test_message(
+            "reserved@example.com",
+        ))))
+        .expect("fill channel");
+    let owner = registry.register(jid.clone(), sender.clone());
+    assert!(registry.update_presence(&jid, true, 0));
+    let old = registry.entry(&jid).expect("original binding");
+    let reserve = registry.reserve_pending_flush(&jid, Some(&owner));
+    tokio::pin!(reserve);
+    assert!(futures::poll!(reserve.as_mut()).is_pending());
+
+    let replacement =
+        ConnectionEntry::new_for_connection(sender.clone(), old.connection_ref().clone());
+    assert_ne!(replacement.binding_ref(), old.binding_ref());
+    registry.register_entry(jid.clone(), replacement);
+    assert!(registry.update_presence(&jid, true, 0));
+    receiver.recv().await.expect("release original capacity");
+    let reservation = reserve.await.expect("original reservation completes");
+    assert_eq!(
+        registry.send_reserved_pending_flush(
+            reservation,
+            OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
+        ),
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::BindingMismatch
+        )
+    );
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(sender.capacity(), 1, "refusal returns reserved capacity");
+}
+
+#[test]
+fn pending_flush_reservation_commit_and_binding_seal_have_one_order() {
+    for _ in 0..32 {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("reserved");
+        let (sender, mut receiver) = mpsc::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(sender.clone(), binding_ref.clone());
+        let owner = registry.register_entry(jid.clone(), entry);
+        assert!(registry.update_presence(&jid, true, 0));
+        let entry = registry.entry(&jid).expect("original binding");
+        let reservation = registry
+            .try_reserve_pending_flush(&jid, Some(&owner))
+            .expect("reserve channel capacity");
+        let barrier = std::sync::Barrier::new(2);
+
+        let outcome = std::thread::scope(|scope| {
+            let commit = scope.spawn(|| {
+                barrier.wait();
+                registry.send_reserved_pending_flush(
+                    reservation,
+                    OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com"))),
+                )
+            });
+            let seal = scope.spawn(|| {
+                barrier.wait();
+                assert!(entry.seal_binding(owner, &binding_ref));
+            });
+            seal.join().expect("seal thread");
+            commit.join().expect("commit thread")
+        });
+        match outcome {
+            PendingFlushCommitOutcome::AcceptedOrUnknown => {
+                receiver.try_recv().expect("commit won before seal");
+            }
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::Sealed,
+            ) => {
+                assert!(receiver.try_recv().is_err(), "seal won before commit");
+            }
+            other => panic!("unexpected commit result: {other:?}"),
+        }
+        assert_eq!(sender.capacity(), 1);
+    }
 }
 
 #[test]
@@ -1488,7 +2078,9 @@ fn pending_flush_reservation_rechecks_presence_after_reservation() {
                 reservation,
                 OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
             ),
-            SendResult::NotConnected
+            PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+                PendingFlushCommitRejection::StaleOrIneligible
+            )
         ));
         assert!(
             receiver.try_recv().is_err(),
@@ -1522,7 +2114,9 @@ fn pending_flush_reservation_rejects_remote_hosted_mirror() {
             reservation,
             OutboundStanza::new(Stanza::Message(make_test_message("reserved@example.com")))
         ),
-        SendResult::NotConnected
+        PendingFlushCommitOutcome::DefinitelyNotEnqueued(
+            PendingFlushCommitRejection::StaleOrIneligible
+        )
     ));
     assert!(receiver.try_recv().is_err());
 }

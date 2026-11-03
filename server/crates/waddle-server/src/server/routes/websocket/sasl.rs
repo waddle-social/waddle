@@ -2,6 +2,7 @@ use super::transport_xml::{sasl_failure_element, sasl_success_element};
 use crate::server::routes::auth_telemetry::{
     record_auth_failure, record_auth_success, AuthFailure,
 };
+use waddle_xmpp::auth::OAuthBearerParseError;
 use waddle_xmpp::telemetry::attributes::AuthStage;
 
 /// Count the failed attempt on `xmpp.auth.attempts` (#1320) and build
@@ -11,6 +12,11 @@ use waddle_xmpp::telemetry::attributes::AuthStage;
 fn sasl_failure_counted(mechanism: &'static str) -> Element {
     waddle_xmpp::metrics::record_auth_attempt(mechanism, false);
     sasl_failure_element("not-authorized")
+}
+
+fn oauth_invalid_authzid() -> Element {
+    waddle_xmpp::metrics::record_auth_attempt("OAUTHBEARER", false);
+    sasl_failure_element("invalid-authzid")
 }
 
 fn scram_bare_identifier(username: &str, domain: &str) -> Option<BareJid> {
@@ -36,6 +42,7 @@ use super::{
 pub(super) async fn handle_sasl_oauthbearer(
     b64_data: &str,
     state: &WebSocketState,
+    stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<Element> {
@@ -49,11 +56,14 @@ pub(super) async fn handle_sasl_oauthbearer(
         }
     };
 
-    let token = match parse_oauthbearer(&decoded) {
-        Ok(OAuthBearerResult::Credentials(credentials)) => credentials.token,
+    let credentials = match parse_oauthbearer(&decoded) {
+        Ok(OAuthBearerResult::Credentials(credentials)) => credentials,
         Ok(OAuthBearerResult::DiscoveryRequest) => {
             warn!("SASL OAUTHBEARER: discovery request received on token-auth WebSocket path");
             return vec![sasl_failure_counted("OAUTHBEARER")];
+        }
+        Err(OAuthBearerParseError::InvalidAuthzid) => {
+            return vec![oauth_invalid_authzid()];
         }
         Err(e) => {
             warn!(error = %e, "SASL OAUTHBEARER: failed to parse bearer data");
@@ -65,10 +75,14 @@ pub(super) async fn handle_sasl_oauthbearer(
         .deps
         .auth_state
         .session_manager
-        .validate_session(&token)
+        .validate_session_without_touch(&credentials.token)
         .await
     {
         Ok(session) => {
+            let principal = match session.user_jid.parse::<BareJid>() {
+                Ok(principal) if principal.node().is_some() => principal,
+                _ => return vec![sasl_failure_counted("OAUTHBEARER")],
+            };
             let bare_jid_str =
                 match localpart_to_jid(&session.xmpp_localpart, &state.deps.auth_state.xmpp_domain)
                 {
@@ -83,13 +97,43 @@ pub(super) async fn handle_sasl_oauthbearer(
                     }
                 };
 
-            let full_jid = match format!("{}/pending", bare_jid_str).parse::<FullJid>() {
+            let derived = match bare_jid_str.parse::<BareJid>() {
+                Ok(derived) => derived,
+                Err(_) => return vec![sasl_failure_counted("OAUTHBEARER")],
+            };
+            if derived != principal {
+                return vec![sasl_failure_counted("OAUTHBEARER")];
+            }
+            if credentials
+                .authzid
+                .as_ref()
+                .is_some_and(|authzid| authzid != &principal)
+            {
+                return vec![oauth_invalid_authzid()];
+            }
+            if stream_from.is_some_and(|from| from != &principal) {
+                *phase = ConnectionPhase::closing(None);
+                return vec![sasl_failure_counted("OAUTHBEARER")];
+            }
+
+            let full_jid = match principal.with_resource_str("pending") {
                 Ok(jid) => jid,
                 Err(e) => {
                     warn!(jid = %bare_jid_str, error = %e, "SASL OAUTHBEARER: JID construction failed");
                     return vec![sasl_failure_counted("OAUTHBEARER")];
                 }
             };
+
+            if state
+                .deps
+                .auth_state
+                .session_manager
+                .touch_session(&credentials.token)
+                .await
+                .is_err()
+            {
+                return vec![sasl_failure_counted("OAUTHBEARER")];
+            }
 
             info!(
                 jid = %bare_jid_str,
@@ -212,6 +256,7 @@ pub(super) async fn handle_sasl_scram_response(
     domain: &str,
     state: &WebSocketState,
     mut scram: ScramPendingState,
+    stream_from: Option<&BareJid>,
     authenticated_session: &mut Option<Session>,
     phase: &mut ConnectionPhase,
 ) -> Vec<Element> {
@@ -263,6 +308,11 @@ pub(super) async fn handle_sasl_scram_response(
             return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
         }
     };
+
+    if stream_from.is_some_and(|from| from != &bare_jid) {
+        *phase = ConnectionPhase::closing(None);
+        return vec![scram_failure_counted(AuthFailure::ScramOther, None)];
+    }
 
     info!(
         jid = %bare_jid_str,

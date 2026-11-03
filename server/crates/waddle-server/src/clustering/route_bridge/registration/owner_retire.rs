@@ -86,7 +86,7 @@ impl OrderedRelayDeliveryBridge {
                     release.notified().await;
                 }
                 for pending in actor_retirements {
-                    let owner = pending.entry.carbons_handle();
+                    let owner = pending.entry.binding_id();
                     if !matches!(
                         unregister_remote_owner_actor_entry(&services, &jid, &owner).await,
                         RemoteOwnerActorUnregisterOutcome::Unregistered

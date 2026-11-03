@@ -5,7 +5,6 @@ use crate::server::session_janitors::spawn_critical_registry_supervisor;
 use jid::FullJid;
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -25,7 +24,7 @@ struct Fixture {
     state: Arc<WebSocketState>,
     jid: FullJid,
     actor: ActorRef<UserActor>,
-    owner: Arc<AtomicBool>,
+    owner: waddle_xmpp::registry::LocalConnectionBindingId,
     claims: Arc<InProcessClaimStore>,
     // Keep the registered socket's outbound channel open.
     _outbound: mpsc::Receiver<OutboundStanza>,
@@ -58,7 +57,7 @@ impl Fixture {
         let jid: FullJid = "alice@example.com/phone".parse().expect("jid");
         let (tx, outbound) = mpsc::channel(16);
         let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let owner = entry.binding_id();
         assert!(mirror_register(registry, jid.clone(), entry).await);
         let actor = registry
             .ask(GetUser {
@@ -96,7 +95,7 @@ impl Fixture {
             mirror_unregister(
                 &self.state.deps.protocol.user_registry,
                 &self.jid,
-                Some(self.owner.clone()),
+                Some(self.owner),
             )
             .await,
             MirrorUnregisterOutcome::Completed,
@@ -241,7 +240,7 @@ async fn mirror_full_child_mailbox_retains_custody_until_retry() {
         .await
         .expect("barrier after full mailbox")
         .expect("unregister was not admitted to the full child mailbox");
-    assert!(Arc::ptr_eq(&entry.carbons_handle(), &f.owner));
+    assert!(entry.binding_id() == f.owner);
     f.retry().await;
     assert!(f
         .actor
@@ -259,7 +258,7 @@ async fn timed_out_old_owner_mirror_and_retry_preserve_successor() {
     let release = f.gate().await;
     let (tx, _outbound) = mpsc::channel(16);
     let fresh_entry = ConnectionEntry::new(tx);
-    let fresh_owner = fresh_entry.carbons_handle();
+    let fresh_owner = fresh_entry.binding_id();
     // Put the successor before the old unregister in the child's FIFO while
     // both remain behind the gate. The admitted unregister will execute only
     // after its registry caller has already timed out and retained a retry.
@@ -279,7 +278,7 @@ async fn timed_out_old_owner_mirror_and_retry_preserve_successor() {
         .await
         .expect("barrier after successor and late old unregister")
         .expect("successor");
-    assert!(Arc::ptr_eq(&entry.carbons_handle(), &fresh_owner));
+    assert!(entry.binding_id() == fresh_owner);
     // Retry the retained old-owner removal before reconciling the registry's
     // resource mirror, so this exercises the convergence handler itself.
     f.retry().await;
@@ -289,7 +288,7 @@ async fn timed_out_old_owner_mirror_and_retry_preserve_successor() {
         .await
         .expect("entry after old-owner retry")
         .expect("successor");
-    assert!(Arc::ptr_eq(&entry.carbons_handle(), &fresh_owner));
+    assert!(entry.binding_id() == fresh_owner);
     assert!(
         mirror_register(
             &f.state.deps.protocol.user_registry,
@@ -313,7 +312,7 @@ async fn unregister_ask_preserves_typed_busy_error_and_pending_retry() {
         .user_registry
         .ask(UnregisterUserResource {
             jid: f.jid.clone(),
-            owner: Some(f.owner.clone()),
+            owner: Some(f.owner),
         })
         .await;
     assert!(

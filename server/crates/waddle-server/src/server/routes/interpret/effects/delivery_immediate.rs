@@ -57,7 +57,7 @@ pub(crate) async fn execute_with_received_at(
                                 .is_some_and(|entry| {
                                     immediate.connection_registry.try_send_outbound_if_owner(
                                         &jid,
-                                        &entry.carbons_enabled,
+                                        &entry.binding_id(),
                                         outbound,
                                     ) == waddle_xmpp::registry::BroadcastOutcome::Delivered
                                 });

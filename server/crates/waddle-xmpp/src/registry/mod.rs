@@ -22,10 +22,13 @@ pub mod user_actor;
 pub mod user_registry;
 
 pub use connection_registry::{
-    BroadcastOutcome, ConnectionBindGuard, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, LiveResumeControl, LocalResumeReply,
-    OutboundStanza, OutboundWriteAcceptance, PendingFlushReservation, PendingFlushReserveError,
-    PresenceState, SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe,
+    BindingAdmissionState, BroadcastOutcome, ConnectionBindGuard, ConnectionEntry,
+    ConnectionRegistry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
+    LiveResumeControl, LocalConnectionBindingId, LocalIoRelinquishment,
+    LocalIoRelinquishmentOutcome, LocalResumeReply, LocalSocketIo, OutboundStanza,
+    OutboundWriteAcceptance, PendingFlushCommitOutcome, PendingFlushCommitRejection,
+    PendingFlushReservation, PendingFlushReserveError, PresenceState, ProvisionalConnectionEntry,
+    SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe, SocketOutboundEndpoint,
     TerminalOrderingRetryLease,
 };
 pub use selection::{

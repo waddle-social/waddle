@@ -16,8 +16,7 @@ use crate::ingress_uow::{
 use crate::server::routes::interpret::effects::invite::MucUserRoute;
 use crate::server::routes::interpret::effects::{EffectOutcome, SettledCompletion, SettledOutcome};
 use crate::server::routes::interpret::{
-    deliver_direct_to_full_locally, deliver_registered_remote_resource, Deps,
-    FullJidDeliveryOutcome, SmIngressAppendContext,
+    deliver_frozen_invitation_resource, Deps, FullJidDeliveryOutcome, SmIngressAppendContext,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -98,23 +97,7 @@ async fn execute_inner(
         let mut immediate = deps.clone();
         immediate.ingress_delivery_uow = Some(uow.clone());
         immediate.ingress_append_context = Some(invitation.context.clone());
-        let mut outcome = deliver_direct_to_full_locally(&immediate, resource, &stanza).await;
-        if outcome == FullJidDeliveryOutcome::Unavailable {
-            // Owner-side remote mirrors represent live sockets too. Use their
-            // acknowledged, keyed gateway; an inviter's ordered-relay origin
-            // does not authorize the generated room sender, and this route's
-            // whole-invitation fallback must not become a detached SM append.
-            if let Some(remote) = deliver_registered_remote_resource(
-                &immediate,
-                resource,
-                &stanza,
-                waddle_xmpp::registry::DeliveryKind::DirectFrame,
-            )
-            .await
-            {
-                outcome = remote;
-            }
-        }
+        let outcome = deliver_frozen_invitation_resource(&immediate, resource, &stanza).await;
         uncertain |= outcome == FullJidDeliveryOutcome::MaybeCommitted;
     }
     check_stop(deps)?;

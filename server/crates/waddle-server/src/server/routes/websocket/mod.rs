@@ -75,6 +75,18 @@ mod parse_errors;
 mod registration;
 #[cfg(feature = "clustering")]
 pub(crate) use registration::complete_bind_retirements;
+// The private owner is compiled now, but startup remains on the live loop.
+// The feature-gated fixture is its only caller until that migration is ready.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(
+        dead_code,
+        reason = "the connection actor core is not wired into startup yet"
+    )
+)]
+mod connection_actor_core;
+#[cfg(feature = "test-support")]
+pub use connection_actor_core::fixture as connection_actor;
 #[cfg(feature = "clustering")]
 mod remote_muc_retry;
 pub(crate) mod replay;
@@ -85,6 +97,7 @@ mod send;
 mod session_init;
 mod state;
 mod stream_management;
+pub mod supervised_io;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_state;
 mod timers;

@@ -883,6 +883,115 @@ impl Transcript {
     }
 }
 
+#[tokio::test]
+async fn local_io_witness_tracks_each_production_websocket() {
+    use waddle_xmpp::registry::LocalIoRelinquishmentOutcome;
+
+    let harness = start().await;
+    harness.add_account("alice").await;
+    let mut first = harness.authenticated("alice").await;
+    send_bind(&mut first, "bind-phone", Some("phone")).await;
+    let phone = expect_bind_result(&mut first, "bind-phone").await;
+    let first_entry = harness
+        .state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(&phone)
+        .expect("first local entry");
+    let first_witness = first_entry
+        .local_io_relinquishment()
+        .expect("first physical witness")
+        .clone();
+
+    let mut second = harness.authenticated("alice").await;
+    send_bind(&mut second, "bind-desk", Some("desk")).await;
+    let desk = expect_bind_result(&mut second, "bind-desk").await;
+    let second_entry = harness
+        .state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(&desk)
+        .expect("second local entry");
+    let second_witness = second_entry
+        .local_io_relinquishment()
+        .expect("second physical witness")
+        .clone();
+    assert_ne!(first_entry.connection_ref(), second_entry.connection_ref());
+    assert!(!first_witness.is_relinquished());
+    assert!(!second_witness.is_relinquished());
+
+    drop(first);
+    assert_eq!(
+        within("first local I/O relinquishment", first_witness.wait()).await,
+        LocalIoRelinquishmentOutcome::Relinquished
+    );
+    assert!(!second_witness.is_relinquished());
+
+    drop(second);
+    assert_eq!(
+        within("second local I/O relinquishment", second_witness.wait()).await,
+        LocalIoRelinquishmentOutcome::Relinquished
+    );
+}
+
+#[tokio::test]
+async fn failed_resume_then_fresh_bind_keeps_the_reserved_socket_identity() {
+    let harness = start().await;
+    harness.add_account("alice").await;
+    let mut client = harness.authenticated("alice").await;
+    let reserved = harness
+        .state
+        .deps
+        .app_state
+        .websocket_inventory_for_test()
+        .reserved_connection_refs();
+    assert_eq!(reserved.len(), 1);
+    let physical = reserved[0].clone();
+
+    let resume = Element::builder("resume", waddle_xmpp::stream_management::SM_NS)
+        .attr(
+            minidom::rxml::xml_ncname!("previd").to_owned(),
+            "missing-stream",
+        )
+        .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+        .build();
+    client
+        .send(&serialize(resume))
+        .await
+        .expect("resume request");
+    let failed = next_frame(&mut client).await;
+    assert!(failed.is("failed", waddle_xmpp::stream_management::SM_NS));
+    assert_eq!(
+        harness
+            .state
+            .deps
+            .app_state
+            .websocket_inventory_for_test()
+            .reserved_connection_refs(),
+        vec![physical.clone()]
+    );
+
+    send_bind(&mut client, "fresh-after-failed-resume", Some("phone")).await;
+    let jid = expect_bind_result(&mut client, "fresh-after-failed-resume").await;
+    let entry = harness
+        .state
+        .deps
+        .protocol
+        .connection_registry
+        .entry(&jid)
+        .expect("registered bind");
+    assert_eq!(entry.connection_ref(), &physical);
+    assert_eq!(
+        entry
+            .binding_ref()
+            .expect("binding attempt")
+            .connection_ref(),
+        &physical
+    );
+}
+
 /// Two streams of one account overlap while binding the same full JID. The
 /// first is parked in claim acquisition while holding the per-full-JID gate;
 /// the second must poll that gate's lock future to `Pending` before the first

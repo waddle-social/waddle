@@ -761,7 +761,7 @@ async fn flush_owner_gated_sm_push_skips_mismatched_owner_and_releases_row() {
     let resource = full("alice@example.com/web");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let live_owner = registry.register(resource.clone(), tx); // the entry's real owner token
-    let stale_owner = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)); // a DIFFERENT token
+    let stale_owner = waddle_xmpp::registry::LocalConnectionBindingId::fresh(); // a DIFFERENT token
     let sm_session = SmSessionId::new("sm-owner");
     let recipient = bare("alice@example.com");
 
@@ -5759,7 +5759,6 @@ async fn ambiguous_ordering_release_preserves_new_same_session_claim() {
         let registry = registry.clone();
         let resource = resource.clone();
         let session = session.clone();
-        let owner = owner.clone();
         tokio::spawn(async move {
             let resolver = ordered_pending_resolver().await;
             flush_for_resource(

@@ -2,11 +2,11 @@
 //! registered remote-resource route without appending to a stale local stream.
 
 use super::{
-    origin_identity, receiver_identity, services_with_claims, test_peer_id, Arc, CancellationToken,
-    ClusteringMessagingConfig, ConnectionEntry, DeliveryKind, NodeId, OrderedRelayDeliveryBridge,
-    OutboundStanza, RelayDeliverRemoteResourceFrame, RelayRemoteResourceFrameStatus,
-    RelayTraceContext, RemoteOwnerRegistration, RemoteResourceOutboundFrame,
-    RemoteResourceSocketGeneration, Stanza, WebSocketState,
+    connection_entry_for_current_node, origin_identity, receiver_identity, services_with_claims,
+    test_peer_id, Arc, CancellationToken, ClusteringMessagingConfig, ConnectionEntry, DeliveryKind,
+    NodeId, OrderedRelayDeliveryBridge, OutboundStanza, RelayDeliverRemoteResourceFrame,
+    RelayRemoteResourceFrameStatus, RelayTraceContext, RemoteOwnerRegistration,
+    RemoteResourceOutboundFrame, RemoteResourceSocketGeneration, Stanza, WebSocketState,
 };
 use crate::clustering::route_bridge::{
     TestRemoteFrameTransport, TEST_CANCELLED_REMOTE_FRAMES, TEST_REMOTE_FRAME_TRANSPORT,
@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use waddle_xmpp::ownership::{Entity, EntityType};
+use waddle_xmpp::ownership::{Entity, EntityType, NodeIdentity};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage};
 use waddle_xmpp::stream_management::{
@@ -88,7 +88,7 @@ impl RemoteRosterFixture {
             ))))
             .expect("fill owner mirror before fanout");
         let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-        let mirror_owner = mirror_entry.carbons_handle();
+        let mirror_owner = mirror_entry.binding_id();
         state
             .deps
             .protocol
@@ -117,8 +117,8 @@ impl RemoteRosterFixture {
         );
         socket_bridge.wire(socket_services.clone());
         let (socket_sender, socket_receiver) = mpsc::channel(4);
-        let socket_entry = ConnectionEntry::new(socket_sender);
-        let socket_owner = socket_entry.carbons_handle();
+        let socket_entry = connection_entry_for_current_node(socket_sender, &socket_services);
+        let socket_owner = socket_entry.binding_id();
         socket_services
             .connection_registry
             .register_entry(target.clone(), socket_entry);
@@ -134,6 +134,11 @@ impl RemoteRosterFixture {
             RemoteOwnerRegistration {
                 occupancy_session: OccupancySessionGeneration::mint(),
                 socket_identity: origin_identity(),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),
@@ -319,21 +324,23 @@ async fn subscription_roster_push_does_not_offer_uninterested_registered_remote_
 #[tokio::test]
 async fn subscription_roster_remote_backpressure_does_not_append_or_retry() {
     let mut fixture = RemoteRosterFixture::new(true).await;
-    let socket_entry = fixture
+    let socket_registry = &fixture
         .socket_bridge
         .services
         .get()
         .expect("wired socket services")
-        .connection_registry
+        .connection_registry;
+    let socket_entry = socket_registry
         .entry(&fixture.target)
         .expect("registered socket entry");
     for _ in 0..4 {
-        socket_entry
-            .sender
-            .try_send(OutboundStanza::new(Stanza::Presence(Presence::new(
-                Type::None,
-            ))))
-            .expect("fill actual socket queue");
+        assert!(socket_registry
+            .try_send_outbound_if_owner(
+                &fixture.target,
+                &socket_entry.binding_id(),
+                OutboundStanza::new(Stanza::Presence(Presence::new(Type::None))),
+            )
+            .is_delivered());
     }
     let offers = Arc::new(AtomicUsize::new(0));
     let offer_count = offers.clone();
@@ -466,7 +473,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     let [remote, local] = <[_; 2]>::try_from(order.clone()).expect("two live resources");
     let (mirror_sender, mut mirror_receiver) = mpsc::channel(2);
     let mirror_entry = ConnectionEntry::remote_hosted(mirror_sender);
-    let mirror_owner = mirror_entry.carbons_handle();
+    let mirror_owner = mirror_entry.binding_id();
     registry.register_entry(remote.clone(), mirror_entry);
     let (local_sender, mut local_receiver) = mpsc::channel(2);
     registry.register_entry(local.clone(), ConnectionEntry::new(local_sender));
@@ -485,7 +492,7 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
     let socket_entry = socket_registry
         .entry(&fixture.target)
         .expect("actual B socket");
-    let socket_owner = socket_entry.carbons_handle();
+    let socket_owner = socket_entry.binding_id();
     socket_registry.register_entry(remote.clone(), socket_entry);
     let registration_id = fixture
         .socket_bridge
@@ -511,6 +518,11 @@ async fn ready_local_roster_resource_is_queued_before_an_earlier_remote_reply_st
             RemoteOwnerRegistration {
                 occupancy_session: OccupancySessionGeneration::mint(),
                 socket_identity: origin_identity(),
+                connection_ref: waddle_xmpp::ownership::ConnectionRef::fresh(
+                    waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(
+                        &NodeIdentity::new(origin_identity().node_id, "fixture-epoch"),
+                    ),
+                ),
                 unregister_pending: false,
                 registration_id,
                 socket_generation: RemoteResourceSocketGeneration::next(None),

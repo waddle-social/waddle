@@ -32,15 +32,14 @@
 //! 7. RFC 6121 §8.5.2.1 bare-JID resource selection, excluding
 //!    negative-priority resources.
 
-use crate::pending_delivery::PendingRowId;
-use jid::FullJid;
-use kameo::message::Context;
-use tokio::sync::mpsc::error::TrySendError;
-
 use super::UserActor;
-use crate::registry::connection_registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
+use crate::pending_delivery::PendingRowId;
+use crate::registry::connection_registry::endpoint::EndpointEnqueueRejection;
+use crate::registry::{BroadcastOutcome, ConnectionEntry, OutboundStanza};
 use crate::stream_management::SmRelayedAppendObligation;
 use crate::Stanza;
+use jid::FullJid;
+use kameo::message::Context;
 
 impl UserActor {
     /// Non-blocking `try_send` of an already-built [`OutboundStanza`] to one
@@ -61,11 +60,11 @@ impl UserActor {
                 }
                 BroadcastOutcome::Delivered
             }
-            Err(TrySendError::Full(_)) => {
+            Err(EndpointEnqueueRejection::Full) => {
                 crate::telemetry::reliability::increment_broadcast_dropped_full();
                 BroadcastOutcome::DroppedFull
             }
-            Err(TrySendError::Closed(_)) => {
+            Err(EndpointEnqueueRejection::ChannelClosed) => {
                 crate::telemetry::reliability::increment_broadcast_dropped_closed();
                 // The actor serializes register against send, so unlike the
                 // DashMap path there is no concurrent-replacement window: if
@@ -75,6 +74,14 @@ impl UserActor {
                 // drift from the eviction path if a new field is added.
                 self.remove_resource(jid);
                 BroadcastOutcome::DroppedClosed
+            }
+            Err(
+                EndpointEnqueueRejection::Provisional
+                | EndpointEnqueueRejection::Sealed
+                | EndpointEnqueueRejection::BindingMismatch,
+            ) => {
+                crate::telemetry::reliability::increment_broadcast_not_connected();
+                BroadcastOutcome::NotConnected
             }
         }
     }

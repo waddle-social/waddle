@@ -3,7 +3,7 @@ use crate::channel_space_links::ChannelSpaceLinkStore;
 use crate::channel_space_links::InMemoryChannelSpaceLinkStore;
 use crate::clustering::ClusteringHandles;
 use crate::clustering::NodeLifecycle;
-use crate::config::LineageConfig;
+use crate::config::{LineageConfig, MaxWebSocketConnections};
 use crate::db::lineage::DurableStore;
 use crate::db::lineage::LineageRegistry;
 use crate::db::lineage::LineageRegistryBuilder;
@@ -17,10 +17,14 @@ use crate::server::liveness::RuntimeProgress;
 #[cfg(any(test, feature = "test-support"))]
 use crate::spaces_metadata::InMemorySpacesMetadataStore;
 use crate::spaces_metadata::SpacesMetadataStore;
+use crate::websocket_transport::{
+    IoCustodianInventory, LegacySocketAdmission, PreparedSocketAdmission, SocketAdmissionError,
+};
 use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
@@ -84,6 +88,10 @@ pub struct AppState {
     /// Cluster self-fencing moves it to `FencedRecovering`; an unexpected
     /// critical registry death latches `Failed` until this process exits.
     pub node_lifecycle: NodeLifecycle,
+    /// Per-process capacity reserved for live and pending WebSocket connections.
+    pub(crate) websocket_inventory: IoCustodianInventory,
+    #[cfg(feature = "test-support")]
+    pub websocket_admission_test_barriers: crate::websocket_transport::AdmissionTestBarriers,
     /// Live `ClaimStore`/node-identity handles from the clustering
     /// subsystem (ADR-0017 Phase 3 Slice 4 follow-up plumbing note), used
     /// to select and construct the Postgres-fenced `SmPersistenceStorage`
@@ -160,6 +168,7 @@ impl AppState {
             permission_actor,
             server_owner_jids: Arc::from(Vec::<BareJid>::new()),
             node_lifecycle: NodeLifecycle::new(),
+            max_websocket_connections: MaxWebSocketConnections::default(),
             clustering_claims: ClusteringHandles::default(),
             lineage_config: LineageConfig::default(),
             clustering_enabled: false,
@@ -187,6 +196,7 @@ impl AppState {
             permission_actor,
             server_owner_jids,
             node_lifecycle,
+            max_websocket_connections,
             clustering_claims,
             lineage_config,
             clustering_enabled,
@@ -206,6 +216,10 @@ impl AppState {
             permission_actor,
             server_owner_jids,
             node_lifecycle,
+            websocket_inventory: IoCustodianInventory::new(max_websocket_connections.get())
+                .expect("validated WebSocket capacity is positive"),
+            #[cfg(feature = "test-support")]
+            websocket_admission_test_barriers: Default::default(),
             clustering_claims,
             lineage_registry: OnceLock::new(),
             lineage_registry_builder: Mutex::new(Some(LineageRegistryBuilder::default())),
@@ -219,7 +233,70 @@ impl AppState {
     }
 }
 
+/// The lifecycle generation and identity revision tied to their AppState.
+/// No inventory slot is held until `reserve` runs after upgrade parsing.
+pub(crate) struct WebSocketAdmissionGate<'a> {
+    state: &'a AppState,
+    prepared: PreparedSocketAdmission,
+}
+
+impl WebSocketAdmissionGate<'_> {
+    /// Test-only consumption of the same canonical state-bound gate, retaining
+    /// the physical socket admission for the dark supervised actor bridge.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn reserve_socket_for_test(
+        self,
+        process_stop: CancellationToken,
+        live_interrupt: CancellationToken,
+    ) -> Result<crate::websocket_transport::SocketAdmission, SocketAdmissionError> {
+        self.prepared.reserve(
+            &self.state.websocket_inventory,
+            process_stop,
+            live_interrupt,
+        )
+    }
+
+    pub(crate) fn reserve(
+        self,
+        process_stop: CancellationToken,
+    ) -> Result<LegacySocketAdmission, SocketAdmissionError> {
+        Ok(self
+            .prepared
+            .reserve(
+                &self.state.websocket_inventory,
+                process_stop,
+                CancellationToken::new(),
+            )?
+            .into_legacy())
+    }
+}
+
 impl AppState {
+    #[cfg(feature = "test-support")]
+    pub fn websocket_inventory_for_test(&self) -> &IoCustodianInventory {
+        &self.websocket_inventory
+    }
+
+    /// Bind preliminary admission and the eventual capacity hold to this state.
+    pub(crate) fn websocket_admission_gate(
+        &self,
+    ) -> Result<WebSocketAdmissionGate<'_>, SocketAdmissionError> {
+        let prepared = if self.clustering_enabled {
+            let source = self
+                .clustering_claims
+                .node_identity
+                .as_ref()
+                .ok_or(SocketAdmissionError::MissingClusterIdentity)?;
+            PreparedSocketAdmission::clustered(&self.node_lifecycle, source)?
+        } else {
+            PreparedSocketAdmission::standalone(&self.node_lifecycle)?
+        };
+        Ok(WebSocketAdmissionGate {
+            state: self,
+            prepared,
+        })
+    }
+
     pub fn register_lineage_database(&self, store: DurableStore, database: Database) {
         if let Ok(mut builder) = self.lineage_registry_builder.lock() {
             if let Some(builder) = builder.as_mut() {
@@ -324,6 +401,7 @@ pub struct AppStateDeps {
     pub permission_actor: ActorRef<PermissionActor>,
     pub server_owner_jids: Arc<[BareJid]>,
     pub node_lifecycle: NodeLifecycle,
+    pub max_websocket_connections: MaxWebSocketConnections,
     pub clustering_claims: ClusteringHandles,
     pub lineage_config: LineageConfig,
     pub clustering_enabled: bool,
@@ -356,6 +434,35 @@ pub fn resolve_server_owner_jids(
 mod tests {
     use super::*;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+
+    #[tokio::test]
+    async fn cancelling_a_legacy_admission_owner_releases_its_capacity_hold() {
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
+            .await
+            .expect("db pool");
+        MigrationRunner::global()
+            .run(db_pool.global())
+            .await
+            .expect("migrations");
+        let state = Arc::new(AppState::new(Arc::new(db_pool)));
+        let task_state = Arc::clone(&state);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let admission = task_state
+                .websocket_admission_gate()
+                .expect("gate")
+                .reserve(CancellationToken::new())
+                .expect("reservation");
+            ready_tx.send(()).expect("notify test");
+            std::future::pending::<()>().await;
+            drop(admission);
+        });
+        ready_rx.await.expect("owner reserved");
+        assert_eq!(state.websocket_inventory.len(), 1);
+        owner.abort();
+        assert!(owner.await.expect_err("task aborted").is_cancelled());
+        assert!(state.websocket_inventory.is_empty());
+    }
 
     #[tokio::test]
     async fn new_with_deps_populates_admin_v2_dependencies() {
