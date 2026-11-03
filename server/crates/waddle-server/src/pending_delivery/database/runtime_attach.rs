@@ -695,6 +695,18 @@ async fn verify_postgres_recovery(
             component: "PostgreSQL immutable trigger and function",
         });
     }
+    let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    let mut rows = tx
+        .query(
+            &format!("SELECT 1 FROM {quoted_schema}.pending_delivery WHERE notification_recovery_ordinal IS NULL OR notification_recovery_ordinal <= 0 LIMIT 1"),
+            (),
+        )
+        .await?;
+    if rows.next().await?.is_some() {
+        return Err(PendingRuntimeAttachError::InvalidRecovery {
+            component: "PostgreSQL ordinal values",
+        });
+    }
     Ok(())
 }
 

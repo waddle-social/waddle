@@ -122,6 +122,24 @@ async fn pending_runtime_attach_checks_owner_preparation_and_restricted_snapshot
     ));
     drop(storage);
 
+    admin(&fixture, &format!("INSERT INTO {}.pending_delivery (row_id, recipient_jid, original_receipt_at, payload_kind, archive_stanza_by, archive_stanza_id, notification_recovery_ordinal) OVERRIDING SYSTEM VALUE VALUES ('bad-zero', 'alice@example.test', 1001, 'archived', 'alice@example.test', 'bad-zero-stanza', 0), ('bad-negative', 'alice@example.test', 1002, 'archived', 'alice@example.test', 'bad-negative-stanza', -7)", fixture.target)).await;
+    assert!(matches!(
+        attach(&runtime).await,
+        Err(PendingRuntimeAttachError::InvalidRecovery {
+            component: "PostgreSQL ordinal values"
+        })
+    ));
+    let ordinals: Vec<i64> = sqlx::query_scalar(&format!("SELECT notification_recovery_ordinal FROM {}.pending_delivery WHERE row_id IN ('bad-zero', 'bad-negative') ORDER BY notification_recovery_ordinal", fixture.target)).fetch_all(&fixture.admin).await.expect("invalid rows remain unchanged");
+    assert_eq!(ordinals, vec![-7, 0]);
+    admin(
+        &fixture,
+        &format!(
+            "DELETE FROM {}.pending_delivery WHERE row_id IN ('bad-zero', 'bad-negative')",
+            fixture.target
+        ),
+    )
+    .await;
+
     let mut wrong_identity = fixture.lineage.clone();
     wrong_identity
         .postgres_identity
@@ -201,6 +219,35 @@ async fn pending_runtime_attach_checks_owner_preparation_and_restricted_snapshot
     admin(
         &fixture,
         &format!(
+            "DROP INDEX {}.idx_pending_delivery_archived_unique",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(&fixture, &format!("CREATE UNIQUE INDEX idx_pending_delivery_archived_unique ON {}.pending_delivery (recipient_jid, archive_stanza_id) WHERE payload_kind = 'transient'", fixture.target)).await;
+    assert!(matches!(
+        attach(&runtime).await,
+        Err(PendingRuntimeAttachError::InvalidIndex {
+            index: "idx_pending_delivery_archived_unique"
+        })
+    ));
+    let predicate: String = sqlx::query_scalar(&format!("SELECT pg_catalog.pg_get_expr(i.indpred, i.indrelid) FROM pg_catalog.pg_index i WHERE i.indexrelid = '{}.idx_pending_delivery_archived_unique'::regclass", fixture.target)).fetch_one(&fixture.admin).await.expect("inspect changed predicate");
+    assert!(
+        predicate.contains("transient"),
+        "attach did not repair the predicate"
+    );
+    admin(
+        &fixture,
+        &format!(
+            "DROP INDEX {}.idx_pending_delivery_archived_unique",
+            fixture.target
+        ),
+    )
+    .await;
+    admin(&fixture, &format!("CREATE UNIQUE INDEX idx_pending_delivery_archived_unique ON {}.pending_delivery (recipient_jid, archive_stanza_id) WHERE payload_kind = 'archived'", fixture.target)).await;
+    admin(
+        &fixture,
+        &format!(
             "DROP INDEX {}.idx_pending_notification_recovery_due",
             fixture.target
         ),
@@ -257,6 +304,21 @@ async fn pending_runtime_attach_checks_owner_preparation_and_restricted_snapshot
     attach(&runtime)
         .await
         .expect("attach after owner restores state");
+
+    let held_main_lane = runtime.begin().await.expect("occupy the only main lane");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), attach(&runtime))
+            .await
+            .is_err(),
+        "attachment waits for main-lane acquisition"
+    );
+    held_main_lane
+        .commit()
+        .await
+        .expect("release held main lane");
+    attach(&runtime)
+        .await
+        .expect("cancelled acquisition did not strand the lane");
 
     let strict = waddle_server::test_support::database_from_attested_postgres_pool(
         "strict pending runtime",
