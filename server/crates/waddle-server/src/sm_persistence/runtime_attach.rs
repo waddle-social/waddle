@@ -201,8 +201,29 @@ pub(super) async fn verify(db: &Database) -> Result<(), SmRuntimeAttachError> {
                 SmRuntimeAttachError::Database(error)
             }
         })?;
-    capability.attest_transaction(&mut tx).await?;
     let expected = &capability.identity().schema;
+    let schema = &expected.name.0;
+    let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+    // The checkout hook has already attested this physical session. Lock all
+    // qualified relations before the first snapshot-forming SELECT: an owner
+    // can otherwise commit DDL after physical attestation pins the RR snapshot
+    // but before a table is locked, leaving pg_catalog reads stale. LOCK and
+    // the SHOW/SET LOCAL timeout setup do not establish an RR snapshot.
+    for table in TABLES {
+        tx.execute(
+            &format!(
+                "LOCK TABLE {quoted}.\"{}\" IN ACCESS SHARE MODE",
+                table.name
+            ),
+            (),
+        )
+        .await
+        .map_err(|source| SmRuntimeAttachError::Relation {
+            relation: table.name,
+            source,
+        })?;
+    }
+    capability.attest_transaction(&mut tx).await?;
     let mut rows = tx.query(
         "SELECT n.nspname::text, n.oid::bigint FROM pg_catalog.pg_namespace n WHERE n.nspname = pg_catalog.current_schema()",
         (),
@@ -217,11 +238,8 @@ pub(super) async fn verify(db: &Database) -> Result<(), SmRuntimeAttachError> {
     if !valid {
         return Err(SmRuntimeAttachError::ActiveSchemaMismatch);
     }
-    let schema = &expected.name.0;
-    let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
-    // Access each qualified relation first: this both checks SELECT access and
-    // holds ACCESS SHARE until the snapshot is complete, blocking concurrent
-    // destructive DDL while its catalog is inspected.
+    // Check SELECT access on each locked relation before inspecting its
+    // columns and constraints.
     for table in TABLES {
         tx.query(
             &format!("SELECT 1 FROM {quoted}.\"{}\" WHERE false", table.name),

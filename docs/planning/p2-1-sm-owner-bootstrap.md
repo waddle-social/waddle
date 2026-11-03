@@ -15,8 +15,9 @@ The owner bootstrap slice did not include a runtime credential switch or read-on
 `DatabaseSmPersistence::attach_existing_postgres` is a dark, explicit
 prerequisite. It accepts only the supplied attested PostgreSQL main lane and
 inspects the owner-prepared portable SM tables in one bounded read-only
-repeatable-read transaction. It checks the active attested schema and OID,
-required table and column shapes, primary keys, the ingress disposition check,
+repeatable-read transaction. It locks the qualified tables before establishing
+its snapshot, then checks the active attested schema and OID, required table and
+column shapes, primary keys, the ingress disposition check,
 and the portable initializer's indexes, including the unique dedup predicate.
 The profile comes from the portable owner initializer and the V1012, V1019,
 and V1027 PostgreSQL migrations; a retained `shadow_ordinal` requires owner

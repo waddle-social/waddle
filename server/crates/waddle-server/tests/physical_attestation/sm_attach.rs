@@ -506,3 +506,90 @@ async fn portable_sm_attach_accepts_owner_upgrade_and_migration_profiles() {
     drop(owner);
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn portable_sm_attach_observes_owner_ddl_before_snapshot() {
+    let _serial = CATALOG_GRANT_LOCK.lock().await;
+    let Some(url) = test_url() else { return };
+    let fixture = Fixture::new(url).await;
+    let (owner, pool, _) = setup(&fixture).await;
+    let runtime = pool.global().clone();
+    bootstrap_portable_sm_owner_schema(&owner)
+        .await
+        .expect("owner prepares the portable SM schema");
+    grant_reads(&fixture).await;
+
+    // This ALTER holds ACCESS EXCLUSIVE until commit. The attachment must wait
+    // before establishing its catalog snapshot, then see the committed default.
+    let mut blocker = fixture.admin.begin().await.expect("owner DDL transaction");
+    sqlx::query(&format!(
+        "ALTER TABLE {}.sm_ingress_appends ALTER COLUMN disposition SET DEFAULT 3",
+        fixture.target
+    ))
+    .execute(&mut *blocker)
+    .await
+    .expect("change a required default under the owner lock");
+    let attaching = runtime.clone();
+    let pending = tokio::spawn(async move { attach(&attaching).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = $1 AND usename = $2 AND wait_event_type = 'Lock' \
+                 AND query LIKE '%sm_ingress_appends%')",
+            )
+            .bind(&fixture.database_name)
+            .bind(&fixture.runtime)
+            .fetch_one(&fixture.admin)
+            .await
+            .expect("observe attachment lock wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("attachment reaches the blocked relation");
+    blocker.commit().await.expect("commit owner DDL");
+    let result = pending.await.expect("join attachment");
+    assert!(
+        matches!(
+            result,
+            Err(SmRuntimeAttachError::InvalidColumn {
+                table: "sm_ingress_appends",
+                column: "disposition"
+            })
+        ),
+        "the attachment must inspect the committed default"
+    );
+    let default: String = sqlx::query_scalar(
+        "SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid) FROM pg_catalog.pg_attrdef d \
+         JOIN pg_catalog.pg_class t ON t.oid = d.adrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.adnum \
+         WHERE n.nspname = $1 AND t.relname = 'sm_ingress_appends' AND a.attname = 'disposition'",
+    )
+    .bind(&fixture.target)
+    .fetch_one(&fixture.admin)
+    .await
+    .expect("owner DDL remains");
+    assert_eq!(default, "3");
+    admin(
+        &fixture,
+        &format!(
+            "ALTER TABLE {}.sm_ingress_appends ALTER COLUMN disposition DROP DEFAULT",
+            fixture.target
+        ),
+    )
+    .await;
+    attach(&runtime)
+        .await
+        .expect("owner-restored schema attaches");
+    drop(runtime);
+    pool.global_actor().kill();
+    pool.global_actor().wait_for_shutdown().await;
+    drop(pool);
+    drop(owner);
+    fixture.cleanup().await;
+}
