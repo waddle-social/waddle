@@ -2229,6 +2229,81 @@ async fn reservation_is_indexed_before_the_actor_pump_factory_runs() {
 }
 
 #[tokio::test]
+async fn actor_core_retains_transferred_identity_and_existing_state() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let (identity_tx, identity_rx) = oneshot::channel();
+    let config = ReservedIoStartConfig::new(
+        test_transport_limits(2, 2048, 2, 256),
+        ShutdownProtocol::new(
+            ConnectionWireFrame::Close,
+            |_: &std::convert::Infallible| false,
+        ),
+        ConnectionWireFrame::encoded_len,
+        ConnectionWireFrame::is_close,
+        TEST_TIMEOUT,
+    );
+    let controller =
+        start_connection_actor_with_hooks(
+            &inventory,
+            NodeLeaseIdentity::local_process(),
+            HANDLED_OPERATION_DEADLINE,
+            config,
+            move |connection_ref| {
+                let _ = identity_tx.send(connection_ref.clone());
+                async {
+                    (
+                        futures::stream::pending::<
+                            Result<ConnectionWireFrame, std::convert::Infallible>,
+                        >(),
+                        futures::sink::drain::<ConnectionWireFrame>(),
+                    )
+                }
+            },
+            |_| async { CountableEffectDisposition::Handled },
+            ConnectionActorStartHooks {
+                initial_handled_count: Some(37),
+                ..ConnectionActorStartHooks::default()
+            },
+        )
+        .await
+        .expect("reserved actor starts");
+
+    let reserved_identity = identity_rx.await.expect("factory sees reserved identity");
+    let snapshot = controller
+        .actor()
+        .ask(SnapshotConnection)
+        .send()
+        .await
+        .expect("snapshot transferred state");
+    assert_eq!(snapshot.connection_ref, reserved_identity);
+    assert_eq!(controller.connection_ref(), &reserved_identity);
+    assert!(snapshot.stream_management_enabled);
+    assert_eq!(snapshot.handled_h, 37);
+    assert_eq!(controller.handled_h(), 37);
+
+    let sequence = controller
+        .actor()
+        .ask(reserve_request())
+        .send()
+        .await
+        .expect("reserve from transferred state");
+    assert_eq!(
+        controller
+            .actor()
+            .ask(CompleteHandledInbound(sequence))
+            .send()
+            .await
+            .expect("complete from transferred state"),
+        38
+    );
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        controller.wait_until_joined().await,
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
 async fn failed_reservation_does_not_call_the_connection_pump_factory() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
     let (first, _first_peer, _) = start_actor(

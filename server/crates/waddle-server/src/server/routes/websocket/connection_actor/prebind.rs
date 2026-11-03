@@ -258,11 +258,12 @@ impl Message<SnapshotPrebind> for ConnectionActor {
             pending_auth: p.pending_auth.as_ref().map(|pending| pending.token.clone()),
             output_pending: p.pending_output.is_some(),
             validated_principal: self
+                .core
                 .state
                 .authenticated_session
                 .as_ref()
                 .and_then(|session| session.authenticated_principal_ref().ok()),
-            state_authenticated: self.state.phase.is_authenticated(),
+            state_authenticated: self.core.state.phase.is_authenticated(),
             last_stanza_language: p.last_stanza_language.clone(),
         })
     }
@@ -274,7 +275,7 @@ pub(super) enum PrebindOutput {
 }
 pub(super) struct PrebindWriteCompleted {
     pub id: u64,
-    pub progress: super::super::supervised_io::WriteProgress,
+    pub progress: super::super::super::supervised_io::WriteProgress,
 }
 struct PendingOutput {
     id: u64,
@@ -423,7 +424,7 @@ impl PrebindState {
         PrebindOutput::Element(element)
     }
     fn open(&self) -> Element {
-        super::super::transport_xml::websocket_stream_open_element(
+        super::super::super::transport_xml::websocket_stream_open_element(
             &self.domain.to_string(),
             self.current_open_from.as_ref(),
         )
@@ -469,7 +470,7 @@ impl PrebindState {
             frames.push_back(Self::element(Self::stream_error(condition)));
         }
         frames.push_back(Self::element(
-            super::super::transport_xml::websocket_stream_close_element(),
+            super::super::super::transport_xml::websocket_stream_close_element(),
         ));
         frames.push_back(PrebindOutput::TransportClose);
         self.phase = PrebindPhase::Closing;
@@ -487,7 +488,7 @@ impl PrebindState {
                         .pending_auth
                         .as_ref()
                         .is_some_and(|pending| pending.token == *result.token())
-                    && result.token().connection_ref == *actor.state.connection_ref();
+                    && result.token().connection_ref == *actor.core.connection_ref();
                 if !is_current
                     || self
                         .deferred
@@ -634,7 +635,7 @@ impl PrebindState {
                 };
                 self.next_auth_nonce = next;
                 let token = PrebindAuthToken {
-                    connection_ref: actor.state.connection_ref().clone(),
+                    connection_ref: actor.core.connection_ref().clone(),
                     nonce,
                 };
                 let cancellation = CancellationToken::new();
@@ -698,7 +699,7 @@ impl PrebindState {
         };
         if self.phase != PrebindPhase::AuthPending
             || pending.token != *result.token()
-            || result.token().connection_ref != *actor.state.connection_ref()
+            || result.token().connection_ref != *actor.core.connection_ref()
         {
             return;
         }
@@ -725,8 +726,8 @@ impl PrebindState {
             _ => None,
         };
         if let Some(session) = verified {
-            actor.state.authenticated_session = Some(session.session.clone());
-            actor.state.phase = waddle_xmpp::protocol::ConnectionPhase::Authenticated {
+            actor.core.state.authenticated_session = Some(session.session.clone());
+            actor.core.state.phase = waddle_xmpp::protocol::ConnectionPhase::Authenticated {
                 bare_jid: session.identity.clone(),
             };
         }
@@ -745,7 +746,9 @@ impl PrebindState {
                     Self::element(Self::failure(
                         xmpp_parsers::sasl::DefinedCondition::NotAuthorized,
                     )),
-                    Self::element(super::super::transport_xml::websocket_stream_close_element()),
+                    Self::element(
+                        super::super::super::transport_xml::websocket_stream_close_element(),
+                    ),
                     PrebindOutput::TransportClose,
                 ]),
                 PrebindPhase::Closing,
@@ -757,7 +760,7 @@ impl PrebindState {
                     self.current_open_from = None;
                     self.one(
                         actor,
-                        super::super::transport_xml::sasl_success_element(),
+                        super::super::super::transport_xml::sasl_success_element(),
                         PrebindPhase::AwaitRestart,
                     );
                 }
@@ -777,7 +780,7 @@ impl PrebindState {
             self.pending_output = Some(pending);
             return;
         }
-        if completed.progress != super::super::supervised_io::WriteProgress::Completed {
+        if completed.progress != super::super::super::supervised_io::WriteProgress::Completed {
             actor.io_control.request_stop(StopReason::Requested);
             return;
         }

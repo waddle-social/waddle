@@ -7,6 +7,7 @@
 //! separate pre-bind fixtures start unauthenticated with SM disabled and use
 //! scripted or session-validated authentication; neither performs routing.
 
+#[path = "connection_actor/prebind.rs"]
 mod prebind;
 pub use prebind::{
     CompletePrebindAuth, CompleteValidatedPrebindAuth, PrebindAuthAttempt, PrebindAuthOutcome,
@@ -14,11 +15,15 @@ pub use prebind::{
     PrebindValidationAttempt, SnapshotPrebind,
 };
 
-use super::state::WsConnState;
-use super::supervised_io::{
+use super::super::state::WsConnState;
+use super::super::supervised_io::{
     AdmissionError, AuxiliaryCleanupGuard, CustodianInventoryError, CustodianState,
     IoCustodianHandle, IoCustodianInventory, IoCustodianObserver, IoCustodianReservation,
     QueueItem, ReservedIoStartConfig, ReservedStartError, StopReason, WriteSender,
+};
+use super::{
+    ConnectionActorCore, ConnectionActorLifecycle, ConnectionActorLifecycleGuard,
+    ConnectionActorLifecycleState, ConnectionActorStopped,
 };
 use crate::server::routes::interpret::OrderedRelayInboundSequence;
 use crate::server::routes::websocket::WebSocketState;
@@ -32,7 +37,7 @@ use futures::FutureExt;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::mailbox;
 use kameo::message::{Context, Message};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
@@ -171,6 +176,8 @@ impl ConnectionActorStartBarrier {
 /// Pause points for deterministic cancellation tests of the startup owner.
 #[derive(Default)]
 pub struct ConnectionActorStartHooks {
+    /// Seed the fixture's SM counter before its state is transferred to the core.
+    pub initial_handled_count: Option<u32>,
     /// Wait after synchronous inventory reservation but before invoking the
     /// transport factory. Caller cancellation here drops the unused slot.
     pub before_factory: Option<ConnectionActorStartBarrier>,
@@ -386,8 +393,11 @@ where
     Effect: Fn(CountableInboundEffect) -> EffectFuture + Send + Sync + 'static,
     EffectFuture: Future<Output = CountableEffectDisposition> + Send + 'static,
 {
-    let (state, reservation, connection_ref) =
+    let (mut state, reservation, connection_ref) =
         prepare_connection_actor_reservation(inventory, node_lease)?;
+    if let Some(count) = hooks.initial_handled_count {
+        state.sm_state.inbound_count = count;
+    }
     let effect_runner: CountableStanzaEffect = Arc::new(move |input| Box::pin(effect(input)));
     let caller_gone = CancellationToken::new();
     let startup = start_connection_actor_inner(
@@ -482,7 +492,7 @@ impl CanonicalActorAdmission {
     }
 
     /// Inject reaper loss to verify the no-actor startup error path.
-    pub fn inject_reaper_exit(&self, exit: super::supervised_io::ReservedReaperExitPoint) {
+    pub fn inject_reaper_exit(&self, exit: super::super::supervised_io::ReservedReaperExitPoint) {
         self.admission.inject_actor_reaper_exit(exit);
     }
 
@@ -491,7 +501,7 @@ impl CanonicalActorAdmission {
     pub async fn start_synthetic_sm_fixture_with_effect<Effect, EffectFuture>(
         self,
         socket: WebSocket,
-        limits: super::supervised_io::TransportLimits,
+        limits: super::super::supervised_io::TransportLimits,
         retirement_deadline: Duration,
         lifecycle_handoff_deadline: Duration,
         hooks: ConnectionActorStartHooks,
@@ -522,7 +532,7 @@ impl CanonicalActorAdmission {
     pub async fn start_prebind(
         self,
         socket: WebSocket,
-        limits: super::supervised_io::TransportLimits,
+        limits: super::super::supervised_io::TransportLimits,
         retirement_deadline: Duration,
         lifecycle_handoff_deadline: Duration,
         hooks: ConnectionActorStartHooks,
@@ -553,7 +563,7 @@ impl CanonicalActorAdmission {
     pub async fn start_prebind_validated(
         self,
         socket: WebSocket,
-        limits: super::supervised_io::TransportLimits,
+        limits: super::super::supervised_io::TransportLimits,
         retirement_deadline: Duration,
         lifecycle_handoff_deadline: Duration,
         hooks: ConnectionActorStartHooks,
@@ -586,7 +596,7 @@ impl CanonicalActorAdmission {
 async fn start_canonical_actor(
     admission: CanonicalActorAdmission,
     socket: WebSocket,
-    limits: super::supervised_io::TransportLimits,
+    limits: super::super::supervised_io::TransportLimits,
     retirement_deadline: Duration,
     lifecycle_handoff_deadline: Duration,
     mut hooks: ConnectionActorStartHooks,
@@ -609,6 +619,9 @@ async fn start_canonical_actor(
         state
             .sm_state
             .enable("dark-canonical-actor".to_owned(), false, None);
+    }
+    if let Some(count) = hooks.initial_handled_count {
+        state.sm_state.inbound_count = count;
     }
     // This hold is installed before the socket can be split or pumps spawned.
     let auxiliary_cleanup = admission.retain_actor_cleanup()?;
@@ -639,12 +652,16 @@ async fn start_canonical_actor(
         },
         move |stage| {
             let barrier = match stage {
-                super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
+                super::super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
                     before_inbound.take()
                 }
-                super::supervised_io::ReservedStartStage::BetweenPumpSpawns => between_pumps.take(),
-                super::supervised_io::ReservedStartStage::AfterOutboundSpawn => after_pumps.take(),
-                super::supervised_io::ReservedStartStage::AfterCommit => None,
+                super::super::supervised_io::ReservedStartStage::BetweenPumpSpawns => {
+                    between_pumps.take()
+                }
+                super::super::supervised_io::ReservedStartStage::AfterOutboundSpawn => {
+                    after_pumps.take()
+                }
+                super::super::supervised_io::ReservedStartStage::AfterCommit => None,
             };
             async move {
                 if let Some(barrier) = barrier {
@@ -652,7 +669,8 @@ async fn start_canonical_actor(
                 }
                 assert!(
                     !panic_after_pumps
-                        || stage != super::supervised_io::ReservedStartStage::AfterOutboundSpawn,
+                        || stage
+                            != super::super::supervised_io::ReservedStartStage::AfterOutboundSpawn,
                     "injected post-pump startup panic"
                 );
             }
@@ -765,14 +783,16 @@ where
     let started = reservation
         .start_with_hook_and_cancellation(config, factory, caller_gone.clone(), move |stage| {
             let barrier = match stage {
-                super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
+                super::super::supervised_io::ReservedStartStage::BeforeInboundSpawn => {
                     before_inbound.take()
                 }
-                super::supervised_io::ReservedStartStage::BetweenPumpSpawns => between_pumps.take(),
-                super::supervised_io::ReservedStartStage::AfterOutboundSpawn => {
+                super::super::supervised_io::ReservedStartStage::BetweenPumpSpawns => {
+                    between_pumps.take()
+                }
+                super::super::supervised_io::ReservedStartStage::AfterOutboundSpawn => {
                     after_pumps_handed_off.take()
                 }
-                super::supervised_io::ReservedStartStage::AfterCommit => None,
+                super::super::supervised_io::ReservedStartStage::AfterCommit => None,
             };
             async move {
                 if let Some(barrier) = barrier {
@@ -891,12 +911,14 @@ async fn launch_connection_actor(
         prebind,
     } = pieces;
     let is_prebind = prebind.is_some();
+    let initial_handled_h = state.sm_state.inbound_count();
     let cancellation_watch = custodian.watch_cancellation(caller_gone.clone());
-    let lifecycle = Arc::new(ConnectionActorLifecycle::new());
+    let core = ConnectionActorCore::new(state);
+    let lifecycle = Arc::clone(&core.lifecycle);
     let stop_listener_lifecycle = Arc::clone(&lifecycle);
     let (effect_jobs_tx, effect_jobs_rx) = mpsc::channel(effect_capacity);
     let (effect_completed_tx, effect_completed_rx) = watch::channel(0usize);
-    let (handled_h_tx, handled_h_rx) = watch::channel(0u32);
+    let (handled_h_tx, handled_h_rx) = watch::channel(initial_handled_h);
     let effect_owner = Arc::new(EffectOwnerShared {
         phase: Mutex::new(EffectOwnerPhase::Running),
         sender: effect_jobs_tx,
@@ -984,7 +1006,7 @@ async fn launch_connection_actor(
     }
     let actor = ConnectionActor::spawn_with_mailbox(
         ConnectionActor {
-            state,
+            core,
             io_control: Arc::clone(&io_control),
             outbound,
             effect_owner: Arc::clone(&effect_owner),
@@ -1247,7 +1269,7 @@ async fn drive_actor_websocket_output(
                 match frame {
                     prebind::PrebindOutput::Element(element) => {
                         output.data_frame(WebSocketMessage::Text(
-                            super::transport_xml::element_to_xml(element).into(),
+                            super::super::transport_xml::element_to_xml(element).into(),
                         ))
                     }
                     prebind::PrebindOutput::TransportClose => output.transport_close_frame(None),
@@ -1289,7 +1311,7 @@ async fn drive_actor_websocket_output(
                 break;
             }
         }
-        if progress != super::supervised_io::WriteProgress::Completed {
+        if progress != super::super::supervised_io::WriteProgress::Completed {
             control.request_stop(StopReason::Requested);
             break;
         }
@@ -1459,7 +1481,7 @@ impl EffectOwnerShared {
 struct EffectOwnerTask {
     receiver: mpsc::Receiver<EffectJob>,
     shared: Arc<EffectOwnerShared>,
-    stop_signal: super::supervised_io::StopSignal,
+    stop_signal: super::super::supervised_io::StopSignal,
     actor: kameo::actor::WeakActorRef<ConnectionActor>,
     io_control: std::sync::Weak<ConnectionActorIoControl>,
     effect_runner: CountableStanzaEffect,
@@ -1500,7 +1522,7 @@ impl EffectOwnerTask {
     async fn run_effect_job(
         job: EffectJob,
         shared: Arc<EffectOwnerShared>,
-        stop_signal: super::supervised_io::StopSignal,
+        stop_signal: super::super::supervised_io::StopSignal,
         actor: kameo::actor::WeakActorRef<ConnectionActor>,
         io_control: std::sync::Weak<ConnectionActorIoControl>,
         effect_runner: CountableStanzaEffect,
@@ -1589,7 +1611,7 @@ impl Drop for ActorStartupGuard {
 
 struct ConnectionActorCleanup {
     actor: oneshot::Receiver<ActorRef<ConnectionActor>>,
-    stop_signal: super::supervised_io::StopSignal,
+    stop_signal: super::super::supervised_io::StopSignal,
     input_forwarder: oneshot::Receiver<JoinHandle<()>>,
     effect_owner: oneshot::Receiver<JoinHandle<()>>,
     output_driver: oneshot::Receiver<Option<JoinHandle<()>>>,
@@ -1629,7 +1651,7 @@ struct ConnectionActorIoControl {
     inventory: IoCustodianInventory,
     connection_ref: ConnectionRef,
     lifecycle: Arc<ConnectionActorLifecycle>,
-    stop_signal: super::supervised_io::StopSignal,
+    stop_signal: super::super::supervised_io::StopSignal,
     effect_owner: Arc<EffectOwnerShared>,
     handled_h_observation: watch::Sender<u32>,
     output_admission_hook: Mutex<Option<OutputAdmissionHook>>,
@@ -1664,58 +1686,20 @@ impl ConnectionActorIoControl {
     }
 }
 
-struct ConnectionActorLifecycle {
-    state: Mutex<ConnectionActorLifecycleState>,
-    stop_callback_count: AtomicU64,
-    stop_callback_watch: watch::Sender<u64>,
-}
-
-#[derive(Default)]
-struct ConnectionActorLifecycleState {
-    stop_reason: Option<StopReason>,
-    pending_handled_operations: HashSet<ConnectionActorOperationId>,
-    pending_binding_handoff: Option<u64>,
-}
-
 impl ConnectionActorLifecycle {
-    fn new() -> Self {
-        let (stop_callback_watch, _) = watch::channel(0);
-        Self {
-            state: Mutex::new(ConnectionActorLifecycleState::default()),
-            stop_callback_count: AtomicU64::new(0),
-            stop_callback_watch,
-        }
-    }
-
-    fn lock_running(&self) -> Result<ConnectionActorLifecycleGuard<'_>, ConnectionActorError> {
-        let state = self.lock_state();
-        if state.stop_reason.is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
-        Ok(ConnectionActorLifecycleGuard { state })
-    }
-
     fn lock_pending_handled(
         &self,
         operation_id: ConnectionActorOperationId,
     ) -> Result<ConnectionActorLifecycleGuard<'_>, ConnectionActorError> {
-        let state = self.lock_state();
-        if state.stop_reason.is_some() {
-            return Err(ConnectionActorError::ConnectionStopping);
-        }
-        if !state.pending_handled_operations.contains(&operation_id) {
+        let state = self.lock_running()?;
+        if !state
+            .state
+            .pending_handled_operations
+            .contains(&operation_id)
+        {
             return Err(ConnectionActorError::SequenceNotPending);
         }
-        Ok(ConnectionActorLifecycleGuard { state })
-    }
-
-    fn request_stop(&self, reason: StopReason) -> bool {
-        let mut state = self.lock_state();
-        if state.stop_reason.is_some() {
-            return false;
-        }
-        state.stop_reason = Some(reason);
-        true
+        Ok(state)
     }
 
     fn observe_pump_stop(&self, reason: StopReason) {
@@ -1754,13 +1738,6 @@ impl ConnectionActorLifecycle {
         true
     }
 
-    fn lock_state(&self) -> MutexGuard<'_, ConnectionActorLifecycleState> {
-        match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
     async fn lock_state_async(&self) -> MutexGuard<'_, ConnectionActorLifecycleState> {
         loop {
             if let Some(state) = self.try_lock_state() {
@@ -1777,10 +1754,6 @@ impl ConnectionActorLifecycle {
             Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
         }
     }
-}
-
-struct ConnectionActorLifecycleGuard<'a> {
-    state: MutexGuard<'a, ConnectionActorLifecycleState>,
 }
 
 impl ConnectionActorLifecycleGuard<'_> {
@@ -1812,10 +1785,16 @@ impl ConnectionActorLifecycleGuard<'_> {
     }
 }
 
+impl From<ConnectionActorStopped> for ConnectionActorError {
+    fn from(_: ConnectionActorStopped) -> Self {
+        Self::ConnectionStopping
+    }
+}
+
 /// Addressable Kameo actor with the single mutable owner of connection state.
 #[derive(kameo::Actor)]
 pub struct ConnectionActor {
-    state: WsConnState,
+    core: ConnectionActorCore,
     io_control: Arc<ConnectionActorIoControl>,
     outbound: ActorOutbound,
     effect_owner: Arc<EffectOwnerShared>,
@@ -1854,11 +1833,11 @@ impl Drop for ConnectionActor {
 
 impl ConnectionActor {
     fn enqueue_acknowledgement(&self) -> Result<(), ConnectionActorError> {
-        if !self.state.sm_state.enabled {
+        if !self.core.state.sm_state.enabled {
             drop(self.io_control.lifecycle.lock_running()?);
             return Err(ConnectionActorError::StreamManagementDisabled);
         }
-        let ack = SmAck::new(self.state.sm_state.inbound_count());
+        let ack = SmAck::new(self.core.state.sm_state.inbound_count());
         match &self.outbound {
             ActorOutbound::Synthetic(outbound) => {
                 let byte_len = ack.to_xml().len();
@@ -1895,8 +1874,10 @@ impl ConnectionActor {
         ack: SmAck,
         byte_len: usize,
         hook: Option<&mut OutputAdmissionHook>,
-    ) -> Result<Result<super::supervised_io::WriteReceipt, AdmissionError>, ConnectionActorError>
-    {
+    ) -> Result<
+        Result<super::super::supervised_io::WriteReceipt, AdmissionError>,
+        ConnectionActorError,
+    > {
         // Custodian stop takes admission first and the stop listener takes
         // lifecycle second. Never reverse them or notify under either gate.
         let admission = outbound.lock_admission()?;
@@ -2348,7 +2329,9 @@ impl ConnectionActor {
         {
             return Err(ConnectionActorError::OperationIdNotIncreasing);
         }
-        if self.state.sm_inbound_completion.outstanding_count() >= MAX_HANDLED_INBOUND_OPERATIONS {
+        if self.core.state.sm_inbound_completion.outstanding_count()
+            >= MAX_HANDLED_INBOUND_OPERATIONS
+        {
             return Err(ConnectionActorError::HandledInboundFull);
         }
         let next_nonce = self
@@ -2357,12 +2340,13 @@ impl ConnectionActor {
             .ok_or(ConnectionActorError::SequenceNonceExhausted)?;
         let nonce = self.next_handled_nonce;
         let sequence = self
+            .core
             .state
             .sm_inbound_completion
-            .reserve(&self.state.sm_state);
+            .reserve(&self.core.state.sm_state);
         let token = ConnectionActorSequence {
-            connection_ref: self.state.connection_ref().clone(),
-            binding_ref: self.state.binding_ref.clone(),
+            connection_ref: self.core.connection_ref().clone(),
+            binding_ref: self.core.state.binding_ref.clone(),
             sequence,
             operation_id,
             nonce,
@@ -2407,7 +2391,7 @@ impl ConnectionActor {
             Ok(lifecycle) => lifecycle,
             Err(_) => return,
         };
-        if !self.state.sm_state.enabled {
+        if !self.core.state.sm_state.enabled {
             drop(lifecycle);
             return;
         }
@@ -2636,10 +2620,10 @@ impl ConnectionActor {
         token: ConnectionActorSequence,
         barrier: Option<(oneshot::Sender<()>, Arc<ConnectionActorGateBarrier>)>,
     ) -> Result<u32, ConnectionActorError> {
-        if token.connection_ref != *self.state.connection_ref() {
+        if token.connection_ref != *self.core.connection_ref() {
             return Err(ConnectionActorError::SequenceConnectionMismatch);
         }
-        if token.binding_ref != self.state.binding_ref {
+        if token.binding_ref != self.core.state.binding_ref {
             return Err(ConnectionActorError::SequenceBindingMismatch);
         }
         let Some(operation) = self.handled_operations.get(&token.operation_id) else {
@@ -2657,7 +2641,12 @@ impl ConnectionActor {
         if operation.completed {
             return Err(ConnectionActorError::SequenceNotPending);
         }
-        if !self.state.sm_inbound_completion.is_pending(token.sequence) {
+        if !self
+            .core
+            .state
+            .sm_inbound_completion
+            .is_pending(token.sequence)
+        {
             return Err(ConnectionActorError::SequenceNotPending);
         }
         let mut lifecycle = self
@@ -2670,14 +2659,15 @@ impl ConnectionActor {
         if !lifecycle.finish_handled_operation(token.operation_id) {
             return Err(ConnectionActorError::SequenceNotPending);
         }
-        self.state
+        self.core
+            .state
             .sm_inbound_completion
-            .complete(token.sequence, &mut self.state.sm_state);
+            .complete(token.sequence, &mut self.core.state.sm_state);
         if let Some(operation) = self.handled_operations.get_mut(&token.operation_id) {
             operation.completed = true;
             operation.expiry_task.abort();
         }
-        let tracker = &self.state.sm_inbound_completion;
+        let tracker = &self.core.state.sm_inbound_completion;
         let settled_operation_ids = self
             .handled_operations
             .iter()
@@ -2690,7 +2680,7 @@ impl ConnectionActor {
                 operation.expiry_task.abort();
             }
         }
-        let handled_h = self.state.sm_state.inbound_count();
+        let handled_h = self.core.state.sm_state.inbound_count();
         self.io_control
             .handled_h_observation
             .send_replace(handled_h);
@@ -2715,17 +2705,17 @@ impl Message<SeedInboundCounterForTest> for ConnectionActor {
         }
         let _lifecycle = match self.io_control.lifecycle.lock_running() {
             Ok(lifecycle) => lifecycle,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
-        if self.state.sm_inbound_completion.outstanding_count() > 0 {
+        if self.core.state.sm_inbound_completion.outstanding_count() > 0 {
             return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
         for operation in self.handled_operations.values() {
             operation.expiry_task.abort();
         }
         self.handled_operations.clear();
-        self.state.sm_inbound_completion.reset();
-        self.state.sm_state.inbound_count = msg.0;
+        self.core.state.sm_inbound_completion.reset();
+        self.core.state.sm_state.inbound_count = msg.0;
         self.io_control.handled_h_observation.send_replace(msg.0);
         Ok(())
     }
@@ -2892,15 +2882,15 @@ impl ConnectionActor {
             return Err(ConnectionActorError::OperationIdNotIncreasing);
         }
         if self.active_binding_attempt.is_some() {
-            if self.state.sm_inbound_completion.outstanding_count() > 0 {
+            if self.core.state.sm_inbound_completion.outstanding_count() > 0 {
                 return Err(ConnectionActorError::BindingHasPendingHandledInbound);
             }
             return Err(ConnectionActorError::BindingAlreadyActive);
         }
-        if self.state.binding_ref.is_some() {
+        if self.core.state.binding_ref.is_some() {
             return Err(ConnectionActorError::BindingAlreadyActive);
         }
-        if self.state.sm_inbound_completion.outstanding_count() > 0 {
+        if self.core.state.sm_inbound_completion.outstanding_count() > 0 {
             return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
         let epoch = self
@@ -2908,8 +2898,8 @@ impl ConnectionActor {
             .checked_add(1)
             .ok_or(ConnectionActorError::BindingEpochExhausted)?;
         let attempt = ConnectionActorBindingAttempt {
-            connection_ref: self.state.connection_ref().clone(),
-            binding_ref: BindingRef::fresh(self.state.connection_ref().clone()),
+            connection_ref: self.core.connection_ref().clone(),
+            binding_ref: BindingRef::fresh(self.core.connection_ref().clone()),
             operation_id,
             epoch,
         };
@@ -2975,25 +2965,25 @@ impl ConnectionActor {
             return Err(ConnectionActorError::PrebindFixtureOnly);
         }
         let mut lifecycle = self.io_control.lifecycle.lock_running()?;
-        if attempt.connection_ref != *self.state.connection_ref() {
+        if attempt.connection_ref != *self.core.connection_ref() {
             return Err(ConnectionActorError::BindingConnectionMismatch);
         }
         if self.active_binding_attempt.as_ref() == Some(&attempt)
-            && self.state.binding_ref.as_ref() == Some(&attempt.binding_ref)
+            && self.core.state.binding_ref.as_ref() == Some(&attempt.binding_ref)
         {
             return Ok(());
         }
         if self.binding_epoch != attempt.epoch
             || self.pending_binding_attempt.as_ref() != Some(&attempt)
-            || self.state.binding_ref.is_some()
+            || self.core.state.binding_ref.is_some()
         {
             return Err(ConnectionActorError::StaleBindingTransition);
         }
-        if self.state.sm_inbound_completion.outstanding_count() > 0 {
+        if self.core.state.sm_inbound_completion.outstanding_count() > 0 {
             return Err(ConnectionActorError::BindingHasPendingHandledInbound);
         }
         lifecycle.track_binding_handoff(attempt.epoch);
-        self.state.binding_ref = Some(attempt.binding_ref.clone());
+        self.core.state.binding_ref = Some(attempt.binding_ref.clone());
         self.pending_binding_attempt = None;
         self.active_binding_attempt = Some(attempt.clone());
         self.active_binding_confirmed = false;
@@ -3032,11 +3022,11 @@ impl ConnectionActor {
         attempt: ConnectionActorBindingAttempt,
     ) -> Result<(), ConnectionActorError> {
         let mut lifecycle = self.io_control.lifecycle.lock_running()?;
-        if attempt.connection_ref != *self.state.connection_ref() {
+        if attempt.connection_ref != *self.core.connection_ref() {
             return Err(ConnectionActorError::BindingConnectionMismatch);
         }
         if self.active_binding_attempt.as_ref() != Some(&attempt)
-            || self.state.binding_ref.as_ref() != Some(&attempt.binding_ref)
+            || self.core.state.binding_ref.as_ref() != Some(&attempt.binding_ref)
         {
             return Err(ConnectionActorError::StaleBindingTransition);
         }
@@ -3069,16 +3059,16 @@ impl Message<RetireBinding> for ConnectionActor {
         let Ok(mut lifecycle) = self.io_control.lifecycle.lock_running() else {
             return false;
         };
-        if self.state.binding_ref.as_ref() == Some(&msg.0)
-            && msg.0.connection_ref() == self.state.connection_ref()
-            && self.state.sm_inbound_completion.outstanding_count() == 0
+        if self.core.state.binding_ref.as_ref() == Some(&msg.0)
+            && msg.0.connection_ref() == self.core.connection_ref()
+            && self.core.state.sm_inbound_completion.outstanding_count() == 0
         {
             let epoch = self.binding_epoch;
             let Some(next_epoch) = self.binding_epoch.checked_add(1) else {
                 return false;
             };
             lifecycle.retire_binding_handoff(epoch);
-            self.state.binding_ref = None;
+            self.core.state.binding_ref = None;
             self.binding_epoch = next_epoch;
             self.active_binding_attempt = None;
             self.active_binding_confirmed = false;
@@ -3105,11 +3095,11 @@ impl Message<SnapshotConnection> for ConnectionActor {
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         ConnectionActorSnapshot {
-            connection_ref: self.state.connection_ref().clone(),
-            binding_ref: self.state.binding_ref.clone(),
+            connection_ref: self.core.connection_ref().clone(),
+            binding_ref: self.core.state.binding_ref.clone(),
             binding_epoch: self.binding_epoch,
-            handled_h: self.state.sm_state.inbound_count(),
-            stream_management_enabled: self.state.sm_state.enabled,
+            handled_h: self.core.state.sm_state.inbound_count(),
+            stream_management_enabled: self.core.state.sm_state.enabled,
         }
     }
 }
