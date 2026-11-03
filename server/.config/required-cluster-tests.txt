@@ -349,3 +349,5 @@ waddle-server ingress::relayed_origin_tests::postgres_relayed_alias_lock_orders_
 waddle-server::physical_attestation sm_attach::portable_sm_attach_checks_restricted_snapshot_and_schema_drift
 waddle-server::physical_attestation sm_attach::portable_sm_attach_accepts_owner_upgrade_and_migration_profiles
 waddle-server::physical_attestation sm_attach::portable_sm_attach_observes_owner_ddl_before_snapshot
+# The closed room-archive writer must run its restricted-role PostgreSQL fixture.
+waddle-server::recorded_room_archive recorded_room_archive_owns_its_transaction

@@ -74,6 +74,7 @@ package(waddle-server) & (
     | binary(physical_attestation)
     | binary(ingress_relation_guard_lab)
     | binary(ingress_relation_uow_lab)
+    | binary(recorded_room_archive)
     | binary(ingress_uow_reentrant_claim)
     | binary(migration_owner_lab)
     | test(clustering::)
