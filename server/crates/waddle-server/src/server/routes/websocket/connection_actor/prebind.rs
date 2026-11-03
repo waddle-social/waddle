@@ -390,14 +390,10 @@ impl PrebindState {
         };
         self.next_output_id = next;
         match &actor.outbound {
-            ActorOutbound::WebSocket(output) => {
-                if output.try_send(ActorOutput::Prebind { id, frame }).is_ok() {
-                    Some(id)
-                } else {
-                    actor.io_control.request_stop(StopReason::OutboundOverload);
-                    None
-                }
-            }
+            ActorOutbound::WebSocket(_) => actor
+                .enqueue_websocket_output(ActorOutput::Prebind { id, frame })
+                .ok()
+                .map(|()| id),
             ActorOutbound::Synthetic(_) => {
                 actor.io_control.request_stop(StopReason::Requested);
                 None

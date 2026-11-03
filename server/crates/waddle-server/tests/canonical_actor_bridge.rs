@@ -25,11 +25,15 @@ use tokio_tungstenite::WebSocketStream;
 use waddle_server::clustering::NodeAdmissionError;
 use waddle_server::config::MaxWebSocketConnections;
 use waddle_server::test_support::connection_actor::{
-    canonical_actor_gate, ConnectionActorController, ConnectionActorStartBarrier,
-    ConnectionActorStartError, ConnectionActorStartHooks, CountableEffectDisposition,
-    CountableStanzaEffect, PanicConnectionActor, PauseConnectionActor, SnapshotConnection,
+    canonical_actor_gate, ConnectionActorController, ConnectionActorError,
+    ConnectionActorGateBarrier, ConnectionActorStartBarrier, ConnectionActorStartError,
+    ConnectionActorStartHooks, CountableEffectDisposition, CountableStanzaEffect,
+    OutputAdmissionPause, PanicConnectionActor, PauseConnectionActor, RequestAcknowledgement,
+    SnapshotConnection,
 };
-use waddle_server::test_support::supervised_io::{ReservedReaperExitPoint, ReservedStartError};
+use waddle_server::test_support::supervised_io::{
+    AdmissionError, ReservedReaperExitPoint, ReservedStartError,
+};
 use waddle_server::test_support::{
     websocket_state_with_admission, WebSocketAdmissionTestConfig, WebSocketState,
 };
@@ -332,6 +336,221 @@ impl Drop for ReleaseProbe {
         self.0.release();
         self.0.release_close();
     }
+}
+
+struct ReleaseAdmissionBarrier(Arc<ConnectionActorGateBarrier>);
+impl Drop for ReleaseAdmissionBarrier {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_ack_stop_wins_before_admission_and_does_not_affect_successor() {
+    let mut h = Harness::new(None, limits(4, 1024), limits(4, 1024)).await;
+    let _peer = h.open().await.expect("101");
+    let original = h.reserved().await;
+    let _ = h.starting().await;
+    let controller = h.started().await;
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, result_rx) = oneshot::channel();
+    controller.pause_next_output_admission(
+        OutputAdmissionPause::BeforeGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    controller
+        .actor()
+        .tell(RequestAcknowledgement)
+        .try_send()
+        .expect("queue acknowledgment");
+    wait_gate(entered_rx).await;
+    controller.request_stop(StopReason::LeaseLost);
+    barrier.release();
+    assert_eq!(
+        timeout(TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Err(ConnectionActorError::ConnectionStopping)
+    );
+    assert_eq!(
+        timeout(TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("original joins"),
+        Some(CustodianState::Joined)
+    );
+
+    let mut successor_peer = h.open().await.expect("successor 101");
+    let successor = h.reserved().await;
+    assert_ne!(successor, original);
+    let _ = h.starting().await;
+    let next = h.started().await;
+    controller.request_stop(StopReason::Requested);
+    send_request(&mut successor_peer).await;
+    assert_eq!(recv_ack(&mut successor_peer).await.h, 0);
+    assert_eq!(next.stop_reason(), None);
+    next.request_stop(StopReason::Requested);
+    assert_eq!(
+        timeout(TIMEOUT, next.wait_until_joined())
+            .await
+            .expect("successor joins"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_ack_admission_wins_before_stop_callback() {
+    let mut h = Harness::new(None, limits(4, 1024), limits(4, 1024)).await;
+    let _peer = h.open().await.expect("101");
+    let _ = h.reserved().await;
+    let _ = h.starting().await;
+    let controller = Arc::new(h.started().await);
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, mut result_rx) = oneshot::channel();
+    controller.pause_next_output_admission(
+        OutputAdmissionPause::InsideGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    controller
+        .actor()
+        .tell(RequestAcknowledgement)
+        .try_send()
+        .expect("queue acknowledgment");
+    wait_gate(entered_rx).await;
+    let stopping = Arc::clone(&controller);
+    let stop = tokio::task::spawn_blocking(move || stopping.request_stop(StopReason::LeaseLost));
+    assert!(
+        timeout(TIMEOUT, controller.wait_for_stop_signal_callbacks(1))
+            .await
+            .expect("stop reaches the lifecycle callback")
+    );
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    barrier.release();
+    assert_eq!(
+        timeout(TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Ok(())
+    );
+    timeout(TIMEOUT, stop)
+        .await
+        .expect("stop returns after gate release")
+        .expect("stop task");
+    assert_eq!(
+        timeout(TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("original joins"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closed_websocket_output_receiver_stops_after_releasing_lifecycle_gate() {
+    let mut h = Harness::new(None, limits(4, 1024), limits(4, 1024)).await;
+    let _peer = h.open().await.expect("101");
+    let _ = h.reserved().await;
+    let _ = h.starting().await;
+    let controller = h.started().await;
+    assert!(
+        timeout(TIMEOUT, controller.close_output_receiver_for_test())
+            .await
+            .expect("output receiver closes")
+    );
+    let result = timeout(
+        TIMEOUT,
+        controller.actor().ask(RequestAcknowledgement).send(),
+    )
+    .await
+    .expect("closed-queue stop callback does not deadlock")
+    .expect("actor reply")
+    .0;
+    assert_eq!(
+        result,
+        Err(ConnectionActorError::Admission(AdmissionError::Closed))
+    );
+    assert_eq!(
+        controller.stop_reason(),
+        Some(StopReason::OutboundQueueClosed)
+    );
+    assert_eq!(
+        timeout(TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("closed receiver joins"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_websocket_output_queue_stops_after_releasing_lifecycle_gate() {
+    let probe = Arc::new(ActorWriteProbe::default());
+    let _release = ReleaseProbe(Arc::clone(&probe));
+    let mut h = Harness::new(None, limits(4, 1024), limits(4, 1024)).await;
+    h.queue(RouteOptions {
+        probe: Some(Arc::clone(&probe)),
+        ..Default::default()
+    });
+    let _peer = h.open().await.expect("101");
+    let _ = h.reserved().await;
+    let _ = h.starting().await;
+    let controller = h.started().await;
+    probe.pause_next();
+    assert_eq!(
+        controller
+            .actor()
+            .ask(RequestAcknowledgement)
+            .send()
+            .await
+            .expect("first")
+            .0,
+        Ok(())
+    );
+    timeout(TIMEOUT, probe.wait_for_entry())
+        .await
+        .expect("writer stalls");
+    for _ in 0..4 {
+        assert_eq!(
+            controller
+                .actor()
+                .ask(RequestAcknowledgement)
+                .send()
+                .await
+                .expect("queued")
+                .0,
+            Ok(())
+        );
+    }
+    let result = timeout(
+        TIMEOUT,
+        controller.actor().ask(RequestAcknowledgement).send(),
+    )
+    .await
+    .expect("overload stop callback does not deadlock")
+    .expect("actor reply")
+    .0;
+    assert_eq!(
+        result,
+        Err(ConnectionActorError::Admission(AdmissionError::Overloaded))
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::OutboundOverload));
+    probe.release();
+    assert_eq!(
+        timeout(TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("overloaded connection joins"),
+        Some(CustodianState::Joined)
+    );
 }
 
 #[tokio::test]

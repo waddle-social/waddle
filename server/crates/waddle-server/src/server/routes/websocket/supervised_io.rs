@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::MutexGuard;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
@@ -346,38 +348,53 @@ impl<T> BoundedSender<T> {
 
     /// Try to admit an item without waiting for queue capacity.
     pub fn try_send(&self, value: T, byte_len: usize) -> Result<(), AdmissionError> {
+        let result = self.try_send_without_notification(value, byte_len);
+        self.notify_failed_admission(result)
+    }
+
+    // Queue operations under an authority gate must not synchronously invoke
+    // the stop listener, which can need that same gate. Return the result for
+    // notification after the caller has dropped its guards.
+    fn try_send_without_notification(
+        &self,
+        value: T,
+        byte_len: usize,
+    ) -> Result<(), AdmissionError> {
         if self.stop.is_cancelled() {
             return Err(AdmissionError::Stopped);
         }
-        let result = (|| {
-            let count_permit = self
-                .count
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| AdmissionError::Overloaded)?;
-            let byte_len = u32::try_from(byte_len).map_err(|_| AdmissionError::Overloaded)?;
-            let byte_permit = self
-                .bytes
-                .clone()
-                .try_acquire_many_owned(byte_len)
-                .map_err(|_| AdmissionError::Overloaded)?;
-            if self.stop.is_cancelled() {
-                return Err(AdmissionError::Stopped);
-            }
-            self.sender
-                .try_send(QueueItem {
-                    value,
-                    _count_permit: count_permit,
-                    _byte_permit: byte_permit,
-                })
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(_) => AdmissionError::Overloaded,
-                    mpsc::error::TrySendError::Closed(_) => AdmissionError::Closed,
-                })
-        })();
+        let count_permit = self
+            .count
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AdmissionError::Overloaded)?;
+        let byte_len = u32::try_from(byte_len).map_err(|_| AdmissionError::Overloaded)?;
+        let byte_permit = self
+            .bytes
+            .clone()
+            .try_acquire_many_owned(byte_len)
+            .map_err(|_| AdmissionError::Overloaded)?;
+        if self.stop.is_cancelled() {
+            return Err(AdmissionError::Stopped);
+        }
+        self.sender
+            .try_send(QueueItem {
+                value,
+                _count_permit: count_permit,
+                _byte_permit: byte_permit,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => AdmissionError::Overloaded,
+                mpsc::error::TrySendError::Closed(_) => AdmissionError::Closed,
+            })
+    }
 
+    fn notify_failed_admission<R>(
+        &self,
+        result: Result<R, AdmissionError>,
+    ) -> Result<R, AdmissionError> {
         match result {
-            Ok(()) => Ok(()),
+            Ok(value) => Ok(value),
             Err(AdmissionError::Overloaded) => {
                 self.stop.cancel(self.overload_reason);
                 Err(AdmissionError::Overloaded)
@@ -539,6 +556,33 @@ pub struct WriteSender<T> {
     shutdown: CancellationToken,
 }
 
+/// Held only across the synchronous queue admission, never notification.
+#[cfg(feature = "test-support")]
+pub(crate) struct WriteAdmissionGuard<'a, T> {
+    sender: &'a WriteSender<T>,
+    _open: MutexGuard<'a, bool>,
+}
+
+#[cfg(feature = "test-support")]
+impl<T> WriteAdmissionGuard<'_, T> {
+    pub(crate) fn try_send_without_notification(
+        &self,
+        value: T,
+        byte_len: usize,
+    ) -> Result<WriteReceipt, AdmissionError> {
+        let receipt = WriteReceipt::new();
+        self.sender.sender.try_send_without_notification(
+            WriteRequest {
+                value: Some(value),
+                receipt: receipt.clone(),
+                authority: None,
+            },
+            byte_len,
+        )?;
+        Ok(receipt)
+    }
+}
+
 impl<T> WriteSender<T> {
     /// Wait for capacity without treating ordinary saturation as a transport failure.
     #[cfg(feature = "test-support")]
@@ -593,6 +637,15 @@ impl<T> WriteSender<T> {
     /// Admit one outbound value under the queue's count and byte bounds.
     #[cfg(feature = "test-support")]
     pub fn try_send(&self, value: T, byte_len: usize) -> Result<WriteReceipt, AdmissionError> {
+        let result = {
+            let admission = self.lock_admission()?;
+            admission.try_send_without_notification(value, byte_len)
+        };
+        self.notify_failed_admission(result)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn lock_admission(&self) -> Result<WriteAdmissionGuard<'_, T>, AdmissionError> {
         let admission_open = match self.admission_open.lock() {
             Ok(admission_open) => admission_open,
             Err(poisoned) => poisoned.into_inner(),
@@ -600,16 +653,18 @@ impl<T> WriteSender<T> {
         if !*admission_open {
             return Err(AdmissionError::Shutdown);
         }
-        let receipt = WriteReceipt::new();
-        self.sender.try_send(
-            WriteRequest {
-                value: Some(value),
-                receipt: receipt.clone(),
-                authority: None,
-            },
-            byte_len,
-        )?;
-        Ok(receipt)
+        Ok(WriteAdmissionGuard {
+            sender: self,
+            _open: admission_open,
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn notify_failed_admission<R>(
+        &self,
+        result: Result<R, AdmissionError>,
+    ) -> Result<R, AdmissionError> {
+        self.sender.notify_failed_admission(result)
     }
 }
 

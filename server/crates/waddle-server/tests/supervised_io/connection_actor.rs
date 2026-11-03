@@ -17,9 +17,10 @@ use waddle_server::test_support::connection_actor::{
     CompleteHandledInboundBeforeLifecycleGate, ConfirmBindingInstall, ConnectionActorError,
     ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorStartBarrier,
     ConnectionActorStartError, ConnectionActorStartHooks, ConnectionWireFrame,
-    CountableEffectDisposition, CountableInboundEffect, InstallBinding, PanicConnectionActor,
-    PauseConnectionActor, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
-    RetireBinding, SeedInboundCounterForTest, SnapshotConnection, StopConnectionActor,
+    CountableEffectDisposition, CountableInboundEffect, InstallBinding, OutputAdmissionPause,
+    PanicConnectionActor, PauseConnectionActor, PrepareBinding, RequestAcknowledgement,
+    ReserveHandledInbound, RetireBinding, SeedInboundCounterForTest, SnapshotConnection,
+    StopConnectionActor,
 };
 use waddle_server::test_support::supervised_io::{
     AdmissionError, CustodianInventoryError, CustodianState, IoCustodianInventory, Limits,
@@ -44,6 +45,14 @@ fn reserve_request() -> ReserveHandledInbound {
 struct FlushGate {
     released: AtomicBool,
     waker: Mutex<Option<Waker>>,
+}
+
+struct ReleaseAdmissionBarrier(Arc<ConnectionActorGateBarrier>);
+
+impl Drop for ReleaseAdmissionBarrier {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 impl FlushGate {
@@ -509,6 +518,102 @@ async fn actor_ack(
         .0
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn synthetic_ack_stop_wins_before_output_admission() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, _peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, result_rx) = oneshot::channel();
+    controller.pause_next_output_admission(
+        OutputAdmissionPause::BeforeGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    let actor = controller.actor().clone();
+    let request = tokio::spawn(async move { actor.ask(RequestAcknowledgement).send().await });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("output reached pre-gate barrier")
+        .expect("output barrier signal");
+
+    controller.request_stop(StopReason::LeaseLost);
+    assert_eq!(controller.stop_reason(), Some(StopReason::LeaseLost));
+    barrier.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Err(ConnectionActorError::Admission(AdmissionError::Shutdown))
+    );
+    let _ = timeout(TEST_TIMEOUT, request)
+        .await
+        .expect("request resolves");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("stop joins the connection"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn synthetic_ack_admission_wins_before_pump_stop() {
+    let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
+    let gate = Arc::new(FlushGate::new());
+    gate.release();
+    let (controller, mut peer, _) = start_actor(&inventory, 4, 256, gate, TEST_TIMEOUT).await;
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, mut result_rx) = oneshot::channel();
+    controller.pause_next_output_admission(
+        OutputAdmissionPause::InsideGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    let actor = controller.actor().clone();
+    let request = tokio::spawn(async move { actor.ask(RequestAcknowledgement).send().await });
+    timeout(TEST_TIMEOUT, entered_rx)
+        .await
+        .expect("output owns both gates")
+        .expect("output barrier signal");
+    peer.send(Message::Close(None)).await.expect("close peer");
+    assert!(
+        timeout(TEST_TIMEOUT, controller.wait_for_stop_signal_callbacks(1))
+            .await
+            .expect("pump stop reaches lifecycle callback")
+    );
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    barrier.release();
+    assert_eq!(
+        timeout(TEST_TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Ok(())
+    );
+    let _ = timeout(TEST_TIMEOUT, request)
+        .await
+        .expect("request resolves");
+    assert_eq!(
+        timeout(TEST_TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("pump stop joins"),
+        Some(CustodianState::Joined)
+    );
+    assert_eq!(controller.stop_reason(), Some(StopReason::PeerClosed));
+}
+
 #[tokio::test]
 async fn one_actor_owns_state_and_answers_xep0198_from_contiguous_handled_prefix() {
     let inventory = IoCustodianInventory::new(1).expect("inventory capacity");
@@ -655,7 +760,9 @@ async fn outbound_count_and_byte_limits_include_the_in_flight_write() {
             .expect("flush entered signal");
 
         assert_eq!(
-            actor_ack(&controller).await,
+            timeout(TEST_TIMEOUT, actor_ack(&controller))
+                .await
+                .expect("overload notification does not deadlock the admission gates"),
             Err(ConnectionActorError::Admission(AdmissionError::Overloaded)),
             "the in-flight frame retains both count and byte permits"
         );

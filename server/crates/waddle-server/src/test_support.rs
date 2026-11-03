@@ -21,11 +21,12 @@ pub mod connection_actor {
         ConnectionActorGateBarrier, ConnectionActorOperationId, ConnectionActorSequence,
         ConnectionActorSnapshot, ConnectionActorStartBarrier, ConnectionActorStartError,
         ConnectionActorStartHooks, ConnectionWireFrame, CountableEffectDisposition,
-        CountableInboundEffect, CountableStanzaEffect, InstallBinding, PanicConnectionActor,
-        PauseConnectionActor, PrebindAuthAttempt, PrebindAuthOutcome, PrebindAuthToken,
-        PrebindInput, PrebindPhase, PrebindSaslInput, PrebindSnapshot, PrebindValidationAttempt,
-        PrepareBinding, RequestAcknowledgement, ReserveHandledInbound, RetireBinding,
-        SeedInboundCounterForTest, SnapshotConnection, SnapshotPrebind, StopConnectionActor,
+        CountableInboundEffect, CountableStanzaEffect, InstallBinding, OutputAdmissionPause,
+        PanicConnectionActor, PauseConnectionActor, PrebindAuthAttempt, PrebindAuthOutcome,
+        PrebindAuthToken, PrebindInput, PrebindPhase, PrebindSaslInput, PrebindSnapshot,
+        PrebindValidationAttempt, PrepareBinding, RequestAcknowledgement, ReserveHandledInbound,
+        RetireBinding, SeedInboundCounterForTest, SnapshotConnection, SnapshotPrebind,
+        StopConnectionActor,
     };
 }
 

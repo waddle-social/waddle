@@ -917,6 +917,7 @@ async fn launch_connection_actor(
         stop_signal,
         effect_owner: Arc::clone(&effect_owner),
         handled_h_observation: handled_h_tx,
+        output_admission_hook: Mutex::new(None),
     });
     // Register an independent cleanup owner before spawning any actor-side
     // task. Each handle is handed over synchronously immediately after spawn;
@@ -954,18 +955,24 @@ async fn launch_connection_actor(
     }
     let mut startup_guard = ActorStartupGuard(Some(Arc::clone(&io_control)));
     let (output_actor_tx, output_actor_rx) = oneshot::channel();
-    let (outbound, output_driver) = match outbound {
-        ActorStartOutput::Synthetic(sender) => (ActorOutbound::Synthetic(sender), None),
+    let (outbound, output_driver, output_close) = match outbound {
+        ActorStartOutput::Synthetic(sender) => (ActorOutbound::Synthetic(sender), None, None),
         ActorStartOutput::WebSocket(output) => {
             let (sender, receiver) = mpsc::channel(effect_capacity);
+            let (close_sender, close_receiver) = oneshot::channel();
             let output_control = Arc::clone(&io_control);
             let task = tokio::spawn(drive_actor_websocket_output(
                 output,
                 receiver,
                 output_control,
                 output_actor_rx,
+                close_receiver,
             ));
-            (ActorOutbound::WebSocket(sender), Some(task))
+            (
+                ActorOutbound::WebSocket(sender),
+                Some(task),
+                Some(close_sender),
+            )
         }
     };
     if let Err(task) = output_tx.send(output_driver) {
@@ -1075,6 +1082,7 @@ async fn launch_connection_actor(
         effect_completed: effect_completed_rx,
         handled_h_observation: handled_h_rx,
         effect_owner_abort,
+        output_close: Mutex::new(output_close),
     })
 }
 
@@ -1209,6 +1217,7 @@ async fn drive_actor_websocket_output(
     mut requests: mpsc::Receiver<ActorOutput>,
     control: Arc<ConnectionActorIoControl>,
     actor: oneshot::Receiver<kameo::actor::WeakActorRef<ConnectionActor>>,
+    mut close_receiver: oneshot::Receiver<oneshot::Sender<()>>,
 ) {
     let actor = match actor.await {
         Ok(actor) => actor,
@@ -1218,6 +1227,14 @@ async fn drive_actor_websocket_output(
         let request = tokio::select! {
             biased;
             _ = control.stop_signal.cancelled() => break,
+            close = &mut close_receiver => {
+                if let Ok(closed) = close {
+                    requests.close();
+                    let _ = closed.send(());
+                    control.stop_signal.cancelled().await;
+                }
+                break;
+            },
             request = requests.recv() => match request { Some(request) => request, None => break },
         };
         let (id, frame) = match request {
@@ -1615,9 +1632,17 @@ struct ConnectionActorIoControl {
     stop_signal: super::supervised_io::StopSignal,
     effect_owner: Arc<EffectOwnerShared>,
     handled_h_observation: watch::Sender<u32>,
+    output_admission_hook: Mutex<Option<OutputAdmissionHook>>,
 }
 
 impl ConnectionActorIoControl {
+    fn take_output_admission_hook(&self) -> Option<OutputAdmissionHook> {
+        match self.output_admission_hook.lock() {
+            Ok(mut hook) => hook.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
     fn observer(&self) -> Option<IoCustodianObserver> {
         self.inventory.observe(&self.connection_ref)
     }
@@ -1829,36 +1854,110 @@ impl Drop for ConnectionActor {
 
 impl ConnectionActor {
     fn enqueue_acknowledgement(&self) -> Result<(), ConnectionActorError> {
-        drop(self.io_control.lifecycle.lock_running()?);
         if !self.state.sm_state.enabled {
+            drop(self.io_control.lifecycle.lock_running()?);
             return Err(ConnectionActorError::StreamManagementDisabled);
         }
         let ack = SmAck::new(self.state.sm_state.inbound_count());
-        let byte_len = ack.to_xml().len();
-        // WriteSender may synchronously request stop on overload. Release the
-        // lifecycle gate after its preflight check so that stop callback can
-        // enter without re-locking this actor's own gate. This is not an atomic
-        // output-authority fence: a stop can race between preflight and queue
-        // admission, which remains a live-cutover blocker.
         match &self.outbound {
-            ActorOutbound::Synthetic(outbound) => outbound
-                .try_send(ConnectionWireFrame::Acknowledgement(ack), byte_len)
-                .map(|_| ())
-                .map_err(ConnectionActorError::from),
-            ActorOutbound::WebSocket(outbound) => {
-                match outbound.try_send(ActorOutput::Acknowledgement(ack)) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        self.io_control.request_stop(StopReason::OutboundOverload);
-                        Err(ConnectionActorError::Admission(AdmissionError::Overloaded))
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        self.io_control
-                            .request_stop(StopReason::OutboundQueueClosed);
-                        Err(ConnectionActorError::Admission(AdmissionError::Closed))
-                    }
+            ActorOutbound::Synthetic(outbound) => {
+                let byte_len = ack.to_xml().len();
+                let mut hook = self.io_control.take_output_admission_hook();
+                if let Some(hook) = &mut hook {
+                    hook.pause(OutputAdmissionPause::BeforeGate);
                 }
+                let result = match self.try_enqueue_synthetic_acknowledgement(
+                    outbound,
+                    ack,
+                    byte_len,
+                    hook.as_mut(),
+                ) {
+                    Ok(result) => outbound
+                        .notify_failed_admission(result)
+                        .map(|_| ())
+                        .map_err(ConnectionActorError::from),
+                    Err(error) => Err(error),
+                };
+                if let Some(hook) = hook {
+                    hook.report(result);
+                }
+                result
             }
+            ActorOutbound::WebSocket(_) => {
+                self.enqueue_websocket_output(ActorOutput::Acknowledgement(ack))
+            }
+        }
+    }
+
+    fn try_enqueue_synthetic_acknowledgement(
+        &self,
+        outbound: &WriteSender<ConnectionWireFrame>,
+        ack: SmAck,
+        byte_len: usize,
+        hook: Option<&mut OutputAdmissionHook>,
+    ) -> Result<Result<super::supervised_io::WriteReceipt, AdmissionError>, ConnectionActorError>
+    {
+        // Custodian stop takes admission first and the stop listener takes
+        // lifecycle second. Never reverse them or notify under either gate.
+        let admission = outbound.lock_admission()?;
+        let _lifecycle = self.io_control.lifecycle.lock_running()?;
+        if let Some(hook) = hook {
+            hook.pause(OutputAdmissionPause::InsideGate);
+        }
+        Ok(admission
+            .try_send_without_notification(ConnectionWireFrame::Acknowledgement(ack), byte_len))
+    }
+
+    fn enqueue_websocket_output(&self, frame: ActorOutput) -> Result<(), ConnectionActorError> {
+        let ActorOutbound::WebSocket(outbound) = &self.outbound else {
+            return Err(ConnectionActorError::PrebindFixtureOnly);
+        };
+        let mut hook = self.io_control.take_output_admission_hook();
+        if let Some(hook) = &mut hook {
+            hook.pause(OutputAdmissionPause::BeforeGate);
+        }
+        let result = match self.try_enqueue_websocket_output(outbound, frame, hook.as_mut()) {
+            Err(error) => Err(error),
+            Ok(result) => self.finish_websocket_output_admission(result),
+        };
+        if let Some(hook) = hook {
+            hook.report(result);
+        }
+        result
+    }
+
+    fn try_enqueue_websocket_output(
+        &self,
+        outbound: &mpsc::Sender<ActorOutput>,
+        frame: ActorOutput,
+        hook: Option<&mut OutputAdmissionHook>,
+    ) -> Result<Result<(), AdmissionError>, ConnectionActorError> {
+        let _lifecycle = self.io_control.lifecycle.lock_running()?;
+        if let Some(hook) = hook {
+            hook.pause(OutputAdmissionPause::InsideGate);
+        }
+        Ok(outbound.try_send(frame).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => AdmissionError::Overloaded,
+            mpsc::error::TrySendError::Closed(_) => AdmissionError::Closed,
+        }))
+    }
+
+    fn finish_websocket_output_admission(
+        &self,
+        result: Result<(), AdmissionError>,
+    ) -> Result<(), ConnectionActorError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(AdmissionError::Overloaded) => {
+                self.io_control.request_stop(StopReason::OutboundOverload);
+                Err(ConnectionActorError::Admission(AdmissionError::Overloaded))
+            }
+            Err(AdmissionError::Closed) => {
+                self.io_control
+                    .request_stop(StopReason::OutboundQueueClosed);
+                Err(ConnectionActorError::Admission(AdmissionError::Closed))
+            }
+            Err(error) => Err(ConnectionActorError::Admission(error)),
         }
     }
 }
@@ -1872,9 +1971,47 @@ pub struct ConnectionActorController {
     effect_completed: watch::Receiver<usize>,
     handled_h_observation: watch::Receiver<u32>,
     effect_owner_abort: AbortHandle,
+    output_close: Mutex<Option<oneshot::Sender<oneshot::Sender<()>>>>,
 }
 
 impl ConnectionActorController {
+    /// Close the actor output receiver without retiring the physical writer.
+    pub async fn close_output_receiver_for_test(&self) -> bool {
+        let close = match self.output_close.lock() {
+            Ok(mut close) => close.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(close) = close else {
+            return false;
+        };
+        let (completed, wait_completed) = oneshot::channel();
+        if close.send(completed).is_err() {
+            return false;
+        }
+        wait_completed.await.is_ok()
+    }
+
+    /// Pause the next actor output immediately before or inside its gate and
+    /// observe its admission result independently of actor retirement.
+    pub fn pause_next_output_admission(
+        &self,
+        point: OutputAdmissionPause,
+        entered: oneshot::Sender<()>,
+        barrier: Arc<ConnectionActorGateBarrier>,
+        result: oneshot::Sender<Result<(), ConnectionActorError>>,
+    ) {
+        let hook = OutputAdmissionHook {
+            point,
+            entered: Some(entered),
+            barrier,
+            result,
+        };
+        match self.io_control.output_admission_hook.lock() {
+            Ok(mut current) => *current = Some(hook),
+            Err(poisoned) => *poisoned.into_inner() = Some(hook),
+        }
+    }
+
     /// Address of the sole actor that owns this connection's mutable state.
     pub fn actor(&self) -> &ActorRef<ConnectionActor> {
         &self.actor
@@ -2341,6 +2478,36 @@ impl Message<CompleteHandledInbound> for ConnectionActor {
         _: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.complete_handled_operation(msg.0, None)
+    }
+}
+
+/// Where the next actor output pauses for a deterministic admission race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputAdmissionPause {
+    /// Pause before acquiring any output admission gate.
+    BeforeGate,
+    /// Pause with the output lifecycle gate held, before queue admission.
+    InsideGate,
+}
+
+struct OutputAdmissionHook {
+    point: OutputAdmissionPause,
+    entered: Option<oneshot::Sender<()>>,
+    barrier: Arc<ConnectionActorGateBarrier>,
+    result: oneshot::Sender<Result<(), ConnectionActorError>>,
+}
+
+impl OutputAdmissionHook {
+    fn pause(&mut self, point: OutputAdmissionPause) {
+        if self.point == point {
+            if let Some(entered) = self.entered.take() {
+                self.barrier.wait(entered);
+            }
+        }
+    }
+
+    fn report(self, result: Result<(), ConnectionActorError>) {
+        let _ = self.result.send(result);
     }
 }
 

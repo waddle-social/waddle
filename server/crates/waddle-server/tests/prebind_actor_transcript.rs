@@ -12,7 +12,7 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
@@ -20,7 +20,8 @@ use tokio_tungstenite::WebSocketStream;
 use waddle_server::config::MaxWebSocketConnections;
 use waddle_server::test_support::connection_actor::{
     canonical_actor_gate, CompletePrebindAuth, CompleteValidatedPrebindAuth,
-    ConnectionActorController, ConnectionActorStartHooks, PrebindAuthAttempt, PrebindAuthOutcome,
+    ConnectionActorController, ConnectionActorError, ConnectionActorGateBarrier,
+    ConnectionActorStartHooks, OutputAdmissionPause, PrebindAuthAttempt, PrebindAuthOutcome,
     PrebindPhase, PrebindValidationAttempt, SnapshotConnection, SnapshotPrebind,
 };
 use waddle_server::test_support::{
@@ -105,7 +106,7 @@ async fn handler(State(route): State<Arc<RouteState>>, request: Request) -> Resp
 
 struct Fixture {
     peer: WebSocketStream<TcpStream>,
-    actor: ConnectionActorController,
+    actor: Arc<ConnectionActorController>,
     attempts: mpsc::Receiver<PrebindAuthAttempt>,
     validated_attempts: mpsc::Receiver<PrebindValidationAttempt>,
     state: Arc<WebSocketState>,
@@ -114,6 +115,12 @@ struct Fixture {
 
 struct ReleaseProbe(Arc<ActorWriteProbe>);
 impl Drop for ReleaseProbe {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+struct ReleaseAdmissionBarrier(Arc<ConnectionActorGateBarrier>);
+impl Drop for ReleaseAdmissionBarrier {
     fn drop(&mut self) {
         self.0.release();
     }
@@ -169,7 +176,7 @@ impl Fixture {
             .expect("started");
         Self {
             peer,
-            actor,
+            actor: Arc::new(actor),
             attempts,
             validated_attempts,
             state,
@@ -293,6 +300,160 @@ impl Fixture {
 
 fn condition(element: &Element) -> Option<&str> {
     element.children().next().map(Element::name)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prebind_late_auth_output_is_rejected_when_stop_wins() {
+    let mut fixture = Fixture::start(None).await;
+    fixture.initial_open().await;
+    fixture.send(AUTH).await;
+    let attempt = fixture.auth_attempt().await;
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, result_rx) = oneshot::channel();
+    fixture.actor.pause_next_output_admission(
+        OutputAdmissionPause::BeforeGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    fixture
+        .complete(
+            attempt.token,
+            PrebindAuthOutcome::Authenticated("alice@example.com".parse().expect("jid")),
+        )
+        .await;
+    timeout(TIMEOUT, entered_rx)
+        .await
+        .expect("auth success reaches pre-admission barrier")
+        .expect("barrier entry");
+    fixture.actor.request_stop(StopReason::LeaseLost);
+    barrier.release();
+    assert_eq!(
+        timeout(TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Err(ConnectionActorError::ConnectionStopping)
+    );
+    assert_eq!(
+        timeout(TIMEOUT, fixture.actor.wait_until_joined())
+            .await
+            .expect("connection joins"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prebind_auth_output_admission_wins_before_stop_callback() {
+    let mut fixture = Fixture::start(None).await;
+    fixture.initial_open().await;
+    fixture.send(AUTH).await;
+    let attempt = fixture.auth_attempt().await;
+    let barrier = Arc::new(ConnectionActorGateBarrier::new());
+    let _release = ReleaseAdmissionBarrier(Arc::clone(&barrier));
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (result_tx, mut result_rx) = oneshot::channel();
+    fixture.actor.pause_next_output_admission(
+        OutputAdmissionPause::InsideGate,
+        entered_tx,
+        Arc::clone(&barrier),
+        result_tx,
+    );
+    fixture
+        .complete(
+            attempt.token,
+            PrebindAuthOutcome::Authenticated("alice@example.com".parse().expect("jid")),
+        )
+        .await;
+    timeout(TIMEOUT, entered_rx)
+        .await
+        .expect("auth output owns lifecycle gate")
+        .expect("barrier entry");
+    let stopping = Arc::clone(&fixture.actor);
+    let stop = tokio::task::spawn_blocking(move || stopping.request_stop(StopReason::LeaseLost));
+    assert!(
+        timeout(TIMEOUT, fixture.actor.wait_for_stop_signal_callbacks(1))
+            .await
+            .expect("stop reaches lifecycle callback")
+    );
+    assert!(matches!(
+        result_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    barrier.release();
+    assert_eq!(
+        timeout(TIMEOUT, result_rx)
+            .await
+            .expect("admission decision")
+            .expect("admission observation"),
+        Ok(())
+    );
+    timeout(TIMEOUT, stop)
+        .await
+        .expect("stop returns after gate release")
+        .expect("stop task");
+    assert_eq!(
+        timeout(TIMEOUT, fixture.actor.wait_until_joined())
+            .await
+            .expect("connection joins"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prebind_completion_after_stop_cannot_affect_a_successor() {
+    let mut first = Fixture::start(None).await;
+    first.initial_open().await;
+    first.send(AUTH).await;
+    let stale = first.auth_attempt().await;
+    let old_actor = first.actor.actor().clone();
+    first.actor.request_stop(StopReason::LeaseLost);
+    assert_eq!(
+        timeout(TIMEOUT, first.actor.wait_until_joined())
+            .await
+            .expect("old connection joins"),
+        Some(CustodianState::Joined)
+    );
+    let late = CompletePrebindAuth {
+        token: stale.token.clone(),
+        outcome: PrebindAuthOutcome::Authenticated("alice@example.com".parse().expect("jid")),
+    };
+    assert!(timeout(TIMEOUT, old_actor.tell(late).send())
+        .await
+        .expect("late completion returns")
+        .is_err());
+
+    let mut successor = Fixture::start(None).await;
+    assert_ne!(
+        first.actor.connection_ref(),
+        successor.actor.connection_ref()
+    );
+    successor.initial_open().await;
+    successor.send(AUTH).await;
+    let current = successor.auth_attempt().await;
+    successor
+        .complete(
+            stale.token,
+            PrebindAuthOutcome::Authenticated("alice@example.com".parse().expect("jid")),
+        )
+        .await;
+    assert_eq!(successor.phase().await, PrebindPhase::AuthPending);
+    successor
+        .complete(
+            current.token,
+            PrebindAuthOutcome::Authenticated("alice@example.com".parse().expect("jid")),
+        )
+        .await;
+    assert_eq!(successor.element().await.name(), "success");
+    successor.actor.request_stop(StopReason::Requested);
+    assert_eq!(
+        timeout(TIMEOUT, successor.actor.wait_until_joined())
+            .await
+            .expect("successor joins"),
+        Some(CustodianState::Joined)
+    );
 }
 
 #[tokio::test]
