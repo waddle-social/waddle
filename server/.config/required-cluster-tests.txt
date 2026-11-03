@@ -344,3 +344,7 @@ waddle-server::physical_attestation attested_control_plane_lineage_registry_uses
 # Relayed origin IDs must prove the exact canonical parent under both row locks.
 waddle-server ingress::relayed_origin_tests::postgres_relayed_origin_requires_exact_persisted_alias
 waddle-server ingress::relayed_origin_tests::postgres_relayed_alias_lock_orders_parent_before_alias
+
+# P2.1 portable SM attachment must run against the restricted PostgreSQL role.
+waddle-server::physical_attestation sm_attach::portable_sm_attach_checks_restricted_snapshot_and_schema_drift
+waddle-server::physical_attestation sm_attach::portable_sm_attach_accepts_owner_upgrade_and_migration_profiles

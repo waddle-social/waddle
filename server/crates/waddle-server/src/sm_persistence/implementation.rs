@@ -82,6 +82,21 @@ impl DatabaseSmPersistence {
         self.db.clone()
     }
 
+    /// Attach an existing owner-prepared portable PostgreSQL SM schema.
+    ///
+    /// This validates a structural snapshot on the supplied attested main
+    /// lane. It does not run owner bootstrap, establish writer privileges, or
+    /// enable fenced SM and must not be used as a production readiness check.
+    pub async fn attach_existing_postgres(
+        db: Database,
+    ) -> Result<Self, super::SmRuntimeAttachError> {
+        super::runtime_attach::verify(&db).await?;
+        Ok(Self {
+            db,
+            stream_locks: Arc::new(StreamLockMap::new()),
+        })
+    }
+
     /// Open against `database_url`. Supported schemes:
     ///
     /// - `postgres://…` / `postgresql://…` → Postgres adapter

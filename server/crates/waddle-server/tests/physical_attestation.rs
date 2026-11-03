@@ -6181,3 +6181,7 @@ mod shared_correctness;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/pending_attach.rs"]
 mod pending_attach;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/sm_attach.rs"]
+mod sm_attach;
