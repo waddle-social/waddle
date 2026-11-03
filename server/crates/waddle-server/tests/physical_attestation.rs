@@ -6177,3 +6177,7 @@ mod owner_rejection_roles;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/shared_correctness.rs"]
 mod shared_correctness;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/pending_attach.rs"]
+mod pending_attach;

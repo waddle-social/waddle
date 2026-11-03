@@ -12,6 +12,7 @@ use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, Pe
 mod ack_windows;
 mod custody;
 mod recovery_order;
+mod runtime_attach;
 mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
@@ -31,4 +32,5 @@ pub(crate) use implementation::insert_in_transaction;
 pub(crate) use implementation::mark_notification_outboxed_in_transaction;
 pub use implementation::DatabasePendingDeliveryStorage;
 pub(crate) use implementation::PendingInsertFence;
+pub use runtime_attach::PendingRuntimeAttachError;
 pub use schema::bootstrap_schema_owner as bootstrap_pending_delivery_owner_schema;

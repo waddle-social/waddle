@@ -55,6 +55,7 @@ mod recovery;
 
 pub use database::bootstrap_pending_delivery_owner_schema;
 pub use database::DatabasePendingDeliveryStorage;
+pub use database::PendingRuntimeAttachError;
 pub(crate) use flush::resume_flush_for_resource_with_retry;
 pub use flush::{
     flush_for_resource, flush_for_resource_with_retry, ArchiveResolveError, ArchiveResolver,
