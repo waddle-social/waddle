@@ -164,6 +164,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
             deps.effects
                 .set_room_execution(super::effects::RoomExecutionPath::Local {
                     room: room.clone(),
+                    client_origin: None,
                     fence: requirement,
                     snapshot_generation: snapshot.admission_revision,
                     manifest_snapshot: Some(RoomManifestSnapshot::from(&snapshot)),

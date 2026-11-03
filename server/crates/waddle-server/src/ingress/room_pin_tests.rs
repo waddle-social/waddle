@@ -177,6 +177,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
             .expect("failing projection store");
         submission.plan.room_execution = RoomExecutionPath::Local {
             room: room.clone(),
+            client_origin: None,
             fence: if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
                 effects::room::RoomFenceRequirement::Guarded(fence)
             } else {

@@ -150,6 +150,7 @@ mod deps;
 pub mod effects;
 mod message_plan;
 pub(crate) mod preview_plan;
+pub(crate) use message_plan::plan_message_dispatch_with_client_origin;
 pub(crate) use message_plan::reject_malformed_message;
 pub use message_plan::{build_plan_deps, plan_message_dispatch};
 mod direct_archive;

@@ -1,6 +1,7 @@
 //! Phase-A entry point for early message handlers and interpreter feedback.
 use super::effects::{
-    Effect, EffectSink, ExternalEffect, IngressPlan, PlanRejection, PlanSink, PolicyDeniedReason,
+    ClientRoomOrigin, Effect, EffectSink, ExternalEffect, IngressPlan, PlanRejection, PlanSink,
+    PolicyDeniedReason, RoomExecutionPath,
 };
 use super::{Deps, XmppStateMachine};
 use crate::ingress::IngressEffectCapture;
@@ -18,9 +19,25 @@ pub fn build_plan_deps<'a>(deps: &Deps<'a>, sink: &'a PlanSink) -> Deps<'a> {
 /// read feedback and transient recipient passes. No connection authority is changed.
 pub async fn plan_message_dispatch(
     sm: &mut XmppStateMachine,
-    mut incoming: Message,
+    incoming: Message,
     deps: &Deps<'_>,
 ) -> IngressPlan {
+    plan_message_dispatch_with_client_origin(sm, incoming, deps, None).await
+}
+
+/// Plan a local client stanza with the identity captured at its connection boundary.
+pub(crate) async fn plan_message_dispatch_with_client_origin(
+    sm: &mut XmppStateMachine,
+    mut incoming: Message,
+    deps: &Deps<'_>,
+    origin: Option<&ClientRoomOrigin>,
+) -> IngressPlan {
+    let client_origin = origin
+        .filter(|origin| {
+            incoming.type_ == MessageType::Groupchat
+                && sm.phase().bound_jid() == Some(&origin.full_jid)
+        })
+        .cloned();
     let sink = PlanSink::new();
     if let Some(sender) = sm.phase().bound_jid() {
         incoming.from = Some(jid::Jid::from(sender.clone()));
@@ -57,7 +74,15 @@ pub async fn plan_message_dispatch(
         ))));
         super::super::websocket::replay::drive_interpret_loop(events, sm, &planned).await;
     }
-    finish_plan(&sink, &capture, incoming, ingress_sender)
+    let mut plan = finish_plan(&sink, &capture, incoming, ingress_sender);
+    if let RoomExecutionPath::Local {
+        client_origin: planned_origin,
+        ..
+    } = &mut plan.room_execution
+    {
+        *planned_origin = client_origin;
+    }
+    plan
 }
 
 pub(super) fn finish_plan(

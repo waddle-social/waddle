@@ -8,7 +8,7 @@ use crate::ingress_uow::{
 };
 use crate::server::routes::interpret::effects::room::ExternalRoomEffect;
 use crate::server::routes::interpret::effects::{
-    Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect,
+    Effect, ExternalEffect, PlanSuppressionPolicy, PlannedEffect, RoomExecutionPath,
 };
 use crate::server::routes::interpret::plan_room_result;
 use crate::server::routes::websocket::interpret_loop::build_interpret_deps;
@@ -219,6 +219,13 @@ async fn result_archive_and_stale_gate(f: IngressFixture) {
     let submission = plan_room_result(&deps, publication.clone())
         .await
         .expect("room result plan");
+    assert!(matches!(
+        &submission.plan.room_execution,
+        RoomExecutionPath::Local {
+            client_origin: None,
+            ..
+        }
+    ));
     let apply_to = submission
         .plan
         .sanitized_message
