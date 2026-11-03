@@ -44,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
 use waddle_xmpp::stream_management::SmAck;
 use waddle_xmpp::Stanza;
+use xmpp_parsers::message::Lang;
 
 const MAX_HANDLED_INBOUND_OPERATIONS: usize = 256;
 
@@ -57,9 +58,10 @@ pub enum ConnectionWireFrame {
     Acknowledgement(SmAck),
     /// A parsed, countable peer stanza plus its raw serialized byte length.
     /// The dark fixture uses this for sequencing and custody; it does not
-    /// carry all live parser metadata or imply routing parity.
+    /// imply routing parity.
     CountableStanza {
         stanza: Arc<Stanza>,
+        message_stanza_lang: Option<Lang>,
         wire_bytes: usize,
     },
     /// A malformed or non-stanza peer frame retained only long enough for
@@ -112,6 +114,8 @@ pub enum CountableEffectDisposition {
 pub struct CountableInboundEffect {
     /// Parsed countable XMPP stanza.
     pub stanza: Arc<Stanza>,
+    /// The message's top-level language, captured at the initial parse.
+    pub message_stanza_lang: Option<Lang>,
     /// Exact actor-issued completion capability.
     pub sequence: ConnectionActorSequence,
 }
@@ -1155,6 +1159,7 @@ async fn forward_websocket_frames(
                         Ok(parsed) => match parsed.frame {
                             InboundFrame::Stanza(stanza) => ConnectionWireFrame::CountableStanza {
                                 stanza: Arc::new(*stanza),
+                                message_stanza_lang: parsed.message_stanza_lang,
                                 wire_bytes,
                             },
                             _ => ConnectionWireFrame::RejectedInbound { wire_bytes },
@@ -1483,8 +1488,12 @@ impl EffectOwnerTask {
         io_control: std::sync::Weak<ConnectionActorIoControl>,
         effect_runner: CountableStanzaEffect,
     ) {
-        let stanza = match &job.item.value {
-            ConnectionWireFrame::CountableStanza { stanza, .. } => Arc::clone(stanza),
+        let (stanza, message_stanza_lang) = match &job.item.value {
+            ConnectionWireFrame::CountableStanza {
+                stanza,
+                message_stanza_lang,
+                ..
+            } => (Arc::clone(stanza), message_stanza_lang.clone()),
             _ => {
                 if let Some(io_control) = io_control.upgrade() {
                     io_control.request_stop(StopReason::Requested);
@@ -1496,6 +1505,7 @@ impl EffectOwnerTask {
         };
         let effect = CountableInboundEffect {
             stanza,
+            message_stanza_lang,
             sequence: job.token.clone(),
         };
         let disposition = tokio::select! {

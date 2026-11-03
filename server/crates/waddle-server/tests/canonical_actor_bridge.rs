@@ -990,6 +990,128 @@ async fn full_actor_mailbox_and_inbound_budget_do_not_block_independent_stop() {
 }
 
 #[tokio::test]
+async fn countable_effects_keep_each_message_stanza_language() {
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let first_entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let first_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let effect_entered = Arc::clone(&first_entered);
+    let effect_release = Arc::clone(&first_release);
+    let effect: CountableStanzaEffect = Arc::new(move |input| {
+        let observed = observed_tx.clone();
+        let entered = Arc::clone(&effect_entered);
+        let release = Arc::clone(&effect_release);
+        Box::pin(async move {
+            if input.sequence.sequence_number() == 1 {
+                entered.add_permits(1);
+                release.acquire().await.expect("release effect").forget();
+            }
+            observed.send(input).expect("effect observation");
+            CountableEffectDisposition::Handled
+        })
+    });
+    let mut h = Harness::new(None, limits(16, 4096), limits(4, 1024)).await;
+    h.queue(RouteOptions {
+        effect: Some(effect),
+        ..Default::default()
+    });
+    let mut peer = h.open().await.expect("101");
+    let _ = h.reserved().await;
+    let _ = h.starting().await;
+    let controller = h.started().await;
+    let cases = [
+        (
+            "<message xmlns='jabber:client' id='fr' xml:lang='fr'><body xml:lang='en'>hello</body></message>",
+            "message",
+            "fr",
+            Some("fr"),
+        ),
+        (
+            "<message xmlns='jabber:client' id='child'><body xml:lang='de'>hallo</body></message>",
+            "message",
+            "child",
+            None,
+        ),
+        (
+            "<message xmlns='jabber:client' id='ja' xml:lang='ja'><body>hello</body></message>",
+            "message",
+            "ja",
+            Some("ja"),
+        ),
+        (
+            "<message xmlns='jabber:client' id='empty' xml:lang=''><body>hello</body></message>",
+            "message",
+            "empty",
+            Some(""),
+        ),
+        (
+            "<message xmlns='jabber:client' id='plain'><body>hello</body></message>",
+            "message",
+            "plain",
+            None,
+        ),
+        (
+            "<presence xmlns='jabber:client' id='presence' xml:lang='fr'/>",
+            "presence",
+            "presence",
+            None,
+        ),
+        (
+            "<iq xmlns='jabber:client' id='iq' type='get'><query xmlns='jabber:iq:version'/></iq>",
+            "iq",
+            "iq",
+            None,
+        ),
+    ];
+    peer.send(Message::Text(cases[0].0.into()))
+        .await
+        .expect("first stanza");
+    timeout(TIMEOUT, first_entered.acquire())
+        .await
+        .expect("first effect entered")
+        .expect("semaphore")
+        .forget();
+    for (xml, _, _, _) in &cases[1..] {
+        peer.send(Message::Text((*xml).into()))
+            .await
+            .expect("queued stanza");
+    }
+    send_request(&mut peer).await;
+    assert_eq!(recv_ack(&mut peer).await.h, 0);
+    first_release.add_permits(1);
+
+    for (index, (_, kind, id, expected_lang)) in cases.iter().enumerate() {
+        let observed = timeout(TIMEOUT, observed_rx.recv())
+            .await
+            .expect("effect observation timeout")
+            .expect("effect observation channel");
+        assert_eq!(observed.stanza.name(), *kind);
+        assert_eq!(observed.stanza.to_element().attr("id"), Some(*id));
+        assert_eq!(
+            observed
+                .message_stanza_lang
+                .as_ref()
+                .map(|lang| lang.0.as_str()),
+            *expected_lang
+        );
+        assert_eq!(observed.sequence.sequence_number(), index as u32 + 1);
+    }
+    assert!(
+        timeout(TIMEOUT, controller.wait_for_effects_completed(cases.len()))
+            .await
+            .expect("effects complete")
+    );
+    send_request(&mut peer).await;
+    assert_eq!(recv_ack(&mut peer).await.h, 7);
+    controller.request_stop(StopReason::Requested);
+    assert_eq!(
+        timeout(TIMEOUT, controller.wait_until_joined())
+            .await
+            .expect("join"),
+        Some(CustodianState::Joined)
+    );
+}
+
+#[tokio::test]
 async fn inbound_bytes_remain_reserved_through_the_synthetic_effect() {
     const STANZA: &str =
         "<message xmlns='jabber:client' type='chat'><body>held-effect</body></message>";

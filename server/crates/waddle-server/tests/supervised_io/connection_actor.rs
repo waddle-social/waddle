@@ -26,7 +26,7 @@ use waddle_server::test_support::supervised_io::{
     OutboundTerminal, ReservedIoStartConfig, ShutdownProtocol, StopReason, TransportLimits,
 };
 use waddle_xmpp::ownership::{ConnectionRef, NodeLeaseIdentity};
-use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame, ParseError};
+use waddle_xmpp::protocol::frame::{parse_frame_with_metadata, InboundFrame, ParseError};
 use waddle_xmpp::stream_management::{SmAck, SmRequest, SmStanza};
 use xmpp_parsers::minidom::Element;
 
@@ -435,10 +435,14 @@ fn test_transport_limits(
 
 fn connection_frame_from_text(text: &str) -> ConnectionWireFrame {
     let wire_bytes = text.len();
-    match parse_frame(text) {
-        Ok(InboundFrame::Stanza(stanza)) => ConnectionWireFrame::CountableStanza {
-            stanza: Arc::new(*stanza),
-            wire_bytes,
+    match parse_frame_with_metadata(text) {
+        Ok(parsed) => match parsed.frame {
+            InboundFrame::Stanza(stanza) => ConnectionWireFrame::CountableStanza {
+                stanza: Arc::new(*stanza),
+                message_stanza_lang: parsed.message_stanza_lang,
+                wire_bytes,
+            },
+            _ => ConnectionWireFrame::RejectedInbound { wire_bytes },
         },
         Err(ParseError::UnknownRoot(root)) if root == "r" => {
             if matches!(SmStanza::parse(text), Some(SmStanza::Request)) {
