@@ -159,6 +159,7 @@ pub(super) async fn plan_bot_groupchat_message(
     sink.observe_message(&working);
     sink.set_room_execution(RoomExecutionPath::Local {
         room: bot_ctx.room_jid.clone(),
+        client_origin: None,
         fence: bot_ctx
             .claim_fence
             .cloned()

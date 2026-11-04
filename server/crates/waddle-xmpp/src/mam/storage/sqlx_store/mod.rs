@@ -1,8 +1,10 @@
 mod allocation;
 mod decode;
 mod impls;
+mod lookup;
 mod query;
 mod schema;
+mod schema_verify;
 mod tx_write;
 mod write;
 
@@ -17,16 +19,27 @@ use tracing::info;
 
 use super::MamStorageError;
 pub use allocation::{
-    lock_archive_sequence_on_connection, lock_archive_sequence_on_sqlite_connection,
+    lock_archive_sequence_on_connection, lock_archive_sequence_on_connection_in_schema,
+    lock_archive_sequence_on_sqlite_connection,
 };
+pub use schema::MamSchemaBootstrapError;
 use schema::{
     ensure_postgres_schema, ensure_sqlite_parent_dir, infer_driver, is_in_memory_sqlite,
     MamDatabaseDriver,
 };
+pub use schema_verify::MamSchemaVerificationError;
 pub use tx_write::{
-    store_archived_message_on_connection, store_archived_message_on_sqlite_connection,
-    ArchiveExpectation, MamTxStoreError, MamTxStoreOutcome,
+    store_archived_message_on_connection, store_archived_message_on_connection_in_schema,
+    store_archived_message_on_sqlite_connection, ArchiveExpectation, MamTxStoreError,
+    MamTxStoreOutcome,
 };
+
+fn postgres_relation(schema: Option<&str>, relation: &str) -> String {
+    match schema {
+        Some(schema) => format!("\"{}\".{relation}", schema.replace('"', "\"\"")),
+        None => relation.to_owned(),
+    }
+}
 
 #[derive(Clone)]
 pub(super) enum MamDatabaseBackend {
@@ -194,6 +207,9 @@ mod tests {
         assert!(!storage.postgres_pool().expect("postgres pool").is_closed());
     }
 }
+
+#[cfg(test)]
+mod lookup_tests;
 
 #[cfg(test)]
 mod ordinal_tests;

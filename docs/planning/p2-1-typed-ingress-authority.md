@@ -1,0 +1,100 @@
+# P2.1 typed ingress transaction authority
+
+Status: dark implementation plan stacked on #2153. This work does not install a
+guard migration, change normal startup or credentials, unify pools, or activate
+an epoch. The installed V1009 trigger still takes the epoch row `FOR SHARE`.
+
+## Boundary
+
+The reusable dark service may be shared through `Arc`. Its private,
+non-cloneable transaction capability is created only inside an operation and
+cannot escape that operation. PostgreSQL must select READ COMMITTED, establish
+bounded transaction-local timeouts, and take `ACCESS SHARE` on the qualified
+epoch relation before application locks or transaction reads. A separate read
+then validates the supported live epoch and installs the epoch/xid proof. Bind
+the schema to independently supplied physical identity; qualify protected SQL.
+SQLite keeps its shared database and `BEGIN IMMEDIATE` semantics.
+
+The intended consumer is a closed set of typed database operations. No caller
+may receive a pool, connection, raw SQL executor, or caller-owned transaction.
+An arbitrary async callback is not by itself proof that the transaction contains
+only database awaits. Where conversion cannot be completed coherently, keep the
+new service unreachable from normal startup and state the remaining callers.
+The closed receipt operation is one isolated example, not a compositional UOW:
+atomic alias, message, stream-management, archive, and receipt writes still
+need a reviewed set of closed domain operations or another design that preserves
+their shared commit without exposing raw transactions or arbitrary async work.
+
+The prepared PostgreSQL UOW carries its attested schema through a direct
+message's archive, inbox and exact-resource no-store acceptance paths, including
+intent reconciliation, archive sequence and row, inbox projection and delivery
+marker, archive dispatch, SM claim and delivery-progress statements. MAM's
+cross-crate adapters take the schema from the prepared UOW; raw PostgreSQL and
+SQLite use their existing paths. Prepared transactions also qualify the archive
+position and per-resource carbon receipt existence reads, and send-attempt
+claim, start, completion and release statements. These repository changes do not
+close the live-delivery operation or enable startup on the attested pool.
+
+Guarded live delivery remains blocked. Its room-manifest preflight uses a pooled
+read and the room actor's `protect_room_acceptance` claim query is unqualified.
+Even an attested preflight and a canonical-locked direct-only check are not an
+immutable classification: a later room-owner acceptance may add a MUC intent
+and seal the same canonical row after a send's start transaction commits but
+before its socket callback. Some local relay paths bypass the ordered-relay
+stanza validator. Production requires an enforced shared classification or
+fence respected by every room-seal and live-send writer, with no transaction
+held over socket I/O. Carbon sends, pooled archive readiness, pending handoff,
+descendants, recovery and GC also remain on legacy paths, and custody stores
+must be proven co-located before activation.
+
+Optional pending-table detection during no-store retention is limited to the
+attested schema; it does not prove a separate store's location. Its catalog probe
+does not fence concurrent creation of the pending table after an absent result.
+Production activation requires owner bootstrap and co-location to be settled,
+with concurrent owner DDL quiesced or otherwise fenced. This does not make the
+service closed, connect normal startup to the attested pool, or establish
+production authority.
+
+## Migration and review
+
+1. Provide a lexical authority and focused real PostgreSQL and SQLite tests,
+   including fail-closed identity, missing foundation, timeout and isolation
+   behavior. Verify the candidate against the unregistered guard laboratory.
+2. Convert UOW, substrate, receipt, descendants and GC together with their
+   notification and push transaction owners; preserve their atomicity, timeout
+   accounting and parent/claim lock ordering. Do not leave a public raw route
+   from the new authority to guarded writes. Standalone stores need an explicit
+   mode rather than an unqualified transaction-time foundation probe.
+3. Remove raw correctness-pool escape paths only when their consumers and role
+   boundaries have moved. The current generic `Database` and `ConnectionGuard`
+   APIs, owner startup, and separate store pools remain outside a dark component
+   claim until then. Attestation must run on each physical connection/reconnect.
+
+### Contracts requiring review before changes
+
+- **MAM:** ingress archive writes and the corresponding effect receipt must
+  share one transaction; preserve canonical ordering of archive sequence locks
+  and claim fencing. MAM reads, standalone writes, schema ownership and lineage
+  probes currently use a separate pool. A server-owned `MamStorage` adapter or
+  shared private repository must preserve those semantics and SQLite's same
+  pool, while removing raw pool and connection escapes. Design admission and
+  capacity before unifying pools; do not silently reduce existing capacity.
+- **Room replay:** the current outer transaction holds the exact room claim
+  through child acceptance, including nested asynchronous work. A replacement
+  must preserve that takeover fence through the actual durable child commit,
+  retain actor/node authority and cancellation semantics, and avoid waiting on
+  an external action or another pool checkout while holding the transaction.
+  It needs an independent lock-order review and one-slot/saturated-pool tests.
+
+## Activation gates
+
+The relation-guard candidate is not a registered migration. A production
+cutover additionally requires a non-owner runtime role, owner-only bootstrap,
+an independent expected-identity handoff, all protected SQL bound to its schema,
+old-session and old-binary drain, AX-first transitions, and quiescent guarded-DDL
+installation with an enforced migration lock order. Physical reconnect,
+commit-indeterminate authoritative lookup, and shared-pool starvation and
+capacity policy also remain unproven. A GUC, a pool wrapper, or the dark fixture
+alone cannot establish P2.1 completion.
+The transaction-local epoch and XID GUCs are consistency checks, not
+authentication against arbitrary SQL run with a runtime writer's credentials.

@@ -9,7 +9,11 @@ use uuid::Uuid;
 use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 use super::{IngressUowError, IngressUowTransaction};
-use crate::db::{DatabaseDriver, Transaction};
+#[cfg(feature = "test-support")]
+use crate::db::physical_attestation::AttestedPostgresWriterCapability;
+use crate::db::{Database, DatabaseDriver, Transaction};
+#[cfg(feature = "test-support")]
+use crate::ingress_substrate::prepare_attested_receipt_transaction;
 use crate::ingress_substrate::{acquire_epoch_lock_first, supported_protocol_epoch};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -21,7 +25,178 @@ pub enum EffectDeliveryBinding {
     AwaitingDurableOwner,
 }
 
+/// Begin a scheduler transaction that may write canonical descendants.
+///
+/// This must happen at the actual transaction boundary: PostgreSQL cannot
+/// change isolation after a snapshot has been taken, and an epoch request
+/// made after scheduler locks can deadlock with epoch activation. Standalone
+/// stores without the descendant foundation remain usable.
+pub(crate) async fn begin_raw_ingress_writer(
+    db: &Database,
+) -> Result<Transaction<'_>, IngressUowError> {
+    begin_raw_ingress_writer_inner(db).await
+}
+
+/// Begin a dark raw writer using the full identity capability retained by an
+/// independently attested PostgreSQL pool. This path is not wired into normal
+/// startup and verifies the same physical transaction connection before any
+/// application lock or DML.
+#[cfg(feature = "test-support")]
+pub(crate) async fn begin_raw_ingress_writer_with_capability<'a>(
+    db: &'a Database,
+    capability: &AttestedPostgresWriterCapability,
+) -> Result<Transaction<'a>, IngressUowError> {
+    if db.driver() != DatabaseDriver::Postgres {
+        return Err(IngressUowError::PostgresRequired);
+    }
+    db.verify_attested_pg_writer_capability(capability)
+        .map_err(DatabaseError::from)?;
+    let mut tx = db.begin_immediate().await?;
+    tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+        .await?;
+    bound_raw_transaction(&mut tx).await?;
+    let live = prepare_attested_receipt_transaction(&mut tx, capability)
+        .await?
+        .protocol_epoch();
+    let supported = supported_protocol_epoch();
+    if live > supported {
+        return Err(IngressUowError::EpochUnsupported { live, supported });
+    }
+    Ok(tx)
+}
+
+async fn begin_raw_ingress_writer_inner<'a>(
+    db: &'a Database,
+) -> Result<Transaction<'a>, IngressUowError> {
+    let mut tx = db.begin_immediate().await?;
+    if tx.driver() == DatabaseDriver::Postgres {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await?;
+        // Bound the catalog probe too, without changing standalone stores'
+        // timeout policy after a foundation-free probe.
+        let mut rows = tx
+            .query(
+                "SELECT current_setting('lock_timeout'), current_setting('statement_timeout')",
+                (),
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::TransactionBoundsUnproven)?;
+        let lock_timeout: String = row.get(0)?;
+        let statement_timeout: String = row.get(1)?;
+        drop(rows);
+        bound_raw_transaction(&mut tx).await?;
+        if descendant_foundation_exists(&mut tx).await? {
+            install_epoch_proof(&mut tx).await?;
+        } else {
+            tx.execute(
+                "SELECT set_config('lock_timeout', ?, true), set_config('statement_timeout', ?, true)",
+                crate::db_params![lock_timeout, statement_timeout],
+            )
+            .await?;
+        }
+    }
+    Ok(tx)
+}
+
 impl EffectDescendantRepository {
+    /// Attach one descendant under the sealed laboratory transaction. The
+    /// ordinary entry below retains its V1009 proof and raw-writer behavior.
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn attach_in_relation_guard_lab(
+        lab: &mut super::CandidateTransaction<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+        descendant: Uuid,
+    ) -> Result<(), IngressUowError> {
+        use crate::ingress_substrate::{prepared_ingress_sql, PreparedIngressRelation};
+
+        {
+            let (tx, prepared) = lab.transaction.prepared_parts();
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+            let query = prepared_ingress_sql(
+                tx.driver(),
+                Some(prepared),
+                PreparedIngressRelation::Messages,
+                (
+                    "SELECT 1 FROM ",
+                    " WHERE message_key = ?::uuid FOR UPDATE NOWAIT",
+                ),
+                "SELECT 1 FROM ingress_messages WHERE message_key = ?",
+            );
+            let mut rows = tx
+                .query(
+                    &query,
+                    crate::db_params![message_key.to_storage().to_string()],
+                )
+                .await
+                .map_err(canonical_nowait_error)?;
+            if rows.next().await.map_err(canonical_nowait_error)?.is_none() {
+                return Err(IngressUowError::EffectIntentMessageMissing);
+            }
+            drop(rows);
+            ensure_intent_in_prepared(tx, Some(prepared), message_key, effect).await?;
+        }
+        if matches!(
+            effect,
+            IngressEffectKey::CallSignal(..)
+                | IngressEffectKey::Pin(..)
+                | IngressEffectKey::DmPinMutation(..)
+                | IngressEffectKey::DmCallThreadState(..)
+        ) {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let delivery = DeliveryKey::effect(message_key, effect);
+        {
+            let fixture = lab.fixture;
+            let (tx, prepared) = lab.transaction.prepared_parts();
+            let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+            if crate::ingress_substrate::record_delivery_in_relation_guard_lab(
+                tx,
+                prepared,
+                fixture,
+                delivery,
+                message_key,
+            )
+            .await?
+                == MessageWriteOutcome::MessageVanished
+            {
+                return Err(IngressUowError::EffectIntentMessageMissing);
+            }
+        }
+        let (tx, prepared) = lab.transaction.prepared_parts();
+        let prepared = prepared.ok_or(IngressUowError::AttestedPoolRequired)?;
+        let query = prepared_ingress_sql(
+            tx.driver(),
+            Some(prepared),
+            PreparedIngressRelation::EffectDescendants,
+            ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"),
+            "INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        );
+        let inserted = tx
+            .execute(
+                &query,
+                crate::db_params![
+                    message_key.to_storage().to_string(),
+                    effect.storage_kind(),
+                    identity_hash(effect).to_vec(),
+                    descendant.to_string()
+                ],
+            )
+            .await?;
+        if inserted > 0 {
+            crate::ingress_substrate::invalidate_retention_in_prepared_transaction(
+                tx,
+                Some(prepared),
+                message_key,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     pub async fn lock_nowait(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -47,7 +222,7 @@ impl EffectDescendantRepository {
 
     /// New parents acquired after pre-existing work must never wait: abort the
     /// whole UoW so its complete lock set can be retried from the beginning.
-    pub async fn lock_nowait_raw(
+    pub(crate) async fn lock_nowait_raw(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
@@ -70,7 +245,7 @@ impl EffectDescendantRepository {
         Ok(())
     }
 
-    pub async fn lock_all_nowait_raw(
+    pub(crate) async fn lock_all_nowait_raw(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -84,14 +259,14 @@ impl EffectDescendantRepository {
         Ok(())
     }
     /// Take Foundation locks before scheduler/config/source row locks.
-    pub async fn lock_raw(
+    pub(crate) async fn lock_raw(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
     ) -> Result<(), IngressUowError> {
         Self::lock_nowait_raw(tx, message_key).await
     }
 
-    pub async fn bind_effect_raw(
+    pub(crate) async fn bind_effect_raw(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
@@ -131,7 +306,7 @@ impl EffectDescendantRepository {
     }
 
     /// Bind scheduling custody to one recorded canonical effect and its target.
-    pub async fn attach_raw(
+    pub(crate) async fn attach_raw(
         tx: &mut Transaction<'_>,
         message_key: MessageKey,
         effect: &IngressEffectKey,
@@ -163,7 +338,7 @@ impl EffectDescendantRepository {
     }
 
     /// Lock all ancestors in canonical order before touching a scheduler row.
-    pub async fn lock_all_raw(
+    pub(crate) async fn lock_all_raw(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
     ) -> Result<(), IngressUowError> {
@@ -179,7 +354,7 @@ impl EffectDescendantRepository {
 
     /// Copy ancestry during candidate fanout/coalescing; the source stays live
     /// until its caller has copied every target and explicitly settles it.
-    pub async fn copy_raw(
+    pub(crate) async fn copy_raw(
         tx: &mut Transaction<'_>,
         source: Uuid,
         target: Uuid,
@@ -200,7 +375,7 @@ impl EffectDescendantRepository {
     }
 
     /// Explicit durable scheduler/provider settlement, not transport ACK.
-    pub async fn settle_all_raw(
+    pub(crate) async fn settle_all_raw(
         tx: &mut Transaction<'_>,
         descendant: Uuid,
         now: DateTime<Utc>,
@@ -230,12 +405,22 @@ async fn ensure_intent(
     message_key: MessageKey,
     effect: &IngressEffectKey,
 ) -> Result<(), IngressUowError> {
-    let query = sql(tx,
-        "SELECT 1 FROM ingress_effect_intents WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?",
+    ensure_intent_in_prepared(tx, None, message_key, effect).await
+}
+
+async fn ensure_intent_in_prepared(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&crate::ingress_substrate::PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    effect: &IngressEffectKey,
+) -> Result<(), IngressUowError> {
+    let query = crate::ingress_substrate::prepared_ingress_sql(tx.driver(), prepared,
+        crate::ingress_substrate::PreparedIngressRelation::Effects,
+        ("SELECT 1 FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?"),
         "SELECT 1 FROM ingress_effect_intents WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ?");
     let mut rows = tx
         .query(
-            query,
+            &query,
             crate::db_params![
                 message_key.to_storage().to_string(),
                 effect.storage_kind(),
@@ -271,6 +456,10 @@ async fn install_epoch_proof(tx: &mut Transaction<'_>) -> Result<(), IngressUowE
 
 async fn table_exists(tx: &mut Transaction<'_>) -> Result<bool, IngressUowError> {
     bound_raw_transaction(tx).await?;
+    descendant_foundation_exists(tx).await
+}
+
+async fn descendant_foundation_exists(tx: &mut Transaction<'_>) -> Result<bool, IngressUowError> {
     let query = sql(
         tx,
         "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL",
@@ -280,29 +469,10 @@ async fn table_exists(tx: &mut Transaction<'_>) -> Result<bool, IngressUowError>
     Ok(rows.next().await?.is_some())
 }
 
-/// Scheduler transactions also enter through plain Database::begin. Bound
-/// even the first epoch/catalog wait, retaining any tighter ingress UoW bounds.
-async fn bound_raw_transaction(tx: &mut Transaction<'_>) -> Result<(), IngressUowError> {
-    if tx.driver() == DatabaseDriver::Postgres {
-        let mut rows = tx
-            .query(
-                r#"
-            SELECT
-              set_config('lock_timeout', CASE
-                WHEN current_setting('lock_timeout')::interval = interval '0 ms'
-                  OR current_setting('lock_timeout')::interval > interval '100 ms'
-                THEN '100ms' ELSE current_setting('lock_timeout') END, true),
-              set_config('statement_timeout', CASE
-                WHEN current_setting('statement_timeout')::interval = interval '0 ms'
-                  OR current_setting('statement_timeout')::interval > interval '250 ms'
-                THEN '250ms' ELSE current_setting('statement_timeout') END, true)
-        "#,
-                (),
-            )
-            .await?;
-        rows.next()
-            .await?
-            .ok_or(IngressUowError::TransactionBoundsUnproven)?;
+/// Bound epoch and catalog waits, retaining any tighter transaction bounds.
+pub(crate) async fn bound_raw_transaction(tx: &mut Transaction<'_>) -> Result<(), IngressUowError> {
+    if !crate::ingress_substrate::tighten_local_transaction_timeouts(tx).await? {
+        return Err(IngressUowError::TransactionBoundsUnproven);
     }
     Ok(())
 }

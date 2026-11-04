@@ -83,9 +83,30 @@ impl MigrationRunner {
             DatabaseDriver::Sqlite => db.begin_immediate().await?,
         };
 
-        let checksum_column_added = self.bootstrap(&mut tx, driver).await?;
-        let applied_rows = self.read_ledger(&mut tx).await?;
-        self.validate_schema_has_ledger(&mut tx, driver, &applied_rows)
+        let newly_applied = self.apply_pending_in_transaction(&mut tx, driver).await?;
+
+        tx.commit().await?;
+
+        if newly_applied.is_empty() {
+            debug!("No new migrations to apply");
+        } else {
+            info!(count = newly_applied.len(), "Applied new migrations");
+        }
+
+        Ok(newly_applied)
+    }
+
+    /// Apply the catalog in the caller's transaction without acquiring locks or
+    /// committing. The caller must establish the required driver-specific
+    /// serialization and search path before entering this method.
+    pub(super) async fn apply_pending_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+    ) -> Result<Vec<i64>, DatabaseError> {
+        let checksum_column_added = self.bootstrap(tx, driver).await?;
+        let applied_rows = self.read_ledger(tx).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
             .await?;
         let adoption_backfill =
             self.validate_ledger(&applied_rows, driver, checksum_column_added)?;
@@ -144,14 +165,6 @@ impl MigrationRunner {
 
             newly_applied.push(migration.version);
             info!(version = migration.version, "Applied migration");
-        }
-
-        tx.commit().await?;
-
-        if newly_applied.is_empty() {
-            debug!("No new migrations to apply");
-        } else {
-            info!(count = newly_applied.len(), "Applied new migrations");
         }
 
         Ok(newly_applied)
@@ -213,12 +226,17 @@ impl MigrationRunner {
     }
 
     async fn read_ledger(&self, tx: &mut Transaction<'_>) -> Result<Vec<LedgerRow>, DatabaseError> {
-        let mut rows = tx
-            .query(
-                "SELECT version, description, checksum FROM _migrations ORDER BY version",
-                (),
-            )
-            .await?;
+        self.read_ledger_from(tx, "_migrations").await
+    }
+
+    async fn read_ledger_from(
+        &self,
+        tx: &mut Transaction<'_>,
+        ledger_table: &str,
+    ) -> Result<Vec<LedgerRow>, DatabaseError> {
+        let sql =
+            format!("SELECT version, description, checksum FROM {ledger_table} ORDER BY version");
+        let mut rows = tx.query(&sql, ()).await?;
         let mut ledger = Vec::new();
         while let Some(row) = rows.next().await? {
             ledger.push(LedgerRow {
@@ -228,6 +246,102 @@ impl MigrationRunner {
             });
         }
         Ok(ledger)
+    }
+
+    /// Verify an already committed ledger without bootstrap DDL or checksum
+    /// backfill. The caller owns a read-only PostgreSQL transaction so this
+    /// cannot silently become an owner operation as the catalog evolves.
+    pub(crate) async fn verify_complete_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+        ledger_table: &str,
+    ) -> Result<(), DatabaseError> {
+        let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
+            .await?;
+        self.verify_complete_rows(&applied_rows, driver)
+    }
+
+    /// Verify the same catalog on a dedicated PostgreSQL owner session.
+    /// A complete ledger necessarily contains both owned namespaces, so the
+    /// bootstrap-only sentinel check cannot authorize additional work here.
+    pub(super) async fn verify_complete_on_postgres_connection(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        ledger_table: &str,
+    ) -> Result<(), DatabaseError> {
+        let sql =
+            format!("SELECT version, description, checksum FROM {ledger_table} ORDER BY version");
+        let rows: Vec<(i64, String, Option<String>)> =
+            sqlx::query_as(&sql).fetch_all(connection).await?;
+        let applied_rows = rows
+            .into_iter()
+            .map(|(version, description, checksum)| LedgerRow {
+                version,
+                description,
+                checksum,
+            })
+            .collect::<Vec<_>>();
+        self.verify_complete_rows(&applied_rows, DatabaseDriver::Postgres)
+    }
+
+    fn verify_complete_rows(
+        &self,
+        applied_rows: &[LedgerRow],
+        driver: DatabaseDriver,
+    ) -> Result<(), DatabaseError> {
+        self.validate_ledger(applied_rows, driver, false)?;
+
+        let mut seen = HashSet::new();
+        for row in applied_rows {
+            if self.owns_version(row.version) && !seen.insert(row.version) {
+                return Err(MigrationLedgerError::DuplicateVersion {
+                    version: row.version,
+                }
+                .into());
+            }
+        }
+        for migration in &self.migrations {
+            if !seen.contains(&migration.version) {
+                return Err(MigrationLedgerError::PendingMigration {
+                    version: migration.version,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify the committed ledger prefix without applying pending migrations.
+    /// No checksum repair or schema DDL is permitted by this check.
+    pub(super) async fn verify_applied_through_in_transaction(
+        &self,
+        tx: &mut Transaction<'_>,
+        driver: DatabaseDriver,
+        ledger_table: &str,
+        required_version: i64,
+    ) -> Result<(), DatabaseError> {
+        let applied_rows = self.read_ledger_from(tx, ledger_table).await?;
+        self.validate_schema_has_ledger(tx, driver, &applied_rows)
+            .await?;
+        self.validate_ledger(&applied_rows, driver, false)?;
+        let mut seen = HashSet::new();
+        for row in &applied_rows {
+            if self.owns_version(row.version) && !seen.insert(row.version) {
+                return Err(MigrationLedgerError::DuplicateVersion {
+                    version: row.version,
+                }
+                .into());
+            }
+        }
+        if !seen.contains(&required_version) {
+            return Err(MigrationLedgerError::PendingMigration {
+                version: required_version,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// The table each namespace's first migration unconditionally drops and

@@ -7,9 +7,10 @@ use url::Url;
 /// Resolved XMPP storage location for one store.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ResolvedXmppDatabaseUrl {
-    /// A concrete SQLite/Postgres DSN, whether dedicated or inherited from
-    /// `WADDLE_DATABASE_URL`.
-    Resolved(String),
+    /// A concrete SQLite/Postgres DSN explicitly configured for this store.
+    Explicit(String),
+    /// A DSN inherited from `WADDLE_DATABASE_URL`.
+    InheritedGlobal(String),
     /// No dedicated or global DSN was configured, so the caller must fall back
     /// to an in-memory SQLite store.
     #[default]
@@ -19,14 +20,14 @@ pub enum ResolvedXmppDatabaseUrl {
 impl ResolvedXmppDatabaseUrl {
     pub fn as_deref(&self) -> Option<&str> {
         match self {
-            Self::Resolved(url) => Some(url.as_str()),
+            Self::Explicit(url) | Self::InheritedGlobal(url) => Some(url.as_str()),
             Self::EphemeralFallback => None,
         }
     }
 
     pub fn clone_resolved_url(&self) -> Option<String> {
         match self {
-            Self::Resolved(url) => Some(url.clone()),
+            Self::Explicit(url) | Self::InheritedGlobal(url) => Some(url.clone()),
             Self::EphemeralFallback => None,
         }
     }
@@ -294,17 +295,23 @@ where
 }
 
 pub(crate) fn resolve_xmpp_database_url(env_key: &str) -> ResolvedXmppDatabaseUrl {
-    std::env::var(env_key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(ResolvedXmppDatabaseUrl::Resolved)
-        .or_else(|| {
-            std::env::var("WADDLE_DATABASE_URL")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .map(ResolvedXmppDatabaseUrl::Resolved)
-        })
+    let explicit = std::env::var(env_key).ok();
+    let global = std::env::var("WADDLE_DATABASE_URL").ok();
+    resolve_xmpp_database_url_values(explicit.as_deref(), global.as_deref())
+}
+
+pub(crate) fn resolve_xmpp_database_url_values(
+    explicit: Option<&str>,
+    global: Option<&str>,
+) -> ResolvedXmppDatabaseUrl {
+    let nonempty = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    nonempty(explicit)
+        .map(ResolvedXmppDatabaseUrl::Explicit)
+        .or_else(|| nonempty(global).map(ResolvedXmppDatabaseUrl::InheritedGlobal))
         .unwrap_or(ResolvedXmppDatabaseUrl::EphemeralFallback)
 }

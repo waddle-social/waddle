@@ -50,6 +50,7 @@ pub(super) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
         });
     submission.plan.room_execution = RoomExecutionPath::Local {
         room,
+        client_origin: None,
         fence: RoomFenceRequirement::Unfenced,
         snapshot_generation: 1,
         manifest_snapshot: Some(RoomManifestSnapshot {

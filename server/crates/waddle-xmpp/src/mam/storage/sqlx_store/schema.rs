@@ -1,9 +1,12 @@
 use std::path::Path;
 
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPool;
 use sqlx::sqlite::SqlitePool;
-use sqlx::{Connection as _, Row};
+use sqlx::{Connection as _, PgConnection, Postgres, Row};
+use thiserror::Error;
 
+use super::SqlxMamStorage;
 use crate::mam::storage::MamStorageError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,6 +166,15 @@ DROP INDEX IF EXISTS idx_mam_origin_groupchat_candidates;
 DROP INDEX IF EXISTS idx_mam_origin_groupchat_sender_content_unique;
 DROP INDEX IF EXISTS idx_mam_origin_direct_content_unique;
 "#;
+
+pub(super) const OBSOLETE_MAM_INDEXES: &[&str] = &[
+    "idx_mam_origin_groupchat_unique",
+    "idx_mam_origin_direct_unique",
+    "idx_mam_origin_groupchat_content_unique",
+    "idx_mam_origin_groupchat_candidates",
+    "idx_mam_origin_groupchat_sender_content_unique",
+    "idx_mam_origin_direct_content_unique",
+];
 
 pub(super) fn infer_driver(database_url: &str) -> Result<MamDatabaseDriver, MamStorageError> {
     let lower = database_url.to_ascii_lowercase();
@@ -405,77 +417,372 @@ async fn ensure_sqlite_table_shape(pool: &SqlitePool) -> Result<(), MamStorageEr
 /// writers — observed as `deadlock detected` under parallel test suites.
 const POSTGRES_SCHEMA_INIT_LOCK: i64 = 0x7761_6464_6d61_6d31; // "waddmam1"
 
-pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStorageError> {
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(POSTGRES_SCHEMA_INIT_LOCK)
-        .execute(&mut *conn)
-        .await?;
-    let ensured = ensure_postgres_schema_locked(&mut conn).await;
-    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(POSTGRES_SCHEMA_INIT_LOCK)
-        .execute(&mut *conn)
-        .await;
-    if ensured.is_err() || unlocked.is_err() {
-        // The session advisory lock must never return to the pool still
-        // held — a later checkout would wedge every other initializer.
-        // Detaching closes the connection, which releases session locks.
-        let connection = conn.detach();
-        drop(connection.close().await);
+/// Outcome of an exclusively owned, autocommit MAM schema bootstrap.
+#[derive(Debug, Error)]
+pub enum MamSchemaBootstrapError {
+    #[error("MAM schema bootstrap requires an autocommit connection")]
+    TransactionOpen,
+    #[error("failed to acquire the MAM schema advisory lock")]
+    Lock(#[source] sqlx::Error),
+    #[error("the MAM schema advisory lock is already held by this session")]
+    AlreadyHeld,
+    #[error("failed to inspect preexisting MAM objects before bootstrap")]
+    Preflight(#[source] sqlx::Error),
+    #[error(
+        "the current role or a preexisting MAM object conflicts with the attested owner schema"
+    )]
+    PreexistingObjectConflict,
+    #[error("MAM schema bootstrap may have committed a prefix or an unknown statement")]
+    PartialOrUnknown(#[source] MamStorageError),
+    #[error("MAM schema advisory unlock outcome is unknown")]
+    Unlock(#[source] sqlx::Error),
+    #[error("MAM schema advisory lock was not held at unlock")]
+    LockNotHeld,
+}
+
+impl SqlxMamStorage {
+    /// Bootstrap the internally selected MAM schema on an exclusively owned,
+    /// direct PostgreSQL connection. The caller must already have established
+    /// the physical identity, owner role, lineage, ledger, and their lock order.
+    ///
+    /// The connection must be in autocommit mode, including no raw `BEGIN`
+    /// outside SQLx's transaction tracking. The MAM session lock is acquired
+    /// after any caller-held lineage and ledger locks and is released before a
+    /// successful return. The caller retains responsibility for its other locks.
+    ///
+    /// Every statement autocommits. A failure after DDL begins, or a cancelled
+    /// future, may leave a committed prefix or unknown outcome. On every error
+    /// or cancellation the owned connection is dropped rather than returned;
+    /// a retry requires independently fencing the previous backend and primary
+    /// and inspecting authoritative state afresh.
+    pub async fn bootstrap_postgres_schema_on_owned_connection(
+        mut conn: PgConnection,
+        schema: &str,
+        expected_owner: &str,
+    ) -> Result<PgConnection, MamSchemaBootstrapError> {
+        bootstrap_postgres_connection(&mut conn, Some((schema, expected_owner))).await?;
+        Ok(conn)
     }
-    ensured?;
-    unlocked?;
+}
+
+async fn bootstrap_postgres_connection(
+    conn: &mut PgConnection,
+    target: Option<(&str, &str)>,
+) -> Result<(), MamSchemaBootstrapError> {
+    if conn.is_in_transaction() {
+        return Err(MamSchemaBootstrapError::TransactionOpen);
+    }
+    let already_held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid() AND granted AND objsubid = 1 AND ((classid::pg_catalog.int8 << 32) | objid::pg_catalog.int8) = $1)",
+    )
+    .bind(POSTGRES_SCHEMA_INIT_LOCK)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(MamSchemaBootstrapError::Lock)?;
+    if already_held {
+        return Err(MamSchemaBootstrapError::AlreadyHeld);
+    }
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock($1)")
+        .bind(POSTGRES_SCHEMA_INIT_LOCK)
+        .execute(&mut *conn)
+        .await
+        .map_err(MamSchemaBootstrapError::Lock)?;
+    let migrate_chat_default = match target {
+        Some((schema, owner)) => preflight_mam_owner_schema(&mut *conn, schema, owner).await?,
+        None => false,
+    };
+    ensure_postgres_schema_locked(
+        &mut *conn,
+        target.map(|(schema, _)| schema),
+        migrate_chat_default,
+    )
+    .await
+    .map_err(MamSchemaBootstrapError::PartialOrUnknown)?;
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_catalog.pg_advisory_unlock($1)")
+        .bind(POSTGRES_SCHEMA_INIT_LOCK)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(MamSchemaBootstrapError::Unlock)?;
+    if !unlocked {
+        return Err(MamSchemaBootstrapError::LockNotHeld);
+    }
+    Ok(())
+}
+
+// Check existing names and their authority before the first autocommit DDL.
+// This is a point-in-time preflight: callers must exclude non-cooperating DDL.
+async fn preflight_mam_owner_schema(
+    conn: &mut PgConnection,
+    schema: &str,
+    expected_owner: &str,
+) -> Result<bool, MamSchemaBootstrapError> {
+    let (current_user, schema_exists): (String, bool) = sqlx::query_as(
+        "SELECT CURRENT_USER::pg_catalog.text, EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
+    )
+    .bind(schema)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(MamSchemaBootstrapError::Preflight)?;
+    if current_user != expected_owner || !schema_exists {
+        return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+    }
+    let expected_indexes = super::schema_verify::EXPECTED_MAM_INDEXES;
+    let mut names = vec!["mam_messages", "mam_archive_sequences"];
+    names.extend(expected_indexes.iter().map(|index| index.name));
+    names.extend_from_slice(OBSOLETE_MAM_INDEXES);
+    let rows = sqlx::query(
+        r#"SELECT c.relname::pg_catalog.text AS name, c.relkind::pg_catalog.text AS kind,
+                  c.relpersistence::pg_catalog.text AS persistence,
+                  owner.rolname::pg_catalog.text AS owner,
+                  target.relname::pg_catalog.text AS target
+           FROM pg_catalog.pg_class c
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           JOIN pg_catalog.pg_roles owner ON owner.oid = c.relowner
+           LEFT JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
+           LEFT JOIN pg_catalog.pg_class target ON target.oid = i.indrelid
+           WHERE n.nspname = $1 AND (c.relname::pg_catalog.text = ANY($2)
+              OR target.relname IN ('mam_messages', 'mam_archive_sequences'))"#,
+    )
+    .bind(schema)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(MamSchemaBootstrapError::Preflight)?;
+    let mut messages_exist = false;
+    for row in rows {
+        let name: String = row
+            .try_get("name")
+            .map_err(MamSchemaBootstrapError::Preflight)?;
+        let kind: String = row
+            .try_get("kind")
+            .map_err(MamSchemaBootstrapError::Preflight)?;
+        let persistence: String = row
+            .try_get("persistence")
+            .map_err(MamSchemaBootstrapError::Preflight)?;
+        let owner: String = row
+            .try_get("owner")
+            .map_err(MamSchemaBootstrapError::Preflight)?;
+        if owner != expected_owner || persistence != "p" {
+            return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+        }
+        if name == "mam_messages" || name == "mam_archive_sequences" {
+            if kind != "r" {
+                return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+            }
+            messages_exist |= name == "mam_messages";
+            continue;
+        }
+        let target: Option<String> = row
+            .try_get("target")
+            .map_err(MamSchemaBootstrapError::Preflight)?;
+        let expected_target =
+            if let Some(index) = expected_indexes.iter().find(|index| index.name == name) {
+                index.table
+            } else if OBSOLETE_MAM_INDEXES.contains(&name.as_str()) {
+                "mam_messages"
+            } else {
+                return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+            };
+        if kind != "i" || target.as_deref() != Some(expected_target) {
+            return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+        }
+    }
+    if !messages_exist {
+        return Ok(false);
+    }
+    let row = sqlx::query(
+        r#"SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) AS kind,
+                  pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_value
+           FROM pg_catalog.pg_attribute a
+           JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+           WHERE n.nspname = $1 AND c.relname = 'mam_messages' AND a.attname = 'message_type'
+             AND a.attnum > 0 AND NOT a.attisdropped"#,
+    )
+    .bind(schema)
+    .fetch_optional(conn)
+    .await
+    .map_err(MamSchemaBootstrapError::Preflight)?;
+    let Some(row) = row else {
+        return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+    };
+    let kind: String = row
+        .try_get("kind")
+        .map_err(MamSchemaBootstrapError::Preflight)?;
+    let default: Option<String> = row
+        .try_get("default_value")
+        .map_err(MamSchemaBootstrapError::Preflight)?;
+    if kind != "text" {
+        return Err(MamSchemaBootstrapError::PreexistingObjectConflict);
+    }
+    match default.as_deref() {
+        Some("'normal'::text") => Ok(false),
+        Some("'chat'::text") => Ok(true),
+        _ => Err(MamSchemaBootstrapError::PreexistingObjectConflict),
+    }
+}
+
+struct PooledSchemaGuard(Option<PoolConnection<Postgres>>);
+
+impl PooledSchemaGuard {
+    fn connection(&mut self) -> Result<&mut PgConnection, MamStorageError> {
+        self.0.as_deref_mut().ok_or_else(|| {
+            MamStorageError::Database("MAM schema connection guard is empty".to_owned())
+        })
+    }
+
+    fn return_to_pool(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl Drop for PooledSchemaGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.take() {
+            drop(conn.detach());
+        }
+    }
+}
+
+pub(super) async fn ensure_postgres_schema(pool: &PgPool) -> Result<(), MamStorageError> {
+    // Arm the guard before dispatching the advisory-lock request; even a lost
+    // lock response may mean that the physical session acquired the lock.
+    let mut guard = PooledSchemaGuard(Some(pool.acquire().await?));
+    bootstrap_postgres_connection(guard.connection()?, None)
+        .await
+        .map_err(|error| match error {
+            MamSchemaBootstrapError::PartialOrUnknown(source) => source,
+            MamSchemaBootstrapError::Lock(source)
+            | MamSchemaBootstrapError::Preflight(source)
+            | MamSchemaBootstrapError::Unlock(source) => source.into(),
+            error => MamStorageError::Database(error.to_string()),
+        })?;
+    guard.return_to_pool();
     Ok(())
 }
 
 async fn ensure_postgres_schema_locked(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut PgConnection,
+    schema: Option<&str>,
+    migrate_chat_default: bool,
 ) -> Result<(), MamStorageError> {
-    execute_postgres_batch(&mut *conn, POSTGRES_MAM_SCHEMA).await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS rich_payload TEXT")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS stanza_xml TEXT")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS nickname_generation BIGINT")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS parent_thread_id TEXT")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("ALTER TABLE mam_messages ADD COLUMN IF NOT EXISTS archive_seq BIGINT")
-        .execute(&mut *conn)
-        .await?;
-    execute_postgres_batch(&mut *conn, POSTGRES_ARCHIVE_SEQUENCES).await?;
+    let messages = super::postgres_relation(schema, "mam_messages");
+    let sequences = super::postgres_relation(schema, "mam_archive_sequences");
+    if schema.is_some() {
+        // Split the fixed template before inserting an identifier: a valid
+        // quoted schema name may itself contain a semicolon.
+        for statement in POSTGRES_MAM_SCHEMA
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let statement = statement
+                .replace("TEXT", "pg_catalog.text")
+                .replace("TIMESTAMPTZ", "pg_catalog.timestamptz")
+                .replace("BIGINT", "pg_catalog.int8")
+                .replace(
+                    "CREATE TABLE IF NOT EXISTS mam_messages",
+                    "CREATE TABLE IF NOT EXISTS __MAM_TABLE__",
+                )
+                .replace("ON mam_messages(", "ON __MAM_TABLE__(")
+                .replace("__MAM_TABLE__", &messages);
+            sqlx::query(&statement).execute(&mut *conn).await?;
+        }
+    } else {
+        execute_postgres_batch(&mut *conn, POSTGRES_MAM_SCHEMA).await?;
+    }
+    let text_type = if schema.is_some() {
+        "pg_catalog.text"
+    } else {
+        "TEXT"
+    };
+    let bigint_type = if schema.is_some() {
+        "pg_catalog.int8"
+    } else {
+        "BIGINT"
+    };
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS rich_payload {text_type}"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS stanza_xml {text_type}"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS nickname_generation {bigint_type}"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS parent_thread_id {text_type}"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS archive_seq {bigint_type}"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    if schema.is_some() {
+        sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {sequences} (archive_jid pg_catalog.text PRIMARY KEY, next_seq pg_catalog.int8 NOT NULL)"))
+            .execute(&mut *conn)
+            .await?;
+    } else {
+        execute_postgres_batch(&mut *conn, POSTGRES_ARCHIVE_SEQUENCES).await?;
+    }
     // Fresh tables declare the column NOT NULL; only a legacy table whose
     // ordinal column is still nullable needs the one-time rank backfill.
     // Each statement autocommits under the advisory lock, so an interrupted
     // backfill resumes here on the next start.
     let ordinal_nullable: String = sqlx::query_scalar(
-        "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mam_messages' AND column_name = 'archive_seq'",
-    ).fetch_one(&mut *conn).await?;
+        "SELECT is_nullable FROM information_schema.columns WHERE table_schema = COALESCE($1, pg_catalog.current_schema()) AND table_name = 'mam_messages' AND column_name = 'archive_seq'",
+    ).bind(schema).fetch_one(&mut *conn).await?;
     if ordinal_nullable == "YES" {
-        sqlx::query(ARCHIVE_ORDINAL_BACKFILL)
-            .execute(&mut *conn)
-            .await?;
-        sqlx::query(POSTGRES_SEED_ARCHIVE_SEQUENCES)
-            .execute(&mut *conn)
-            .await?;
-        sqlx::query("ALTER TABLE mam_messages ALTER COLUMN archive_seq SET NOT NULL")
-            .execute(&mut *conn)
-            .await?;
+        let backfill = if schema.is_some() {
+            format!("UPDATE {messages} AS target SET archive_seq = ranked.rn FROM (SELECT id, pg_catalog.row_number() OVER (PARTITION BY room_jid ORDER BY timestamp ASC, id ASC) AS rn FROM {messages} WHERE room_jid IN (SELECT DISTINCT room_jid FROM {messages} WHERE archive_seq IS NULL)) AS ranked WHERE target.id = ranked.id")
+        } else {
+            ARCHIVE_ORDINAL_BACKFILL.to_owned()
+        };
+        sqlx::query(&backfill).execute(&mut *conn).await?;
+        let seed = if schema.is_some() {
+            format!("INSERT INTO {sequences} AS target (archive_jid, next_seq) SELECT room_jid, pg_catalog.max(archive_seq) FROM {messages} GROUP BY room_jid ON CONFLICT (archive_jid) DO UPDATE SET next_seq = GREATEST(target.next_seq, EXCLUDED.next_seq)")
+        } else {
+            POSTGRES_SEED_ARCHIVE_SEQUENCES.to_owned()
+        };
+        sqlx::query(&seed).execute(&mut *conn).await?;
+        sqlx::query(&format!(
+            "ALTER TABLE {messages} ALTER COLUMN archive_seq SET NOT NULL"
+        ))
+        .execute(&mut *conn)
+        .await?;
     }
-    sqlx::query(ARCHIVE_ORDINAL_INDEX)
-        .execute(&mut *conn)
-        .await?;
-    execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await?;
-    sqlx::query("ALTER TABLE mam_messages DROP COLUMN IF EXISTS origin_dedup_sender_scope")
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("ALTER TABLE mam_messages DROP COLUMN IF EXISTS origin_dedup_fingerprint")
-        .execute(&mut *conn)
-        .await?;
+    let ordinal_index =
+        ARCHIVE_ORDINAL_INDEX.replace("ON mam_messages(", &format!("ON {messages}("));
+    sqlx::query(&ordinal_index).execute(&mut *conn).await?;
+    if schema.is_some() {
+        for index in OBSOLETE_MAM_INDEXES {
+            let index = super::postgres_relation(schema, index);
+            sqlx::query(&format!("DROP INDEX IF EXISTS {index}"))
+                .execute(&mut *conn)
+                .await?;
+        }
+    } else {
+        execute_postgres_batch(&mut *conn, POSTGRES_MAM_ORIGIN_DEDUP_INDEXES).await?;
+    }
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} DROP COLUMN IF EXISTS origin_dedup_sender_scope"
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE {messages} DROP COLUMN IF EXISTS origin_dedup_fingerprint"
+    ))
+    .execute(&mut *conn)
+    .await?;
     // RFC 6121 §5.2.3 / XEP-0313 §3: `body` is nullable. Older
     // production deployments were created with `body TEXT NOT NULL`
     // (the schema before the typed `Option<String>` retype in #228);
@@ -498,17 +805,25 @@ async fn ensure_postgres_schema_locked(
     let is_nullable: Option<String> = sqlx::query_scalar(
         "SELECT is_nullable \
          FROM information_schema.columns \
-         WHERE table_schema = current_schema() \
+         WHERE table_schema = COALESCE($1, pg_catalog.current_schema()) \
            AND table_name = 'mam_messages' \
            AND column_name = 'body'",
     )
+    .bind(schema)
     .fetch_optional(&mut *conn)
     .await?;
     let needs_drop = is_nullable
         .as_deref()
         .is_some_and(|v| v.eq_ignore_ascii_case("NO"));
     if needs_drop {
-        sqlx::query("ALTER TABLE mam_messages ALTER COLUMN body DROP NOT NULL")
+        sqlx::query(&format!(
+            "ALTER TABLE {messages} ALTER COLUMN body DROP NOT NULL"
+        ))
+        .execute(&mut *conn)
+        .await?;
+    }
+    if migrate_chat_default {
+        sqlx::query(&format!("ALTER TABLE {messages} ALTER COLUMN message_type SET DEFAULT 'normal'::pg_catalog.text"))
             .execute(&mut *conn)
             .await?;
     }
@@ -608,3 +923,7 @@ mod cutover_tests {
 #[cfg(test)]
 #[path = "schema_ordinal_tests.rs"]
 mod ordinal_tests;
+
+#[cfg(test)]
+#[path = "schema_owner_tests.rs"]
+mod owner_tests;

@@ -218,22 +218,8 @@ impl NotificationOutboxStore {
     async fn begin_prune_transaction(&self) -> Result<Transaction<'_>, NotificationOutboxError> {
         let timeout = std::time::Duration::from_millis(100);
         tokio::time::timeout(timeout, async {
-            let mut tx = self.db.begin_immediate().await?;
-            if tx.driver() == DatabaseDriver::Postgres {
-                // Every guard reread needs a fresh snapshot, even when the
-                // connection's configured default is REPEATABLE READ.
-                tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
-                    .await?;
-            }
-            if !crate::ingress_substrate::set_local_transaction_timeouts(
-                &mut tx,
-                timeout,
-                std::time::Duration::from_millis(250),
-            )
-            .await?
-            {
-                return Err(IngressUowError::TransactionBoundsUnproven.into());
-            }
+            let mut tx = crate::ingress_uow::begin_raw_ingress_writer(&self.db).await?;
+            crate::ingress_uow::bound_raw_transaction(&mut tx).await?;
             Ok::<_, NotificationOutboxError>(tx)
         })
         .await

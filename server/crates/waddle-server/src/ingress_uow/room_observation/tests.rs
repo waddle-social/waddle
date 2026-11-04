@@ -155,6 +155,129 @@ async fn revert_v1025(fixture: &IngressFixture) {
         .begin()
         .await
         .expect("downgrade fixture transaction");
+    // Undo V1028 source binding before the older retention migrations.
+    match fixture.db.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            tx.execute(
+                "DROP TRIGGER ingress_messages_source_binding_insert_guard",
+                (),
+            )
+            .await
+            .expect("remove source insert guard");
+            tx.execute(
+                "DROP TRIGGER ingress_messages_source_binding_update_guard",
+                (),
+            )
+            .await
+            .expect("remove source update guard");
+            tx.execute("DROP TRIGGER ingress_owner_rejections_update_guard", ())
+                .await
+                .expect("remove rejection update guard");
+            tx.execute("DROP TRIGGER ingress_owner_rejections_insert_guard", ())
+                .await
+                .expect("remove rejection insert guard");
+            tx.execute("DROP TRIGGER ingress_owner_rejections_delete_guard", ())
+                .await
+                .expect("remove rejection delete guard");
+            tx.execute("DROP TABLE ingress_owner_rejections", ())
+                .await
+                .expect("remove owner rejection relation");
+            for column in [
+                "source_binding_version",
+                "source_bare_jid",
+                "source_auth_context_id",
+                "source_auth_context_version",
+                "source_auth_epoch",
+                "source_sm_ingress_id",
+                "source_ingress_ordinal",
+                "owner_decision",
+            ] {
+                tx.execute(
+                    &format!("ALTER TABLE ingress_messages DROP COLUMN {column}"),
+                    (),
+                )
+                .await
+                .expect("remove source binding column");
+            }
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            tx.execute(
+                "DROP TRIGGER ingress_messages_source_binding_guard ON ingress_messages",
+                (),
+            )
+            .await
+            .expect("remove source update guard");
+            tx.execute(
+                "DROP TRIGGER ingress_messages_source_insert_guard ON ingress_messages",
+                (),
+            )
+            .await
+            .expect("remove source insert guard");
+            tx.execute("DROP FUNCTION waddle_ingress_source_binding_guard()", ())
+                .await
+                .expect("remove source update function");
+            tx.execute("DROP FUNCTION waddle_ingress_source_insert_guard()", ())
+                .await
+                .expect("remove source insert function");
+            tx.execute(
+                "DROP TRIGGER ingress_owner_rejections_update_guard ON ingress_owner_rejections",
+                (),
+            )
+            .await
+            .expect("remove rejection update guard");
+            tx.execute(
+                "DROP TRIGGER ingress_owner_rejections_insert_guard ON ingress_owner_rejections",
+                (),
+            )
+            .await
+            .expect("remove rejection insert guard");
+            tx.execute(
+                "DROP TRIGGER ingress_owner_rejections_delete_guard ON ingress_owner_rejections",
+                (),
+            )
+            .await
+            .expect("remove rejection delete guard");
+            tx.execute(
+                "DROP FUNCTION waddle_ingress_owner_rejection_immutable()",
+                (),
+            )
+            .await
+            .expect("remove rejection update function");
+            tx.execute(
+                "DROP FUNCTION waddle_ingress_owner_rejection_insert_guard()",
+                (),
+            )
+            .await
+            .expect("remove rejection insert function");
+            tx.execute(
+                "DROP FUNCTION waddle_ingress_owner_rejection_delete_guard()",
+                (),
+            )
+            .await
+            .expect("remove rejection delete function");
+            tx.execute("ALTER TABLE ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row", ())
+                .await
+                .expect("model earlier manifest");
+            tx.execute("DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_owner_rejections'", ())
+                .await
+                .expect("remove V1028 manifest entry");
+            tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ())
+                .await
+                .expect("restore append-only protection");
+            tx.execute("DROP TABLE ingress_owner_rejections", ())
+                .await
+                .expect("remove owner rejection relation");
+            tx.execute("ALTER TABLE ingress_messages DROP CONSTRAINT ingress_messages_source_binding_check", ())
+                .await
+                .expect("remove source tuple constraint");
+            tx.execute("ALTER TABLE ingress_messages DROP CONSTRAINT ingress_messages_owner_decision_check", ())
+                .await
+                .expect("remove owner decision constraint");
+            tx.execute_batch("ALTER TABLE ingress_messages DROP COLUMN source_binding_version, DROP COLUMN source_bare_jid, DROP COLUMN source_auth_context_id, DROP COLUMN source_auth_context_version, DROP COLUMN source_auth_epoch, DROP COLUMN source_sm_ingress_id, DROP COLUMN source_ingress_ordinal, DROP COLUMN owner_decision;")
+                .await
+                .expect("remove source binding columns");
+        }
+    }
     // Undo V1026 as well: both catalog history and schema must describe
     // the earlier binary before the real upgrade runs again.
     tx.execute(
@@ -214,7 +337,7 @@ ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_ch
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
     tx.execute(
-        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027)",
+        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027, 1028)",
         (),
     )
     .await

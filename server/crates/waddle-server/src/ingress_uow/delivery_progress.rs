@@ -3,10 +3,10 @@ use jid::FullJid;
 use waddle_xmpp::ingress::MessageKey;
 
 use super::{IngressUowError, IngressUowTransaction};
-use crate::db::DatabaseDriver;
 use crate::ingress::decision::EffectReceiptKey;
 use crate::ingress::room_manifest::RoomManifestChildDisposition;
 use crate::ingress_substrate::EffectReceiptKind;
+use crate::ingress_substrate::{prepared_ingress_sql, PreparedIngressRelation};
 
 pub(crate) struct DeliveryProgressRepository;
 
@@ -36,15 +36,13 @@ impl DeliveryProgressRepository {
         message: MessageKey,
         receipt: &EffectReceiptKey,
     ) -> Result<Vec<FullJid>, IngressUowError> {
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY resource"
-        } else {
-            "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY resource"
-        };
-        let mut rows = tx
-            .transaction_mut()
+        let (transaction, prepared) = tx.prepared_parts();
+        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+            ("SELECT resource FROM ", " WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ORDER BY resource"),
+            "SELECT resource FROM ingress_delivery_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ORDER BY resource");
+        let mut rows = transaction
             .query(
-                sql,
+                &sql,
                 crate::db_params![
                     message.to_storage().to_string(),
                     receipt.kind.to_storage(),
@@ -81,14 +79,12 @@ impl DeliveryProgressRepository {
         tx: &mut IngressUowTransaction<'_>,
         message: MessageKey,
     ) -> Result<Vec<(EffectReceiptKey, Vec<FullJid>)>, IngressUowError> {
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ?::uuid ORDER BY kind, semantic_identity_hash, resource"
-        } else {
-            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY kind, semantic_identity_hash, resource"
-        };
-        let mut rows = tx
-            .transaction_mut()
-            .query(sql, crate::db_params![message.to_storage().to_string()])
+        let (transaction, prepared) = tx.prepared_parts();
+        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+            ("SELECT kind, semantic_identity_hash, resource FROM ", " WHERE message_key = ?::uuid ORDER BY kind, semantic_identity_hash, resource"),
+            "SELECT kind, semantic_identity_hash, resource FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY kind, semantic_identity_hash, resource");
+        let mut rows = transaction
+            .query(&sql, crate::db_params![message.to_storage().to_string()])
             .await?;
         let mut progress: Vec<(EffectReceiptKey, Vec<FullJid>)> = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -165,15 +161,14 @@ impl DeliveryProgressRepository {
         if recipients.is_empty() {
             return Ok(());
         }
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"
-        } else {
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        };
+        let (transaction, prepared) = tx.prepared_parts();
+        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+            ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, resource) VALUES (?::uuid, ?, ?, ?) ON CONFLICT DO NOTHING"),
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING");
         for recipient in recipients {
-            tx.transaction_mut()
+            transaction
                 .execute(
-                    sql,
+                    &sql,
                     crate::db_params![
                         message.to_storage().to_string(),
                         receipt.kind.to_storage(),
@@ -195,15 +190,14 @@ impl DeliveryProgressRepository {
         recipients: &[FullJid],
         reason: DeliveryPolicyDiscardReason,
     ) -> Result<(), IngressUowError> {
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        } else {
-            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
-        };
+        let (transaction, prepared) = tx.prepared_parts();
+        let sql = prepared_ingress_sql(transaction.driver(), prepared, PreparedIngressRelation::DeliveryReceipts,
+            ("INSERT INTO ", " (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"),
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING");
         for recipient in recipients {
-            tx.transaction_mut()
+            transaction
                 .execute(
-                    sql,
+                    &sql,
                     crate::db_params![
                         message.to_storage().to_string(),
                         receipt.kind.to_storage(),

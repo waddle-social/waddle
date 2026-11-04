@@ -24,6 +24,7 @@ use crate::server::extension_bot_avatar::BotAvatars;
 use crate::server::extension_host_adapter::BotRoomLocks;
 use crate::server::routes::extension_webhooks::ProviderDispatchTracker;
 use crate::server::routes::extension_webhooks::ProviderIngressRegistry;
+use crate::server::routes::interpret::effects::ClientRoomOrigin;
 use crate::server::routes::interpret::OrderedRelayHandoffCompletion;
 use crate::server::routes::interpret::SmInboundCompletionTracker;
 use std::collections::HashMap;
@@ -1714,6 +1715,24 @@ impl std::ops::Deref for ResolvedPrincipal<'_> {
     fn deref(&self) -> &Self::Target {
         self.0
     }
+}
+
+/// Capture the authenticated connection binding, not a stanza-supplied JID or
+/// a fresh lookup in a JID-indexed registry.
+pub(super) fn authenticated_client_room_origin(
+    phase: &ConnectionPhase,
+    session: Option<&Session>,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+) -> Option<ClientRoomOrigin> {
+    let full_jid = phase.bound_jid()?;
+    let principal = session?.authenticated_principal_ref().ok()?;
+    if principal.bare_jid() != &full_jid.to_bare() {
+        return None;
+    }
+    Some(ClientRoomOrigin {
+        full_jid: full_jid.clone(),
+        occupancy_session,
+    })
 }
 
 pub(super) struct WsConnState {
