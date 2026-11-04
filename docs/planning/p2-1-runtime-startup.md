@@ -58,3 +58,28 @@ physical primary fencing and complete epoch/ACL policy also remain gates.
 Until those are resolved, the unconfigured legacy startup path still runs the
 existing owner initialization. No role or epoch activation is implied by this
 configuration or by a successful local test.
+
+## Dark outbox attachment slice
+
+The next restricted-startup slice covers the call-teardown and room-effect
+outboxes on the exact global main pool. MUC-destroy completion already has a
+read-only attachment path; startup can reuse it. The attested branch must
+attach functional stores without opening another pool, running schema DDL,
+repairing rows or falling back to owner initialization. The legacy SQLite and
+owner-startup constructors remain available. `UnconvertedStores` stays fatal
+before listeners until the other startup stores have equivalent boundaries.
+
+The owner prepares the outbox schemas separately. Runtime attachment verifies
+the active database and main lane, required relation and index shape, effective
+runtime grants and expected ownership under a bounded read-only transaction.
+Missing or changed shape, wrong pool identity and excess runtime privileges
+fail closed. Startup must retain the existing node identity and outbox handles;
+a verification marker alone is not a usable runtime store.
+
+Disposable PostgreSQL tests use separate owner and restricted logins to check
+successful same-pool attachment, DDL denial, malformed shape and grants,
+owner schema changes racing with the attachment lock, and ordinary row writes
+during attachment. SQLite constructor behavior remains covered. Passing these
+tests does not permit serving with the attested pool; MAM, PubSub, clustered SM,
+notification, push, observation and claim/lease/MUC startup paths still need
+their own reviewed attachment and rollout evidence.
