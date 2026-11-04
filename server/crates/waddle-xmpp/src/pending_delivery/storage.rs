@@ -87,6 +87,19 @@ pub struct PendingClaim {
     pub token: PendingClaimToken,
 }
 
+/// Authority for deleting pending rows acknowledged by an XEP-0198 client.
+///
+/// A resumable stream must carry its immutable clustered claim fence. A
+/// non-resumable stream has a fresh, one-off SM id that cannot be resumed or
+/// transferred, so its ACKs use that explicit authority. `Unavailable` is
+/// fail-closed and is never accepted by clustered storage.
+#[derive(Debug, Clone, Copy)]
+pub enum PendingAckAuthority<'a> {
+    Fenced(&'a SmClaimFence),
+    NonResumable,
+    Unavailable,
+}
+
 impl std::fmt::Display for PendingClaimToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -676,6 +689,12 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// whose flush stanzas haven't yet been ack'd stay claimed for a
     /// future ack.
     ///
+    /// Cluster-aware implementations require `Fenced` for resumable streams
+    /// and check its exact identity/claim epoch under a claim-row lock in the
+    /// same transaction as deletion. `NonResumable` is accepted only for
+    /// one-off streams that cannot be resumed or transferred. Portable
+    /// implementations may ignore the authority.
+    ///
     /// The interval is WRAP-AWARE: XEP-0198 counters are mod 2^32, so
     /// a valid wrap-spanning ack (`h` numerically small post-wrap)
     /// must also delete the pre-wrap rows near `u32::MAX` — see
@@ -691,6 +710,7 @@ pub trait PendingDeliveryStorage: Send + Sync {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError>;
 
     /// List rows whose `flushed_in_session` references a session
@@ -1623,6 +1643,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         session: &SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        _authority: PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         let mut guard = self
             .inner

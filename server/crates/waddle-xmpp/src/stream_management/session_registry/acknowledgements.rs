@@ -164,7 +164,12 @@ impl InMemorySmSessionRegistry {
         ))?;
         for window in windows {
             pending
-                .delete_acked_in_window(stream, window.from_exclusive, window.to_inclusive)
+                .delete_acked_in_window(
+                    stream,
+                    window.from_exclusive,
+                    window.to_inclusive,
+                    crate::pending_delivery::storage::PendingAckAuthority::Fenced(fence),
+                )
                 .await
                 .map_err(|error| match error {
                     crate::pending_delivery::storage::PendingStorageError::NotOwner { .. } => {

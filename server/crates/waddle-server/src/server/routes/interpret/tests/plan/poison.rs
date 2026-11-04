@@ -330,6 +330,7 @@ impl PendingDeliveryStorage for PoisonPending {
         _session: &SmSessionId,
         _from_exclusive: u32,
         _to_inclusive: u32,
+        _authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, PendingStorageError> {
         panic!("planning wrote PendingDeliveryStorage::delete_acked_in_window")
     }

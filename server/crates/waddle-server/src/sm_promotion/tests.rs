@@ -260,6 +260,7 @@ impl PendingDeliveryStorage for AlwaysFailingPending {
         _session: &waddle_xmpp::pending_delivery::SmSessionId,
         _from_exclusive: u32,
         _to_inclusive: u32,
+        _authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         Ok(0)
     }
@@ -2379,9 +2380,10 @@ impl PendingDeliveryStorage for RetractDuringInsertPending {
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
     async fn list_orphaned_claims(
@@ -2668,9 +2670,10 @@ impl PendingDeliveryStorage for FlakyPending {
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         from_exclusive: u32,
         to_inclusive: u32,
+        authority: waddle_xmpp::pending_delivery::storage::PendingAckAuthority<'_>,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner
-            .delete_acked_in_window(session, from_exclusive, to_inclusive)
+            .delete_acked_in_window(session, from_exclusive, to_inclusive, authority)
             .await
     }
     async fn list_orphaned_claims(

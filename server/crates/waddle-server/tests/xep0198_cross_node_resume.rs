@@ -1348,7 +1348,12 @@ async fn recipient_claim_move_retry_dedups_pending_delivery_delete() {
     // dedups: a second, retried delete_acked_in_window for the SAME h is a
     // clean no-op, never an error and never a double-delete side effect.
     let removed_first = pending_storage
-        .delete_acked_in_window(&session_id, 0, 1)
+        .delete_acked_in_window(
+            &session_id,
+            0,
+            1,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .expect("delete_acked_in_window");
     assert_eq!(
@@ -1356,7 +1361,12 @@ async fn recipient_claim_move_retry_dedups_pending_delivery_delete() {
         "the claimed, pushed row is deleted on first ack"
     );
     let removed_retry = pending_storage
-        .delete_acked_in_window(&session_id, 0, 1)
+        .delete_acked_in_window(
+            &session_id,
+            0,
+            1,
+            waddle_xmpp::pending_delivery::storage::PendingAckAuthority::NonResumable,
+        )
         .await
         .expect("delete_acked_in_window retry");
     assert_eq!(
