@@ -3055,7 +3055,7 @@ async fn db_storage_release_rows_for_outbound_sequences_releases_exact_set() {
     storage.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let released = storage
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]), None)
         .await;
     assert!(
         released.error.is_none(),
@@ -3079,6 +3079,280 @@ async fn db_storage_release_rows_for_outbound_sequences_releases_exact_set() {
     assert!(released_rows
         .iter()
         .all(|row| row.flushed_in_session.is_none() && row.outbound_sequence.is_none()));
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_outbound_sequence_release_rejects_same_node_reacquired_claim_epoch() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let Some(base_url) = waddle_ws_test_support::require_test_postgres_url() else {
+        return;
+    };
+    let (schema, scoped_url) =
+        create_postgres_test_schema(&base_url, "pending_outbound_epoch_release").await;
+    let db = Database::from_config(
+        "pending-outbound-epoch-release-test",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("open scoped postgres");
+    let claim_store = std::sync::Arc::new(PostgresClaimStore::new(db.clone()));
+    claim_store.ensure_schema().await.expect("claim schema");
+    let node = NodeIdentity::new(
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let node_identity = SharedNodeIdentity::new(node.clone());
+    let stream_id = format!("outbound-epoch-{}", uuid::Uuid::new_v4());
+    let entity = Entity::new(EntityType::SmSession, stream_id.clone());
+    let captured_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("initial SM claim");
+    let recipient_text = format!("outbound-epoch-{}@example.com", uuid::Uuid::new_v4());
+    let recipient = bare(&recipient_text);
+    let session = SmSessionId::new(&stream_id);
+    let storage = crate::pending_delivery::open_for_cluster_mode(
+        Some(&scoped_url),
+        QuotaPolicy::Unlimited,
+        true,
+        Some((
+            claim_store.clone() as std::sync::Arc<dyn ClaimStore>,
+            node_identity,
+        )),
+        &db,
+    )
+    .await
+    .expect("open fenced pending storage");
+    for body in ["acknowledged", "released", "stale release"] {
+        storage
+            .insert(transient_row(&recipient_text, body))
+            .await
+            .expect("insert pending row");
+    }
+    let claimed = storage
+        .claim_for_session(&recipient, &session)
+        .await
+        .expect("claim pending row");
+    assert_eq!(claimed.len(), 3);
+    for (row, sequence) in claimed.iter().zip([7, 8, 9]) {
+        storage
+            .record_pushed_at(&row.id, sequence)
+            .await
+            .expect("bind outbound sequence");
+    }
+
+    let captured_fence = SmClaimFence::new(node.clone(), captured_epoch);
+    let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), stream_id);
+    let mut claim_lock = db.begin().await.expect("begin claim lock transaction");
+    let mut locked_claim = claim_lock
+        .query(
+            "SELECT 1 FROM clustering_claims WHERE entity = ? FOR UPDATE",
+            crate::db_params![entity_key],
+        )
+        .await
+        .expect("lock current SM claim");
+    assert!(locked_claim
+        .next()
+        .await
+        .expect("read locked claim")
+        .is_some());
+    drop(locked_claim);
+
+    let release_storage = storage.clone();
+    let release_recipient = recipient.clone();
+    let release_session = session.clone();
+    let release_fence = captured_fence.clone();
+    let release_task = tokio::spawn(async move {
+        release_storage
+            .release_rows_for_outbound_sequences(
+                &release_recipient,
+                &release_session,
+                &HashSet::from([8]),
+                Some(&release_fence),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let connection = db.guard().await.expect("inspect blocked release");
+            let mut rows = connection
+                .query(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE state = 'active' AND wait_event_type = 'Lock' \
+                       AND query LIKE '%FROM clustering_claims%' \
+                       AND query LIKE '%FOR SHARE%'",
+                    (),
+                )
+                .await
+                .expect("inspect release fence waiter");
+            let count = rows
+                .next()
+                .await
+                .expect("read release fence waiter")
+                .expect("count row")
+                .get::<i64>(0)
+                .expect("waiter count");
+            drop(rows);
+            drop(connection);
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("release waits on the exact claim row");
+
+    // The ACK call records its proof synchronously before it waits for the
+    // pending-store operation lock. Poll it once while release is blocked,
+    // then cancel the waiter: its ACK proof must remain available to release.
+    {
+        let ack = storage.delete_acked_in_window(&session, 6, 7);
+        tokio::pin!(ack);
+        tokio::select! {
+            biased;
+            result = &mut ack => panic!("ACK unexpectedly bypassed the blocked release: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+
+    let connection = db.guard().await.expect("install release failure trigger");
+    connection
+        .execute(
+            "CREATE FUNCTION pending_release_test_fail_update() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected pending release failure'; END $$",
+            (),
+        )
+        .await
+        .expect("create release failure function");
+    connection
+        .execute(
+            "CREATE TRIGGER pending_release_test_fail_update \
+             BEFORE UPDATE ON pending_delivery \
+             FOR EACH ROW EXECUTE FUNCTION pending_release_test_fail_update()",
+            (),
+        )
+        .await
+        .expect("create release failure trigger");
+    drop(connection);
+    claim_lock.commit().await.expect("release claim-row lock");
+
+    let failed_release = release_task.await.expect("join release task");
+    assert!(failed_release.error.is_some(), "injected update must fail");
+    let connection = db.guard().await.expect("remove release failure trigger");
+    connection
+        .execute(
+            "DROP TRIGGER pending_release_test_fail_update ON pending_delivery",
+            (),
+        )
+        .await
+        .expect("drop release failure trigger");
+    connection
+        .execute("DROP FUNCTION pending_release_test_fail_update()", ())
+        .await
+        .expect("drop release failure function");
+    drop(connection);
+    let after_failed_release = storage
+        .list(&recipient)
+        .await
+        .expect("list failed release rows");
+    assert_eq!(after_failed_release.len(), 3);
+    assert!(after_failed_release
+        .iter()
+        .all(|row| row.outbound_sequence.is_some()));
+
+    // The failed release rolled its ACK delete back and retained the proof;
+    // retry settles sequence 7 and releases sequence 8 atomically.
+    let first_release = storage
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session,
+            &HashSet::from([8]),
+            Some(&captured_fence),
+        )
+        .await;
+    assert!(
+        first_release.error.is_none(),
+        "retry must complete: {first_release:?}"
+    );
+    assert_eq!(first_release.released, HashSet::from([8]));
+    let after_first_release = storage.list(&recipient).await.expect("list first release");
+    assert_eq!(after_first_release.len(), 2, "ACKed sequence 7 is deleted");
+    assert!(after_first_release
+        .iter()
+        .any(|row| row.outbound_sequence == Some(9)));
+    assert!(after_first_release
+        .iter()
+        .any(|row| row.outbound_sequence.is_none()));
+
+    claim_store
+        .release(&entity, &node, captured_epoch)
+        .await
+        .expect("release original claim");
+    let reacquired_epoch = claim_store
+        .acquire(&entity, &node)
+        .await
+        .expect("reacquire with the same process identity");
+    assert!(reacquired_epoch > captured_epoch);
+
+    let sequences = HashSet::from([9]);
+    let missing_fence = storage
+        .release_rows_for_outbound_sequences(&recipient, &session, &sequences, None)
+        .await;
+    assert!(matches!(
+        missing_fence.error,
+        Some(PendingStorageError::NotOwner { .. })
+    ));
+    let stale_fence = storage
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session,
+            &sequences,
+            Some(&captured_fence),
+        )
+        .await;
+    assert!(matches!(
+        stale_fence.error,
+        Some(PendingStorageError::NotOwner { .. })
+    ));
+    let after_stale_attempt = storage.list(&recipient).await.expect("list pending rows");
+    assert_eq!(after_stale_attempt.len(), 2);
+    assert!(after_stale_attempt
+        .iter()
+        .any(|row| row.outbound_sequence == Some(9)));
+    assert!(after_stale_attempt
+        .iter()
+        .filter(|row| row.outbound_sequence == Some(9))
+        .all(|row| row.flushed_in_session.as_ref() == Some(&session)));
+
+    let current_fence = SmClaimFence::new(node, reacquired_epoch);
+    let released = storage
+        .release_rows_for_outbound_sequences(&recipient, &session, &sequences, Some(&current_fence))
+        .await;
+    assert!(
+        released.error.is_none(),
+        "current fence must release: {released:?}"
+    );
+    assert_eq!(released.released, sequences);
+    let after_current_release = storage.list(&recipient).await.expect("list released row");
+    assert_eq!(after_current_release.len(), 2);
+    assert!(after_current_release
+        .iter()
+        .all(|row| row.outbound_sequence.is_none() && row.flushed_in_session.is_none()));
+
+    drop(storage);
+    drop(claim_store);
+    drop(db);
+    drop_postgres_test_schema(&base_url, &schema).await;
 }
 
 #[tokio::test]

@@ -592,7 +592,7 @@ async fn release_rows_for_outbound_sequences_releases_only_matching_rows() {
     store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let released = store
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 7, 99]), None)
         .await;
     assert!(released.error.is_none());
     assert_eq!(released.released, HashSet::from([5, 7]));
@@ -798,7 +798,7 @@ async fn default_release_rows_reports_partial_progress_before_error() {
     store.record_pushed_at(&claimed[2].id, 7).await.unwrap();
 
     let outcome = store
-        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 6, 7]))
+        .release_rows_for_outbound_sequences(&recipient, &session, &HashSet::from([5, 6, 7]), None)
         .await;
     assert_eq!(outcome.released, HashSet::from([5]));
     assert!(matches!(

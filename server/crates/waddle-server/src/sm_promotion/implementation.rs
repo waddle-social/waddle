@@ -430,7 +430,12 @@ pub(crate) async fn release_row_backed_replay_copies(
         }
     }
     let outcome = pending_storage
-        .release_rows_for_outbound_sequences(&recipient, &session_id, &sequences)
+        .release_rows_for_outbound_sequences(
+            &recipient,
+            &session_id,
+            &sequences,
+            detached.promotion_custody.captured_fence(),
+        )
         .await;
     let mut replay_sequences_to_strip = outcome.released.clone();
     let mut release_failed_known_rows = false;

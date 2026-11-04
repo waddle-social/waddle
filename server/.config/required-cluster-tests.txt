@@ -430,3 +430,7 @@ waddle-server::supervised_io pumps::peer_close_during_local_close_flush_still_ge
 waddle-server::supervised_io pumps::send_after_closing_waits_for_peer_close_then_flushes_reply
 waddle-server::supervised_io pumps::forced_retirement_interrupts_a_stalled_peer_close_reply
 waddle-server::supervised_io kameo_control::full_256_entry_kameo_mailbox_requires_an_independent_interrupt_path
+
+# Pending delivery releases an outbound binding only under the detached
+# stream's captured SM claim epoch, including same-process reacquisition.
+waddle-server pending_delivery::tests::postgres_outbound_sequence_release_rejects_same_node_reacquired_claim_epoch

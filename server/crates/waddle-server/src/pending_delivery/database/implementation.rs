@@ -1432,6 +1432,7 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if sequences.is_empty() {
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
@@ -1441,9 +1442,31 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
 
         let state = self.ack_windows.for_session(session);
         let _guard = state.operation.lock().await;
-        if let Err(error) = self.settle_ack_windows(session, &state).await {
-            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
-        }
+        let identity_guard = if let Some(fencing) = &self.fencing {
+            let Some(expected_fence) = expected_fence else {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    },
+                );
+            };
+            match fencing
+                .node_identity
+                .guard_if_current(expected_fence.owner())
+                .await
+            {
+                Some(guard) => Some(guard),
+                None => {
+                    return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                        PendingStorageError::NotOwner {
+                            entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                        },
+                    );
+                }
+            }
+        } else {
+            None
+        };
         let sequence_placeholders = std::iter::repeat_n("?", sequences.len())
             .collect::<Vec<_>>()
             .join(", ");
@@ -1470,24 +1493,36 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                 );
             }
         };
-        // Clustered fencing, identical shape to `insert_fenced`: a deposed
-        // but still-running node must not clear sequence bindings after
-        // another node acquired and hydrated the same durable SM session —
-        // the new owner would then promote the replay copies as
-        // non-row-backed while the original rows remain pending. The fence
-        // is the first statement inside this transaction; lost ownership
-        // aborts (rollback on drop) and surfaces as a failed release, which
-        // every caller already treats as retain-and-defer.
+        // Clustered fencing uses the immutable source fence captured with the
+        // detached queue. Same-node reacquisition changes claim_epoch without
+        // changing node identity, so checking only the process incarnation
+        // would let an obsolete capture release this generation's bindings.
+        // The row lock is the first statement in the transaction. ACK
+        // settlement below shares this transaction so a stale capture cannot
+        // mutate pending rows before this exact-epoch assertion.
         if let Some(fencing) = &self.fencing {
-            let identity = fencing.node_identity.current();
+            let expected_fence = expected_fence.expect("checked before transaction");
+            let identity_guard = identity_guard
+                .as_ref()
+                .expect("clustered release holds an identity guard");
+            if !fencing.node_identity.owns_guard(identity_guard)
+                || identity_guard.identity() != expected_fence.owner()
+            {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
+                    PendingStorageError::NotOwner {
+                        entity: Entity::new(EntityType::SmSession, session.as_str().to_string()),
+                    },
+                );
+            }
             let entity_key = format!("{}:{}", EntityType::SmSession.as_db_str(), session.as_str());
             let fence_rows = tx
                 .query(
-                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? FOR SHARE",
+                    "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
                     crate::db_params![
                         entity_key,
-                        identity.node_id.clone(),
-                        identity.node_epoch.clone(),
+                        expected_fence.owner().node_id.clone(),
+                        expected_fence.owner().node_epoch.clone(),
+                        expected_fence.epoch().0,
                     ],
                 )
                 .await;
@@ -1513,6 +1548,27 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                     },
                 );
             }
+        }
+        // Close ACK registration only after the exact claim row is locked.
+        // Any ACK proof published before this point is included in this
+        // transaction; subsequent registrations are deferred and merged back
+        // after release. This operation is terminal-only: the detached source
+        // has already left live ingress, and accepted ACKs have been settled
+        // or retained as proofs before promotion reaches this boundary.
+        let ack_window_release = match state.begin_release() {
+            Ok(release) => release,
+            Err(error) => {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+            }
+        };
+        if let Err(error) = super::ack_windows::settle_ack_windows_in_transaction(
+            &mut tx,
+            session,
+            ack_window_release.pending(),
+        )
+        .await
+        {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
         }
         let rows = tx.query(&select_sql, select_params).await;
         let mut rows = match rows {
@@ -1579,6 +1635,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
                     PendingStorageError::Other(error.to_string()),
                 );
             }
+            if let Err(error) = ack_window_release.committed() {
+                return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
+            }
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
                 released,
             );
@@ -1609,6 +1668,9 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
             return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(
                 PendingStorageError::Other(error.to_string()),
             );
+        }
+        if let Err(error) = ack_window_release.committed() {
+            return waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::failed(error);
         }
         waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome::complete(
             released,
