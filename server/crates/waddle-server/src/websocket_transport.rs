@@ -4,8 +4,9 @@
 //! entering protocol actor messages. Outgoing data carries this transport's
 //! exact identity and lifecycle authority to the physical sink enqueue.
 //! The supervised adapter remains inactive. The production upgrade path uses
-//! an `AppState`-bound admission only as a capacity hold for the legacy loop;
-//! it does not start these pumps or independently fence every legacy write.
+//! an `AppState`-bound admission as a capacity hold for the legacy loop. Its
+//! authority-bound writes fence the source revision and lifecycle generation
+//! at `start_send`, but it does not start or join these pumps.
 //! Revocation after splitting but before supervised startup gets a bounded
 //! Close attempt on the split writer. If startup is dropped during that window,
 //! an independent bounded cleanup task retains its capacity reservation.
@@ -588,8 +589,16 @@ impl SocketAdmission {
     /// Consume the admission into the existing single-task WebSocket loop.
     /// Its reservation is a capacity hold, not a pump-cleanup witness.
     pub(crate) fn into_legacy(self) -> LegacySocketAdmission {
+        let permit = match &self.authority.source {
+            IdentitySource::Clustered { source, stamp } => self
+                .authority
+                .permit
+                .with_identity(source.clone(), stamp.clone()),
+            IdentitySource::Standalone => self.authority.permit.clone(),
+        };
         LegacySocketAdmission {
             authority: self.authority,
+            permit,
             _reservation: self.reservation,
         }
     }
@@ -747,9 +756,11 @@ impl SocketAdmission {
 
 /// Non-cloneable capacity hold for the current legacy WebSocket task.
 /// Dropping the owner releases its reservation; this does not establish
-/// independent pump cleanup or fence individual legacy writes.
+/// independent pump cleanup. Authority-bound writes use the captured source
+/// revision and lifecycle generation at their synchronous enqueue boundary.
 pub(crate) struct LegacySocketAdmission {
     authority: Arc<TransportAuthority>,
+    permit: NodeAdmissionPermit,
     _reservation: IoCustodianReservation,
 }
 
@@ -763,7 +774,7 @@ impl LegacySocketAdmission {
     }
 
     pub(crate) fn permit(&self) -> &NodeAdmissionPermit {
-        &self.authority.permit
+        &self.permit
     }
 
     pub(crate) async fn identity_revoked(&self) {
