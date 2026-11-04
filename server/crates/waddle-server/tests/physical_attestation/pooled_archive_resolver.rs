@@ -12,7 +12,7 @@ use waddle_server::pending_delivery::{
 use waddle_server::test_support::SharedPendingResolverFixture;
 use waddle_xmpp::pending_delivery::storage::PendingStorageError;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
-use waddle_xmpp::registry::ConnectionRegistry;
+use waddle_xmpp::registry::{ConnectionRegistry, LocalConnectionBindingId};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 struct ReadyGate(AtomicUsize);
@@ -99,7 +99,7 @@ async fn flush<R: ArchiveResolver + ?Sized>(
     resolver: &R,
     registry: &ConnectionRegistry,
     resource: &jid::FullJid,
-    owner: &Arc<std::sync::atomic::AtomicBool>,
+    owner: &LocalConnectionBindingId,
     gate: &ReadyGate,
 ) -> FlushOutcome {
     let session = SmSessionId::new("pool-resolver-stream");
@@ -259,7 +259,6 @@ async fn common(fixture: &Arc<SharedPendingResolverFixture>, stamp: &StanzaId, o
         let fixture = Arc::clone(fixture);
         let registry = registry.clone();
         let resource = resource.clone();
-        let owner = Arc::clone(&owner);
         tokio::spawn(async move {
             let gate = ReadyGate(AtomicUsize::new(0));
             let outcome = flush(&fixture, &paused, &registry, &resource, &owner, &gate).await;
