@@ -27,13 +27,14 @@ impl ConnectionEntry {
             [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
                 .iter()
                 .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage())
-        }) && !self.is_carbons_enabled()
-        {
-            // A frozen audience is only an upper bound. Check current opt-in
-            // at queue acceptance, after any relay/database await and against
-            // this exact connection entry. Like duplicate suppression below,
-            // success settles the obligation without a new wire copy.
-            return Ok(());
+        }) {
+            // Suppression settles the obligation without a queue write, so it
+            // must still be ordered against activation and sealing. Check
+            // current opt-in while holding the same admission gate as enqueue.
+            let suppressed = self.endpoint.with_active(|_| !self.is_carbons_enabled())?;
+            if suppressed {
+                return Ok(());
+            }
         }
         let Some(obligation) = outbound
             .ingress_append

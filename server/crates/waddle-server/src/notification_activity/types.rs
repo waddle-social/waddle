@@ -166,6 +166,8 @@ pub struct NotificationActivity {
 pub enum NotificationActivityError {
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
+    #[error("notification activity owner initialization cannot use an attested runtime handle")]
+    OwnerBootstrapRequiresOwnerHandle,
     #[error("invalid chat-state token: {0}")]
     InvalidChatState(String),
     #[error("invalid presence <show/> token: {0}")]

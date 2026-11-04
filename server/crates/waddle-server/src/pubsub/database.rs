@@ -45,6 +45,7 @@ impl DatabasePubSubStorage {
     /// `format!`-into-SQL pattern would be a latent injection
     /// surface; with it, the compiler refuses any call that didn't
     /// originate from a hard-coded identifier.
+    #[cfg(test)]
     pub(super) async fn row_count(&self, table: &'static str) -> Result<i64, XmppError> {
         let mut rows = self
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())

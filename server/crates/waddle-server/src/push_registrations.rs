@@ -46,9 +46,40 @@ pub struct DatabasePushRegistrationStore {
 
 impl DatabasePushRegistrationStore {
     pub async fn try_new(db: Database) -> Result<Self, PushError> {
+        Self::initialize_owner(db).await
+    }
+
+    /// Initialize the registration schema through this exact owner database
+    /// handle. Existing callers retain the historical bootstrap behavior via
+    /// [`Self::try_new`].
+    pub async fn initialize_owner(db: Database) -> Result<Self, PushError> {
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(PushError::StorageError(
+                "push-registration owner initialization cannot use an attested runtime handle"
+                    .to_owned(),
+            ));
+        }
+        Self::build_initialized(db).await
+    }
+
+    async fn build_initialized(db: Database) -> Result<Self, PushError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
+    }
+
+    /// Attach to an owner-prepared PostgreSQL table through the exact
+    /// physically attested main-pool handle. This path is read-only and does
+    /// not reopen a URL or apply schema DDL.
+    pub async fn attach_existing(
+        db: Database,
+    ) -> Result<Self, crate::notification_activity::DurableStoreAttachError> {
+        crate::notification_activity::runtime_attach::verify_attested_table(
+            &db,
+            &crate::notification_activity::runtime_attach::PUSH_REGISTRATIONS_CONTRACT,
+        )
+        .await?;
+        Ok(Self { db })
     }
 
     async fn initialize(&self) -> Result<(), PushError> {

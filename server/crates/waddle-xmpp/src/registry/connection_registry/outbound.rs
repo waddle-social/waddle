@@ -809,8 +809,15 @@ impl BroadcastOutcome {
 mod tests {
     use super::super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
     use super::{ConnectionEntry, OutboundStanza, SocketOutboundEndpoint};
+    use crate::ingress::{IngressEffectKind, MessageKey};
+    use crate::mam::ArchiveOrdinal;
     use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+    use crate::stream_management::{
+        ArchiveDispatchPosition, SmIngressAppendKey, SmIngressReceiptKind,
+        SmRelayedAppendObligation,
+    };
     use crate::Stanza;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn sealed_candidate_cannot_activate_or_enqueue() {
@@ -835,5 +842,68 @@ mod tests {
         ));
         assert!(candidate.activate_binding(owner, &binding_ref).is_none());
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn carbon_opt_out_requires_the_exact_binding_to_be_active() {
+        let resource: jid::FullJid = "bob@example.test/phone".parse().expect("resource");
+        for kind in [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons] {
+            for archived in [false, true] {
+                let (endpoint, mut receiver) = SocketOutboundEndpoint::channel(1);
+                let binding_ref =
+                    BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+                let candidate =
+                    ConnectionEntry::new_provisional_for_binding(endpoint, binding_ref.clone());
+                let owner = candidate.binding_id();
+                let outbound = OutboundStanza::new(Stanza::Message(
+                    xmpp_parsers::message::Message::new(Some(resource.clone().into())),
+                ))
+                .with_ingress_append(SmRelayedAppendObligation {
+                    key: SmIngressAppendKey {
+                        message_key: MessageKey::new(),
+                        kind: SmIngressReceiptKind::from_storage(kind.storage_tag()),
+                        semantic_identity_hash: [1; 32],
+                        resource: resource.clone(),
+                    },
+                    sender_bare: "alice@example.test".parse().expect("sender"),
+                    received_at: None,
+                    archive_positions: if archived {
+                        vec![ArchiveDispatchPosition {
+                            archive: resource.to_bare(),
+                            ordinal: ArchiveOrdinal::from_storage(1).expect("ordinal"),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    dispatch_stream: None,
+                });
+
+                assert_eq!(
+                    candidate.entry.try_send_archive_ordered(outbound.clone()),
+                    Err(EndpointEnqueueRejection::Provisional)
+                );
+                assert!(receiver.try_recv().is_err());
+
+                let entry = candidate
+                    .activate_binding(owner, &binding_ref)
+                    .expect("activate exact binding");
+                assert_eq!(entry.try_send_archive_ordered(outbound.clone()), Ok(()));
+                assert!(receiver.try_recv().is_err(), "active opt-out suppresses");
+
+                entry.carbons_enabled.store(true, Ordering::Relaxed);
+                assert_eq!(entry.try_send_archive_ordered(outbound.clone()), Ok(()));
+                receiver
+                    .try_recv()
+                    .expect("opt-in enqueues the same obligation");
+
+                entry.carbons_enabled.store(false, Ordering::Relaxed);
+                assert!(entry.seal_binding(owner, &binding_ref));
+                assert_eq!(
+                    entry.try_send_archive_ordered(outbound),
+                    Err(EndpointEnqueueRejection::Sealed)
+                );
+                assert!(receiver.try_recv().is_err());
+            }
+        }
     }
 }
