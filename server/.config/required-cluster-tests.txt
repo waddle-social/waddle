@@ -375,6 +375,14 @@ waddle-server clustering::route_bridge::registration::owner_update::tests::delay
 waddle-server server::routes::websocket::tests::registration::xep0198_pre_authority_resume_fails_cleanly_and_allows_fresh_bind
 waddle-xmpp registry::connection_registry::tests::physical_reference_survives_binding_replacement_and_remote_owner_movement
 
+# P3 failed-resume endpoint rollback: a published replay-gap attempt may hand
+# its same-socket queue back only after exact seal and an empty/no-permit check.
+waddle-server server::routes::websocket::tests::registration::replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control
+waddle-server server::routes::websocket::tests::registration::replay_gap_with_queued_outbound_refuses_same_socket_endpoint_handoff
+waddle-xmpp registry::connection_registry::tests::sealed_nonempty_binding_does_not_reclaim_its_socket_queue
+waddle-xmpp registry::connection_registry::tests::sealed_binding_with_reserved_permit_does_not_reclaim_socket_queue
+waddle-xmpp registry::connection_registry::tests::retired_binding_cannot_interrupt_a_later_binding_on_the_same_socket
+
 # Reserved pending-flush commits recheck their exact binding after capacity
 # waits and serialize with a test-only seal before consuming the permit.
 waddle-xmpp registry::connection_registry::tests::pending_flush_reservation_refuses_binding_sealed_while_waiting_for_capacity

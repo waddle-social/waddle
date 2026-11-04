@@ -1820,6 +1820,14 @@ pub(super) struct WsConnState {
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<waddle_xmpp::registry::LocalConnectionBindingId>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
+    /// Same-queue endpoint recovered from an empty, sealed binding after a
+    /// published resume attempt failed. Registration consumes this only when
+    /// its original `pending_tx` slot is empty.
+    pub(super) recovered_pending_endpoint: Option<waddle_xmpp::registry::SocketOutboundEndpoint>,
+    /// A published resume rollback could not safely hand back its endpoint
+    /// because the exact owner disappeared or accepted work remains queued.
+    /// The physical socket must not publish a fresh binding in that state.
+    pub(super) resume_endpoint_handoff_blocked: bool,
     pub(super) write_interruption: waddle_xmpp::registry::SocketWriteInterruption,
     /// Resume preflight is serviced only by this connection's owning task,
     /// including while transport readiness or flushing is blocked.
@@ -1972,6 +1980,8 @@ impl WsConnState {
             post_sm_finalization_test_hook: None,
             registry_owner: None,
             socket_lifecycle: None,
+            recovered_pending_endpoint: None,
+            resume_endpoint_handoff_blocked: false,
             write_interruption,
             live_resume_control,
             suppress_sm_record_next_batch: false,

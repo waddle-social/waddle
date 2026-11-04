@@ -1,5 +1,5 @@
 use jid::FullJid;
-use tracing::warn;
+use tracing::{error, warn};
 use waddle_xmpp::protocol::ConnectionPhase;
 use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
@@ -330,15 +330,74 @@ async fn reset_resume_attempt(
     owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     _failed_stream_id: Option<&str>,
 ) {
+    // This rollback runs inline while the sole live WebSocket task handles the
+    // client's inbound SM request. That task owns the only receiver for this
+    // socket queue, and it cannot concurrently dequeue or handle another
+    // outbound stanza while this function is on the stack. After sealing the
+    // exact endpoint, full sender capacity therefore proves there is no queued
+    // frame, reserved permit, or in-flight receiver handler to retarget.
+    let failed_binding = conn.binding_ref.clone();
     conn.retire_binding_ref();
+    let mut removed_owner = false;
+    let mut recovered_endpoint = None;
+    let mut exact_binding_match = false;
     if let Some(owner) = owner {
-        let removed = state
-            .deps
-            .protocol
-            .connection_registry
-            .unregister_if_owner(jid, owner)
-            .is_some();
-        if removed {
+        let registry = &state.deps.protocol.connection_registry;
+        let current = registry.entry_if_owner(jid, owner);
+        if let Some(entry) = current {
+            if let Some(binding) = entry.binding_ref().cloned() {
+                if entry.seal_binding(*owner, &binding) {
+                    if let Some(removed) = registry.unregister_if_owner(jid, owner) {
+                        removed_owner = true;
+                        exact_binding_match = failed_binding.as_ref() == Some(&binding);
+                        if exact_binding_match {
+                            recovered_endpoint =
+                                removed.into_socket_outbound_endpoint_if_empty(*owner, &binding);
+                        }
+                    }
+                } else {
+                    error!(
+                        jid = %jid,
+                        "failed resume could not seal its exact outbound binding"
+                    );
+                }
+            } else {
+                error!(
+                    jid = %jid,
+                    "failed resume owner has no local binding to seal"
+                );
+            }
+        }
+        if removed_owner {
+            if let Some(endpoint) = recovered_endpoint.take() {
+                if conn.recovered_pending_endpoint.is_none()
+                    && !conn.resume_endpoint_handoff_blocked
+                {
+                    conn.recovered_pending_endpoint = Some(endpoint);
+                } else {
+                    conn.resume_endpoint_handoff_blocked = true;
+                    error!(
+                        jid = %jid,
+                        "failed resume found conflicting outbound endpoint custody"
+                    );
+                }
+            } else {
+                // Accepted frames and/or reserved permits may still belong to
+                // the old binding. Keep the receiver's existing queue in place,
+                // but do not hand it to a fresh stream attempt.
+                conn.resume_endpoint_handoff_blocked = true;
+                if exact_binding_match {
+                    warn!(
+                        jid = %jid,
+                        "failed resume outbound queue was not empty; same-socket rebind is blocked"
+                    );
+                } else {
+                    warn!(
+                        jid = %jid,
+                        "failed resume binding identity changed before outbound handback"
+                    );
+                }
+            }
             crate::server::dual_registration::mirror_unregister(
                 &state.deps.protocol.user_registry,
                 jid,
@@ -346,6 +405,14 @@ async fn reset_resume_attempt(
             )
             .await;
             unregister_remote_user_resource_if_owner(state, jid, owner).await;
+        } else {
+            // Ownership moved or its exact binding could not be sealed. Do not
+            // reuse any sender from this socket for a successor attempt.
+            conn.resume_endpoint_handoff_blocked = true;
+            warn!(
+                jid = %jid,
+                "failed resume lost exact registry ownership before outbound handback"
+            );
         }
     }
     conn.registry_owner = None;

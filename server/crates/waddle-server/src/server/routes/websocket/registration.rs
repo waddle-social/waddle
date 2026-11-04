@@ -471,7 +471,25 @@ where
     let Some(jid) = conn.phase.bound_jid().cloned() else {
         return RegistrationAfterFrame::Unchanged;
     };
-    if pending_tx.is_none() {
+    if conn.resume_endpoint_handoff_blocked {
+        error!(
+            jid = %jid,
+            "same-socket bind refused because failed-resume endpoint custody is unresolved"
+        );
+        // Match the pre-existing no-endpoint path and leave the connection
+        // loop's receiver attached to the old queue. Its nonempty disposition
+        // remains unresolved; converting this refusal into a session-init
+        // failure would close the socket and drop that receiver immediately.
+        return RegistrationAfterFrame::Unchanged;
+    }
+    if pending_tx.is_some() && conn.recovered_pending_endpoint.is_some() {
+        error!(
+            jid = %jid,
+            "same-socket bind has two outbound endpoint custody sources"
+        );
+        return RegistrationAfterFrame::SessionInitializationFailed;
+    }
+    if pending_tx.is_none() && conn.recovered_pending_endpoint.is_none() {
         return RegistrationAfterFrame::Unchanged;
     }
 
@@ -614,7 +632,11 @@ where
         blocklist,
     );
 
-    let Some(tx) = pending_tx.take() else {
+    let tx: SocketOutboundEndpoint = if let Some(tx) = pending_tx.take() {
+        tx.into()
+    } else if let Some(endpoint) = conn.recovered_pending_endpoint.take() {
+        endpoint
+    } else {
         return RegistrationAfterFrame::Unchanged;
     };
 

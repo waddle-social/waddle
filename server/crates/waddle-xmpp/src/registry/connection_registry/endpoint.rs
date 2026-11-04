@@ -181,6 +181,31 @@ impl BindingOutboundEndpoint {
             .seal(owner, binding_ref)
     }
 
+    /// Recover the socket queue only after this exact binding is sealed and
+    /// the queue has no accepted work or outstanding reserved permits.
+    pub(super) fn into_socket_endpoint_if_empty(
+        self,
+        owner: LocalConnectionBindingId,
+        binding_ref: &BindingRef,
+    ) -> Result<SocketOutboundEndpoint, Self> {
+        let sealed_for_binding = {
+            let admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            admission.matches(owner, Some(binding_ref))
+                && admission.state == BindingAdmissionState::Sealed
+        };
+        if !sealed_for_binding
+            || self.queue.sender.is_closed()
+            || self.queue.sender.capacity() != self.queue.sender.max_capacity()
+        {
+            return Err(self);
+        }
+
+        Ok(SocketOutboundEndpoint { queue: self.queue })
+    }
+
     /// Cancellation while waiting for capacity drops the owned envelope. A
     /// seal does not wake a capacity waiter; commit rechecks admission once
     /// capacity becomes available.

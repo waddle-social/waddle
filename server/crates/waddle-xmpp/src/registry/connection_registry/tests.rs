@@ -3,8 +3,8 @@ use super::{
     mpsc, Arc, BareJid, BindingAdmissionState, BroadcastOutcome, ConnectionEntry,
     ConnectionRegistry, DeliveryKind, FullJid, Instant, LocalConnectionBindingId, Ordering,
     OutboundStanza, OutboundWriteAcceptance, PendingFlushCommitOutcome,
-    PendingFlushCommitRejection, PendingFlushReserveError, SendResult, Stanza,
-    WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
+    PendingFlushCommitRejection, PendingFlushReserveError, SendResult, SocketOutboundEndpoint,
+    Stanza, WriteAcceptanceEnqueueOutcome, WriteAcceptanceEnqueueRejection,
 };
 use crate::ownership::{BindingRef, ConnectionRef, NodeIdentity, NodeLeaseIdentity};
 use jid::Jid;
@@ -46,6 +46,7 @@ async fn retired_binding_cannot_interrupt_a_later_binding_on_the_same_socket() {
     registry
         .register_socket_entry(jid.clone(), old.clone())
         .expect("publish old binding");
+    assert!(old.seal_binding(old.binding_id(), &old_binding));
     old.write_interruption.retire_binding(&old_binding);
     registry
         .register_socket_entry(jid.clone(), new.clone())
@@ -65,10 +66,110 @@ async fn retired_binding_cannot_interrupt_a_later_binding_on_the_same_socket() {
         super::ForceDetachInterruption::QueuedAfterRetirement
     );
     assert_ne!(old_binding, new_binding);
+    assert_eq!(
+        old.try_send_archive_ordered(OutboundStanza::new(Stanza::Message(make_test_message(
+            "stale@example.com"
+        )))),
+        Err(EndpointEnqueueRejection::Sealed),
+        "a stale endpoint clone cannot enqueue after exact-binding seal"
+    );
     let request = old_control.try_recv().expect("queued old request");
     assert!(!request.targets_binding(Some(&new_binding)));
     assert!(!new.write_interruption.is_cancelled());
     registry.unregister(&jid);
+}
+
+#[test]
+fn sealed_nonempty_binding_does_not_reclaim_its_socket_queue() {
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let binding = BindingRef::fresh(connection);
+    let (socket, mut receiver) = SocketOutboundEndpoint::channel(1);
+    let old = ConnectionEntry::new_for_binding(socket, binding.clone());
+    let owner = old.binding_id();
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("queued-handoff");
+    registry
+        .register_socket_entry(jid.clone(), old.clone())
+        .expect("publish old binding");
+    assert_eq!(
+        registry.try_send_outbound_if_owner(
+            &jid,
+            &owner,
+            OutboundStanza::new(Stanza::Message(make_test_message(
+                "accepted-before-seal@example.com"
+            )))
+        ),
+        BroadcastOutcome::Delivered
+    );
+
+    let published = registry
+        .entry_if_owner(&jid, &owner)
+        .expect("exact old owner");
+    assert!(published.seal_binding(owner, &binding));
+    let removed = registry
+        .unregister_if_owner(&jid, &owner)
+        .expect("remove sealed old owner");
+    assert!(
+        removed
+            .into_socket_outbound_endpoint_if_empty(owner, &binding)
+            .is_none(),
+        "accepted queued work prevents handback to a successor"
+    );
+    assert!(registry.entry(&jid).is_none());
+    assert_eq!(
+        old.try_send_archive_ordered(OutboundStanza::new(Stanza::Message(make_test_message(
+            "stale@example.com"
+        )))),
+        Err(EndpointEnqueueRejection::Sealed)
+    );
+    assert_eq!(
+        receiver
+            .try_recv()
+            .expect("accepted frame remains with its original receiver")
+            .stanza
+            .to_element(),
+        Stanza::Message(make_test_message("accepted-before-seal@example.com")).to_element()
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "accepted frame is retained once"
+    );
+}
+
+#[tokio::test]
+async fn sealed_binding_with_reserved_permit_does_not_reclaim_socket_queue() {
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let binding = BindingRef::fresh(connection);
+    let (socket, mut receiver) = SocketOutboundEndpoint::channel(1);
+    let old = ConnectionEntry::new_for_binding(socket, binding.clone());
+    let owner = old.binding_id();
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("reserved-handoff");
+    registry
+        .register_socket_entry(jid.clone(), old.clone())
+        .expect("publish old binding");
+    let reservation = registry
+        .try_reserve_pending_flush(&jid, Some(&owner))
+        .expect("reserve sender capacity");
+
+    let published = registry
+        .entry_if_owner(&jid, &owner)
+        .expect("exact old owner");
+    assert!(published.seal_binding(owner, &binding));
+    let removed = registry
+        .unregister_if_owner(&jid, &owner)
+        .expect("remove sealed old owner");
+    assert!(
+        removed
+            .into_socket_outbound_endpoint_if_empty(owner, &binding)
+            .is_none(),
+        "an outstanding reserved permit prevents handback"
+    );
+    drop(reservation);
+    assert!(
+        receiver.try_recv().is_err(),
+        "reservation was never accepted"
+    );
 }
 
 #[tokio::test]
