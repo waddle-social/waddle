@@ -476,6 +476,49 @@ impl Database {
         Ok((view, expected))
     }
 
+    /// Build a private logical view over the exact attested control-plane
+    /// pool, retaining its own physical writer capability. Stores that need
+    /// to validate both sides of a split-pool contract can inspect this view
+    /// without reopening a URL or borrowing the main-pool capability.
+    pub(crate) fn attested_control_plane_pool_view(
+        &self,
+    ) -> Result<(Self, AttestedPostgresWriterCapability), DatabaseError> {
+        if self.attested_pg_writer.is_none() {
+            return Err(PhysicalAttestationError::Mismatch {
+                field: "attested main pool capability",
+            }
+            .into());
+        }
+        let backend = self.control_plane_backend.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let admission = self.control_plane_admission.clone().ok_or_else(|| {
+            PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            }
+        })?;
+        let capability = self
+            .control_plane_pg_writer
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| PhysicalAttestationError::Mismatch {
+                field: "attested control-plane pool capability",
+            })?;
+
+        let mut view = self.clone();
+        view.backend = backend;
+        view.admission = admission;
+        view.ingress_admission = None;
+        view.control_plane_backend = None;
+        view.control_plane_admission = None;
+        view.control_plane_pg_writer = None;
+        view.database_url = "postgres://[attested-control-plane-pool?mode=memory".to_owned();
+        view.attested_pg_writer = Some(capability.clone());
+        Ok((view, capability))
+    }
+
     /// Whether this handle owns the exact hook-bearing pool created by the
     /// physical attestor. Child stores must share this handle or fail closed;
     /// its `database_url()` value is deliberately not reconnectable.
