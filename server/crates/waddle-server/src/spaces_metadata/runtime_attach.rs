@@ -445,13 +445,13 @@ async fn verify_runtime_acl(
                       runtime.oid, relation.oid, 'TRUNCATE, REFERENCES, TRIGGER')
                     AND NOT pg_catalog.has_table_privilege(
                       runtime.oid, relation.oid,
-                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION, \
-                       UPDATE WITH GRANT OPTION, DELETE WITH GRANT OPTION, \
-                       TRUNCATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION, \
+                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION,
+                       UPDATE WITH GRANT OPTION, DELETE WITH GRANT OPTION,
+                       TRUNCATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION,
                        TRIGGER WITH GRANT OPTION')
                     AND NOT pg_catalog.has_any_column_privilege(
                       runtime.oid, relation.oid,
-                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION, \
+                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION,
                        UPDATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION')
                     AND CASE WHEN pg_catalog.current_setting('server_version_num')::integer >= 170000
                       THEN NOT pg_catalog.has_table_privilege(runtime.oid, relation.oid, 'MAINTAIN')
