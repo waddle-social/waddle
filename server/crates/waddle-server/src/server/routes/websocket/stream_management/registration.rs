@@ -291,6 +291,7 @@ async fn reset_resume_attempt(
     owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     _failed_stream_id: Option<&str>,
 ) {
+    conn.retire_binding_ref();
     if let Some(owner) = owner {
         let removed = state
             .deps
@@ -309,7 +310,6 @@ async fn reset_resume_attempt(
         }
     }
     conn.registry_owner = None;
-    conn.retire_binding_ref();
     // The adopted detached generation is rolled back too: the detached
     // session is restored and will be invalidated with ITS generation, so a
     // fresh bind on this connection must not share it (#1703).
@@ -318,7 +318,11 @@ async fn reset_resume_attempt(
         #[cfg(feature = "test-support")]
         if let (Some(owner), Some(stream_id)) = (owner, _failed_stream_id) {
             super::super::characterization_seams::delay_failed_resume_cleanup(
-                state, jid, owner, stream_id,
+                state,
+                jid,
+                owner,
+                stream_id,
+                lifecycle.entry.clone(),
             );
         }
         state
@@ -366,6 +370,7 @@ async fn close_registered_resume_attempt(
     jid: &FullJid,
     owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
+    conn.retire_binding_ref();
     let removed = state
         .deps
         .protocol
@@ -386,7 +391,6 @@ async fn close_registered_resume_attempt(
         unregister_remote_user_resource_if_owner(state, jid, owner).await;
     }
     conn.registry_owner = None;
-    conn.retire_binding_ref();
     conn.phase = ConnectionPhase::closing(Some(jid.clone()));
 }
 

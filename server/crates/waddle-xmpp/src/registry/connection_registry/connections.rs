@@ -85,6 +85,37 @@ impl ConnectionRegistry {
         binding_id
     }
 
+    /// Publish a physical socket's exact binding under its write-stop gate.
+    /// A stop that wins first refuses publication. The route shard is held
+    /// before the socket gate; no code under the socket gate reads SM state.
+    pub fn register_socket_entry(
+        &self,
+        jid: FullJid,
+        entry: ConnectionEntry,
+    ) -> Option<LocalConnectionBindingId> {
+        let binding_id = entry.binding_id();
+        let binding = entry.binding_ref()?.clone();
+        let interruption = entry.write_interruption.clone();
+        match self.connections.entry(jid.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                let remove_old_stream = occupied.get().sm_stream_id() != entry.sm_stream_id();
+                let old = interruption.publish_binding(&binding, || occupied.insert(entry))?;
+                if remove_old_stream {
+                    Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, &old);
+                }
+                debug!("Replaced existing connection registration");
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                interruption.publish_binding(&binding, || {
+                    drop(vacant.insert(entry));
+                })?;
+                crate::metrics::adjust_connections_active(1);
+                debug!("Registered new connection");
+            }
+        }
+        Some(binding_id)
+    }
+
     /// Register a prebuilt entry only when the full-JID slot is empty or still
     /// belongs to the provided owner token.
     pub fn register_entry_if_owner_or_absent(

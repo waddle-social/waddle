@@ -225,10 +225,24 @@ pub struct ForceDetachRequest {
     /// identity-gated, including on the cross-node resume path that already
     /// checked the registry's reverse index before sending.
     pub requester_bare_jid: jid::BareJid,
+    /// Exact local binding targeted by an interrupting request. A request
+    /// queued before rollback may reach the receiver after that binding has
+    /// retired; the connection owner must reject it before force cleanup.
+    pub target_binding: Option<BindingRef>,
     /// Reply for this request. An unanswered or dropped sender is
     /// inconclusive; only [`ForceDetachOutcome::Detached`] proves the
     /// force-detach completion required by a resumer.
     pub ack: tokio::sync::oneshot::Sender<ForceDetachOutcome>,
+}
+
+impl ForceDetachRequest {
+    /// An unstamped request retains its legacy semantics. A stamped request
+    /// may act only on the exact binding captured when it was queued.
+    pub fn targets_binding(&self, current: Option<&BindingRef>) -> bool {
+        self.target_binding
+            .as_ref()
+            .is_none_or(|target| Some(target) == current)
+    }
 }
 
 /// Outcome of a [`ForceDetachRequest`], reported back to the asker.
@@ -251,6 +265,23 @@ pub enum ForceDetachOutcome {
     /// callers must re-check persistence and retry rather than treating it as
     /// [`Self::Detached`].
     NotPersisted,
+}
+
+/// Whether an accepted interrupting control request also stopped this socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceDetachInterruption {
+    Stopped,
+    /// The binding retired after enqueue. The request remains accepted and
+    /// its acknowledgement is the only possible evidence of cleanup.
+    QueuedAfterRetirement,
+}
+
+/// A control request was not enqueued, retaining the original request.
+#[derive(Debug)]
+pub enum ForceDetachOfferError {
+    NoLocalBinding(Box<ForceDetachRequest>),
+    Full(Box<ForceDetachRequest>),
+    Closed(Box<ForceDetachRequest>),
 }
 
 /// Node-local identity of one published resource binding. This value is
@@ -440,6 +471,10 @@ impl ConnectionEntry {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         let binding_id = LocalConnectionBindingId::fresh();
         let endpoint = endpoint.bind(binding_id, binding_ref.clone(), admission_state);
+        let write_interruption = super::SocketWriteInterruption::new();
+        if let Some(binding) = &binding_ref {
+            let _ = write_interruption.publish_binding(binding, || ());
+        }
         Self {
             binding_id,
             connection_ref,
@@ -461,7 +496,7 @@ impl ConnectionEntry {
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
-            write_interruption: super::SocketWriteInterruption::new(),
+            write_interruption,
         }
     }
 
@@ -474,6 +509,7 @@ impl ConnectionEntry {
         if !control.bind(
             owner,
             Arc::clone(&self.sm_stream_id),
+            self.binding_ref.clone(),
             self.force_detach_tx.clone(),
         ) {
             return false;
@@ -582,24 +618,41 @@ impl ConnectionEntry {
     /// applicable stream or occupancy generation. Cleanup and acknowledgement
     /// remain the owning task's responsibility. A failed enqueue leaves I/O
     /// uninterrupted; callers that must preserve I/O use the ordinary sender.
-    /// The queue offer is not itself a write fence: interruption takes effect
-    /// at the subsequent stop transition, before this method returns.
+    /// A successful offer remains accepted even if the binding retires before
+    /// the stop transition. In that case the request is stamped with the old
+    /// binding and must not interrupt or force cleanup of its successor.
     pub fn try_force_detach_and_interrupt(
         &self,
         request: ForceDetachRequest,
-    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
         self.try_force_detach_and_interrupt_after_offer(request, || {})
     }
 
     fn try_force_detach_and_interrupt_after_offer(
         &self,
-        request: ForceDetachRequest,
+        mut request: ForceDetachRequest,
         after_offer: impl FnOnce(),
-    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
-        self.force_detach_tx.try_send(request)?;
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
+        let Some(binding) = self.binding_ref.as_ref() else {
+            return Err(ForceDetachOfferError::NoLocalBinding(Box::new(request)));
+        };
+        request.target_binding = Some(binding.clone());
+        self.force_detach_tx
+            .try_send(request)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(request) => {
+                    ForceDetachOfferError::Full(Box::new(request))
+                }
+                mpsc::error::TrySendError::Closed(request) => {
+                    ForceDetachOfferError::Closed(Box::new(request))
+                }
+            })?;
         after_offer();
-        self.write_interruption.cancel();
-        Ok(())
+        Ok(if self.write_interruption.cancel_if_binding(binding) {
+            ForceDetachInterruption::Stopped
+        } else {
+            ForceDetachInterruption::QueuedAfterRetirement
+        })
     }
 
     /// Pause the real interrupting path after its offer but before its stop.
@@ -608,7 +661,7 @@ impl ConnectionEntry {
         &self,
         request: ForceDetachRequest,
         after_offer: impl FnOnce(),
-    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
+    ) -> Result<ForceDetachInterruption, ForceDetachOfferError> {
         self.try_force_detach_and_interrupt_after_offer(request, after_offer)
     }
 

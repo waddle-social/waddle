@@ -63,11 +63,19 @@ pub(crate) async fn request_validated_local_resume(
     if jid.to_bare() != *requester_bare_jid {
         return Ok(LocalForcedDetachOutcome::IdentityMismatch);
     }
+    let Some(binding_ref) = entry.binding_ref().cloned() else {
+        return Ok(LocalForcedDetachOutcome::NotLiveLocally);
+    };
     let Some(control) = entry.resume_control() else {
         return Ok(LocalForcedDetachOutcome::NotLiveLocally);
     };
     match control
-        .request(stream_id.clone(), requester_bare_jid.clone(), h)
+        .request(
+            binding_ref,
+            stream_id.clone(),
+            requester_bare_jid.clone(),
+            h,
+        )
         .await
     {
         LocalResumeReply::Detached => Ok(LocalForcedDetachOutcome::Detached),
@@ -170,6 +178,7 @@ pub(crate) async fn request_local_forced_detach(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
     let request = ForceDetachRequest {
         origin: waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+        target_binding: None,
         requester_bare_jid: requester_bare_jid.clone(),
         ack: ack_tx,
     };
@@ -181,13 +190,14 @@ pub(crate) async fn request_local_forced_detach(
     // meaningful (a blocking send has no bound of its own).
     if let Err(error) = entry.try_force_detach_and_interrupt(request) {
         match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+            waddle_xmpp::registry::ForceDetachOfferError::Full(_) => {
                 tracing::debug!(
                     "cross-node resume force-detach: connection's force-detach channel is \
                          full; reporting not-live-locally so the asker retries"
                 );
             }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+            waddle_xmpp::registry::ForceDetachOfferError::Closed(_)
+            | waddle_xmpp::registry::ForceDetachOfferError::NoLocalBinding(_) => {
                 // The connection's own task already exited (e.g. it
                 // detached on its own, or died) — the force-detach
                 // channel is gone.
@@ -222,6 +232,7 @@ mod tests {
     use super::*;
     use jid::FullJid;
     use tokio::sync::mpsc;
+    use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
     use waddle_xmpp::registry::ConnectionEntry;
 
     fn register_resumable_connection(
@@ -230,11 +241,15 @@ mod tests {
         stream_id: &SmSessionId,
     ) -> mpsc::Receiver<ForceDetachRequest> {
         let (sender, _receiver) = mpsc::channel(1);
-        let entry = ConnectionEntry::new(sender);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(sender, binding_ref);
         let requests = entry
             .take_force_detach_rx()
             .expect("new connection receiver");
-        registry.register_entry(jid.clone(), entry);
+        registry
+            .register_socket_entry(jid.clone(), entry)
+            .expect("socket binding published");
         registry.set_sm_stream_id(jid, Some(stream_id.clone()));
         requests
     }

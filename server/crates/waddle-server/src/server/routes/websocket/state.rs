@@ -1997,7 +1997,9 @@ impl WsConnState {
     }
 
     pub(super) fn retire_binding_ref(&mut self) {
-        self.binding_ref = None;
+        if let Some(binding) = self.binding_ref.take() {
+            self.write_interruption.retire_binding(&binding);
+        }
     }
 
     /// Enter terminal non-resumable recovery without ever appending another

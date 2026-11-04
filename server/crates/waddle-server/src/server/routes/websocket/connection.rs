@@ -542,7 +542,11 @@ impl LiveWebSocketConnection {
                     match request {
                         Some(request) => {
                             let bound_bare = conn.phase.bound_jid().map(|jid| jid.to_bare());
-                            if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
+                            if !request.targets_binding(conn.binding_ref.as_ref()) {
+                                // Closing the acknowledgement is an unknown outcome,
+                                // never proof that this socket completed cleanup.
+                                debug!("force-detach ignored: binding retired after enqueue");
+                            } else if bound_bare.as_ref() != Some(&request.requester_bare_jid) {
                                 warn!("force-detach rejected: identity mismatch");
                                 let _ = request
                                     .ack
@@ -558,6 +562,7 @@ impl LiveWebSocketConnection {
                                     pending_force_detach.extend(drain_ready_force_detach_requests(
                                         &mut *force_detach_rx,
                                         bound_bare,
+                                        conn.binding_ref.as_ref(),
                                     ));
                                 }
                                 break;
@@ -577,6 +582,7 @@ impl LiveWebSocketConnection {
                                     pending_force_detach.extend(drain_ready_force_detach_requests(
                                         &mut *force_detach_rx,
                                         bound_bare,
+                                        conn.binding_ref.as_ref(),
                                     ));
                                 }
                                 break;
@@ -921,6 +927,7 @@ pub(super) async fn finish_connection<S, R, E>(
         pending_force_detach.extend(drain_ready_force_detach_requests(
             force_detach_rx,
             &bound_bare,
+            conn.binding_ref.as_ref(),
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
             let (sender, _) = socket_io.halves_mut();
@@ -1001,6 +1008,7 @@ pub(super) async fn finish_connection<S, R, E>(
             pending_force_detach.extend(drain_ready_force_detach_requests(
                 force_detach_rx,
                 &bound_bare,
+                conn.binding_ref.as_ref(),
             ));
         }
     }
@@ -1010,6 +1018,7 @@ pub(super) async fn finish_connection<S, R, E>(
         primary_origin,
     );
     let cleanup_bare = conn.phase.cleanup_jid().map(|jid| jid.to_bare());
+    let cleanup_binding = conn.binding_ref.clone();
     let cleanup = async {
         #[cfg(feature = "test-support")]
         if let Some(barrier) = &state
@@ -1038,7 +1047,14 @@ pub(super) async fn finish_connection<S, R, E>(
     };
     let (shutdown_outcome, late_requests) = match (force_detach_rx.take(), cleanup_bare) {
         (Some(receiver), Some(bound_bare)) => {
-            service_late_force_detach_waiters(receiver, bound_bare, primary_origin, cleanup).await
+            service_late_force_detach_waiters(
+                receiver,
+                bound_bare,
+                cleanup_binding,
+                primary_origin,
+                cleanup,
+            )
+            .await
         }
         _ => (cleanup.await, Vec::new()),
     };
@@ -1151,6 +1167,7 @@ fn force_detach_outcome_from_shutdown(
 pub(super) fn drain_ready_force_detach_requests(
     rx: &mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
     bound_bare: &jid::BareJid,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
 ) -> Vec<waddle_xmpp::registry::ForceDetachRequest> {
     let mut drained = Vec::new();
     let Some(receiver) = rx.as_mut() else {
@@ -1159,6 +1176,10 @@ pub(super) fn drain_ready_force_detach_requests(
     loop {
         match receiver.try_recv() {
             Ok(request) => {
+                if !request.targets_binding(binding) {
+                    debug!("force-detach ignored while draining: binding retired after enqueue");
+                    continue;
+                }
                 if request.requester_bare_jid != *bound_bare {
                     warn!("force-detach rejected while draining queue: identity mismatch");
                     let _ = request
@@ -1250,6 +1271,7 @@ fn start_late_force_detach_waiter_service(
             let (_, requests) = service_late_force_detach_waiters(
                 receiver,
                 bound_bare,
+                None,
                 Some(primary_origin),
                 cancel_task.cancelled(),
             )
@@ -1265,6 +1287,7 @@ fn start_late_force_detach_waiter_service(
 async fn service_late_force_detach_waiters<F>(
     mut receiver: mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
     bound_bare: jid::BareJid,
+    binding: Option<waddle_xmpp::ownership::BindingRef>,
     primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
     cleanup: F,
 ) -> (F::Output, Vec<waddle_xmpp::registry::ForceDetachRequest>)
@@ -1284,6 +1307,7 @@ where
                 handle_late_force_detach_waiter_during_cross_node_cleanup(
                     request,
                     &bound_bare,
+                    binding.as_ref(),
                     primary_origin,
                     &mut pending,
                 );
@@ -1296,6 +1320,7 @@ where
     drain_late_force_detach_waiters_during_cross_node_cleanup(
         &mut receiver,
         &bound_bare,
+        binding.as_ref(),
         primary_origin,
         &mut pending,
     );
@@ -1305,6 +1330,7 @@ where
 fn drain_late_force_detach_waiters_during_cross_node_cleanup(
     receiver: &mut mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>,
     bound_bare: &jid::BareJid,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
     primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
     pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
 ) {
@@ -1313,6 +1339,7 @@ fn drain_late_force_detach_waiters_during_cross_node_cleanup(
             Ok(request) => handle_late_force_detach_waiter_during_cross_node_cleanup(
                 request,
                 bound_bare,
+                binding,
                 primary_origin,
                 pending,
             ),
@@ -1325,9 +1352,14 @@ fn drain_late_force_detach_waiters_during_cross_node_cleanup(
 fn handle_late_force_detach_waiter_during_cross_node_cleanup(
     request: waddle_xmpp::registry::ForceDetachRequest,
     bound_bare: &jid::BareJid,
+    binding: Option<&waddle_xmpp::ownership::BindingRef>,
     primary_origin: Option<waddle_xmpp::registry::ForceDetachOrigin>,
     pending: &mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
 ) {
+    if !request.targets_binding(binding) {
+        debug!("force-detach ignored during cleanup: binding retired after enqueue");
+        return;
+    }
     if request.requester_bare_jid != *bound_bare {
         warn!("force-detach rejected during cleanup: identity mismatch");
         let _ = request
@@ -2423,11 +2455,18 @@ mod tests {
     async fn unfinished_live_resume_returns_when_socket_owner_drops() {
         let conn = WsConnState::new();
         let (outbound, _outbound_rx) = mpsc::channel(1);
-        let entry = waddle_xmpp::registry::ConnectionEntry::new(outbound);
+        let binding_ref = waddle_xmpp::ownership::BindingRef::fresh(
+            waddle_xmpp::ownership::ConnectionRef::fresh(
+                waddle_xmpp::ownership::NodeLeaseIdentity::local_process(),
+            ),
+        );
+        let entry =
+            waddle_xmpp::registry::ConnectionEntry::new_for_binding(outbound, binding_ref.clone());
         let owner: FullJid = "alice@example.test/old".parse().expect("full JID");
         assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
         let guard = LiveResumeOwnerGuard(conn.live_resume_control.clone());
         let request = conn.live_resume_control.request(
+            binding_ref,
             waddle_xmpp::pending_delivery::SmSessionId::try_from_wire("old-stream")
                 .expect("valid stream ID"),
             owner.to_bare(),
@@ -2445,6 +2484,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_binding_requests_do_not_enter_initial_or_late_cleanup() {
+        use waddle_xmpp::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
+        use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachRequest};
+
+        let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+        let old = BindingRef::fresh(connection.clone());
+        let current = BindingRef::fresh(connection);
+        let bare: BareJid = "alice@example.com".parse().expect("bare JID");
+        let (sender, receiver) = mpsc::channel(2);
+        let mut receiver = Some(receiver);
+        let (ack, reply) = oneshot::channel();
+        sender
+            .try_send(ForceDetachRequest {
+                origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: Some(old.clone()),
+                requester_bare_jid: bare.clone(),
+                ack,
+            })
+            .expect("queue old request");
+        assert!(drain_ready_force_detach_requests(&mut receiver, &bare, Some(&current)).is_empty());
+        assert!(
+            reply.await.is_err(),
+            "stale request must not acknowledge cleanup"
+        );
+
+        let (ack, reply) = oneshot::channel();
+        sender
+            .try_send(ForceDetachRequest {
+                origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: Some(old),
+                requester_bare_jid: bare.clone(),
+                ack,
+            })
+            .expect("queue old late request");
+        let (finish, finished) = oneshot::channel::<()>();
+        let task = tokio::spawn(service_late_force_detach_waiters(
+            receiver.take().expect("receiver"),
+            bare,
+            Some(current),
+            Some(ForceDetachOrigin::FreshBindReplacement),
+            async move { finished.await.expect("finish cleanup") },
+        ));
+        assert!(
+            reply.await.is_err(),
+            "stale late request must not acknowledge cleanup"
+        );
+        finish.send(()).expect("finish cleanup");
+        let (_, pending) = task.await.expect("late waiter task");
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
     async fn late_waiter_cutoff_is_bounded_with_an_outstanding_permit() {
         use waddle_xmpp::registry::{ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest};
 
@@ -2454,6 +2545,7 @@ mod tests {
         sender
             .send(ForceDetachRequest {
                 origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
                 requester_bare_jid: bare.clone(),
                 ack: queued_ack,
             })
@@ -2463,7 +2555,7 @@ mod tests {
 
         let (_, pending) = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            service_late_force_detach_waiters(receiver, bare.clone(), None, async {}),
+            service_late_force_detach_waiters(receiver, bare.clone(), None, None, async {}),
         )
         .await
         .expect("cutoff must not wait for an outstanding permit");
@@ -2477,6 +2569,7 @@ mod tests {
         let (late_ack, late_reply) = oneshot::channel();
         permit.send(ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare,
             ack: late_ack,
         });
@@ -2500,6 +2593,7 @@ mod tests {
             receiver,
             bare.clone(),
             None,
+            None,
             async move { finished.await.expect("complete cleanup") },
         ));
         let mut replies = Vec::new();
@@ -2513,6 +2607,7 @@ mod tests {
             sender
                 .send(ForceDetachRequest {
                     origin,
+                    target_binding: None,
                     requester_bare_jid: bare.clone(),
                     ack,
                 })
@@ -2524,6 +2619,7 @@ mod tests {
         sender
             .send(ForceDetachRequest {
                 origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
                 requester_bare_jid: "other@example.com".parse().expect("other bare JID"),
                 ack: mismatch_ack,
             })
@@ -2962,6 +3058,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -2999,6 +3096,7 @@ mod tests {
         let (resume_tx, resume_rx) = oneshot::channel();
         tx.send(ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: resume_tx,
         })
@@ -3007,6 +3105,7 @@ mod tests {
         let (stale_tx, stale_rx) = oneshot::channel();
         tx.send(ForceDetachRequest {
             origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: stale_tx,
         })
@@ -3050,6 +3149,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -3086,6 +3186,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: BareJid::from_str("mismatch@example.com")
                 .expect("valid mismatched bare jid"),
             ack: ack_tx,
@@ -3123,6 +3224,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -3160,6 +3262,7 @@ mod tests {
 
         tx.send(waddle_xmpp::registry::ForceDetachRequest {
             origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: ack_tx,
         })
@@ -4205,6 +4308,7 @@ mod tests {
             .iter()
             .map(|&origin| waddle_xmpp::registry::ForceDetachRequest {
                 origin,
+                target_binding: None,
                 requester_bare_jid: "alice@example.com".parse().expect("requester JID"),
                 ack: tokio::sync::oneshot::channel().0,
             })

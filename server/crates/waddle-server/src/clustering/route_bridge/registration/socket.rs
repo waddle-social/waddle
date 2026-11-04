@@ -1269,16 +1269,17 @@ impl OrderedRelayDeliveryBridge {
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
         let request = ForceDetachRequest {
             origin: msg.origin,
+            target_binding: entry.binding_ref().cloned(),
             requester_bare_jid: msg.requester_bare_jid.clone(),
             ack,
         };
         let queued = if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
         {
-            entry.try_force_detach_and_interrupt(request)
+            entry.try_force_detach_and_interrupt(request).is_ok()
         } else {
-            entry.force_detach_sender().try_send(request)
+            entry.force_detach_sender().try_send(request).is_ok()
         };
-        if queued.is_err() {
+        if !queued {
             return RelayForceDetachRemoteUserResourceReply {
                 outcome: ForceDetachOutcome::NotPersisted,
                 status: RelayRemoteResourceForceDetachStatus::Unknown,

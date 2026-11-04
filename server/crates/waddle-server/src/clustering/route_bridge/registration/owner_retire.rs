@@ -55,13 +55,21 @@ impl OrderedRelayDeliveryBridge {
                             } else {
                                 ForceDetachOrigin::FreshBindReplacement
                             },
+                            target_binding: pending.entry.binding_ref().cloned(),
                             requester_bare_jid: jid.to_bare(),
                             ack,
                         };
                         let _ = if pending.generation == generation {
-                            pending.entry.force_detach_sender().try_send(request)
+                            pending
+                                .entry
+                                .force_detach_sender()
+                                .try_send(request)
+                                .is_ok()
                         } else {
-                            pending.entry.try_force_detach_and_interrupt(request)
+                            pending
+                                .entry
+                                .try_force_detach_and_interrupt(request)
+                                .is_ok()
                         };
                         // Route removal and the detach ACK can both precede
                         // handler shutdown. Only the lifecycle is proof.

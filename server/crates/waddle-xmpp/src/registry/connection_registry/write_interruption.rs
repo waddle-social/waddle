@@ -1,5 +1,6 @@
 //! Physical-socket write interruption shared with the connection owner.
 
+use crate::ownership::BindingRef;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -17,13 +18,61 @@ pub struct SocketWriteInterruption {
 
 #[derive(Debug, Default)]
 struct InterruptionState {
-    gate: Mutex<()>,
+    gate: Mutex<Option<BindingRef>>,
     stopped: AtomicBool,
 }
 
 impl SocketWriteInterruption {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Publish an exact binding together with its route. The caller must hold
+    /// the route slot and perform only the synchronous insertion in `publish`.
+    pub(super) fn publish_binding<T>(
+        &self,
+        binding: &BindingRef,
+        publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let mut current = self
+            .state
+            .gate
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if self.state.stopped.load(Ordering::Acquire) {
+            return None;
+        }
+        *current = Some(binding.clone());
+        Some(publish())
+    }
+
+    /// Revoke a binding before asynchronous rollback can expose its successor.
+    pub fn retire_binding(&self, binding: &BindingRef) {
+        let mut current = self
+            .state
+            .gate
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+        if current.as_ref() == Some(binding) {
+            *current = None;
+        }
+    }
+
+    /// Interrupt only if this exact binding still owns the physical socket.
+    pub(super) fn cancel_if_binding(&self, binding: &BindingRef) -> bool {
+        {
+            let current = self
+                .state
+                .gate
+                .lock()
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
+            if current.as_ref() != Some(binding) {
+                return false;
+            }
+            self.state.stopped.store(true, Ordering::Release);
+        }
+        self.signal.cancel();
+        true
     }
 
     /// Stop future write admission, then wake any parked transport operation.

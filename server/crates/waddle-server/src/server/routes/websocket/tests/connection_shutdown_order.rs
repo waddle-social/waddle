@@ -183,6 +183,7 @@ async fn assert_shutdown_order(cancel_cleanup: bool, timing: RequestTiming) {
     let (ack, mut ack_rx) = oneshot::channel();
     let mut request = Some(ForceDetachRequest {
         origin: ForceDetachOrigin::CrossNodeResume,
+        target_binding: None,
         requester_bare_jid: jid.to_bare(),
         ack,
     });
@@ -357,6 +358,7 @@ async fn assert_shutdown_order(cancel_cleanup: bool, timing: RequestTiming) {
             force_tx
                 .try_send(ForceDetachRequest {
                     origin: ForceDetachOrigin::CrossNodeResume,
+                    target_binding: None,
                     requester_bare_jid: jid.to_bare(),
                     ack,
                 })

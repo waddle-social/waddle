@@ -111,6 +111,7 @@ async fn fresh_remote_retirement_does_not_interrupt_when_control_queue_is_full()
         sender
             .try_send(ForceDetachRequest {
                 origin: request.origin,
+                target_binding: None,
                 requester_bare_jid: request.requester_bare_jid.clone(),
                 ack,
             })

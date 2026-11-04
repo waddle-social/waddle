@@ -2066,6 +2066,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
         .force_detach_sender()
         .try_send(ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: crossnode_ack_tx,
         })
@@ -2102,6 +2103,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
             let drained = super::super::connection::drain_ready_force_detach_requests(
                 &mut force_detach_rx,
                 &bare_jid,
+                None,
             );
             if !drained.is_empty() {
                 break drained;
@@ -2188,11 +2190,13 @@ async fn cross_node_origin_is_authoritative_when_stale_retirement_queues_first()
     let mut pending_force_detach = vec![
         ForceDetachRequest {
             origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: stale_ack_tx,
         },
         ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: crossnode_ack_tx,
         },
@@ -2243,16 +2247,19 @@ async fn fresh_replacement_wins_queued_resume_and_releases_stale_actor_waiter() 
         let mut requests = vec![
             ForceDetachRequest {
                 origin: ForceDetachOrigin::RegistryStaleActorRetirement,
+                target_binding: None,
                 requester_bare_jid: bare_jid.clone(),
                 ack: stale_tx,
             },
             ForceDetachRequest {
                 origin: ForceDetachOrigin::CrossNodeResume,
+                target_binding: None,
                 requester_bare_jid: bare_jid.clone(),
                 ack: resume_tx,
             },
             ForceDetachRequest {
                 origin: ForceDetachOrigin::FreshBindReplacement,
+                target_binding: None,
                 requester_bare_jid: bare_jid,
                 ack: fresh_tx,
             },
@@ -2298,11 +2305,13 @@ async fn owner_managed_force_detach_waiter_stays_queued_during_cross_node_cleanu
     let mut pending_force_detach = vec![
         ForceDetachRequest {
             origin: ForceDetachOrigin::CrossNodeResume,
+            target_binding: None,
             requester_bare_jid: bare_jid.clone(),
             ack: crossnode_ack_tx,
         },
         ForceDetachRequest {
             origin: ForceDetachOrigin::OwnerManagedRetirement,
+            target_binding: None,
             requester_bare_jid: bare_jid,
             ack: owner_managed_ack_tx,
         },
