@@ -63,8 +63,9 @@ async fn mam_reader_uses_attested_main_database_and_rejects_drift() {
     )
     .await
     .expect("pool lanes");
+    let ingress = pool.ingress();
     assert!(matches!(
-        DarkMamReader::attach(pool.ingress(), owner_role.clone()).await,
+        DarkMamReader::attach(&ingress, owner_role.clone()).await,
         Err(DarkMamReadError::AttestedMainDatabaseRequired)
     ));
     assert!(DarkMamReader::attach(pool.global(), owner_role.clone())
@@ -181,7 +182,7 @@ async fn mam_reader_uses_attested_main_database_and_rejects_drift() {
         .await
         .expect("attach owner-prepared archive");
     let held_main = pool.global().begin().await.expect("hold main lane");
-    let held_ingress = pool.ingress().begin().await.expect("reserved ingress lane");
+    let held_ingress = ingress.begin().await.expect("reserved ingress lane");
     held_ingress.rollback().await.expect("release ingress lane");
     assert!(
         tokio::time::timeout(
@@ -402,6 +403,7 @@ async fn mam_reader_uses_attested_main_database_and_rejects_drift() {
         3
     );
     drop(reader);
+    drop(ingress);
     drop(pool);
     drop(unattested);
     drop(sqlite);
