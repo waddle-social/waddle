@@ -14,15 +14,16 @@
 //! ADR-0017 Phase 1).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use kameo::Actor;
 use tracing::debug;
 
-use crate::registry::connection_registry::{ConnectionEntry, PresenceState};
+use crate::registry::connection_registry::{
+    ConnectionEntry, LocalConnectionBindingId, PresenceState,
+};
 use crate::Stanza;
 
 pub mod delivery;

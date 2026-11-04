@@ -14,6 +14,7 @@ mod checksum;
 pub mod global;
 mod ledger_error;
 mod namespace;
+mod owner;
 mod runner;
 mod sql;
 #[cfg(test)]
@@ -24,5 +25,18 @@ pub mod waddle;
 pub use checksum::migration_checksum;
 pub use ledger_error::MigrationLedgerError;
 pub use namespace::{MigrationNamespace, WADDLE_NAMESPACE_START};
+pub use owner::{
+    bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
+    inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,
+    run_dark_postgres_owner, DarkEpochAclStage, DarkMamOwnerError, DarkMigrationOwnerConfig,
+    DarkMigrationOwnerError, OwnerRejectionGrantError, OwnerRejectionGrantState,
+};
+#[cfg(feature = "test-support")]
+pub use owner::{
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
+    DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
+};
 pub use runner::MigrationRunner;
 pub use types::Migration;

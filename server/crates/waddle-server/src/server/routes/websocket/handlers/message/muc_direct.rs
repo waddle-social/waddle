@@ -120,6 +120,7 @@ async fn handle_muc_private_message(
         use crate::server::routes::interpret::effects::RoomExecutionPath;
         deps.effects.set_room_execution(RoomExecutionPath::Local {
             room: room_jid.clone(),
+            client_origin: None,
             fence: snapshot
                 .claim_fence
                 .clone()

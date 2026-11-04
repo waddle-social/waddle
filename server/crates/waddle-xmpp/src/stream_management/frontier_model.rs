@@ -1,0 +1,507 @@
+//! Test-only model of a contiguous outbound stream-management frontier.
+//!
+//! This model assumes that its caller has current authority and a known
+//! committed exposure fence, and records the next exposure immediately before
+//! one write attempt. It cannot prove the fence, authority, an actual write, or
+//! durable recovery. Replay rows are represented only by their ordinals.
+
+const HALF_SPACE: u32 = 1 << 31;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FrontierModel {
+    peer_acked: u64,
+    exposed: u64,
+    appended: u64,
+    capacity: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InitError {
+    AmbiguousCapacity,
+    OutOfOrder,
+    OutstandingExceedsCapacity,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AppendError {
+    OrdinalExhausted,
+    Capacity,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttemptError {
+    NotRetained,
+    OutOfOrder,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AttemptOutcome {
+    NewlyExposed,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AckKind {
+    Live,
+    Resume,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AckOutcome {
+    Advanced { through: u64 },
+    Duplicate,
+    StaleIgnored,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AckError {
+    HandledTooHigh { h: u32, send_count: u32 },
+    StaleResume { h: u32 },
+    Antipodal { h: u32 },
+}
+
+impl FrontierModel {
+    fn new(capacity: u32) -> Result<Self, InitError> {
+        Self::from_ordinals(0, 0, 0, capacity)
+    }
+
+    /// Model a supplied contiguous history; this constructor does not validate
+    /// that the history, retained rows, fence, or owner exist outside the model.
+    fn from_ordinals(
+        peer_acked: u64,
+        exposed: u64,
+        appended: u64,
+        capacity: u32,
+    ) -> Result<Self, InitError> {
+        if capacity >= HALF_SPACE {
+            return Err(InitError::AmbiguousCapacity);
+        }
+        if peer_acked > exposed || exposed > appended {
+            return Err(InitError::OutOfOrder);
+        }
+        if appended - peer_acked > u64::from(capacity) {
+            return Err(InitError::OutstandingExceedsCapacity);
+        }
+        Ok(Self {
+            peer_acked,
+            exposed,
+            appended,
+            capacity,
+        })
+    }
+
+    /// Retain the next replay ordinal without asserting any exposure.
+    fn append(&mut self) -> Result<u64, AppendError> {
+        let next = self
+            .appended
+            .checked_add(1)
+            .ok_or(AppendError::OrdinalExhausted)?;
+        if next - self.peer_acked > u64::from(self.capacity) {
+            return Err(AppendError::Capacity);
+        }
+        self.appended = next;
+        Ok(next)
+    }
+
+    /// Caller assumes a current authority and known committed fence, and calls
+    /// immediately before one write attempt. Previously exposed retained rows
+    /// may be retried; new exposure must advance by exactly one ordinal.
+    fn record_assumed_committed_attempt(
+        &mut self,
+        ordinal: u64,
+    ) -> Result<AttemptOutcome, AttemptError> {
+        if ordinal <= self.peer_acked || ordinal > self.appended {
+            return Err(AttemptError::NotRetained);
+        }
+        if ordinal <= self.exposed {
+            return Ok(AttemptOutcome::Retry);
+        }
+        if ordinal - self.exposed != 1 {
+            return Err(AttemptError::OutOfOrder);
+        }
+        self.exposed = ordinal;
+        Ok(AttemptOutcome::NewlyExposed)
+    }
+
+    /// Classify relative to the acknowledged floor in the wrapping half-space.
+    /// A forward value beyond exposure cannot delete rows. A forward distance
+    /// greater than half the space is treated as backward, but may instead be a
+    /// far-ahead value. An older ACK outside the backward half-space can alias
+    /// an exposed forward ordinal and advance the floor; this model cannot
+    /// identify its actual ordinal from the wire value.
+    fn acknowledge(&mut self, h: u32, kind: AckKind) -> Result<AckOutcome, AckError> {
+        let distance = h.wrapping_sub(self.peer_acked as u32);
+        if distance == 0 {
+            return Ok(AckOutcome::Duplicate);
+        }
+        if distance == HALF_SPACE {
+            return Err(AckError::Antipodal { h });
+        }
+        if distance > HALF_SPACE {
+            return match kind {
+                AckKind::Live => Ok(AckOutcome::StaleIgnored),
+                AckKind::Resume => Err(AckError::StaleResume { h }),
+            };
+        }
+        if u64::from(distance) > self.exposed - self.peer_acked {
+            return Err(AckError::HandledTooHigh {
+                h,
+                send_count: self.exposed as u32,
+            });
+        }
+        self.peer_acked += u64::from(distance);
+        Ok(AckOutcome::Advanced {
+            through: self.peer_acked,
+        })
+    }
+
+    /// All retained rows, including appended rows with no write attempt yet.
+    fn replay(&self) -> impl DoubleEndedIterator<Item = u64> {
+        (self.peer_acked..self.appended).map(|ordinal| ordinal + 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use proptest::collection::vec;
+    use proptest::prelude::{any, prop_assert, prop_assert_eq, prop_assume, proptest};
+
+    use super::{
+        AckError, AckKind, AckOutcome, AppendError, AttemptError, AttemptOutcome, FrontierModel,
+        InitError, HALF_SPACE,
+    };
+
+    #[test]
+    fn appended_but_unattempted_rows_remain_in_replay_and_cannot_be_acked() {
+        let mut model = FrontierModel::new(4).unwrap();
+        assert_eq!(
+            model.acknowledge(0, AckKind::Live),
+            Ok(AckOutcome::Duplicate)
+        );
+        assert_eq!(model.append(), Ok(1));
+        assert_eq!(model.append(), Ok(2));
+        assert_eq!(model.append(), Ok(3));
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        let before = model.clone();
+        assert_eq!(
+            model.acknowledge(1, AckKind::Live),
+            Err(AckError::HandledTooHigh {
+                h: 1,
+                send_count: 0,
+            })
+        );
+        assert_eq!(model, before);
+        assert_eq!(
+            model.record_assumed_committed_attempt(2),
+            Err(AttemptError::OutOfOrder)
+        );
+        assert_eq!(model, before);
+
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Ok(AttemptOutcome::Retry)
+        );
+        assert_eq!(
+            model.acknowledge(1, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: 1 })
+        );
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![2, 3]);
+        let before = model.clone();
+        assert_eq!(
+            model.acknowledge(2, AckKind::Resume),
+            Err(AckError::HandledTooHigh {
+                h: 2,
+                send_count: 1,
+            })
+        );
+        assert_eq!(model, before);
+        assert_eq!(
+            model.record_assumed_committed_attempt(1),
+            Err(AttemptError::NotRetained)
+        );
+        assert_eq!(model, before);
+    }
+
+    #[test]
+    fn counters_cross_u32_max_without_discarding_unattempted_rows() {
+        let start = u64::from(u32::MAX) - 1;
+        let mut model = FrontierModel::from_ordinals(start, start, start, 4).unwrap();
+        assert_eq!(model.append(), Ok(u64::from(u32::MAX)));
+        assert_eq!(model.append(), Ok(u64::from(u32::MAX) + 1));
+        assert_eq!(model.append(), Ok(u64::from(u32::MAX) + 2));
+        assert_eq!(
+            model.record_assumed_committed_attempt(u64::from(u32::MAX)),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(
+            model.record_assumed_committed_attempt(u64::from(u32::MAX) + 1),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(
+            model.acknowledge(u32::MAX, AckKind::Live),
+            Ok(AckOutcome::Advanced {
+                through: u64::from(u32::MAX),
+            })
+        );
+        assert_eq!(
+            model.acknowledge(0, AckKind::Resume),
+            Ok(AckOutcome::Advanced {
+                through: u64::from(u32::MAX) + 1,
+            })
+        );
+        assert_eq!(
+            model.acknowledge(0, AckKind::Live),
+            Ok(AckOutcome::Duplicate)
+        );
+        assert_eq!(
+            model.replay().collect::<Vec<_>>(),
+            vec![u64::from(u32::MAX) + 2]
+        );
+        let before = model.clone();
+        assert_eq!(
+            model.acknowledge(1, AckKind::Live),
+            Err(AckError::HandledTooHigh {
+                h: 1,
+                send_count: 0,
+            })
+        );
+        assert_eq!(model, before);
+    }
+
+    #[test]
+    fn resume_ack_from_a_prior_counter_cycle_can_alias_forward() {
+        let next_cycle = u64::from(u32::MAX) + 1;
+        let old_ordinal = 0u64;
+        let mut old_ack =
+            FrontierModel::from_ordinals(next_cycle - 1, next_cycle, next_cycle, 1).unwrap();
+        let mut current_ack = old_ack.clone();
+        assert_eq!(old_ack.replay().collect::<Vec<_>>(), vec![next_cycle]);
+        assert_eq!(old_ordinal as u32, next_cycle as u32);
+
+        let old_result = old_ack.acknowledge(old_ordinal as u32, AckKind::Resume);
+        let current_result = current_ack.acknowledge(next_cycle as u32, AckKind::Resume);
+        assert_eq!(
+            old_result,
+            Ok(AckOutcome::Advanced {
+                through: next_cycle
+            })
+        );
+        assert_eq!(old_result, current_result);
+        assert_eq!(old_ack, current_ack);
+        assert_eq!(old_ack.replay().next(), None);
+    }
+
+    #[test]
+    fn duplicate_backward_window_antipodal_and_high_acknowledgements_never_delete_rows() {
+        let mut model = FrontierModel::from_ordinals(9, 11, 12, 4).unwrap();
+        for kind in [AckKind::Live, AckKind::Resume] {
+            let before = model.clone();
+            assert_eq!(model.acknowledge(9, kind), Ok(AckOutcome::Duplicate));
+            assert_eq!(model, before);
+            assert_eq!(
+                model.acknowledge(9u32.wrapping_add(HALF_SPACE), kind),
+                Err(AckError::Antipodal {
+                    h: 9u32.wrapping_add(HALF_SPACE),
+                })
+            );
+            assert_eq!(model, before);
+            assert_eq!(
+                model.acknowledge(12, kind),
+                Err(AckError::HandledTooHigh {
+                    h: 12,
+                    send_count: 11,
+                })
+            );
+            assert_eq!(model, before);
+            assert_eq!(
+                model.acknowledge(9u32.wrapping_add(HALF_SPACE - 1), kind),
+                Err(AckError::HandledTooHigh {
+                    h: 9u32.wrapping_add(HALF_SPACE - 1),
+                    send_count: 11,
+                })
+            );
+            assert_eq!(model, before);
+        }
+        let before = model.clone();
+        assert_eq!(
+            model.acknowledge(8, AckKind::Live),
+            Ok(AckOutcome::StaleIgnored)
+        );
+        assert_eq!(model, before);
+        assert_eq!(
+            model.acknowledge(8, AckKind::Resume),
+            Err(AckError::StaleResume { h: 8 })
+        );
+        assert_eq!(model, before);
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn capacity_half_space_and_u64_boundaries_refuse_before_mutation() {
+        assert_eq!(
+            FrontierModel::new(HALF_SPACE),
+            Err(InitError::AmbiguousCapacity)
+        );
+        assert_eq!(
+            FrontierModel::from_ordinals(2, 1, 3, 4),
+            Err(InitError::OutOfOrder)
+        );
+        assert_eq!(
+            FrontierModel::from_ordinals(1, 3, 2, 4),
+            Err(InitError::OutOfOrder)
+        );
+        assert_eq!(
+            FrontierModel::from_ordinals(0, 0, u64::from(HALF_SPACE), HALF_SPACE - 1),
+            Err(InitError::OutstandingExceedsCapacity)
+        );
+        let mut model = FrontierModel::from_ordinals(
+            0,
+            u64::from(HALF_SPACE) - 1,
+            u64::from(HALF_SPACE) - 1,
+            HALF_SPACE - 1,
+        )
+        .unwrap();
+        let before = model.clone();
+        assert_eq!(model.append(), Err(AppendError::Capacity));
+        assert_eq!(model, before);
+        assert_eq!(model.replay().next(), Some(1));
+        assert_eq!(model.replay().next_back(), Some(u64::from(HALF_SPACE) - 1));
+        assert_eq!(
+            model.acknowledge(HALF_SPACE - 1, AckKind::Live),
+            Ok(AckOutcome::Advanced {
+                through: u64::from(HALF_SPACE) - 1,
+            })
+        );
+        assert_eq!(model.append(), Ok(u64::from(HALF_SPACE)));
+
+        let mut zero_capacity = FrontierModel::new(0).unwrap();
+        let before = zero_capacity.clone();
+        assert_eq!(zero_capacity.append(), Err(AppendError::Capacity));
+        assert_eq!(zero_capacity, before);
+
+        let mut exhausted =
+            FrontierModel::from_ordinals(u64::MAX - 1, u64::MAX, u64::MAX, 1).unwrap();
+        assert_eq!(exhausted.replay().collect::<Vec<_>>(), vec![u64::MAX]);
+        assert_eq!(
+            exhausted.acknowledge(u32::MAX, AckKind::Live),
+            Ok(AckOutcome::Advanced { through: u64::MAX })
+        );
+        let before = exhausted.clone();
+        assert_eq!(exhausted.append(), Err(AppendError::OrdinalExhausted));
+        assert_eq!(exhausted, before);
+        assert_eq!(exhausted.replay().next(), None);
+    }
+
+    #[test]
+    fn attempts_never_skip_or_expose_a_non_retained_row() {
+        let mut model = FrontierModel::from_ordinals(100, 101, 103, 3).unwrap();
+        for (ordinal, expected) in [
+            (100, AttemptError::NotRetained),
+            (103, AttemptError::OutOfOrder),
+            (104, AttemptError::NotRetained),
+        ] {
+            let before = model.clone();
+            assert_eq!(
+                model.record_assumed_committed_attempt(ordinal),
+                Err(expected)
+            );
+            assert_eq!(model, before);
+        }
+        assert_eq!(
+            model.record_assumed_committed_attempt(101),
+            Ok(AttemptOutcome::Retry)
+        );
+        assert_eq!(
+            model.record_assumed_committed_attempt(102),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(
+            model.record_assumed_committed_attempt(103),
+            Ok(AttemptOutcome::NewlyExposed)
+        );
+        assert_eq!(model.replay().collect::<Vec<_>>(), vec![101, 102, 103]);
+    }
+
+    proptest! {
+        #[test]
+        fn mixed_operations_preserve_frontiers_and_replay(
+            start in any::<u64>(),
+            operations in vec((0u8..8, any::<u8>()), 0..150),
+        ) {
+            prop_assume!(start <= u64::MAX - 150);
+            let mut model = FrontierModel::from_ordinals(start, start, start, 12).unwrap();
+            let mut retained = VecDeque::new();
+            for (operation, value) in operations {
+                let before = model.clone();
+                match operation {
+                    0 | 1 => match model.append() {
+                        Ok(ordinal) => retained.push_back(ordinal),
+                        Err(AppendError::Capacity) => prop_assert_eq!(&model, &before),
+                        Err(AppendError::OrdinalExhausted) => unreachable!(),
+                    },
+                    2 => {
+                        let ordinal = model.exposed + 1;
+                        if model.record_assumed_committed_attempt(ordinal).is_err() {
+                            prop_assert_eq!(&model, &before);
+                        }
+                    }
+                    3 => {
+                        let available = model.exposed - model.peer_acked;
+                        let distance = u64::from(value) % (available + 1);
+                        let h = (model.peer_acked + distance) as u32;
+                        let result = model.acknowledge(h, AckKind::Live).unwrap();
+                        if distance == 0 {
+                            prop_assert_eq!(result, AckOutcome::Duplicate);
+                        } else {
+                            prop_assert_eq!(result, AckOutcome::Advanced {
+                                through: before.peer_acked + distance,
+                            });
+                            for _ in 0..distance {
+                                retained.pop_front();
+                            }
+                        }
+                    }
+                    4 => {
+                        let h = (model.exposed as u32).wrapping_add(1);
+                        prop_assert_eq!(
+                            model.acknowledge(h, AckKind::Live),
+                            Err(AckError::HandledTooHigh { h, send_count: model.exposed as u32 }),
+                        );
+                        prop_assert_eq!(&model, &before);
+                    }
+                    5 => {
+                        let h = (model.peer_acked as u32).wrapping_sub(1);
+                        prop_assert_eq!(model.acknowledge(h, AckKind::Live), Ok(AckOutcome::StaleIgnored));
+                        prop_assert_eq!(&model, &before);
+                        prop_assert_eq!(model.acknowledge(h, AckKind::Resume), Err(AckError::StaleResume { h }));
+                        prop_assert_eq!(&model, &before);
+                    }
+                    6 => {
+                        let h = (model.peer_acked as u32).wrapping_add(HALF_SPACE);
+                        prop_assert_eq!(model.acknowledge(h, AckKind::Resume), Err(AckError::Antipodal { h }));
+                        prop_assert_eq!(&model, &before);
+                    }
+                    _ => {
+                        let ordinal = model.appended + 1;
+                        prop_assert_eq!(model.record_assumed_committed_attempt(ordinal), Err(AttemptError::NotRetained));
+                        prop_assert_eq!(&model, &before);
+                    }
+                }
+                prop_assert!(before.peer_acked <= model.peer_acked);
+                prop_assert!(before.exposed <= model.exposed);
+                prop_assert!(before.appended <= model.appended);
+                prop_assert!(model.peer_acked <= model.exposed && model.exposed <= model.appended);
+                prop_assert!(model.appended - model.peer_acked <= u64::from(model.capacity));
+                prop_assert!(model.appended - model.peer_acked < u64::from(HALF_SPACE));
+                prop_assert_eq!(model.replay().collect::<Vec<_>>(), retained.iter().copied().collect::<Vec<_>>());
+            }
+        }
+    }
+}

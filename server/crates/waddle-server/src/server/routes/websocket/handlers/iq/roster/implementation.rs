@@ -17,7 +17,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_roster_iq
     state: &WebSocketState,
     bound_jid: Option<&FullJid>,
     roster_interested: &mut bool,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) -> Vec<String> {
     let Some(full_jid) = bound_jid else {
         return vec![build_xmpp_error_response(
@@ -69,7 +69,7 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
     user_jid: &BareJid,
     full_jid: &FullJid,
     roster_interested: &mut bool,
-    registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
 ) -> Vec<String> {
     let query = match parse_roster_get(iq) {
         Ok(query) => query,
@@ -101,15 +101,22 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
         }
     };
 
-    state
-        .deps
-        .protocol
-        .connection_registry
-        .mark_roster_interested(full_jid);
-    if let Some(owner) = registry_owner {
-        mirror_remote_roster_interest(state, full_jid, owner).await;
-    }
+    #[cfg(test)]
+    super::super::conn_state::wait_before_resource_metadata_write().await;
+    let Some(owner) = registry_owner.filter(|owner| {
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .mark_roster_interested_if_owner(full_jid, owner)
+    }) else {
+        return vec![build_xmpp_error_response(
+            iq,
+            XmppError::service_unavailable(None),
+        )];
+    };
     *roster_interested = true;
+    mirror_remote_roster_interest(state, full_jid, owner).await;
     // XEP-0237 §2.6: matching ver -> empty <iq type='result'/> (no <query>);
     // anything else (Absent, Bootstrap, Cached(stale)) -> full roster + ver.
     if let Some(cached) = query.ver.cached() {
@@ -124,7 +131,7 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn handle_r
 pub(in crate::server::routes::websocket::handlers::iq::roster) async fn mirror_remote_roster_interest(
     state: &WebSocketState,
     jid: &FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
     if let Some(bridge) = state
         .deps
@@ -147,7 +154,7 @@ pub(in crate::server::routes::websocket::handlers::iq::roster) async fn mirror_r
 pub(in crate::server::routes::websocket::handlers::iq::roster) async fn mirror_remote_roster_interest(
     _state: &WebSocketState,
     _jid: &FullJid,
-    _owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) {
 }
 

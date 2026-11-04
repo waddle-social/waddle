@@ -1,16 +1,18 @@
 //! Monotone physical insertion metadata for bounded notification recovery laps.
 
-use super::{DatabaseDriver, DatabasePendingDeliveryStorage, PendingRowId, PendingStorageError};
-use crate::db::DatabaseError;
-use crate::db::Transaction;
+use super::{DatabaseDriver, PendingRowId, PendingStorageError};
+use crate::db::{Database, DatabaseError, Transaction};
 
 const INITIALIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const BACKFILL_BATCH: i64 = 128;
 
-pub(super) async fn initialize(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<(), PendingStorageError> {
-    tokio::time::timeout(INITIALIZATION_BUDGET, initialize_inner(storage))
+pub(super) const POSTGRES_IMMUTABLE_BODY: &str = " BEGIN IF NEW.notification_recovery_ordinal IS DISTINCT FROM OLD.notification_recovery_ordinal THEN RAISE EXCEPTION 'pending recovery ordinal is immutable'; END IF; RETURN NEW; END ";
+pub(super) const SQLITE_ALLOCATE_TRIGGER: &str = "CREATE TRIGGER pending_notification_recovery_allocate AFTER INSERT ON pending_delivery BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pending_notification_recovery_counter WHERE singleton = 1 AND last_ordinal < 9223372036854775807) THEN RAISE(ABORT, 'pending recovery ordinal exhausted or counter missing') END; UPDATE pending_notification_recovery_counter SET last_ordinal = last_ordinal + 1 WHERE singleton = 1; UPDATE pending_delivery SET notification_recovery_ordinal = (SELECT last_ordinal FROM pending_notification_recovery_counter WHERE singleton = 1) WHERE row_id = NEW.row_id; END";
+pub(super) const SQLITE_IMMUTABLE_TRIGGER: &str = "CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery WHEN OLD.notification_recovery_ordinal IS NOT NULL AND NEW.notification_recovery_ordinal IS NOT OLD.notification_recovery_ordinal BEGIN SELECT RAISE(ABORT, 'pending recovery ordinal is immutable'); END";
+pub(super) const SQLITE_MONOTONE_TRIGGER: &str = "CREATE TRIGGER pending_notification_recovery_counter_monotone BEFORE UPDATE OF last_ordinal ON pending_notification_recovery_counter WHEN NEW.last_ordinal < OLD.last_ordinal BEGIN SELECT RAISE(ABORT, 'pending recovery counter cannot rewind'); END";
+
+pub(super) async fn initialize(db: &Database) -> Result<(), PendingStorageError> {
+    tokio::time::timeout(INITIALIZATION_BUDGET, initialize_inner(db))
         .await
         .map_err(|_| {
             PendingStorageError::Other(
@@ -19,10 +21,8 @@ pub(super) async fn initialize(
         })?
 }
 
-async fn begin(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<Transaction<'_>, PendingStorageError> {
-    let mut tx = storage.db.begin_immediate().await.map_err(other)?;
+async fn begin(db: &Database) -> Result<Transaction<'_>, PendingStorageError> {
+    let mut tx = db.begin_immediate().await.map_err(other)?;
     if tx.driver() == DatabaseDriver::Postgres {
         // Fresh catalog reads are required after waiting for another initializer.
         tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
@@ -43,10 +43,8 @@ fn other(error: DatabaseError) -> PendingStorageError {
     PendingStorageError::Other(error.to_string())
 }
 
-async fn initialize_inner(
-    storage: &DatabasePendingDeliveryStorage,
-) -> Result<(), PendingStorageError> {
-    let mut tx = begin(storage).await?;
+async fn initialize_inner(db: &Database) -> Result<(), PendingStorageError> {
+    let mut tx = begin(db).await?;
     if tx.driver() == DatabaseDriver::Postgres {
         initialize_postgres(&mut tx).await?;
     } else {
@@ -80,7 +78,7 @@ async fn initialize_postgres(tx: &mut Transaction<'_>) -> Result<(), PendingStor
             ))
         }
     }
-    tx.execute("CREATE OR REPLACE FUNCTION pending_notification_recovery_ordinal_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.notification_recovery_ordinal IS DISTINCT FROM OLD.notification_recovery_ordinal THEN RAISE EXCEPTION 'pending recovery ordinal is immutable'; END IF; RETURN NEW; END $$", ()).await.map_err(other)?;
+    tx.execute(&format!("CREATE OR REPLACE FUNCTION pending_notification_recovery_ordinal_immutable() RETURNS trigger LANGUAGE plpgsql AS $${POSTGRES_IMMUTABLE_BODY}$$"), ()).await.map_err(other)?;
     tx.execute("DROP TRIGGER IF EXISTS pending_notification_recovery_ordinal_immutable ON pending_delivery", ()).await.map_err(other)?;
     tx.execute("CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery FOR EACH ROW EXECUTE FUNCTION pending_notification_recovery_ordinal_immutable()", ()).await.map_err(other)?;
     Ok(())
@@ -184,9 +182,15 @@ async fn initialize_sqlite(tx: &mut Transaction<'_>) -> Result<(), PendingStorag
             .await
             .map_err(other)?;
     }
-    tx.execute("CREATE TRIGGER pending_notification_recovery_allocate AFTER INSERT ON pending_delivery BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pending_notification_recovery_counter WHERE singleton = 1 AND last_ordinal < 9223372036854775807) THEN RAISE(ABORT, 'pending recovery ordinal exhausted or counter missing') END; UPDATE pending_notification_recovery_counter SET last_ordinal = last_ordinal + 1 WHERE singleton = 1; UPDATE pending_delivery SET notification_recovery_ordinal = (SELECT last_ordinal FROM pending_notification_recovery_counter WHERE singleton = 1) WHERE row_id = NEW.row_id; END", ()).await.map_err(other)?;
-    tx.execute("CREATE TRIGGER pending_notification_recovery_ordinal_immutable BEFORE UPDATE OF notification_recovery_ordinal ON pending_delivery WHEN OLD.notification_recovery_ordinal IS NOT NULL AND NEW.notification_recovery_ordinal IS NOT OLD.notification_recovery_ordinal BEGIN SELECT RAISE(ABORT, 'pending recovery ordinal is immutable'); END", ()).await.map_err(other)?;
-    tx.execute("CREATE TRIGGER pending_notification_recovery_counter_monotone BEFORE UPDATE OF last_ordinal ON pending_notification_recovery_counter WHEN NEW.last_ordinal < OLD.last_ordinal BEGIN SELECT RAISE(ABORT, 'pending recovery counter cannot rewind'); END", ()).await.map_err(other)?;
+    tx.execute(SQLITE_ALLOCATE_TRIGGER, ())
+        .await
+        .map_err(other)?;
+    tx.execute(SQLITE_IMMUTABLE_TRIGGER, ())
+        .await
+        .map_err(other)?;
+    tx.execute(SQLITE_MONOTONE_TRIGGER, ())
+        .await
+        .map_err(other)?;
     Ok(())
 }
 

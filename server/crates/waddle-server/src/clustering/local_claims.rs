@@ -802,7 +802,7 @@ impl UserLocalClaims {
             return;
         };
         for (jid, entry) in entries {
-            let owner = entry.carbons_handle();
+            let owner = entry.binding_id();
             let (ack, ack_rx) = tokio::sync::oneshot::channel();
             let request = ForceDetachRequest {
                 origin: waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,

@@ -117,7 +117,7 @@ async fn separate_store_upgrade(fixture: IngressFixture) {
     let storage = DatabaseSmPersistence::open(Some(&database_url))
         .await
         .expect("upgrade configured SM store");
-    schema::initialize(&storage)
+    schema::bootstrap_schema_owner(&storage.db)
         .await
         .expect("idempotent upgrade");
     let restored = storage

@@ -2,13 +2,12 @@
 
 use super::debug;
 use super::Actor;
-use super::Arc;
 use super::Context;
 use super::HashMap;
+use super::Ordering;
 use super::Stanza;
-use super::{AtomicBool, Ordering};
 use super::{BareJid, FullJid};
-use super::{ConnectionEntry, PresenceState};
+use super::{ConnectionEntry, LocalConnectionBindingId, PresenceState};
 
 /// Actor that manages per-user connection state and stanza delivery.
 ///
@@ -57,9 +56,8 @@ impl UserActor {
 
     /// Ownership-gated removal, mirroring the DashMap
     /// `ConnectionRegistry::unregister_if_owner` semantics (ADR-0017 Phase 1
-    /// Slice 0). `owner` is the resource's ownership token — the entry's
-    /// `carbons_enabled` `Arc<AtomicBool>`, the same handle the DashMap
-    /// compares with `Arc::ptr_eq`. `Some(owner)` removes only when the stored
+    /// Slice 0). `owner` is the entry's local binding identity, the same value
+    /// compared by the registry. `Some(owner)` removes only when the stored
     /// entry is still that owner's, so a lagging unregister for a superseded
     /// connection cannot evict the replacement resource; `None` removes
     /// unconditionally, matching a plain DashMap `unregister`. Returns whether
@@ -67,10 +65,10 @@ impl UserActor {
     pub(in crate::registry::user_actor) fn remove_resource_if_owner(
         &mut self,
         jid: &FullJid,
-        owner: Option<&Arc<AtomicBool>>,
+        owner: Option<&LocalConnectionBindingId>,
     ) -> bool {
         let should_remove = match (self.connections.get(jid), owner) {
-            (Some(entry), Some(token)) => Arc::ptr_eq(&entry.carbons_enabled, token),
+            (Some(entry), Some(token)) => entry.binding_id() == *token,
             (Some(_), None) => true,
             (None, _) => false,
         };
@@ -119,7 +117,7 @@ impl kameo::message::Message<RegisterConnection> for UserActor {
 pub struct RegisterConnectionIfOwnerOrAbsent {
     pub jid: FullJid,
     pub entry: ConnectionEntry,
-    pub owner: Arc<AtomicBool>,
+    pub owner: LocalConnectionBindingId,
 }
 
 impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
@@ -130,13 +128,13 @@ impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
         msg: RegisterConnectionIfOwnerOrAbsent,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if !Arc::ptr_eq(&msg.entry.carbons_enabled, &msg.owner) {
+        if msg.entry.binding_id() != msg.owner {
             return false;
         }
         if self
             .connections
             .get(&msg.jid)
-            .is_some_and(|entry| !Arc::ptr_eq(&entry.carbons_enabled, &msg.owner))
+            .is_some_and(|entry| entry.binding_id() != msg.owner)
         {
             return false;
         }
@@ -148,14 +146,13 @@ impl kameo::message::Message<RegisterConnectionIfOwnerOrAbsent> for UserActor {
 
 /// Unregister a connection (resource) for this user.
 ///
-/// `owner` is the ownership token (the resource's `carbons_enabled`
-/// `Arc<AtomicBool>`): `Some` gates removal on the stored entry still being
+/// `owner` is the resource's local binding identity: `Some` gates removal on the stored entry still being
 /// that owner's (so a lagging unregister can't evict a replacement), `None`
 /// removes unconditionally — matching the DashMap `unregister_if_owner` vs
 /// plain `unregister` call the teardown site makes.
 pub struct UnregisterConnection {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 impl kameo::message::Message<UnregisterConnection> for UserActor {
@@ -176,7 +173,7 @@ impl kameo::message::Message<UnregisterConnection> for UserActor {
 /// `owner` is ownership-gated exactly like [`UnregisterConnection`].
 pub struct UnregisterConnectionAndReportEmpty {
     pub jid: FullJid,
-    pub owner: Option<Arc<AtomicBool>>,
+    pub owner: Option<LocalConnectionBindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, kameo::Reply)]

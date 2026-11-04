@@ -5,9 +5,10 @@ use super::{PlanEffectDependency, PlanSuppressionPolicy};
 use crate::ingress::room_manifest::RoomManifestSnapshot;
 use crate::server::routes::websocket::handlers::message::dm_pin::DmPinMutation;
 use crate::server::routes::websocket::handlers::message::muc_invite::InviteLedgerMutation;
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::ingress::{IngressEffectIntent, RelayTargetIdentity};
 use waddle_xmpp::Stanza;
+use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::message::Message;
 
 #[derive(Clone, Debug)]
@@ -89,12 +90,22 @@ impl PlannedEffect {
     }
 }
 
+/// Local connection identity for associating room stanzas from the same session.
+/// This is process-local context, not a relay or XMPP wire value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientRoomOrigin {
+    pub(crate) full_jid: FullJid,
+    pub(crate) occupancy_session: OccupancySessionGeneration,
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum RoomExecutionPath {
     #[default]
     None,
     Local {
         room: BareJid,
+        /// Present only when a local authenticated connection supplied the groupchat.
+        client_origin: Option<ClientRoomOrigin>,
         /// Single-node rooms have no distributed claim; never manufacture one.
         fence: RoomFenceRequirement,
         snapshot_generation: u64,

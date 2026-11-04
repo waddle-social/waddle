@@ -1,4 +1,5 @@
-use crate::db::DatabaseDriver;
+use crate::db::lineage::{PgIdentity, PgSystemIdentifier};
+use crate::db::{DatabaseDriver, IntoParams, Rows, Transaction};
 use tracing::{error, info, warn};
 use waddle_xmpp::XmppError;
 
@@ -8,9 +9,9 @@ use waddle_xmpp_core::pubsub::{PEP_NODE_AVATAR_DATA, PEP_NODE_AVATAR_METADATA};
 use super::DatabasePubSubStorage;
 
 /// Schema version for the pubsub + projection tables managed in this
-/// module. CLAUDE.md greenlights breaking changes, so a version
-/// mismatch unconditionally drops + recreates the listed tables —
-/// there is no in-place migration path. Bump this number on any
+/// module. Legacy URL-based initialization resets these tables on a version
+/// mismatch; guarded owner preparation refuses to reset persisted data.
+/// There is no in-place migration path. Bump this number on any
 /// schema-shape change, AND if a stricter parser may reject XML
 /// payloads previously written by an older server (otherwise the
 /// next read silently defaults the user to inactive; see
@@ -25,10 +26,218 @@ use super::DatabasePubSubStorage;
 // opt-in). Version-gated drop-and-recreate carries the schema change.
 // * v8 — pubsub_nodes gains nullable node_type for XEP-0060
 //   `pubsub#type` profile metadata (XEP-0472/XEP-0501).
-const PUBSUB_SCHEMA_VERSION: i64 = 8;
+pub(super) const PUBSUB_SCHEMA_VERSION: i64 = 8;
+
+// Dedicated transaction advisory lock for owner-side PubSub schema changes.
+const PUBSUB_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_534_519_881_230_429_064;
+const DATA_TABLES: &[&str] = &[
+    "pubsub_nodes",
+    "pubsub_items",
+    "pubsub_subscriptions",
+    "pubsub_affiliations",
+    "pubsub_owner_configured",
+    "dnd_projection",
+    "dnd_projection_source_version",
+    "notification_settings_projection",
+    "notification_settings_projection_source_version",
+    "pubsub_push_publications",
+];
+
+#[derive(Clone, Copy)]
+enum BootstrapPolicy<'a> {
+    Legacy,
+    GuardedOwner(&'a PgIdentity),
+}
 
 impl DatabasePubSubStorage {
     pub(super) async fn initialize(&self) -> Result<(), XmppError> {
+        self.initialize_with_policy(BootstrapPolicy::Legacy).await
+    }
+
+    pub(super) async fn initialize_guarded_owner(
+        &self,
+        identity: &PgIdentity,
+    ) -> Result<(), XmppError> {
+        self.initialize_with_policy(BootstrapPolicy::GuardedOwner(identity))
+            .await
+    }
+
+    async fn initialize_with_policy(&self, policy: BootstrapPolicy<'_>) -> Result<(), XmppError> {
+        if self.db.uses_attested_postgres_pool() {
+            return Err(XmppError::internal(
+                "PubSub owner initialization requires an owner database handle".to_string(),
+            ));
+        }
+        let driver = self.db.driver();
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        if driver == DatabaseDriver::Postgres {
+            // Refuse an inherited used transaction while ending at READ
+            // COMMITTED so a lock waiter sees the previous owner's commit.
+            tx.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
+                (),
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.execute(
+                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+                (),
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            tx.query(
+                "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+                crate::db_params![PUBSUB_SCHEMA_ADVISORY_LOCK_KEY],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            if let BootstrapPolicy::GuardedOwner(identity) = policy {
+                pin_owner_schema(&mut tx, identity).await?;
+                super::runtime_attach::verify_owner_preflight(&mut tx, &identity.schema.name.0)
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        SchemaTransaction {
+            tx: &mut tx,
+            driver,
+        }
+        .initialize(policy)
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+}
+
+async fn pin_owner_schema(
+    tx: &mut Transaction<'_>,
+    identity: &PgIdentity,
+) -> Result<(), XmppError> {
+    let schema = &identity.schema.name.0;
+    crate::db::physical_attestation::validate_identifier(schema, "PubSub owner schema")
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let mut rows = tx
+        .query(
+            "SELECT (SELECT system_identifier::text FROM pg_catalog.pg_control_system()), \
+         db.oid::bigint, db.datname::text, n.oid::bigint, n.nspname::text, \
+         n.nspname = pg_catalog.current_schema() AND owner.rolname = current_user \
+         AND NOT owner.rolcanlogin AND NOT owner.rolsuper AND NOT owner.rolcreatedb \
+         AND NOT owner.rolcreaterole AND NOT owner.rolreplication AND NOT owner.rolbypassrls \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+           WHERE c.relnamespace = pg_catalog.pg_my_temp_schema()) \
+         FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+         JOIN pg_catalog.pg_database db ON db.datname = pg_catalog.current_database() \
+         WHERE n.nspname = ?",
+            crate::db_params![schema],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let valid = match rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    {
+        Some(row) => {
+            let system: String = row
+                .get(0)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            system.parse::<PgSystemIdentifier>().ok() == Some(identity.system_identifier)
+                && row
+                    .get::<i64>(1)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    == i64::from(identity.database.oid)
+                && row
+                    .get::<String>(2)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    == identity.database.name.0
+                && row
+                    .get::<i64>(3)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    == i64::from(identity.schema.oid)
+                && row
+                    .get::<String>(4)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    == *schema
+                && row
+                    .get::<bool>(5)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+        }
+        None => false,
+    };
+    if !valid {
+        return Err(XmppError::internal(
+            "PubSub owner physical identity, role, or temporary schema mismatch".to_string(),
+        ));
+    }
+    let quoted = crate::db::physical_attestation::quote_identifier(schema);
+    tx.query(
+        "SELECT pg_catalog.set_config('search_path', ?, true)",
+        crate::db_params![format!("{quoted}, pg_temp")],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(())
+}
+
+struct SchemaTransaction<'tx, 'db> {
+    tx: &'tx mut Transaction<'db>,
+    driver: DatabaseDriver,
+}
+
+impl SchemaTransaction<'_, '_> {
+    async fn execute(&mut self, sql: &str, params: impl IntoParams) -> Result<u64, XmppError> {
+        self.tx
+            .execute(sql, params)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    async fn query(&mut self, sql: &str, params: impl IntoParams) -> Result<Rows, XmppError> {
+        self.tx
+            .query(sql, params)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    async fn relation_exists(&mut self, table: &'static str) -> Result<bool, XmppError> {
+        let exists_sql = match self.driver {
+            DatabaseDriver::Postgres => "SELECT pg_catalog.to_regclass(?) IS NOT NULL",
+            DatabaseDriver::Sqlite => {
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)"
+            }
+        };
+        let mut rows = self.query(exists_sql, crate::db_params![table]).await?;
+        rows.next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+            .ok_or_else(|| {
+                XmppError::internal("PubSub relation probe returned no row".to_string())
+            })?
+            .get(0)
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    async fn existing_row_count(&mut self, table: &'static str) -> Result<i64, XmppError> {
+        if !self.relation_exists(table).await? {
+            return Ok(0);
+        }
+        let mut rows = self
+            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+            .await?;
+        rows.next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+            .ok_or_else(|| XmppError::internal("PubSub item count returned no row".to_string()))?
+            .get(0)
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    async fn initialize(&mut self, policy: BootstrapPolicy<'_>) -> Result<(), XmppError> {
         self.execute(
             r#"
             CREATE TABLE IF NOT EXISTS pubsub_schema_version (
@@ -42,24 +251,68 @@ impl DatabasePubSubStorage {
         let mut rows = self
             .query("SELECT version FROM pubsub_schema_version", ())
             .await?;
-        let current: Option<i64> = match rows
+        let mut versions = Vec::new();
+        while let Some(row) = rows
             .next()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?
         {
-            Some(row) => Some(
-                row.get(0)
+            versions.push(
+                row.get::<i64>(0)
                     .map_err(|error| XmppError::internal(error.to_string()))?,
-            ),
-            None => None,
-        };
+            );
+        }
+        let current = versions.first().copied();
+        if matches!(policy, BootstrapPolicy::GuardedOwner(_)) {
+            if versions.len() > 1
+                || current.is_some_and(|version| !(1..=PUBSUB_SCHEMA_VERSION).contains(&version))
+            {
+                return Err(XmppError::internal(
+                    "PubSub owner preparation refused ambiguous or unknown schema version"
+                        .to_string(),
+                ));
+            }
+            if current != Some(PUBSUB_SCHEMA_VERSION) {
+                for &table in DATA_TABLES {
+                    if self.existing_row_count(table).await? != 0 {
+                        return Err(XmppError::internal(format!(
+                            "PubSub owner preparation refused schema reset with data in {table}"
+                        )));
+                    }
+                }
+            } else {
+                // A current marker alone does not prove all tables survived.
+                // Recreating a missing item table while preserving a push
+                // watermark could make a lost publication look applied.
+                let mut complete = true;
+                let mut populated = false;
+                for &table in DATA_TABLES {
+                    if self.relation_exists(table).await? {
+                        populated |= self.existing_row_count(table).await? != 0;
+                    } else {
+                        complete = false;
+                    }
+                }
+                if populated {
+                    if !complete {
+                        return Err(XmppError::internal(
+                            "PubSub owner preparation refused incomplete populated schema"
+                                .to_string(),
+                        ));
+                    }
+                    // Do not repair or rewrite a populated current store.
+                    // Restricted attachment independently verifies its shape.
+                    return Ok(());
+                }
+            }
+        }
 
         if current != Some(PUBSUB_SCHEMA_VERSION) {
             // Drop-and-recreate: CLAUDE.md greenlights breaking changes.
             // Surface the destruction loudly so a developer with a
             // file-backed dev SQLite doesn't lose hours of state on
             // a quiet branch swap.
-            let prior_items: i64 = self.row_count("pubsub_items").await.unwrap_or(0);
+            let prior_items = self.existing_row_count("pubsub_items").await?;
             if prior_items > 0 {
                 error!(
                     from_version = ?current,
@@ -104,7 +357,15 @@ impl DatabasePubSubStorage {
             )
             .await?;
         }
-        self.initialize_publication_watermarks().await?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS pubsub_push_publications (\
+                service_jid TEXT NOT NULL, node_name TEXT NOT NULL, \
+                revision BIGINT NOT NULL CHECK (revision > 0), \
+                job_token TEXT NOT NULL, payload_hash TEXT NOT NULL, \
+                PRIMARY KEY (service_jid, node_name))",
+            (),
+        )
+        .await?;
         self.repair_legacy_avatar_nodes().await
     }
 
@@ -117,7 +378,7 @@ impl DatabasePubSubStorage {
     /// `pubsub_owner_configured` by the XEP-0060 §8.2 configure path).
     /// Running on every startup, not once, also repairs nodes created by
     /// old pods during a rolling deploy.
-    async fn repair_legacy_avatar_nodes(&self) -> Result<(), XmppError> {
+    async fn repair_legacy_avatar_nodes(&mut self) -> Result<(), XmppError> {
         let reopened = self
             .execute(
                 "UPDATE pubsub_nodes SET access_model = ? \
@@ -139,10 +400,10 @@ impl DatabasePubSubStorage {
         Ok(())
     }
 
-    async fn create_schema(&self) -> Result<(), XmppError> {
+    async fn create_schema(&mut self) -> Result<(), XmppError> {
         // Bug 1 fix: use BIGINT for *_at_ms columns on Postgres (32-bit INTEGER
         // would overflow Unix-millis i64 timestamps ~1.7 trillion). Sqlite uses INTEGER.
-        let nodes_ddl = match self.db.driver() {
+        let nodes_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_nodes (
@@ -183,7 +444,7 @@ impl DatabasePubSubStorage {
             }
         };
         self.execute(nodes_ddl, ()).await?;
-        let notification_settings_projection_ddl = match self.db.driver() {
+        let notification_settings_projection_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection (
@@ -219,7 +480,7 @@ impl DatabasePubSubStorage {
         };
         self.execute(notification_settings_projection_ddl, ())
             .await?;
-        let notification_settings_projection_source_version_ddl = match self.db.driver() {
+        let notification_settings_projection_source_version_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS notification_settings_projection_source_version (
@@ -262,7 +523,7 @@ impl DatabasePubSubStorage {
         // `updated_at_ms < cutoff`), it MUST add a covering index in
         // the same migration — the table grows by one row per user
         // and would otherwise force a full scan on every janitor tick.
-        let dnd_projection_ddl = match self.db.driver() {
+        let dnd_projection_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection (
@@ -297,7 +558,7 @@ impl DatabasePubSubStorage {
         // older and silently drop it from the projection while
         // `pubsub_items` still gets updated, leaving the two stores
         // disagreed. Round-7 Copilot review on PR #759.
-        let dnd_projection_source_version_ddl = match self.db.driver() {
+        let dnd_projection_source_version_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS dnd_projection_source_version (
@@ -317,7 +578,7 @@ impl DatabasePubSubStorage {
         };
         self.execute(dnd_projection_source_version_ddl, ()).await?;
 
-        let items_ddl = match self.db.driver() {
+        let items_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_items (
@@ -366,7 +627,7 @@ impl DatabasePubSubStorage {
         )
         .await?;
 
-        let subs_ddl = match self.db.driver() {
+        let subs_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_subscriptions (
@@ -407,7 +668,7 @@ impl DatabasePubSubStorage {
         )
         .await?;
 
-        let affs_ddl = match self.db.driver() {
+        let affs_ddl = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
                 CREATE TABLE IF NOT EXISTS pubsub_affiliations (

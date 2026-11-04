@@ -6,7 +6,6 @@ use super::incremental;
 use super::ingress_append;
 use super::joined_sessions;
 use super::promotion_inventory;
-use super::schema;
 use super::Arc;
 use super::AuthenticatedPrincipalRef;
 use super::FullJid;
@@ -83,6 +82,33 @@ impl DatabaseSmPersistence {
         self.db.clone()
     }
 
+    /// Attach an existing owner-prepared portable PostgreSQL SM schema.
+    ///
+    /// This validates a structural snapshot on the supplied attested main
+    /// lane. It does not run owner bootstrap, establish writer privileges, or
+    /// enable fenced SM and must not be used as a production readiness check.
+    pub async fn attach_existing_postgres(
+        db: Database,
+    ) -> Result<Self, super::SmRuntimeAttachError> {
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self {
+            db,
+            stream_locks: Arc::new(StreamLockMap::new()),
+        })
+    }
+
+    /// Attach the production writer only after the schema and effective
+    /// runtime privileges have been checked in one read-only snapshot.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+    ) -> Result<Self, super::SmRuntimeAttachError> {
+        super::runtime_attach::verify(&db, true).await?;
+        Ok(Self {
+            db,
+            stream_locks: Arc::new(StreamLockMap::new()),
+        })
+    }
+
     /// Open against `database_url`. Supported schemes:
     ///
     /// - `postgres://…` / `postgresql://…` → Postgres adapter
@@ -129,7 +155,7 @@ impl DatabaseSmPersistence {
             db,
             stream_locks: Arc::new(StreamLockMap::new()),
         };
-        schema::initialize(&storage).await?;
+        super::bootstrap_portable_sm_owner_schema(&storage.db).await?;
         info!(driver = ?storage.db.driver(), "SM persistence storage initialized (XEP-0198)");
         Ok(storage)
     }

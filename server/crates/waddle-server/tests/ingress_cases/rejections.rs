@@ -40,6 +40,7 @@ async fn semantic_rejections(fixture: IngressFixture) {
         // denials still commit when planning observed a local room snapshot.
         submission.plan.room_execution = waddle_server::ingress::RoomExecutionPath::Local {
             room: "room@conference.example.com".parse().expect("room"),
+            client_origin: None,
             fence: waddle_server::ingress::effects::room::RoomFenceRequirement::Unfenced,
             snapshot_generation: 1,
             manifest_snapshot: None,

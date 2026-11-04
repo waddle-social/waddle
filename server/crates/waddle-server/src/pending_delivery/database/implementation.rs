@@ -164,6 +164,60 @@ pub(in crate::pending_delivery::database) fn claim_error_to_pending_storage_erro
 }
 
 impl DatabasePendingDeliveryStorage {
+    /// Attach the supplied owner-prepared database without initializing or repairing it.
+    ///
+    /// PostgreSQL requires the main lane of a physically attested pool; SQLite
+    /// keeps using the supplied database, including a one-connection private
+    /// in-memory database. The checks describe a read-only snapshot, not future
+    /// schema state, writer readiness, deleted-row allocator high-water marks,
+    /// or quiescence of privileged DDL. SQLite temporary objects are inspected
+    /// only on the connection used for verification; its lock wait is capped
+    /// at five seconds without relaxing tighter settings. PostgreSQL lock and
+    /// statement waits are bounded as well. Neither establishes a total or
+    /// network deadline. This API is deliberately not wired into normal startup.
+    pub async fn attach_existing(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, super::PendingRuntimeAttachError> {
+        super::runtime_attach::verify(&db, false).await?;
+        Ok(Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        })
+    }
+
+    /// Attach the production PostgreSQL writer after checking its schema and
+    /// effective privileges in the same read-only transaction.
+    pub(crate) async fn attach_runtime_postgres(
+        db: Database,
+        quota: QuotaPolicy,
+    ) -> Result<Self, super::PendingRuntimeAttachError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(super::PendingRuntimeAttachError::AttestedPostgresPoolRequired);
+        }
+        super::runtime_attach::verify(&db, true).await?;
+        Ok(Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        })
+    }
+
+    /// Assemble a disposable fixture after owner initialization. This is not a
+    /// production schema or privilege attachment proof.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_initialized_database_for_test(db: Database, quota: QuotaPolicy) -> Self {
+        Self {
+            db,
+            quota,
+            fencing: None,
+            ack_windows: Default::default(),
+        }
+    }
+
     pub fn database(&self) -> Database {
         self.db.clone()
     }
@@ -207,7 +261,7 @@ impl DatabasePendingDeliveryStorage {
             fencing: None,
             ack_windows: Default::default(),
         };
-        schema::initialize(&storage).await?;
+        schema::bootstrap_schema_owner(&storage.db).await?;
         info!(
             driver = ?storage.db.driver(),
             "pending_delivery storage initialized (XEP-0160)"

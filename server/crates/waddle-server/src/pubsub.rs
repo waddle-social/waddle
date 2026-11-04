@@ -15,12 +15,14 @@ mod database;
 mod item;
 mod node;
 mod open;
+mod runtime_attach;
 mod schema;
 mod versioned;
 #[cfg(test)]
 mod versioned_tests;
 
 pub use open::{build_database_pubsub_storage, build_pubsub_storage};
+pub use runtime_attach::PubSubRuntimeAttachError;
 
 #[cfg(test)]
 mod tests;

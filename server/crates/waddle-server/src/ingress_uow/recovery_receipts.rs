@@ -484,7 +484,7 @@ mod tests {
         let uow = super::super::IngressUnitOfWork::open(db, fixture.uow.lineage.clone())
             .expect("same attested fixture lineage");
         let mut ordinary = uow.begin().await.expect("ordinary epoch-proven UoW");
-        assert_eq!(isolation(&mut ordinary).await, "repeatable read");
+        assert_eq!(isolation(&mut ordinary).await, "read committed");
         ordinary.commit().await.expect("ordinary commit");
 
         // BEGIN must override the session default before timeout and epoch
@@ -498,12 +498,124 @@ mod tests {
             .expect("recovery begins before its first snapshot is pinned");
         assert_eq!(isolation(&mut recovery).await, "read committed");
         recovery.commit().await.expect("recovery commit");
-        let mut ordinary = uow.begin().await.expect("unchanged session default");
-        assert_eq!(isolation(&mut ordinary).await, "repeatable read");
+        let mut ordinary = uow
+            .begin()
+            .await
+            .expect("ordinary isolation after recovery");
+        assert_eq!(isolation(&mut ordinary).await, "read committed");
         ordinary.commit().await.expect("final ordinary commit");
+        let session_default: String = sqlx::query_scalar("SHOW default_transaction_isolation")
+            .fetch_one(&pool)
+            .await
+            .expect("session default");
+        assert_eq!(session_default, "repeatable read");
         drop(uow);
         pool.close().await;
         fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ordinary_begin_reads_committed_epoch_after_waiting_on_transition() {
+        for timed in [false, true] {
+            let name = if timed {
+                "ordinary_timed_epoch_isolation"
+            } else {
+                "ordinary_epoch_isolation"
+            };
+            let Some(fixture) = crate::ingress::test_support::IngressFixture::postgres(name).await
+            else {
+                return;
+            };
+            let application_name = format!("waddle-uow-rc-{}", uuid::Uuid::new_v4());
+            let writer_application_name = application_name.clone();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .after_connect(move |connection, _| {
+                    let application_name = writer_application_name.clone();
+                    Box::pin(async move {
+                        sqlx::query(
+                            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                        )
+                        .execute(&mut *connection)
+                        .await?;
+                        sqlx::query("SELECT set_config('application_name', $1, false)")
+                            .bind(application_name)
+                            .execute(&mut *connection)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .connect(fixture.db.database_url())
+                .await
+                .expect("fixture-local repeatable-read pool");
+            let admin = sqlx::PgPool::connect(fixture.db.database_url())
+                .await
+                .expect("fixture-local wait observer");
+            let db = crate::db::Database::from_postgres_pool("ordinary-isolation", pool.clone());
+            let uow = super::super::IngressUnitOfWork::open(db, fixture.uow.lineage.clone())
+                .expect("same attested fixture lineage");
+
+            let mut transition = fixture
+                .db
+                .begin_immediate()
+                .await
+                .expect("epoch transition");
+            transition
+                .execute(
+                    "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), lineage_uuid = ?::uuid WHERE id = 1",
+                    crate::db_params![uuid::Uuid::new_v4().to_string()],
+                )
+                .await
+                .expect("hold valid epoch transition uncommitted");
+            let writer = tokio::spawn(async move {
+                let mut tx = if timed {
+                    uow.begin_with_timeouts(
+                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(7),
+                    )
+                    .await
+                } else {
+                    uow.begin().await
+                }
+                .expect("ordinary UoW observes the committed epoch");
+                let epoch = tx.protocol_epoch();
+                let isolation = isolation(&mut tx).await;
+                tx.commit().await.expect("commit ordinary UoW");
+                (epoch, isolation)
+            });
+            let mut observed_wait = false;
+            for _ in 0..400 {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1 AND application_name = $2",
+                )
+                .bind("%SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE%")
+                .bind(&application_name)
+                .fetch_one(&admin)
+                .await
+                .expect("poll epoch row lock waiter");
+                if waiting > 0 {
+                    observed_wait = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert!(
+                observed_wait,
+                "ordinary UoW must wait for the epoch transition"
+            );
+            transition.commit().await.expect("commit epoch transition");
+            let (epoch, isolation) = writer.await.expect("ordinary UoW task");
+            assert_eq!(epoch, waddle_xmpp::ingress::ProtocolEpoch::from_storage(1));
+            assert_eq!(isolation, "read committed");
+            let session_default: String = sqlx::query_scalar("SHOW default_transaction_isolation")
+                .fetch_one(&pool)
+                .await
+                .expect("session default");
+            assert_eq!(session_default, "repeatable read");
+            admin.close().await;
+            pool.close().await;
+            fixture.close().await;
+        }
     }
 
     async fn isolation(tx: &mut IngressUowTransaction<'_>) -> String {

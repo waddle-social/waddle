@@ -40,15 +40,16 @@ pub(super) async fn store_message(
         MamDatabaseBackend::Postgres(pool) => {
             let mut conn = pool.begin().await?;
             if let Some(id) =
-                find_origin_tombstone_postgres(&mut conn, archive_jid, message).await?
+                find_origin_tombstone_postgres(&mut conn, archive_jid, message, None).await?
             {
                 return Ok(StoreOutcome::TombstoneHit(id));
             }
-            let ordinal = allocate_postgres(&mut conn, archive_jid).await?;
+            let ordinal = allocate_postgres(&mut conn, archive_jid, None).await?;
             insert_postgres_message_on_connection(
                 &mut conn,
                 insert(ordinal),
                 InsertConflict::Error,
+                None,
             )
             .await?;
             conn.commit().await?;
@@ -90,7 +91,7 @@ pub(super) async fn store_message_fenced(
             entity: fence.entity.clone(),
         });
     }
-    if let Some(id) = find_origin_tombstone_postgres(&mut tx, archive_jid, message).await? {
+    if let Some(id) = find_origin_tombstone_postgres(&mut tx, archive_jid, message, None).await? {
         tx.commit().await?;
         return Ok(StoreOutcome::TombstoneHit(id));
     }
@@ -101,7 +102,7 @@ pub(super) async fn store_message_fenced(
     } else {
         message.id.clone()
     };
-    let ordinal = allocate_postgres(&mut tx, archive_jid).await?;
+    let ordinal = allocate_postgres(&mut tx, archive_jid, None).await?;
     insert_postgres_message_on_connection(
         &mut tx,
         MessageInsert {
@@ -113,6 +114,7 @@ pub(super) async fn store_message_fenced(
             ordinal,
         },
         InsertConflict::Error,
+        None,
     )
     .await?;
     tx.commit().await?;
@@ -160,6 +162,7 @@ pub(super) async fn insert_postgres_message_on_connection(
     conn: &mut PgConnection,
     insert: MessageInsert<'_>,
     conflict: InsertConflict,
+    schema: Option<&str>,
 ) -> Result<Option<String>, sqlx::Error> {
     let archive_jid_str = insert.archive_jid.to_string();
     let from_jid_str = insert.message.from.to_string();
@@ -173,9 +176,10 @@ pub(super) async fn insert_postgres_message_on_connection(
         .map(jid::Jid::to_string);
     let message_type = waddle_xmpp_core::mam::message_type_wire_str(&insert.message.message_type);
 
-    let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO mam_messages (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
-    );
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "INSERT INTO {} (id, room_jid, timestamp, from_jid, to_jid, body, stanza_id, thread_id, reply_to_id, reply_to_jid, origin_id, message_type, stanza_xml, rich_payload, nickname_generation, parent_thread_id, archive_seq) ",
+        super::postgres_relation(schema, "mam_messages")
+    ));
     query.push_values(std::iter::once(()), |mut builder, _| {
         builder
             .push_bind(insert.archive_id)
@@ -322,6 +326,7 @@ pub(super) async fn find_origin_tombstone_postgres(
     conn: &mut PgConnection,
     archive: &BareJid,
     message: &ArchivedMessage,
+    schema: Option<&str>,
 ) -> Result<Option<String>, sqlx::Error> {
     let Some(origin) = message.origin_id.as_ref() else {
         return Ok(None);
@@ -329,7 +334,9 @@ pub(super) async fn find_origin_tombstone_postgres(
     let mut query = QueryBuilder::<Postgres>::new("SELECT ");
     query
         .push(SELECT_COLUMNS)
-        .push(" FROM mam_messages WHERE room_jid = ")
+        .push(" FROM ")
+        .push(super::postgres_relation(schema, "mam_messages"))
+        .push(" WHERE room_jid = ")
         .push_bind(archive.to_string())
         .push(" AND origin_id = ")
         .push_bind(origin.as_str())

@@ -103,7 +103,7 @@ impl SmEnableCommit {
         sm_state: &mut StreamManagementState,
         sm_ingress_fence: &mut Option<waddle_xmpp::stream_management::persistence::SmClaimFence>,
         bound_jid: Option<&jid::FullJid>,
-        registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        registry_owner: Option<&waddle_xmpp::registry::LocalConnectionBindingId>,
     ) {
         let registry_published = match (bound_jid, registry_owner) {
             (Some(jid), Some(owner)) => state
@@ -191,7 +191,7 @@ impl Drop for SmEnableClaimGuard {
 pub(in crate::server::routes::websocket) fn terminate_if_demoted_during_publication(
     state: &WebSocketState,
     jid: &jid::FullJid,
-    owner: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
     stream_id: Option<&waddle_xmpp::pending_delivery::SmSessionId>,
 ) {
     let Some(stream_id) = stream_id.map(waddle_xmpp::pending_delivery::SmSessionId::as_str) else {
@@ -324,6 +324,13 @@ pub(in crate::server::routes::websocket::stream_management) fn max_resume_secs_f
 /// Passed through `handle_sm_stanza` and its helpers so each signature stays
 /// below the clippy too-many-arguments threshold.
 pub(in crate::server::routes::websocket) struct SmCtx<'a> {
+    pub(in crate::server::routes::websocket) connection_ref:
+        &'a waddle_xmpp::ownership::ConnectionRef,
+    pub(in crate::server::routes::websocket) binding_ref:
+        &'a mut Option<waddle_xmpp::ownership::BindingRef>,
+    #[cfg(test)]
+    pub(in crate::server::routes::websocket) resume_binding_attempts:
+        &'a mut Vec<waddle_xmpp::ownership::BindingRef>,
     pub(in crate::server::routes::websocket) phase: &'a mut ConnectionPhase,
     pub(in crate::server::routes::websocket) sm_state: &'a mut StreamManagementState,
     pub(in crate::server::routes::websocket) sm_ingress_fence:
@@ -837,6 +844,10 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     use waddle_xmpp::stream_management::CrossNodeResumeOutcome;
 
     let SmCtx {
+        connection_ref,
+        binding_ref,
+        #[cfg(test)]
+        resume_binding_attempts,
         phase,
         sm_state,
         sm_ingress_fence,
@@ -869,6 +880,14 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
             SmResumeOutcome::UnexpectedRequest,
         );
     }
+
+    // Capture one identity for this attempt before any asynchronous work.
+    // An early failed attempt drops it; a successful one carries it to the
+    // registration path. Neither case reuses the token on a later attempt.
+    *binding_ref = None;
+    let attempt_binding = waddle_xmpp::ownership::BindingRef::fresh(connection_ref.clone());
+    #[cfg(test)]
+    resume_binding_attempts.push(attempt_binding.clone());
 
     // Capture and retire the old transport before claiming its snapshot. The
     // connection-owned handshake retains counters, replay and occupancy and
@@ -1349,6 +1368,7 @@ pub(in crate::server::routes::websocket::stream_management) async fn handle_sm_r
     *pending_resume_stream_id = Some(resume.previd.clone());
     *pending_resume_h = Some(resume.h);
     *pending_resume_claim = Some(claim_guard);
+    *binding_ref = Some(attempt_binding);
     *phase = ConnectionPhase::ready(detached.jid.clone(), true);
     // Responses below include replayed stanzas straight from the restored
     // unacked queue. They already carry their original sequence numbers —

@@ -4,11 +4,18 @@
 
 pub mod actor;
 mod backend;
+#[cfg(feature = "test-support")]
+pub(crate) use backend::{bind_postgres, rewrite_positional_for_postgres};
 pub mod blocking;
+pub mod bootstrap;
 pub mod lineage;
 mod migrations;
+pub mod physical_attestation;
 mod pool;
+pub(crate) mod read_only_timeout;
 pub mod roster;
+pub mod runtime_startup;
+pub(crate) mod runtime_store_acl;
 mod schema;
 mod value;
 
@@ -21,13 +28,22 @@ use std::str::FromStr;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
-use backend::CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT;
-pub use backend::MAIN_POOL_ACQUIRE_TIMEOUT;
 use backend::{connect_backend, DatabaseBackend};
 pub use backend::{ConnectionGuard, DatabaseDriver, Transaction};
+pub use backend::{CONTROL_PLANE_POOL_ACQUIRE_TIMEOUT, MAIN_POOL_ACQUIRE_TIMEOUT};
 pub use migrations::{
-    migration_checksum, MigrationLedgerError, MigrationNamespace, MigrationRunner,
-    WADDLE_NAMESPACE_START,
+    bootstrap_dark_postgres_mam_owner, grant_dark_owner_rejection_runtime_access,
+    inspect_dark_owner_rejection_runtime_access, inspect_dark_postgres_epoch_acl,
+    migration_checksum, run_dark_postgres_owner, DarkEpochAclStage, DarkMamOwnerError,
+    DarkMigrationOwnerConfig, DarkMigrationOwnerError, MigrationLedgerError, MigrationNamespace,
+    MigrationRunner, OwnerRejectionGrantError, OwnerRejectionGrantState, WADDLE_NAMESPACE_START,
+};
+#[cfg(feature = "test-support")]
+pub use migrations::{
+    observe_disposable_epoch_transition_lab, run_disposable_epoch_transition_lab,
+    DisposableEpochTransitionAttempt, DisposableEpochTransitionConfig,
+    DisposableEpochTransitionError, DisposableEpochTransitionFault,
+    DisposableEpochTransitionObservation,
 };
 pub use pool::{DatabasePool, PoolConfig, PoolHealth};
 pub use schema::{i64_sql_type, null_safe_eq, widen_postgres_i64_column_to_bigint};

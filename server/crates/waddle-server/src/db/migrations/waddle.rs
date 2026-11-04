@@ -1508,6 +1508,228 @@ CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
 );
 "#;
 
+/// Bind canonical origins to their authenticated source and serialize the
+/// first room-owner decision. Legacy rows remain NULL and cannot acquire this
+/// authority by replay.
+pub const V1028_INGRESS_SOURCE_BINDING: &str = r#"
+ALTER TABLE ingress_messages ADD COLUMN source_binding_version INTEGER NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_bare_jid TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_auth_context_id TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_auth_context_version TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_auth_epoch TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_sm_ingress_id TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN source_ingress_ordinal TEXT NULL;
+ALTER TABLE ingress_messages ADD COLUMN owner_decision INTEGER NULL;
+CREATE TABLE ingress_owner_rejections (
+    source_message_key TEXT PRIMARY KEY NOT NULL REFERENCES ingress_messages(message_key) ON DELETE RESTRICT,
+    child_message_key TEXT NOT NULL UNIQUE REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    CHECK (source_message_key <> child_message_key)
+);
+CREATE TRIGGER ingress_owner_rejections_insert_guard
+BEFORE INSERT ON ingress_owner_rejections
+WHEN NOT EXISTS (
+    SELECT 1 FROM ingress_messages source
+    WHERE source.message_key = NEW.source_message_key
+      AND source.source_binding_version = 1
+      AND source.owner_decision = 0
+)
+BEGIN
+    SELECT RAISE(ABORT, 'waddle: owner rejection requires an undecided bound source');
+END;
+CREATE TRIGGER ingress_messages_source_binding_insert_guard
+BEFORE INSERT ON ingress_messages
+WHEN NOT (
+    COALESCE((
+    NEW.source_binding_version IS NULL AND NEW.source_bare_jid IS NULL
+    AND NEW.source_auth_context_id IS NULL AND NEW.source_auth_context_version IS NULL
+    AND NEW.source_auth_epoch IS NULL AND NEW.source_sm_ingress_id IS NULL
+    AND NEW.source_ingress_ordinal IS NULL AND NEW.owner_decision IS NULL
+    ), 0)
+    OR COALESCE((
+    NEW.source_binding_version = 1 AND NEW.source_bare_jid IS NOT NULL AND NEW.source_bare_jid <> ''
+    AND length(CAST(NEW.source_bare_jid AS BLOB)) <= 3071
+    AND NEW.source_auth_context_id IS NOT NULL AND NEW.source_auth_context_version IS NOT NULL
+    AND NEW.source_auth_epoch IS NOT NULL
+    AND NEW.owner_decision IS NULL
+    AND ((NEW.source_sm_ingress_id IS NULL AND NEW.source_ingress_ordinal IS NULL)
+      OR (NEW.source_sm_ingress_id IS NOT NULL AND NEW.source_ingress_ordinal IS NOT NULL
+          AND NEW.source_ingress_ordinal <> '0'))
+    ), 0)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'waddle: malformed immutable ingress source binding');
+END;
+CREATE TRIGGER ingress_messages_source_binding_update_guard
+BEFORE UPDATE ON ingress_messages
+WHEN OLD.source_binding_version IS NOT NEW.source_binding_version
+  OR OLD.source_bare_jid IS NOT NEW.source_bare_jid
+  OR OLD.source_auth_context_id IS NOT NEW.source_auth_context_id
+  OR OLD.source_auth_context_version IS NOT NEW.source_auth_context_version
+  OR OLD.source_auth_epoch IS NOT NEW.source_auth_epoch
+  OR OLD.source_sm_ingress_id IS NOT NEW.source_sm_ingress_id
+  OR OLD.source_ingress_ordinal IS NOT NEW.source_ingress_ordinal
+  OR (OLD.owner_decision IS NOT NEW.owner_decision AND NOT (
+      (OLD.owner_decision IS NULL AND NEW.owner_decision = 0
+        AND NEW.source_binding_version = 1 AND NEW.source_bare_jid IS NOT NULL)
+      OR (OLD.owner_decision = 0 AND NEW.owner_decision = 1
+        AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections r WHERE r.source_message_key = NEW.message_key))
+      OR (OLD.owner_decision = 0 AND NEW.owner_decision = 2
+        AND EXISTS (SELECT 1 FROM ingress_owner_rejections r WHERE r.source_message_key = NEW.message_key))
+  ))
+BEGIN
+    SELECT RAISE(ABORT, 'waddle: ingress source binding or owner decision is immutable');
+END;
+CREATE TRIGGER ingress_owner_rejections_update_guard
+BEFORE UPDATE ON ingress_owner_rejections
+BEGIN
+    SELECT RAISE(ABORT, 'waddle: owner rejection binding is immutable');
+END;
+CREATE TRIGGER ingress_owner_rejections_delete_guard
+BEFORE DELETE ON ingress_owner_rejections
+WHEN EXISTS (
+    SELECT 1 FROM ingress_messages child
+    WHERE child.message_key = OLD.child_message_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'waddle: owner rejection survives until child retention');
+END;
+"#;
+
+pub const V1028_INGRESS_SOURCE_BINDING_POSTGRES: &str = r#"
+ALTER TABLE ingress_messages
+    ADD COLUMN source_binding_version SMALLINT NULL,
+    ADD COLUMN source_bare_jid TEXT NULL,
+    ADD COLUMN source_auth_context_id UUID NULL,
+    ADD COLUMN source_auth_context_version NUMERIC(20,0) NULL,
+    ADD COLUMN source_auth_epoch NUMERIC(20,0) NULL,
+    ADD COLUMN source_sm_ingress_id UUID NULL,
+    ADD COLUMN source_ingress_ordinal NUMERIC(20,0) NULL,
+    ADD COLUMN owner_decision SMALLINT NULL,
+    ADD CONSTRAINT ingress_messages_source_binding_check CHECK (
+        (source_binding_version IS NULL AND source_bare_jid IS NULL
+          AND source_auth_context_id IS NULL AND source_auth_context_version IS NULL
+          AND source_auth_epoch IS NULL AND source_sm_ingress_id IS NULL
+          AND source_ingress_ordinal IS NULL)
+        OR (source_binding_version IS NOT NULL AND source_binding_version = 1
+          AND source_bare_jid IS NOT NULL AND source_bare_jid <> ''
+          AND octet_length(source_bare_jid) <= 3071
+          AND source_auth_context_id IS NOT NULL
+          AND source_auth_context_version IS NOT NULL
+          AND source_auth_context_version BETWEEN 1 AND 18446744073709551615
+          AND source_auth_epoch IS NOT NULL
+          AND source_auth_epoch BETWEEN 1 AND 18446744073709551615
+          AND ((source_sm_ingress_id IS NULL AND source_ingress_ordinal IS NULL)
+            OR (source_sm_ingress_id IS NOT NULL AND source_ingress_ordinal IS NOT NULL
+              AND source_ingress_ordinal BETWEEN 1 AND 18446744073709551615)))
+    ),
+    ADD CONSTRAINT ingress_messages_owner_decision_check CHECK (owner_decision IS NULL OR (owner_decision IN (0, 1, 2) AND source_binding_version IS NOT NULL AND source_binding_version = 1));
+CREATE TABLE ingress_owner_rejections (
+    source_message_key UUID PRIMARY KEY REFERENCES ingress_messages(message_key) ON DELETE RESTRICT,
+    child_message_key UUID NOT NULL UNIQUE REFERENCES ingress_messages(message_key) ON DELETE CASCADE,
+    CHECK (source_message_key <> child_message_key)
+);
+GRANT SELECT ON TABLE ingress_owner_rejections TO pg_monitor;
+CREATE FUNCTION waddle_ingress_source_binding_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    has_rejection BOOLEAN;
+BEGIN
+    IF NEW.source_binding_version IS DISTINCT FROM OLD.source_binding_version
+      OR NEW.source_bare_jid IS DISTINCT FROM OLD.source_bare_jid
+      OR NEW.source_auth_context_id IS DISTINCT FROM OLD.source_auth_context_id
+      OR NEW.source_auth_context_version IS DISTINCT FROM OLD.source_auth_context_version
+      OR NEW.source_auth_epoch IS DISTINCT FROM OLD.source_auth_epoch
+      OR NEW.source_sm_ingress_id IS DISTINCT FROM OLD.source_sm_ingress_id
+      OR NEW.source_ingress_ordinal IS DISTINCT FROM OLD.source_ingress_ordinal THEN
+        RAISE EXCEPTION 'waddle: ingress source binding is immutable';
+    END IF;
+    IF NEW.owner_decision IS DISTINCT FROM OLD.owner_decision THEN
+        EXECUTE format(
+            'SELECT EXISTS (SELECT 1 FROM %I.ingress_owner_rejections WHERE source_message_key = $1)',
+            TG_TABLE_SCHEMA
+        ) INTO has_rejection USING NEW.message_key;
+        IF OLD.owner_decision IS NULL AND NEW.owner_decision = 0
+          AND NEW.source_binding_version = 1 AND NEW.source_bare_jid IS NOT NULL THEN
+            RETURN NEW;
+        ELSIF OLD.owner_decision = 0 AND NEW.owner_decision = 1
+          AND NOT has_rejection THEN
+            RETURN NEW;
+        ELSIF OLD.owner_decision = 0 AND NEW.owner_decision = 2
+          AND has_rejection THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'waddle: invalid ingress owner decision transition';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE FUNCTION waddle_ingress_source_insert_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF NEW.owner_decision IS NOT NULL THEN
+        RAISE EXCEPTION 'waddle: owner decision starts undecided only after source intent commit';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE FUNCTION waddle_ingress_owner_rejection_immutable() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'waddle: owner rejection binding is immutable';
+END $$;
+CREATE FUNCTION waddle_ingress_owner_rejection_insert_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    source_decision SMALLINT;
+    source_binding_version SMALLINT;
+BEGIN
+    EXECUTE format(
+        'SELECT owner_decision, source_binding_version FROM %I.ingress_messages WHERE message_key = $1 FOR UPDATE',
+        TG_TABLE_SCHEMA
+    ) INTO source_decision, source_binding_version USING NEW.source_message_key;
+    IF source_decision IS DISTINCT FROM 0 OR source_binding_version IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION 'waddle: owner rejection requires an undecided bound source';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE FUNCTION waddle_ingress_owner_rejection_delete_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    child_exists BOOLEAN;
+BEGIN
+    EXECUTE format(
+        'SELECT EXISTS (SELECT 1 FROM %I.ingress_messages WHERE message_key = $1)',
+        TG_TABLE_SCHEMA
+    ) INTO child_exists USING OLD.child_message_key;
+    IF child_exists THEN
+        RAISE EXCEPTION 'waddle: owner rejection survives until child retention';
+    END IF;
+    RETURN OLD;
+END $$;
+CREATE TRIGGER ingress_messages_source_binding_guard
+BEFORE UPDATE ON ingress_messages
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_source_binding_guard();
+CREATE TRIGGER ingress_messages_source_insert_guard
+BEFORE INSERT ON ingress_messages
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_source_insert_guard();
+CREATE TRIGGER ingress_owner_rejections_update_guard
+BEFORE UPDATE ON ingress_owner_rejections
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_immutable();
+CREATE TRIGGER ingress_owner_rejections_insert_guard
+BEFORE INSERT ON ingress_owner_rejections
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_insert_guard();
+CREATE TRIGGER ingress_owner_rejections_delete_guard
+BEFORE DELETE ON ingress_owner_rejections
+FOR EACH ROW EXECUTE FUNCTION waddle_ingress_owner_rejection_delete_guard();
+CREATE TRIGGER ingress_owner_rejections_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_owner_rejections
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_owner_rejections_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_owner_rejections
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_epoch_guard_dml;
+ALTER TABLE ingress_owner_rejections ENABLE ALWAYS TRIGGER ingress_owner_rejections_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_owner_rejections');
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1675,6 +1897,13 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V1027_SM_ACKNOWLEDGED_WINDOWS,
             sql_postgres: V1027_SM_ACKNOWLEDGED_WINDOWS,
+        },
+        Migration {
+            version: 1028,
+            description: "Bind canonical room sources to immutable principals and owner decisions"
+                .to_string(),
+            sql_sqlite: V1028_INGRESS_SOURCE_BINDING,
+            sql_postgres: V1028_INGRESS_SOURCE_BINDING_POSTGRES,
         },
     ]
 }

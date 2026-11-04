@@ -14,6 +14,7 @@ use crate::push_service::FcmConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::info;
@@ -1104,6 +1105,38 @@ fn millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Per-process WebSocket capacity. The default is a policy choice, not a
+/// measured workload recommendation; operators should size it for each host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxWebSocketConnections(NonZeroUsize);
+
+impl Default for MaxWebSocketConnections {
+    fn default() -> Self {
+        Self(NonZeroUsize::new(4096).expect("4096 is nonzero"))
+    }
+}
+
+impl MaxWebSocketConnections {
+    /// Parse a positive connection limit; an absent variable uses the default.
+    pub fn from_raw(value: Option<&str>) -> Result<Self, WebSocketCapacityError> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        let capacity = value
+            .parse::<NonZeroUsize>()
+            .map_err(|_| WebSocketCapacityError)?;
+        Ok(Self(capacity))
+    }
+
+    pub fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("WADDLE_MAX_WEBSOCKET_CONNECTIONS must be a positive integer")]
+pub struct WebSocketCapacityError;
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub mode: ServerMode,
@@ -1117,6 +1150,8 @@ pub struct ServerConfig {
     /// RFC 7395 §3.8 WebSocket keepalive knobs (issue #1090), parsed
     /// from `WADDLE_WS_KEEPALIVE_*` by [`ws_keepalive_from_vars`].
     pub ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig,
+    /// Maximum physical WebSocket connections admitted by this process.
+    pub max_websocket_connections: MaxWebSocketConnections,
     /// SpiceDB backend configuration.
     /// Runtime startup requires this to be set.
     pub spicedb: Option<SpiceDbConfig>,
@@ -1613,6 +1648,7 @@ impl Default for ServerConfig {
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
+            max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
@@ -1642,6 +1678,15 @@ impl ServerConfig {
         // still aggregates `String` diagnostics; render the typed
         // keepalive error at this boundary.
         let ws_keepalive = ws_keepalive_from_env().map_err(|error| error.to_string())?;
+        let capacity_var = match std::env::var("WADDLE_MAX_WEBSOCKET_CONNECTIONS") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(WebSocketCapacityError.to_string());
+            }
+        };
+        let max_websocket_connections = MaxWebSocketConnections::from_raw(capacity_var.as_deref())
+            .map_err(|error| error.to_string())?;
         let spicedb = SpiceDbConfig::from_env()?;
 
         let occupant_id_secret =
@@ -1665,6 +1710,7 @@ impl ServerConfig {
             extensions,
             link_preview,
             ws_keepalive,
+            max_websocket_connections,
             spicedb,
             occupant_id_secret,
             ingress,
@@ -1682,6 +1728,10 @@ impl ServerConfig {
     pub fn log_config(&self) {
         info!("Running in {} mode", self.mode);
         info!("Base URL: {}", self.base_url);
+        info!(
+            "Per-process WebSocket connection limit: {}",
+            self.max_websocket_connections.get()
+        );
         info!("Auth providers configured: {}", self.auth.providers.len());
         info!(
             "HTTP auth broker: {}",
@@ -1703,6 +1753,7 @@ impl ServerConfig {
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
+            max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),
@@ -1723,6 +1774,7 @@ impl ServerConfig {
             extensions: ExtensionConfig::default(),
             link_preview: LinkPreviewConfig::default(),
             ws_keepalive: waddle_xmpp::protocol::KeepaliveConfig::default(),
+            max_websocket_connections: MaxWebSocketConnections::default(),
             spicedb: None,
             occupant_id_secret: test_occupant_id_secret(),
             ingress: IngressConfig::default(),

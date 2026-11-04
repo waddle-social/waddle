@@ -1,6 +1,6 @@
 use super::{
     dialect_sql, discard_database_error, gc_retained_child_sql, DateTime, IngressSubstrateError,
-    MessageKey, Transaction, Utc,
+    MessageKey, PreparedAttestedReceiptWriter, Transaction, Utc,
 };
 
 /// Invalidate only while holding the canonical row lock; this is scheduling
@@ -9,12 +9,26 @@ pub(crate) async fn invalidate_retention(
     tx: &mut Transaction<'_>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
-    tx.execute(
-        dialect_sql(
-            tx.driver(),
-            "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?::uuid",
-            "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?",
+    invalidate_retention_in_prepared_transaction(tx, None, message_key).await
+}
+
+pub(crate) async fn invalidate_retention_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+) -> Result<(), IngressSubstrateError> {
+    let sql = super::substrate::prepared_ingress_sql(
+        tx.driver(),
+        prepared,
+        super::substrate::PreparedIngressRelation::Messages,
+        (
+            "UPDATE ",
+            " SET retention_eligible_at = NULL WHERE message_key = ?::uuid",
         ),
+        "UPDATE ingress_messages SET retention_eligible_at = NULL WHERE message_key = ?",
+    );
+    tx.execute(
+        &sql,
         crate::db_params![message_key.to_storage().to_string()],
     )
     .await
@@ -33,6 +47,12 @@ pub(crate) async fn refresh_retention(
         UPDATE ingress_messages AS m
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
+          AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS
+              (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key))
+          AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS (
               SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
@@ -43,6 +63,12 @@ pub(crate) async fn refresh_retention(
         UPDATE ingress_messages AS m
         SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key)
+          AND NOT EXISTS (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key
+              AND (m.owner_decision IS NULL OR m.owner_decision <> 2))
+          AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS
+              (SELECT 1 FROM ingress_owner_rejections owner_child WHERE owner_child.source_message_key = m.message_key))
+          AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0)
+            AND EXISTS (SELECT 1 FROM ingress_effect_intents owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12))
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS (
               SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash))
@@ -61,8 +87,82 @@ pub(crate) async fn refresh_retention(
     Ok(())
 }
 
+/// Refresh the same retention proof against the schema attested for this UOW.
+pub(crate) async fn refresh_retention_in_prepared_transaction(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
+    message_key: MessageKey,
+    now: DateTime<Utc>,
+) -> Result<(), IngressSubstrateError> {
+    let Some(prepared) = prepared else {
+        return refresh_retention(tx, message_key, now).await;
+    };
+    use super::substrate::{prepared_ingress_relation, PreparedIngressRelation};
+    let relation = |name| prepared_ingress_relation(Some(prepared), name);
+    let pending = relation(PreparedIngressRelation::PendingDelivery);
+    let mut rows = tx
+        .query(
+            "SELECT 1 WHERE pg_catalog.to_regclass(?) IS NOT NULL",
+            crate::db_params![pending.clone()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    let has_pending = rows.next().await.map_err(discard_database_error)?.is_some();
+    drop(rows);
+    let pending_guard = if has_pending {
+        format!(
+            "AND NOT EXISTS (SELECT 1 FROM {} dispatch JOIN {pending} pending \
+             ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = m.message_key \
+             AND dispatch.pending_row_id <> '')",
+            relation(PreparedIngressRelation::ArchiveDispatch)
+        )
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "UPDATE {} AS m SET retention_eligible_at = CASE WHEN m.terminal_at IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM {} r WHERE r.message_key = m.message_key) \
+         AND NOT EXISTS (SELECT 1 FROM {} owner_child WHERE owner_child.source_message_key = m.message_key \
+           AND (m.owner_decision IS NULL OR m.owner_decision <> 2)) \
+         AND (m.owner_decision IS NULL OR m.owner_decision <> 2 OR EXISTS \
+           (SELECT 1 FROM {} owner_child WHERE owner_child.source_message_key = m.message_key)) \
+         AND NOT (m.source_binding_version IS NOT NULL AND (m.owner_decision IS NULL OR m.owner_decision = 0) \
+           AND EXISTS (SELECT 1 FROM {} owner_intent WHERE owner_intent.message_key = m.message_key AND owner_intent.kind = 12)) \
+         {pending_guard} \
+         AND NOT EXISTS (SELECT 1 FROM {} d WHERE d.message_key = m.message_key AND d.settled_at IS NULL) \
+         AND NOT EXISTS (SELECT 1 FROM {} i WHERE i.message_key = m.message_key AND NOT EXISTS \
+             (SELECT 1 FROM {} r WHERE r.message_key = i.message_key AND r.kind = i.kind \
+              AND r.semantic_identity_hash = i.semantic_identity_hash)) \
+         THEN COALESCE(m.retention_eligible_at, ?::timestamptz) ELSE NULL END \
+         WHERE m.message_key = ?::uuid",
+        relation(PreparedIngressRelation::Messages),
+        relation(PreparedIngressRelation::SmRefs),
+        relation(PreparedIngressRelation::OwnerRejections),
+        relation(PreparedIngressRelation::OwnerRejections),
+        relation(PreparedIngressRelation::Effects),
+        relation(PreparedIngressRelation::EffectDescendants),
+        relation(PreparedIngressRelation::Effects),
+        relation(PreparedIngressRelation::EffectReceipts),
+    );
+    tx.execute(
+        &sql,
+        crate::db_params![now.to_rfc3339(), message_key.to_storage().to_string()],
+    )
+    .await
+    .map_err(discard_database_error)?;
+    Ok(())
+}
+
 pub(crate) async fn refresh_retention_with_db_clock(
     tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<(), IngressSubstrateError> {
+    refresh_retention_in_prepared_transaction_with_db_clock(tx, None, message_key).await
+}
+
+pub(crate) async fn refresh_retention_in_prepared_transaction_with_db_clock(
+    tx: &mut Transaction<'_>,
+    prepared: Option<&PreparedAttestedReceiptWriter>,
     message_key: MessageKey,
 ) -> Result<(), IngressSubstrateError> {
     let query = dialect_sql(
@@ -81,5 +181,5 @@ pub(crate) async fn refresh_retention_with_db_clock(
         .map_err(|_| IngressSubstrateError::InvalidStoredTimestamp)?
         .with_timezone(&Utc);
     drop(rows);
-    refresh_retention(tx, message_key, now).await
+    refresh_retention_in_prepared_transaction(tx, prepared, message_key, now).await
 }

@@ -56,14 +56,24 @@ impl EffectReceiptRepository {
         receipt: &EffectReceiptKey,
         reason: PolicyDiscardReason,
     ) -> Result<(), IngressUowError> {
-        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
-            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash, policy_discard_reason) SELECT message_key, kind, semantic_identity_hash, ? FROM ingress_effect_intents WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING"
+        let (transaction, prepared) = tx.prepared_parts();
+        let key_param = if transaction.driver() == DatabaseDriver::Postgres {
+            "?::uuid"
         } else {
-            "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash, policy_discard_reason) SELECT message_key, kind, semantic_identity_hash, ? FROM ingress_effect_intents WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING"
+            "?"
         };
-        tx.transaction_mut()
+        let receipts = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::EffectReceipts,
+        );
+        let intents = crate::ingress_substrate::prepared_ingress_relation(
+            prepared,
+            crate::ingress_substrate::PreparedIngressRelation::Effects,
+        );
+        let sql = format!("INSERT INTO {receipts} (message_key, kind, semantic_identity_hash, policy_discard_reason) SELECT message_key, kind, semantic_identity_hash, ? FROM {intents} WHERE message_key = {key_param} AND kind = ? AND semantic_identity_hash = ? ON CONFLICT (message_key, kind, semantic_identity_hash) DO NOTHING");
+        transaction
             .execute(
-                sql,
+                &sql,
                 crate::db_params![
                     reason.as_storage(),
                     key.to_storage().to_string(),

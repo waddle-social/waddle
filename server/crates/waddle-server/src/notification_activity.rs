@@ -31,9 +31,16 @@ use jid::BareJid;
 use thiserror::Error;
 
 use crate::db::{Database, DatabaseError, IntoParams};
+pub(crate) mod runtime_attach;
 mod schema;
 mod store;
 mod types;
+
+pub use runtime_attach::DurableStoreAttachError;
+
+#[cfg(all(test, feature = "test-support"))]
+#[path = "notification_activity/runtime_attach_tests.rs"]
+mod runtime_attach_tests;
 
 pub use types::{
     NoopActivityReader, NotificationActivity, NotificationActivityError,
@@ -47,9 +54,31 @@ pub struct NotificationActivityStore {
 
 impl NotificationActivityStore {
     pub async fn try_new(db: Database) -> Result<Self, NotificationActivityError> {
+        Self::build_initialized(db).await
+    }
+
+    /// Initialize the activity projection through this exact owner database
+    /// handle. Existing callers retain the historical bootstrap behavior via
+    /// [`Self::try_new`].
+    pub async fn initialize_owner(db: Database) -> Result<Self, NotificationActivityError> {
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(NotificationActivityError::OwnerBootstrapRequiresOwnerHandle);
+        }
+        Self::build_initialized(db).await
+    }
+
+    async fn build_initialized(db: Database) -> Result<Self, NotificationActivityError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
+    }
+
+    /// Attach to an owner-prepared PostgreSQL table through the exact
+    /// physically attested main-pool handle. This path is read-only and does
+    /// not reopen a URL or apply schema DDL.
+    pub async fn attach_existing(db: Database) -> Result<Self, DurableStoreAttachError> {
+        runtime_attach::verify_attested_table(&db, &runtime_attach::ACTIVITY_CONTRACT).await?;
+        Ok(Self { db })
     }
 
     async fn execute(

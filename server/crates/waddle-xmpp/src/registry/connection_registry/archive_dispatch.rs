@@ -5,8 +5,7 @@ use crate::ingress::IngressEffectKind;
 use crate::pending_delivery::SmSessionId;
 use std::collections::BTreeMap;
 
-use tokio::sync::mpsc::error::TrySendError;
-
+use super::endpoint::{EndpointEnqueueOutcome, EndpointEnqueueRejection};
 use super::{ConnectionEntry, ConnectionRegistry, OutboundStanza};
 use crate::mam::ArchiveOrdinal;
 use crate::stream_management::SmIngressAppendKey;
@@ -20,28 +19,32 @@ impl ConnectionEntry {
     /// The caller has authorized the canonical positions. The non-blocking
     /// enqueue and frontier publication share one lock across registry/actor
     /// clones. Concurrent retries cannot enqueue A again after B is accepted.
-    pub(crate) fn try_send_archive_ordered(
+    pub(in crate::registry) fn try_send_archive_ordered(
         &self,
         outbound: OutboundStanza,
-    ) -> Result<(), TrySendError<()>> {
+    ) -> Result<(), EndpointEnqueueRejection> {
         if outbound.ingress_append.as_ref().is_some_and(|obligation| {
             [IngressEffectKind::Carbons, IngressEffectKind::RelayCarbons]
                 .iter()
                 .any(|kind| kind.storage_tag() == obligation.key.kind.to_storage())
-        }) && !self.is_carbons_enabled()
-        {
-            // A frozen audience is only an upper bound. Check current opt-in
-            // at queue acceptance, after any relay/database await and against
-            // this exact connection entry. Like duplicate suppression below,
-            // success settles the obligation without a new wire copy.
-            return Ok(());
+        }) {
+            // Suppression settles the obligation without a queue write, so it
+            // must still be ordered against activation and sealing. Check
+            // current opt-in while holding the same admission gate as enqueue.
+            let suppressed = self.endpoint.with_active(|_| !self.is_carbons_enabled())?;
+            if suppressed {
+                return Ok(());
+            }
         }
         let Some(obligation) = outbound
             .ingress_append
             .as_ref()
             .filter(|obligation| !obligation.archive_positions.is_empty())
         else {
-            return self.sender.try_send(outbound).map_err(queue_error);
+            return match self.endpoint.try_send(outbound) {
+                EndpointEnqueueOutcome::AcceptedOrUnknown => Ok(()),
+                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => Err(reason),
+            };
         };
         let key = obligation.key.clone();
         if obligation
@@ -51,51 +54,52 @@ impl ConnectionEntry {
         {
             // Backpressure, not "disconnected": the caller must recheck its
             // predecessor gate instead of falling through to a different stream.
-            return Err(TrySendError::Full(()));
+            return Err(EndpointEnqueueRejection::Full);
         }
         let positions = obligation.archive_positions.clone();
-        let Ok(mut state) = self.archive_dispatch.lock() else {
-            return Err(TrySendError::Full(()));
-        };
-        let duplicate = positions.iter().any(|position| {
-            state
-                .archives
-                .get(&position.archive)
-                .is_some_and(|(ordinal, keys)| {
-                    *ordinal > position.ordinal
-                        || (*ordinal == position.ordinal && keys.contains(&key))
-                })
-        });
-        if duplicate {
-            // Queue acceptance is sufficient for ordinary ingress delivery.
-            // It cannot fabricate the separate write-acceptance callback.
-            return if outbound.write_acceptance.is_some() {
-                Err(TrySendError::Full(()))
-            } else {
-                Ok(())
+        match self.endpoint.with_active(|sink| {
+            let Ok(mut state) = self.archive_dispatch.lock() else {
+                return Err(EndpointEnqueueRejection::Full);
             };
-        }
-        self.sender.try_send(outbound).map_err(queue_error)?;
-        for position in positions {
-            let entry = state
-                .archives
-                .entry(position.archive)
-                .or_insert_with(|| (position.ordinal, Vec::new()));
-            if entry.0 < position.ordinal {
-                *entry = (position.ordinal, Vec::new());
+            let duplicate = positions.iter().any(|position| {
+                state
+                    .archives
+                    .get(&position.archive)
+                    .is_some_and(|(ordinal, keys)| {
+                        *ordinal > position.ordinal
+                            || (*ordinal == position.ordinal && keys.contains(&key))
+                    })
+            });
+            if duplicate {
+                // Queue acceptance is sufficient for ordinary ingress delivery.
+                // It cannot fabricate the separate write-acceptance callback.
+                return if outbound.write_acceptance.is_some() {
+                    Err(EndpointEnqueueRejection::Full)
+                } else {
+                    Ok(())
+                };
             }
-            if !entry.1.contains(&key) {
-                entry.1.push(key.clone());
+            match sink.try_send(outbound) {
+                EndpointEnqueueOutcome::AcceptedOrUnknown => {}
+                EndpointEnqueueOutcome::ProvenNotEnqueued { reason, .. } => return Err(reason),
             }
+            for position in positions {
+                let entry = state
+                    .archives
+                    .entry(position.archive)
+                    .or_insert_with(|| (position.ordinal, Vec::new()));
+                if entry.0 < position.ordinal {
+                    *entry = (position.ordinal, Vec::new());
+                }
+                if !entry.1.contains(&key) {
+                    entry.1.push(key.clone());
+                }
+            }
+            Ok(())
+        }) {
+            Ok(result) => result,
+            Err(rejection) => Err(rejection),
         }
-        Ok(())
-    }
-}
-
-fn queue_error(error: TrySendError<OutboundStanza>) -> TrySendError<()> {
-    match error {
-        TrySendError::Full(_) => TrySendError::Full(()),
-        TrySendError::Closed(_) => TrySendError::Closed(()),
     }
 }
 
@@ -110,8 +114,10 @@ impl ConnectionRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::EndpointEnqueueRejection;
     use super::*;
     use crate::ingress::MessageKey;
+    use crate::ownership::{BindingRef, ConnectionRef, NodeLeaseIdentity};
     use crate::registry::{BroadcastOutcome, ConnectionRegistry};
     use crate::stream_management::{
         ArchiveDispatchPosition, SmIngressReceiptKind, SmRelayedAppendObligation,
@@ -139,6 +145,34 @@ mod tests {
                 dispatch_stream: None,
             },
         )
+    }
+
+    #[test]
+    fn sealed_binding_refusal_does_not_advance_archive_frontier() {
+        let resource: jid::FullJid = "bob@example.test/phone"
+            .parse()
+            .expect("valid recipient resource JID");
+        let (endpoint, mut receiver) = super::super::SocketOutboundEndpoint::channel(1);
+        let binding_ref =
+            BindingRef::fresh(ConnectionRef::fresh(NodeLeaseIdentity::local_process()));
+        let entry = ConnectionEntry::new_for_binding(endpoint, binding_ref.clone());
+        let owner = entry.binding_id();
+
+        assert!(entry.seal_binding(owner, &binding_ref));
+        assert_eq!(
+            entry.try_send_archive_ordered(copy(&resource, MessageKey::new(), 1)),
+            Err(EndpointEnqueueRejection::Sealed)
+        );
+        assert!(
+            entry
+                .archive_dispatch
+                .lock()
+                .expect("archive dispatch mutex is not poisoned")
+                .archives
+                .is_empty(),
+            "refused enqueue must not publish an archive frontier"
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
@@ -194,12 +228,12 @@ mod tests {
         let resource: jid::FullJid = "bob@example.test/phone"
             .parse()
             .expect("valid recipient resource JID");
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-        registry.register(resource.clone(), sender);
+        let (endpoint, mut receiver) = super::super::SocketOutboundEndpoint::channel(8);
+        registry.register(resource.clone(), endpoint);
         let owner = registry
             .entry(&resource)
             .expect("registered recipient resource")
-            .carbons_enabled;
+            .binding_id();
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         for outbound in [a.clone(), b, a] {
@@ -231,12 +265,12 @@ mod tests {
         let resource: jid::FullJid = "bob@example.test/phone"
             .parse()
             .expect("valid recipient resource JID");
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        registry.register(resource.clone(), sender);
+        let (endpoint, mut receiver) = super::super::SocketOutboundEndpoint::channel(1);
+        registry.register(resource.clone(), endpoint);
         let owner = registry
             .entry(&resource)
             .expect("registered recipient resource")
-            .carbons_enabled;
+            .binding_id();
         let a = copy(&resource, MessageKey::new(), 1);
         let b = copy(&resource, MessageKey::new(), 2);
         assert_eq!(
@@ -302,7 +336,7 @@ mod tests {
             .dispatch_stream = Some(old_stream);
         assert!(matches!(
             entry.try_send_archive_ordered(outbound),
-            Err(TrySendError::Full(_))
+            Err(EndpointEnqueueRejection::Full)
         ));
         assert!(receiver.try_recv().is_err());
     }

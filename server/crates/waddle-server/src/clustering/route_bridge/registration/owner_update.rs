@@ -1,15 +1,19 @@
 use super::super::{
-    ActorRef, Arc, AtomicBool, ConnectionEntry, ConnectionRegistry, Future,
-    OrderedRelayDeliveryBridge, OrderedRelayDeliveryServices, Ordering,
-    RelayRemoteResourceRegistrationStatus, RelayRemoteResourceUpdateReply,
-    RelayRemoteResourceUpdateStatus, RelayUpdateRemoteUserResource, RemoteOwnerRegistration,
-    RemoteResourceStateUpdate, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+    ActorRef, Arc, ConnectionEntry, ConnectionRegistry, Future, NodeId, OrderedRelayDeliveryBridge,
+    OrderedRelayDeliveryServices, Ordering, RelayRemoteResourceRegistrationStatus,
+    RelayRemoteResourceUpdateReply, RelayRemoteResourceUpdateStatus, RelayUpdateRemoteUserResource,
+    RemoteOwnerRegistration, RemoteResourceStateUpdate, ORDERED_DELIVERY_MAILBOX_TIMEOUT,
 };
 use super::apply_remote_resource_presence_to_registry;
 use super::owner_update_order::{
     RemoteResourceUpdateKey, MAX_ORDERED_REMOTE_RESOURCE_UPDATE_REGISTRATIONS,
     MAX_PENDING_REMOTE_RESOURCE_UPDATES_PER_REGISTRATION,
 };
+
+#[cfg(test)]
+tokio::task_local! {
+    static REMOTE_UPDATE_SOURCE_LEASE_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
 
 impl OrderedRelayDeliveryBridge {
     /// Owner-side entry point for `remote_resource_update` (#1685 interim).
@@ -122,6 +126,12 @@ impl OrderedRelayDeliveryBridge {
                 .await
                 {
                     Ok(_) => {
+                        if let Err(status) =
+                            remote_owner_entry_source_lease_is_current(&services, &registration)
+                                .await
+                        {
+                            return RelayRemoteResourceUpdateReply { status };
+                        }
                         if apply_remote_resource_presence_to_registry(
                             &services.connection_registry,
                             &jid,
@@ -148,6 +158,12 @@ impl OrderedRelayDeliveryBridge {
                 .await
                 {
                     Ok(entry) => {
+                        if let Err(status) =
+                            remote_owner_entry_source_lease_is_current(&services, &registration)
+                                .await
+                        {
+                            return RelayRemoteResourceUpdateReply { status };
+                        }
                         entry.carbons_enabled.store(enabled, Ordering::Relaxed);
                         RelayRemoteResourceUpdateStatus::Updated
                     }
@@ -163,6 +179,11 @@ impl OrderedRelayDeliveryBridge {
             .await
             {
                 Ok(entry) => {
+                    if let Err(status) =
+                        remote_owner_entry_source_lease_is_current(&services, &registration).await
+                    {
+                        return RelayRemoteResourceUpdateReply { status };
+                    }
                     entry.roster_interested.store(true, Ordering::Relaxed);
                     RelayRemoteResourceUpdateStatus::Updated
                 }
@@ -178,6 +199,12 @@ impl OrderedRelayDeliveryBridge {
                 .await
                 {
                     Ok(entry) => {
+                        if let Err(status) =
+                            remote_owner_entry_source_lease_is_current(&services, &registration)
+                                .await
+                        {
+                            return RelayRemoteResourceUpdateReply { status };
+                        }
                         entry.blocklist_interested.store(true, Ordering::Relaxed);
                         RelayRemoteResourceUpdateStatus::Updated
                     }
@@ -189,11 +216,43 @@ impl OrderedRelayDeliveryBridge {
     }
 }
 
+async fn remote_owner_entry_source_lease_is_current(
+    services: &OrderedRelayDeliveryServices,
+    registration: &RemoteOwnerRegistration,
+) -> Result<(), RelayRemoteResourceUpdateStatus> {
+    #[cfg(test)]
+    if let Ok((entered, release)) = REMOTE_UPDATE_SOURCE_LEASE_GATE.try_with(Clone::clone) {
+        entered.notify_one();
+        release.notified().await;
+    }
+
+    remote_source_connection_lease_is_current(
+        services,
+        &registration.socket_node,
+        &registration.connection_ref,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|status| match status {
+        RelayRemoteResourceRegistrationStatus::StaleRegistration => {
+            RelayRemoteResourceUpdateStatus::StaleRegistration
+        }
+        RelayRemoteResourceRegistrationStatus::Unavailable => {
+            RelayRemoteResourceUpdateStatus::Unavailable
+        }
+        RelayRemoteResourceRegistrationStatus::Registered
+        | RelayRemoteResourceRegistrationStatus::NotOwner
+        | RelayRemoteResourceRegistrationStatus::Busy => {
+            RelayRemoteResourceUpdateStatus::StaleRegistration
+        }
+    })
+}
+
 pub(in super::super) async fn owner_remote_entry_if_current(
     actor: &ActorRef<waddle_xmpp::registry::user_actor::UserActor>,
     registry: &ConnectionRegistry,
     jid: &jid::FullJid,
-    owner: &Arc<AtomicBool>,
+    owner: &waddle_xmpp::registry::LocalConnectionBindingId,
 ) -> Result<ConnectionEntry, RelayRemoteResourceUpdateStatus> {
     let actor_entry = match actor
         .ask(waddle_xmpp::registry::GetConnectionEntry { jid: jid.clone() })
@@ -205,7 +264,7 @@ pub(in super::super) async fn owner_remote_entry_if_current(
         Ok(None) => return Err(RelayRemoteResourceUpdateStatus::StaleRegistration),
         Err(_) => return Err(RelayRemoteResourceUpdateStatus::Unavailable),
     };
-    if !Arc::ptr_eq(&actor_entry.carbons_enabled, owner) {
+    if actor_entry.binding_id() != *owner {
         return Err(RelayRemoteResourceUpdateStatus::StaleRegistration);
     }
     let Some(registry_entry) = registry.entry_if_owner(jid, owner) else {
@@ -225,6 +284,12 @@ pub(super) async fn remote_owner_registration_is_current(
     jid: &jid::FullJid,
     registration: &RemoteOwnerRegistration,
 ) -> Result<(), RelayRemoteResourceRegistrationStatus> {
+    remote_source_connection_lease_is_current(
+        services,
+        &registration.socket_node,
+        &registration.connection_ref,
+    )
+    .await?;
     let actor = match services
         .user_registry
         .ask(waddle_xmpp::registry::GetUser {
@@ -259,11 +324,36 @@ pub(super) async fn remote_owner_registration_is_current(
     })
 }
 
+pub(super) async fn remote_source_connection_lease_is_current(
+    services: &OrderedRelayDeliveryServices,
+    socket_node: &NodeId,
+    connection_ref: &waddle_xmpp::ownership::ConnectionRef,
+) -> Result<waddle_xmpp::ownership::NodeIdentity, RelayRemoteResourceRegistrationStatus> {
+    match tokio::time::timeout(
+        ORDERED_DELIVERY_MAILBOX_TIMEOUT,
+        services.node_lease.unexpired_node_identity(socket_node),
+    )
+    .await
+    {
+        Ok(Ok(Some(identity)))
+            if identity.node_id == socket_node.as_str()
+                && waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&identity)
+                    == *connection_ref.node_lease() =>
+        {
+            Ok(identity)
+        }
+        Ok(Ok(Some(_))) => Err(RelayRemoteResourceRegistrationStatus::StaleRegistration),
+        Ok(Ok(None)) => Err(RelayRemoteResourceRegistrationStatus::StaleRegistration),
+        Ok(Err(_)) | Err(_) => Err(RelayRemoteResourceRegistrationStatus::Unavailable),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clustering::route_bridge::tests::{
-        origin_identity, receiver_identity, services_with_claims, test_peer_id,
+        origin_identity, receiver_identity, services_with_claims, test_peer_id, SocketLeaseRead,
+        StaticNodeLease,
     };
     use crate::clustering::route_bridge::{
         RemoteResourceRegistrationId, RemoteResourceSocketGeneration,
@@ -300,6 +390,36 @@ mod tests {
         (bridge, services)
     }
 
+    async fn wired_bridge_with_socket_lease() -> (
+        Arc<OrderedRelayDeliveryBridge>,
+        Arc<OrderedRelayDeliveryServices>,
+        Arc<std::sync::Mutex<SocketLeaseRead>>,
+    ) {
+        let peer_id = test_peer_id();
+        let socket_read = Arc::new(std::sync::Mutex::new(SocketLeaseRead::Present(
+            NodeIdentity::new("socket-node", "fixture-epoch"),
+        )));
+        let mut services = services_with_claims(
+            origin_identity(),
+            receiver_identity(),
+            receiver_identity(),
+            peer_id.clone(),
+        )
+        .await;
+        services.node_lease = Arc::new(StaticNodeLease {
+            socket_read: Some(Arc::clone(&socket_read)),
+            origin: origin_identity(),
+            peer_id,
+        });
+        let services = Arc::new(services);
+        let bridge = OrderedRelayDeliveryBridge::new(
+            CancellationToken::new(),
+            &ClusteringMessagingConfig::default(),
+        );
+        bridge.wire(services.clone());
+        (bridge, services, socket_read)
+    }
+
     async fn seed_owner_registration(
         bridge: &Arc<OrderedRelayDeliveryBridge>,
         services: &Arc<OrderedRelayDeliveryServices>,
@@ -307,8 +427,14 @@ mod tests {
     ) -> (jid::FullJid, RemoteOwnerRegistration) {
         let target = target.parse::<jid::FullJid>().expect("valid full jid");
         let (tx, _rx) = mpsc::channel(1);
-        let entry = ConnectionEntry::new(tx);
-        let owner = entry.carbons_handle();
+        let connection_ref = waddle_xmpp::ownership::ConnectionRef::fresh(
+            waddle_xmpp::ownership::NodeLeaseIdentity::from_node_identity(&NodeIdentity::new(
+                "socket-node",
+                "fixture-epoch",
+            )),
+        );
+        let entry = ConnectionEntry::remote_hosted_for_connection(tx, connection_ref.clone());
+        let owner = entry.binding_id();
         services
             .connection_registry
             .register_entry(target.clone(), entry.clone());
@@ -323,6 +449,7 @@ mod tests {
         let registration = RemoteOwnerRegistration {
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             socket_identity: NodeIdentity::new("fixture-socket", "fixture-epoch"),
+            connection_ref,
             unregister_pending: false,
             registration_id: RemoteResourceRegistrationId::fresh(),
             socket_node: NodeId::new("socket-node".to_owned()),
@@ -353,6 +480,57 @@ mod tests {
             },
             trace: RelayTraceContext::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_remote_state_update_rejects_rotated_source_lease_before_mutation() {
+        let (bridge, services, socket_read) = wired_bridge_with_socket_lease().await;
+        let (jid, registration) =
+            seed_owner_registration(&bridge, &services, "juliet@example.test/phone").await;
+
+        assert_eq!(
+            bridge
+                .admit_remote_user_resource_update(presence_update(&jid, &registration, 1))
+                .await
+                .status,
+            RelayRemoteResourceUpdateStatus::Updated
+        );
+        assert_eq!(mirrored_priority(&services, &jid), Some(1));
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut pending = tokio::spawn({
+            let bridge = Arc::clone(&bridge);
+            let gate = (Arc::clone(&entered), Arc::clone(&release));
+            let update = presence_update(&jid, &registration, 9);
+            async move {
+                REMOTE_UPDATE_SOURCE_LEASE_GATE
+                    .scope(gate, bridge.admit_remote_user_resource_update(update))
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("update reached its source lease boundary");
+        *socket_read
+            .lock()
+            .expect("socket lease fixture lock must not be poisoned") =
+            SocketLeaseRead::Present(NodeIdentity::new("socket-node", "epoch-after-rotation"));
+        release.notify_one();
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), &mut pending)
+                .await
+                .expect("update completes")
+                .expect("update task")
+                .status,
+            RelayRemoteResourceUpdateStatus::StaleRegistration
+        );
+        assert_eq!(
+            mirrored_priority(&services, &jid),
+            Some(1),
+            "a queued update from the previous source lease cannot change the mirror"
+        );
     }
 
     fn mirrored_priority(

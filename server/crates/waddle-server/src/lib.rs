@@ -18,6 +18,7 @@ pub mod ingress;
 pub mod ingress_substrate;
 /// Atomic PostgreSQL ingress transaction seam (#1654).
 pub mod ingress_uow;
+pub mod mam_runtime;
 pub mod metrics;
 pub mod muc_destroy_completion_outbox;
 /// Postgres-backed durable MUC room ownership state (ADR-0017 Phase 3
@@ -67,3 +68,7 @@ pub mod time;
 pub mod vcard;
 
 pub use config::{ServerConfig, ServerMode};
+
+/// Supervised WebSocket transport primitives for the future connection owner.
+#[doc(hidden)]
+pub mod websocket_transport;

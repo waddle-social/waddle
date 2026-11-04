@@ -297,6 +297,7 @@ async fn ingress_room_generation_stale_postgres() {
     );
     submission.plan.room_execution = RoomExecutionPath::Local {
         room,
+        client_origin: None,
         fence: RoomFenceRequirement::Guarded(fence),
         snapshot_generation: 17,
         manifest_snapshot: None,
@@ -371,6 +372,7 @@ async fn local_room_commit(
     )));
     submission.plan.room_execution = RoomExecutionPath::Local {
         room,
+        client_origin: None,
         fence,
         snapshot_generation: 999,
         manifest_snapshot: None,

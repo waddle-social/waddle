@@ -20,6 +20,14 @@ use super::{create_websocket_mam_storage, start_http_server, HttpServerDeps};
 use super::{ensure_fixed_test_account, fixed_test_account_enabled};
 use super::{resolve_server_owner_jids, AppState, AppStateDeps};
 
+#[derive(Debug, thiserror::Error)]
+pub enum RestrictedStartupError {
+    #[error(
+        "restricted runtime cannot serve until all startup stores have read-only attachment paths"
+    )]
+    UnconvertedStores,
+}
+
 /// Start HTTP and XMPP services with inherited listeners and graceful shutdown.
 ///
 /// On SIGTERM: graceful drain and exit.
@@ -57,6 +65,13 @@ pub async fn start_with_config(
     global_adopt_matched: Option<crate::db::lineage::LineageUuid>,
     mut inherited: Option<waddle_ecdysis::ListenerSet>,
 ) -> Result<crate::telemetry::MetricsFlush> {
+    // Several constructors below still initialize owner schemas or open
+    // separate raw pools (including PubSub, MAM, clustered SM, push and
+    // outboxes). Refuse before binding or starting actors until each has a
+    // verified same-pool attachment. Do not try them with the runtime role.
+    if db_pool.global().uses_attested_postgres_pool() {
+        return Err(RestrictedStartupError::UnconvertedStores.into());
+    }
     // Set up Ecdysis graceful shutdown coordinator
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
@@ -102,13 +117,23 @@ pub async fn start_with_config(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
-        db_pool.global().clone(),
-    )
-    .await
-    .map_err(|error| {
-        anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
-    })?;
+    if db_pool.global().uses_attested_postgres_pool() {
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::attach_existing(
+            db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to attach MUC destroy completion outbox: {error}")
+        })?;
+    } else {
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
+            db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to initialize MUC destroy completion outbox: {error}")
+        })?;
+    }
     ensure_fixed_test_account(&db_pool, &xmpp_config).await?;
     let global_db = Arc::new(db_pool.global().clone());
     let permission_actor_impl = if server_config.spicedb.is_none() && fixed_test_account_enabled() {
@@ -132,9 +157,9 @@ pub async fn start_with_config(
     // The inbox projection is written inside the ingress transaction, so its
     // rows must live in the global database: SQLite shares the global pool
     // outright; PostgreSQL must be pointed at the same database.
-    let inbox_database_storage =
-        http::create_ingress_inbox_storage(xmpp_config.inbox_database_url.as_deref(), &global_db)
-            .await?;
+    let inbox_startup =
+        http::create_ingress_inbox_storage(&xmpp_config.inbox_database_url, &global_db).await?;
+    let inbox_database_storage = inbox_startup.storage().clone();
     let inbox_storage: Arc<dyn waddle_xmpp::inbox::storage::InboxStorage> =
         inbox_database_storage.clone();
     let spaces_metadata_database_store = Arc::new(
@@ -289,6 +314,7 @@ pub async fn start_with_config(
         permission_actor: permission_actor.clone(),
         server_owner_jids,
         node_lifecycle: node_lifecycle.clone(),
+        max_websocket_connections: server_config.max_websocket_connections,
         clustering_claims: clustering_handles,
         lineage_config: lineage_config.clone(),
         clustering_enabled: server_config.clustering.enabled,
@@ -299,24 +325,28 @@ pub async fn start_with_config(
     // The global store follows the same ephemeral classification as every
     // other boundary: an in-memory SQLite global (bare dev runs, the WS
     // integration harness) is non-durable and exempt from attestation.
-    super::bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::Global,
-        db_pool.global().clone(),
-    )
-    .await?;
+    let global = db_pool.global();
+    if let Some(capability) = global.attested_pg_writer_capability() {
+        let expected =
+            capability.attested_lineage_for_deployment(state.lineage_config.deployment_uuid)?;
+        crate::db::bootstrap::verify_global_runtime(global, &state.lineage_config, &expected)
+            .await?;
+        state.register_lineage_database(crate::db::lineage::DurableStore::Global, global.clone());
+    } else {
+        super::bootstrap_and_register_store_lineage(
+            &state,
+            crate::db::lineage::DurableStore::Global,
+            global.clone(),
+        )
+        .await?;
+    }
     if db_pool.global().has_control_plane_pool() {
         state.register_lineage_control_plane(
             crate::db::lineage::DurableStore::ControlPlane,
             db_pool.global().clone(),
         );
     }
-    bootstrap_and_register_store_lineage(
-        &state,
-        crate::db::lineage::DurableStore::Inbox,
-        inbox_database_storage.database(),
-    )
-    .await?;
+    register_inbox_lineage(&state, &inbox_startup).await?;
     bootstrap_and_register_store_lineage(
         &state,
         crate::db::lineage::DurableStore::SpacesMetadata,
@@ -461,6 +491,24 @@ pub async fn start_with_config(
     }
 }
 
+pub(crate) async fn register_inbox_lineage(
+    state: &AppState,
+    startup: &http::InboxStartup,
+) -> Result<()> {
+    use crate::db::lineage::DurableStore;
+
+    match startup {
+        http::InboxStartup::AttachedGlobal(_) => {
+            state.register_lineage_alias(DurableStore::Inbox, DurableStore::Global);
+            Ok(())
+        }
+        http::InboxStartup::OwnerInitialized(storage) => {
+            bootstrap_and_register_store_lineage(state, DurableStore::Inbox, storage.database())
+                .await
+        }
+    }
+}
+
 /// Bootstrap DDL plus the one-shot operator action for one durable boundary.
 ///
 /// `Adopt` uses the matched-or-skip engine call: several stores usually share
@@ -474,27 +522,24 @@ pub(crate) async fn bootstrap_store_lineage(
     database: crate::db::Database,
 ) -> Result<()> {
     let config = &state.lineage_config;
-    crate::db::lineage::ensure_table(&database).await?;
-    match &config.action {
-        Some(crate::db::lineage::LineageAction::Enroll) => {
-            info!(store = %store, "enrolling database lineage");
-            crate::db::lineage::enroll(&database, config).await?;
-        }
-        Some(crate::db::lineage::LineageAction::Adopt(expected)) => {
-            match crate::db::lineage::adopt_if_matched(&database, config, expected).await? {
-                crate::db::lineage::AdoptOutcome::Adopted { matched, .. } => {
-                    info!(store = %store, matched = %matched, "adopted database lineage");
-                    state.note_lineage_adopt_match(matched);
-                }
-                crate::db::lineage::AdoptOutcome::NotMatched => {
-                    info!(
-                        store = %store,
-                        "lineage adopt action did not name this boundary; leaving it untouched"
-                    );
-                }
-            }
-        }
-        None => {}
+    if matches!(
+        config.action,
+        Some(crate::db::lineage::LineageAction::Enroll)
+    ) {
+        info!(store = %store, "enrolling database lineage");
+    }
+    let matched = crate::db::bootstrap::bootstrap_store_owner(&database, config).await?;
+    if let Some(matched) = matched {
+        info!(store = %store, matched = %matched, "adopted database lineage");
+        state.note_lineage_adopt_match(matched);
+    } else if matches!(
+        config.action,
+        Some(crate::db::lineage::LineageAction::Adopt(_))
+    ) {
+        info!(
+            store = %store,
+            "lineage adopt action did not name this boundary; leaving it untouched"
+        );
     }
     Ok(())
 }

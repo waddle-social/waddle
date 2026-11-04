@@ -543,7 +543,7 @@ async fn pending_stream_progress(fixture: IngressFixture) {
                     server_domain: "example.com",
                     sm_session: Some(&stream),
                     blocking_storage: None,
-                    owner: Some(&entry.carbons_enabled),
+                    owner: Some(&entry.binding_id()),
                     archive_resolver: &resolver,
                     dispatch_gate: Some(authority.as_ref()),
                 },
