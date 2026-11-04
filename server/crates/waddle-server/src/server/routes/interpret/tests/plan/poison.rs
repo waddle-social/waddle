@@ -314,6 +314,7 @@ impl PendingDeliveryStorage for PoisonPending {
         _recipient: &BareJid,
         _session: &SmSessionId,
         _sequences: &HashSet<u32>,
+        _expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
         panic!("planning wrote PendingDeliveryStorage::release_rows_for_outbound_sequences")
     }

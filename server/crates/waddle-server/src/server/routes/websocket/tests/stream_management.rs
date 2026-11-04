@@ -3549,6 +3549,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         recipient: &BareJid,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         sequences: &std::collections::HashSet<u32>,
+        expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if self
             .fail_next_release
@@ -3561,7 +3562,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             );
         }
         self.inner
-            .release_rows_for_outbound_sequences(recipient, session, sequences)
+            .release_rows_for_outbound_sequences(recipient, session, sequences, expected_fence)
             .await
     }
 
@@ -4245,6 +4246,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
         recipient: &BareJid,
         session: &waddle_xmpp::pending_delivery::SmSessionId,
         sequences: &std::collections::HashSet<u32>,
+        expected_fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
     ) -> waddle_xmpp::pending_delivery::storage::ReleaseRowsForOutboundSequencesOutcome {
         if self
             .fail_next_release
@@ -4257,7 +4259,7 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
             );
         }
         self.inner
-            .release_rows_for_outbound_sequences(recipient, session, sequences)
+            .release_rows_for_outbound_sequences(recipient, session, sequences, expected_fence)
             .await
     }
 

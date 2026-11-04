@@ -609,15 +609,19 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// return to ordinary pending-delivery redelivery instead of being
     /// promoted from its unacked XML a second time.
     ///
-    /// The default keeps storage implementations source-compatible while
-    /// preserving the ownership check through [`Self::release_row_if_session`].
-    /// Implementations may override it with a set-based query.
+    /// The portable default preserves the row/session ownership check through
+    /// [`Self::release_row_if_session`]. Implementations may override it with
+    /// a set-based query. Cluster-aware implementations must require
+    /// `expected_fence` and assert its exact owner and claim epoch in the same
+    /// transaction as the release; unfenced stores may ignore it.
     async fn release_rows_for_outbound_sequences(
         &self,
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
+        let _ = expected_fence;
         if sequences.is_empty() {
             return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
         }
@@ -1555,7 +1559,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         recipient: &BareJid,
         session: &SmSessionId,
         sequences: &HashSet<u32>,
+        expected_fence: Option<&SmClaimFence>,
     ) -> ReleaseRowsForOutboundSequencesOutcome {
+        let _ = expected_fence;
         if sequences.is_empty() {
             return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
         }
