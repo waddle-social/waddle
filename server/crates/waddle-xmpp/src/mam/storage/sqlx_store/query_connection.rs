@@ -127,7 +127,7 @@ async fn cursor(
         .ok_or_else(|| MamStorageError::NotFound(id.to_owned()))?;
     message
         .ordinal
-        .ok_or_else(|| MamStorageError::MissingOrdinal(message.id))
+        .ok_or(MamStorageError::MissingOrdinal(message.id))
 }
 
 async fn ensure_requested_ids_exist(
