@@ -487,8 +487,8 @@ impl LiveWebSocketConnection {
             tokio::select! {
                 biased;
 
-                // Observe source revision changes at select boundaries. An
-                // already-running legacy write is not fenced by this check.
+                // Observe source revision changes at select boundaries. The
+                // bound permit also fences each ordinary synchronous enqueue.
                 _ = admission.identity_revoked() => {
                     info!(
                         jid = ?conn.phase.bound_jid(),

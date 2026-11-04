@@ -255,8 +255,8 @@ where
 /// That is too coarse for a generation fence: a revocation can occur while
 /// `poll_ready` is parked, and a later poll of that future would otherwise run
 /// `start_send` before the caller can observe cancellation. Keep readiness
-/// cancellable, then validate the generation under a read guard held only for
-/// the synchronous `start_send`. In the `SplitSink` path this is a local
+/// cancellable, then validate the bound source revision and generation under
+/// read guards held only for the synchronous `start_send`. In the `SplitSink` path this is a local
 /// enqueue: after it returns, a later flush may still reach the WebSocket
 /// after revocation as already-authorized in-flight work. The independent
 /// shutdown token check remains best effort and is not atomic with that
@@ -313,9 +313,9 @@ where
     }
     // `poll_ready` may have parked while the generation was revoked, then
     // returned Ready in the same poll that wakes this task. Check the
-    // independent shutdown token again, then hold the lifecycle read guard
-    // only across synchronous `start_send` so a lifecycle transition cannot
-    // slip between validation and local enqueue.
+    // independent shutdown token again, then hold the bound source and
+    // lifecycle guards only across synchronous `start_send` so neither can
+    // change between validation and local enqueue.
     let start_send_result = match authority {
         Some((permit, shutdown)) => {
             if shutdown.is_cancelled() {

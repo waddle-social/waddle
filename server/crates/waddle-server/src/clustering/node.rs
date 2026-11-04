@@ -102,11 +102,17 @@ pub(in crate::clustering) struct NodeLifecycleState {
 /// A successful admission decision for one socket upgrade, bound to the
 /// exact serving generation that issued it. Any lifecycle transition revokes
 /// the permit, including a fence followed by recovery back to `Serving`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct NodeAdmissionPermit {
     pub(in crate::clustering) state: std::sync::Arc<std::sync::RwLock<super::NodeLifecycleState>>,
     pub(in crate::clustering) generation: NodeAdmissionGeneration,
     pub(in crate::clustering) generation_revoked: CancellationToken,
+    // The WebSocket legacy path binds its permit to the identity revision
+    // captured at upgrade. Other admission users need only the node lifecycle.
+    identity: Option<(
+        waddle_xmpp::ownership::SharedNodeIdentity,
+        waddle_xmpp::ownership::NodeIdentityStamp,
+    )>,
 }
 
 impl NodeAdmissionPermit {
@@ -114,29 +120,19 @@ impl NodeAdmissionPermit {
     /// takes only a short read lock: fencing/readiness transitions must never
     /// wait for an HTTP/WebSocket handshake.
     pub fn revalidate(&self) -> Result<(), NodeAdmissionError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
-        if !matches!(state.admission, NodeAdmission::Serving) {
-            return Err(NodeAdmissionError::NotServing(state.admission.clone()));
-        }
-        if state.generation != self.generation {
-            return Err(NodeAdmissionError::Revoked);
-        }
-        Ok(())
+        self.with_current(|| ())
     }
 
-    /// Validate this exact serving generation while performing one
-    /// synchronous sink enqueue under the same read guard. This closes the
+    /// Validate this exact serving generation and any bound identity revision
+    /// while performing one synchronous sink enqueue under read guards. This closes the
     /// gap between a successful validation and `Sink::start_send`: a
     /// lifecycle writer either completes first and rejects the enqueue, or
     /// waits until the enqueue has returned.
     ///
     /// The closure is intentionally short and synchronous: it may check local
     /// transport authority and call `Sink::start_send`, but must not await,
-    /// re-enter this lifecycle, or acquire actor/effect-owner locks. The guard
-    /// is dropped as soon as that call returns; a later flush may
+    /// re-enter either authority, or acquire actor/effect-owner locks. The guards
+    /// are dropped as soon as that call returns; a later flush may
     /// still reach the underlying WebSocket after revocation as already-
     /// authorized in-flight work.
     pub(crate) fn start_send_if_current<E>(
@@ -146,9 +142,34 @@ impl NodeAdmissionPermit {
         self.with_current(start_send)
     }
 
+    /// Clone this lifecycle permit with one exact source revision. The source
+    /// lock precedes the lifecycle lock at the synchronous enqueue boundary.
+    pub(crate) fn with_identity(
+        &self,
+        source: waddle_xmpp::ownership::SharedNodeIdentity,
+        stamp: waddle_xmpp::ownership::NodeIdentityStamp,
+    ) -> Self {
+        let mut permit = self.clone();
+        permit.identity = Some((source, stamp));
+        permit
+    }
+
     /// Run a short synchronous local effect under this exact serving
-    /// generation. The closure must not await or re-enter the lifecycle.
+    /// generation and, when bound, the source revision. The closure must not
+    /// await, re-enter either authority, or acquire actor/effect-owner locks.
     pub(crate) fn with_current<R>(
+        &self,
+        effect: impl FnOnce() -> R,
+    ) -> Result<R, NodeAdmissionError> {
+        match &self.identity {
+            Some((source, stamp)) => source
+                .with_current_stamp(stamp, |_| self.with_current_generation(effect))
+                .ok_or(NodeAdmissionError::Revoked)?,
+            None => self.with_current_generation(effect),
+        }
+    }
+
+    fn with_current_generation<R>(
         &self,
         effect: impl FnOnce() -> R,
     ) -> Result<R, NodeAdmissionError> {
@@ -168,11 +189,16 @@ impl NodeAdmissionPermit {
         Ok(result)
     }
 
-    /// Resolve as soon as the lifecycle leaves the exact serving generation
-    /// that admitted this socket. The token stays cancelled after recovery,
-    /// so an old transport can never become authoritative again.
+    /// Resolve when the serving generation or any bound identity revision is
+    /// revoked. Neither can become current again after recovery or rotation.
     pub async fn revoked(&self) {
-        self.generation_revoked.cancelled().await;
+        match &self.identity {
+            Some((_, stamp)) => tokio::select! {
+                _ = self.generation_revoked.cancelled() => {}
+                _ = stamp.revoked() => {}
+            },
+            None => self.generation_revoked.cancelled().await,
+        }
     }
 }
 
@@ -181,7 +207,7 @@ impl NodeAdmissionPermit {
 pub enum NodeAdmissionError {
     #[error("node is not accepting connections: {0:?}")]
     NotServing(NodeAdmission),
-    #[error("node admission permit was revoked by a lifecycle transition")]
+    #[error("node admission permit's serving generation or identity revision was revoked")]
     Revoked,
 }
 
@@ -274,6 +300,7 @@ impl NodeLifecycle {
                 state: std::sync::Arc::clone(&self.state),
                 generation: state.generation,
                 generation_revoked: state.generation_revoked.clone(),
+                identity: None,
             }),
             _ => Err(NodeAdmissionError::NotServing(state.admission.clone())),
         }

@@ -623,6 +623,194 @@ async fn authority_bound_send_does_not_start_after_ready_revokes_its_generation(
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_admission_rejects_identity_aba_between_ready_and_start_send() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+
+    struct RotateOnReady {
+        trigger: Option<tokio::sync::oneshot::Sender<()>>,
+        completed: mpsc::Receiver<()>,
+        sent: Vec<Message>,
+    }
+
+    impl Sink<Message> for RotateOnReady {
+        type Error = &'static str;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if let Some(trigger) = self.trigger.take() {
+                trigger.send(()).expect("rotation task is waiting");
+                self.completed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("identity rotation completes while readiness is polled");
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let initial = NodeIdentity::new("node", "first");
+    let identity = SharedNodeIdentity::new(initial.clone());
+    let inventory = crate::websocket_transport::IoCustodianInventory::new(1).expect("inventory");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let admission = crate::websocket_transport::SocketAdmission::clustered(
+        &lifecycle,
+        &identity,
+        &inventory,
+        shutdown.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("socket admission")
+    .into_legacy();
+    let (trigger_tx, trigger_rx) = tokio::sync::oneshot::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let rotate = tokio::spawn(async move {
+        trigger_rx.await.expect("readiness was polled");
+        identity.rotate(NodeIdentity::new("node", "second")).await;
+        identity.rotate(initial).await;
+        completed_tx.send(()).expect("sink still waiting");
+    });
+    let mut sink = RotateOnReady {
+        trigger: Some(trigger_tx),
+        completed: completed_rx,
+        sent: Vec::new(),
+    };
+
+    let outcome = send_ws_message_with_authority(
+        &mut sink,
+        Message::Text("<stale/>".into()),
+        "identity rotated during readiness",
+        Some((admission.permit(), &shutdown)),
+    )
+    .await;
+    rotate.await.expect("rotation task completes");
+    assert!(matches!(outcome, AuthoritySendOutcome::AuthorityRevoked));
+    assert!(sink.sent.is_empty(), "the stale frame must not be enqueued");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_admission_holds_identity_revision_through_start_send() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+
+    struct BlockingStart {
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Sink<Message> for BlockingStart {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| "start_send was not released")
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("node", "first"));
+    let stamp = identity.current_stamp().expect("active identity");
+    let inventory = crate::websocket_transport::IoCustodianInventory::new(1).expect("inventory");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let admission = crate::websocket_transport::SocketAdmission::clustered(
+        &lifecycle,
+        &identity,
+        &inventory,
+        shutdown.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("socket admission")
+    .into_legacy();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let send = tokio::spawn(async move {
+        let mut sink = BlockingStart {
+            entered: Some(entered_tx),
+            release: release_rx,
+        };
+        send_ws_message_with_authority(
+            &mut sink,
+            Message::Text("<message/>".into()),
+            "blocked start",
+            Some((admission.permit(), &shutdown)),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("start_send entered")
+        .expect("sender remains alive");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let mut rotation = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        identity.rotate(NodeIdentity::new("node", "second")).await;
+    });
+    started_rx.await.expect("rotation started");
+    let premature = tokio::time::timeout(Duration::from_millis(100), &mut rotation).await;
+    let still_current = !stamp.is_revoked();
+    release_tx.send(()).expect("release start_send");
+    assert!(premature.is_err(), "rotation must wait for the enqueue");
+    assert!(
+        still_current,
+        "the old revision remains valid during enqueue"
+    );
+    assert!(matches!(
+        send.await.expect("send task"),
+        AuthoritySendOutcome::Sent
+    ));
+    rotation.await.expect("rotation completes after enqueue");
+    assert!(stamp.is_revoked());
+}
+
 #[tokio::test]
 async fn force_detach_conflict_frames_are_suppressed_when_revoked_while_ready_is_pending() {
     let lifecycle = crate::clustering::NodeLifecycle::new();
