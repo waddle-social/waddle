@@ -15,22 +15,6 @@ fn storage(error: DatabaseError) -> PublicationError {
 }
 
 impl DatabasePubSubStorage {
-    /// Additive projection metadata, independent of the core PubSub schema
-    /// version and its reset policy. No FK: item/node deletion must preserve it.
-    pub(super) async fn initialize_publication_watermarks(&self) -> Result<(), XmppError> {
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS pubsub_push_publications (
-                service_jid TEXT NOT NULL, node_name TEXT NOT NULL,
-                revision BIGINT NOT NULL CHECK (revision > 0),
-                job_token TEXT NOT NULL, payload_hash TEXT NOT NULL,
-                PRIMARY KEY (service_jid, node_name)
-            )",
-            (),
-        )
-        .await?;
-        Ok(())
-    }
-
     pub(super) async fn publish_push_item_versioned_impl(
         &self,
         service: &BareJid,
