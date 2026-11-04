@@ -23,7 +23,9 @@ use super::NodeId;
 use crate::db::physical_attestation::AttestedPostgresWriterCapability;
 use crate::db::{Database, DatabaseDriver, DatabaseError, Transaction};
 use async_trait::async_trait;
+use libp2p::PeerId;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[cfg(all(test, feature = "test-support"))]
@@ -45,6 +47,12 @@ pub struct LeaseIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeasedSlot {
     pub slot_index: u32,
+}
+
+#[derive(Debug, Clone)]
+struct EnrolledKeypairPool {
+    generation: uuid::Uuid,
+    peer_ids: Vec<PeerId>,
 }
 
 /// Keypair-slot lease failures.
@@ -78,6 +86,9 @@ pub enum LeaseError {
         "attested keypair-slot runtime handle must pass attach_existing before lease operations"
     )]
     RuntimeAttachRequired,
+    /// The keypair pool contains duplicate or no PeerIds.
+    #[error("keypair-pool enrollment requires a non-empty unique PeerId order")]
+    InvalidKeypairPool,
 }
 
 /// Fail-closed refusal to attach a restricted keypair-slot runtime store.
@@ -103,6 +114,35 @@ pub enum LeaseAttachError {
     InvalidSchemaShape,
     #[error("the clustering keypair-slot runtime role or grants are unsafe")]
     UnsafeRuntimeRole,
+    #[error("the owner has not activated this keypair-pool generation")]
+    KeypoolGenerationPending,
+    #[error("the configured PeerId order does not match owner enrollment")]
+    KeypairPoolOrderMismatch,
+    #[error("the configured keypair pool is empty, malformed, or contains duplicate PeerIds")]
+    InvalidConfiguredKeypairPool,
+    #[error("the keypair-pool enrollment relations have an invalid shape")]
+    InvalidKeypairPoolShape,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+/// Fail-closed owner enrollment failures for a keypair-pool generation.
+#[derive(Debug, thiserror::Error)]
+pub enum KeypoolOwnerError {
+    #[error("keypair-pool owner enrollment requires PostgreSQL")]
+    PostgresRequired,
+    #[error("keypair-pool owner enrollment requires a non-attested owner handle")]
+    OwnerHandleRequired,
+    #[error("the keypair-pool owner identity or schema is unsafe")]
+    UnsafeOwnerBoundary,
+    #[error("keypair-pool enrollment requires a non-empty unique PeerId order")]
+    InvalidPeerOrder,
+    #[error("a legacy keypair-slot or keypool authority already exists")]
+    ExistingAuthority,
+    #[error("keypair-pool generation is not ready for activation")]
+    ActivationNotReady,
+    #[error("keypair-pool generation is missing or already active")]
+    InvalidGenerationState,
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
@@ -141,6 +181,7 @@ pub trait KeypairSlotLease: Send + Sync {
 pub struct PostgresKeypairSlotLease {
     db: Database,
     runtime_attach_verified: bool,
+    enrolled_pool: Option<EnrolledKeypairPool>,
 }
 
 impl PostgresKeypairSlotLease {
@@ -148,6 +189,7 @@ impl PostgresKeypairSlotLease {
         Self {
             db,
             runtime_attach_verified: false,
+            enrolled_pool: None,
         }
     }
 
@@ -161,18 +203,72 @@ impl PostgresKeypairSlotLease {
         let store = Self {
             db,
             runtime_attach_verified: false,
+            enrolled_pool: None,
         };
         store.ensure_schema().await?;
         Ok(store)
     }
 
+    /// Install a fresh owner-controlled keypair mapping and its pending
+    /// generation. This path refuses every pre-existing lease or keypool
+    /// relation; it does not reinterpret a live legacy lease table.
+    ///
+    /// `activation_delay` is the operator supplied drain-and-fence window for
+    /// any previous binaries. The generation remains pending until
+    /// [`Self::activate_keypool_owner`] is called after that window and the
+    /// external full-stop procedure has completed.
+    pub async fn initialize_keypool_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+        generation: uuid::Uuid,
+        peer_ids: &[PeerId],
+        runtime_role: &str,
+        activation_delay: Duration,
+    ) -> Result<(), KeypoolOwnerError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(KeypoolOwnerError::PostgresRequired);
+        }
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(KeypoolOwnerError::OwnerHandleRequired);
+        }
+        validate_peer_order(peer_ids).map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?;
+        crate::db::physical_attestation::validate_identifier(runtime_role, "keypool runtime role")
+            .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+        let delay_ms = i64::try_from(activation_delay.as_millis())
+            .map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?;
+        initialize_keypool_owner(db, identity, generation, peer_ids, runtime_role, delay_ms).await
+    }
+
+    /// Complete the owner-only pending-to-active transition after the
+    /// externally verified full-stop and drain window. Runtime attachment and
+    /// lease mutation both refuse a pending generation.
+    pub async fn activate_keypool_owner(
+        db: &Database,
+        identity: &crate::db::lineage::PgIdentity,
+        generation: uuid::Uuid,
+    ) -> Result<(), KeypoolOwnerError> {
+        if db.driver() != DatabaseDriver::Postgres {
+            return Err(KeypoolOwnerError::PostgresRequired);
+        }
+        if db.attested_pg_writer_capability().is_some() {
+            return Err(KeypoolOwnerError::OwnerHandleRequired);
+        }
+        activate_keypool_owner(db, identity, generation).await
+    }
+
     /// Attach the exact attested main and independent control-plane pools to
-    /// an owner-prepared table. This performs only bounded read-only catalog
-    /// checks and no URL reopen or schema DDL.
-    pub async fn attach_existing(db: Database) -> Result<Self, LeaseAttachError> {
+    /// an owner-prepared table. `configured_keypair_pool` is the ordered
+    /// base64 secret list from clustering configuration; this method derives
+    /// its PeerIds before any lease can be acquired. Attachment performs only
+    /// bounded read-only catalog checks and no URL reopen or schema DDL.
+    pub async fn attach_existing(
+        db: Database,
+        configured_keypair_pool: &[String],
+    ) -> Result<Self, LeaseAttachError> {
         if db.driver() != crate::db::DatabaseDriver::Postgres {
             return Err(LeaseAttachError::PostgresRequired);
         }
+        let expected_peer_ids = configured_peer_order(configured_keypair_pool)?;
         if !db.is_main_lane() {
             return Err(LeaseAttachError::MainLaneRequired);
         }
@@ -188,16 +284,18 @@ impl PostgresKeypairSlotLease {
             return Err(LeaseAttachError::PhysicalIdentityMismatch);
         }
 
-        verify_attested_keypair_slot_pair(
+        let enrolled_pool = verify_attested_keypair_slot_pair(
             &db,
             &main_capability,
             &control_plane,
             &control_plane_capability,
+            &expected_peer_ids,
         )
         .await?;
         Ok(Self {
             db,
             runtime_attach_verified: true,
+            enrolled_pool: Some(enrolled_pool),
         })
     }
 
@@ -217,6 +315,42 @@ impl PostgresKeypairSlotLease {
         lease_ttl: Duration,
     ) -> Result<bool, LeaseError> {
         let conn = self.db.guard().await?;
+        if let Some(pool) = &self.enrolled_pool {
+            let peer_id = pool
+                .peer_ids
+                .get(slot_index as usize)
+                .ok_or(LeaseError::InvalidKeypairPool)?;
+            let affected = conn
+                .execute(
+                    r#"
+                    INSERT INTO clustering_keypair_slots
+                        (slot_index, holder_node, holder_epoch, heartbeat, expired,
+                         keypool_generation, peer_id, lease_revision)
+                    VALUES (?, ?, ?, now(), false, ?::uuid, ?, 0)
+                    ON CONFLICT (slot_index) DO UPDATE SET
+                        holder_node = EXCLUDED.holder_node,
+                        holder_epoch = EXCLUDED.holder_epoch,
+                        heartbeat = now(),
+                        expired = false,
+                        keypool_generation = EXCLUDED.keypool_generation,
+                        peer_id = EXCLUDED.peer_id,
+                        lease_revision = clustering_keypair_slots.lease_revision + 1
+                    WHERE clustering_keypair_slots.holder_node IS NULL
+                       OR clustering_keypair_slots.expired
+                       OR clustering_keypair_slots.heartbeat < now() - (? || ' milliseconds')::interval
+                    "#,
+                    crate::db_params![
+                        i64::from(slot_index),
+                        identity.node_id.as_str().to_string(),
+                        identity.node_epoch.to_string(),
+                        pool.generation.to_string(),
+                        peer_id.to_string(),
+                        lease_ttl.as_millis().to_string(),
+                    ],
+                )
+                .await?;
+            return Ok(affected == 1);
+        }
         // Upsert CAS: insert a fresh hold, or steal an existing row only when
         // it is unheld, already expired, or its heartbeat has aged past the
         // TTL. A held-and-fresh slot fails the ON CONFLICT WHERE and affects
@@ -283,6 +417,13 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
         if pool_size == 0 {
             return Err(LeaseError::EmptyPool);
         }
+        if self
+            .enrolled_pool
+            .as_ref()
+            .is_some_and(|enrollment| enrollment.peer_ids.len() != pool_size)
+        {
+            return Err(LeaseError::InvalidKeypairPool);
+        }
         // Scan slots, starting at an offset derived from this node's id so
         // concurrently-starting pods don't all contend on slot 0 first. The
         // CAS guarantees correctness regardless of scan order.
@@ -314,8 +455,35 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
         let conn = self.db.control_plane_guard().await?;
         // Freshness-gated renewal CAS (ADR element 4): renew only while we
         // still hold the slot under our epoch and the lease has not lapsed.
-        let affected = conn
-            .execute(
+        let affected = if let Some(pool) = &self.enrolled_pool {
+            let peer_id = pool
+                .peer_ids
+                .get(slot.slot_index as usize)
+                .ok_or(LeaseError::InvalidKeypairPool)?;
+            conn.execute(
+                r#"
+                UPDATE clustering_keypair_slots
+                SET heartbeat = now(), lease_revision = lease_revision + 1
+                WHERE slot_index = ?
+                  AND holder_node = ?
+                  AND holder_epoch = ?
+                  AND keypool_generation = ?::uuid
+                  AND peer_id = ?
+                  AND NOT expired
+                  AND heartbeat >= now() - (? || ' milliseconds')::interval
+                "#,
+                crate::db_params![
+                    i64::from(slot.slot_index),
+                    identity.node_id.as_str().to_string(),
+                    identity.node_epoch.to_string(),
+                    pool.generation.to_string(),
+                    peer_id.to_string(),
+                    lease_ttl.as_millis().to_string(),
+                ],
+            )
+            .await?
+        } else {
+            conn.execute(
                 r#"
                 UPDATE clustering_keypair_slots
                 SET heartbeat = now()
@@ -332,7 +500,8 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
                     lease_ttl.as_millis().to_string(),
                 ],
             )
-            .await?;
+            .await?
+        };
         if affected == 0 {
             return Err(LeaseError::FencingLoss {
                 slot_index: slot.slot_index,
@@ -346,31 +515,548 @@ impl KeypairSlotLease for PostgresKeypairSlotLease {
         let conn = self.db.guard().await?;
         // Epoch-gated release: mark the slot free+expired so a replacement can
         // acquire it immediately, but only if we still own it.
-        conn.execute(
-            r#"
-            UPDATE clustering_keypair_slots
-            SET holder_node = NULL, holder_epoch = NULL, expired = true
-            WHERE slot_index = ? AND holder_node = ? AND holder_epoch = ?
-            "#,
-            crate::db_params![
-                i64::from(slot.slot_index),
-                identity.node_id.as_str().to_string(),
-                identity.node_epoch.to_string(),
-            ],
-        )
-        .await?;
+        if let Some(pool) = &self.enrolled_pool {
+            let peer_id = pool
+                .peer_ids
+                .get(slot.slot_index as usize)
+                .ok_or(LeaseError::InvalidKeypairPool)?;
+            conn.execute(
+                r#"
+                UPDATE clustering_keypair_slots
+                SET holder_node = NULL, holder_epoch = NULL, expired = true,
+                    lease_revision = lease_revision + 1
+                WHERE slot_index = ? AND holder_node = ? AND holder_epoch = ?
+                  AND keypool_generation = ?::uuid AND peer_id = ?
+                "#,
+                crate::db_params![
+                    i64::from(slot.slot_index),
+                    identity.node_id.as_str().to_string(),
+                    identity.node_epoch.to_string(),
+                    pool.generation.to_string(),
+                    peer_id.to_string(),
+                ],
+            )
+            .await?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE clustering_keypair_slots
+                SET holder_node = NULL, holder_epoch = NULL, expired = true
+                WHERE slot_index = ? AND holder_node = ? AND holder_epoch = ?
+                "#,
+                crate::db_params![
+                    i64::from(slot.slot_index),
+                    identity.node_id.as_str().to_string(),
+                    identity.node_epoch.to_string(),
+                ],
+            )
+            .await?;
+        }
         Ok(())
     }
 }
 
 const KEYPAIR_SLOT_TABLE: &str = "clustering_keypair_slots";
+const KEYPAIR_POOL_TABLE: &str = "clustering_keypool";
+const KEYPAIR_POOL_SLOTS_TABLE: &str = "clustering_keypool_slots";
+const KEYPAIR_GUARD_FUNCTION: &str = "clustering_keypair_slot_guard";
+const KEYPAIR_GUARD_TRIGGER: &str = "clustering_keypair_slot_guard_trigger";
+const KEYPAIR_POOL_GUARD_FUNCTION: &str = "clustering_keypool_guard";
+const KEYPAIR_POOL_GUARD_TRIGGER: &str = "clustering_keypool_guard_trigger";
+const KEYPAIR_MAP_GUARD_FUNCTION: &str = "clustering_keypool_slots_guard";
+const KEYPAIR_MAP_GUARD_TRIGGER: &str = "clustering_keypool_slots_guard_trigger";
+const KEYPAIR_POOL_TRUNCATE_TRIGGER: &str = "clustering_keypool_truncate_guard_trigger";
+const KEYPAIR_MAP_TRUNCATE_TRIGGER: &str = "clustering_keypool_slots_truncate_guard_trigger";
+const KEYPAIR_SLOT_TRUNCATE_TRIGGER: &str = "clustering_keypair_slot_truncate_guard_trigger";
+const KEYPAIR_TRUNCATE_GUARD_FUNCTION: &str = "clustering_keypair_truncate_guard";
+const KEYPAIR_OWNER_ADVISORY_LOCK: i64 = 6_841_445_497_037_938_001;
+
+const KEYPAIR_GUARD_BODY: &str = r#"
+DECLARE
+    expected_generation uuid;
+    expected_peer_id text;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'keypair slot rows cannot be deleted'
+            USING ERRCODE = '55000';
+    END IF;
+    SELECT keypool.generation, keyslots.peer_id
+      INTO expected_generation, expected_peer_id
+      FROM clustering_keypool keypool
+      JOIN clustering_keypool_slots keyslots
+        ON keyslots.generation = keypool.generation
+     WHERE keypool.singleton
+       AND keypool.state = 'active'
+       AND keyslots.slot_index = NEW.slot_index;
+    IF NOT FOUND
+       OR NEW.keypool_generation IS DISTINCT FROM expected_generation
+       OR NEW.peer_id IS DISTINCT FROM expected_peer_id THEN
+        RAISE EXCEPTION 'keypair slot does not match the active enrolled generation'
+            USING ERRCODE = '55000';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.lease_revision <> 0 THEN
+            RAISE EXCEPTION 'new keypair slot revision must start at zero'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.lease_revision <> OLD.lease_revision + 1 THEN
+        RAISE EXCEPTION 'keypair slot update requires a fresh lease revision'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+"#;
+
+const KEYPAIR_TRUNCATE_GUARD_BODY: &str = r#"
+BEGIN
+    RAISE EXCEPTION 'keypair enrollment relations cannot be truncated'
+        USING ERRCODE = '55000';
+    RETURN NULL;
+END;
+"#;
+
+const KEYPAIR_POOL_GUARD_BODY: &str = r#"
+BEGIN
+    IF TG_OP = 'DELETE'
+       OR OLD.state <> 'pending'
+       OR NEW.state <> 'active'
+       OR NEW.singleton IS DISTINCT FROM OLD.singleton
+       OR NEW.generation IS DISTINCT FROM OLD.generation
+       OR NEW.slot_count IS DISTINCT FROM OLD.slot_count
+       OR NEW.activation_after IS DISTINCT FROM OLD.activation_after
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION 'keypair pool generation is immutable after enrollment'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+"#;
+
+const KEYPAIR_MAP_GUARD_BODY: &str = r#"
+DECLARE
+    generation_state text;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT state INTO generation_state
+          FROM clustering_keypool
+         WHERE singleton AND generation = NEW.generation;
+    ELSE
+        SELECT state INTO generation_state
+          FROM clustering_keypool
+         WHERE singleton AND generation = OLD.generation;
+    END IF;
+    IF generation_state IS DISTINCT FROM 'pending' THEN
+        RAISE EXCEPTION 'keypair pool mapping is immutable outside pending enrollment'
+            USING ERRCODE = '55000';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+"#;
+
+async fn initialize_keypool_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    generation: uuid::Uuid,
+    peer_ids: &[PeerId],
+    runtime_role: &str,
+    activation_delay_ms: i64,
+) -> Result<(), KeypoolOwnerError> {
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![KEYPAIR_OWNER_ADVISORY_LOCK],
+    )
+    .await?;
+    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+        .await
+        .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+    let schema_name = &identity.schema.name.0;
+    let schema = crate::db::physical_attestation::quote_identifier(schema_name);
+    tx.execute(
+        &format!("GRANT USAGE ON SCHEMA {schema} TO {runtime_role}"),
+        (),
+    )
+    .await?;
+    verify_keypool_runtime_candidate(&mut tx, schema_name, runtime_role).await?;
+
+    let mut existing = tx
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+               WHERE n.nspname = ? AND c.relname IN \
+                 ('clustering_keypair_slots','clustering_keypool','clustering_keypool_slots')) \
+             OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+               WHERE n.nspname = ? AND p.proname IN (?, ?, ?, ?)) \
+             OR EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t \
+               JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+               WHERE n.nspname = ? AND t.tgname IN (?, ?, ?, ?, ?, ?))",
+            crate::db_params![
+                schema_name,
+                schema_name,
+                KEYPAIR_GUARD_FUNCTION,
+                KEYPAIR_POOL_GUARD_FUNCTION,
+                KEYPAIR_MAP_GUARD_FUNCTION,
+                KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+                schema_name,
+                KEYPAIR_GUARD_TRIGGER,
+                KEYPAIR_POOL_GUARD_TRIGGER,
+                KEYPAIR_MAP_GUARD_TRIGGER,
+                KEYPAIR_SLOT_TRUNCATE_TRIGGER,
+                KEYPAIR_POOL_TRUNCATE_TRIGGER,
+                KEYPAIR_MAP_TRUNCATE_TRIGGER,
+            ],
+        )
+        .await?;
+    if matches!(existing.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(KeypoolOwnerError::ExistingAuthority);
+    }
+
+    tx.execute(
+        &format!(
+            "CREATE TABLE {schema}.{KEYPAIR_POOL_TABLE} (\
+               singleton BOOLEAN PRIMARY KEY CHECK (singleton), \
+               generation UUID NOT NULL UNIQUE, \
+               state TEXT NOT NULL CHECK (state IN ('pending','active')), \
+               slot_count INTEGER NOT NULL CHECK (slot_count > 0), \
+               activation_after TIMESTAMPTZ NOT NULL, \
+               created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE TABLE {schema}.{KEYPAIR_POOL_SLOTS_TABLE} (\
+               generation UUID NOT NULL REFERENCES {schema}.{KEYPAIR_POOL_TABLE}(generation) \
+                 ON DELETE RESTRICT, \
+               slot_index INTEGER NOT NULL CHECK (slot_index >= 0), \
+               peer_id TEXT NOT NULL, \
+               PRIMARY KEY (generation, slot_index), \
+               UNIQUE (generation, peer_id))"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE TABLE {schema}.{KEYPAIR_SLOT_TABLE} (\
+               slot_index INTEGER PRIMARY KEY, \
+               holder_node TEXT, \
+               holder_epoch TEXT, \
+               heartbeat TIMESTAMPTZ NOT NULL DEFAULT now(), \
+               expired BOOLEAN NOT NULL DEFAULT TRUE, \
+               keypool_generation UUID NOT NULL, \
+               peer_id TEXT NOT NULL, \
+               lease_revision BIGINT NOT NULL DEFAULT 0)"
+        ),
+        (),
+    )
+    .await?;
+
+    let function_path = format!("pg_catalog, {schema_name}, pg_temp");
+    tx.execute(
+        &format!(
+            "CREATE FUNCTION {schema}.{KEYPAIR_GUARD_FUNCTION}() RETURNS trigger \
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             AS $keypair_guard${KEYPAIR_GUARD_BODY}$keypair_guard$"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE TRIGGER {KEYPAIR_GUARD_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE \
+             ON {schema}.{KEYPAIR_SLOT_TABLE} FOR EACH ROW \
+             EXECUTE FUNCTION {schema}.{KEYPAIR_GUARD_FUNCTION}()"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE FUNCTION {schema}.{KEYPAIR_POOL_GUARD_FUNCTION}() RETURNS trigger \
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             AS $keypair_pool_guard${KEYPAIR_POOL_GUARD_BODY}$keypair_pool_guard$"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE TRIGGER {KEYPAIR_POOL_GUARD_TRIGGER} BEFORE UPDATE OR DELETE \
+             ON {schema}.{KEYPAIR_POOL_TABLE} FOR EACH ROW \
+             EXECUTE FUNCTION {schema}.{KEYPAIR_POOL_GUARD_FUNCTION}()"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE FUNCTION {schema}.{KEYPAIR_MAP_GUARD_FUNCTION}() RETURNS trigger \
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             AS $keypair_map_guard${KEYPAIR_MAP_GUARD_BODY}$keypair_map_guard$"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE TRIGGER {KEYPAIR_MAP_GUARD_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE \
+             ON {schema}.{KEYPAIR_POOL_SLOTS_TABLE} FOR EACH ROW \
+             EXECUTE FUNCTION {schema}.{KEYPAIR_MAP_GUARD_FUNCTION}()"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "CREATE FUNCTION {schema}.{KEYPAIR_TRUNCATE_GUARD_FUNCTION}() RETURNS trigger \
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = {function_path} \
+             AS $keypair_truncate_guard${KEYPAIR_TRUNCATE_GUARD_BODY}$keypair_truncate_guard$"
+        ),
+        (),
+    )
+    .await?;
+    for (table, trigger) in [
+        (KEYPAIR_SLOT_TABLE, KEYPAIR_SLOT_TRUNCATE_TRIGGER),
+        (KEYPAIR_POOL_TABLE, KEYPAIR_POOL_TRUNCATE_TRIGGER),
+        (KEYPAIR_POOL_SLOTS_TABLE, KEYPAIR_MAP_TRUNCATE_TRIGGER),
+    ] {
+        tx.execute(
+            &format!(
+                "CREATE TRIGGER {trigger} BEFORE TRUNCATE ON {schema}.{table} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {schema}.{KEYPAIR_TRUNCATE_GUARD_FUNCTION}()"
+            ),
+            (),
+        )
+        .await?;
+    }
+
+    tx.execute(
+        &format!(
+            "REVOKE ALL ON TABLE {schema}.{KEYPAIR_POOL_TABLE}, \
+             {schema}.{KEYPAIR_POOL_SLOTS_TABLE}, {schema}.{KEYPAIR_SLOT_TABLE} FROM PUBLIC"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "REVOKE ALL ON FUNCTION {schema}.{KEYPAIR_GUARD_FUNCTION}(), \
+             {schema}.{KEYPAIR_POOL_GUARD_FUNCTION}(), \
+             {schema}.{KEYPAIR_MAP_GUARD_FUNCTION}(), \
+             {schema}.{KEYPAIR_TRUNCATE_GUARD_FUNCTION}() FROM PUBLIC"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!("GRANT USAGE ON SCHEMA {schema} TO {runtime_role}"),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "GRANT SELECT ON TABLE {schema}.{KEYPAIR_POOL_TABLE}, \
+             {schema}.{KEYPAIR_POOL_SLOTS_TABLE} TO {runtime_role}"
+        ),
+        (),
+    )
+    .await?;
+    tx.execute(
+        &format!(
+            "GRANT SELECT, INSERT, UPDATE ON TABLE {schema}.{KEYPAIR_SLOT_TABLE} \
+             TO {runtime_role}"
+        ),
+        (),
+    )
+    .await?;
+
+    tx.execute(
+        &format!(
+            "INSERT INTO {schema}.{KEYPAIR_POOL_TABLE} \
+             (singleton, generation, state, slot_count, activation_after) \
+             VALUES (TRUE, ?::uuid, 'pending', ?, now() + (? || ' milliseconds')::interval)"
+        ),
+        crate::db_params![
+            generation.to_string(),
+            i32::try_from(peer_ids.len()).map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?,
+            activation_delay_ms.to_string()
+        ],
+    )
+    .await?;
+    for (slot_index, peer_id) in peer_ids.iter().enumerate() {
+        let slot_index =
+            i32::try_from(slot_index).map_err(|_| KeypoolOwnerError::InvalidPeerOrder)?;
+        tx.execute(
+            &format!(
+                "INSERT INTO {schema}.{KEYPAIR_POOL_SLOTS_TABLE} \
+                 (generation, slot_index, peer_id) VALUES (?::uuid, ?, ?)"
+            ),
+            crate::db_params![generation.to_string(), slot_index, peer_id.to_string()],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn activate_keypool_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+    generation: uuid::Uuid,
+) -> Result<(), KeypoolOwnerError> {
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(?)",
+        crate::db_params![KEYPAIR_OWNER_ADVISORY_LOCK],
+    )
+    .await?;
+    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+        .await
+        .map_err(|_| KeypoolOwnerError::UnsafeOwnerBoundary)?;
+    let schema = crate::db::physical_attestation::quote_identifier(&identity.schema.name.0);
+    tx.execute(
+        &format!(
+            "LOCK TABLE {schema}.{KEYPAIR_SLOT_TABLE}, {schema}.{KEYPAIR_POOL_SLOTS_TABLE}, \
+             {schema}.{KEYPAIR_POOL_TABLE} IN ACCESS EXCLUSIVE MODE"
+        ),
+        (),
+    )
+    .await?;
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT state, activation_after <= now(), \
+                    slot_count = (SELECT count(*) FROM {schema}.{KEYPAIR_POOL_SLOTS_TABLE} \
+                      WHERE generation = {schema}.{KEYPAIR_POOL_TABLE}.generation) \
+                    AND (SELECT min(slot_index) = 0 AND max(slot_index) = slot_count - 1 \
+                         FROM {schema}.{KEYPAIR_POOL_SLOTS_TABLE} \
+                         WHERE generation = {schema}.{KEYPAIR_POOL_TABLE}.generation), \
+                    NOT EXISTS (SELECT 1 FROM {schema}.{KEYPAIR_SLOT_TABLE}) \
+                 FROM {schema}.{KEYPAIR_POOL_TABLE} \
+                 WHERE singleton AND generation = ?::uuid"
+            ),
+            crate::db_params![generation.to_string()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(KeypoolOwnerError::InvalidGenerationState);
+    };
+    let state: String = row.get(0)?;
+    if state != "pending" {
+        return Err(KeypoolOwnerError::InvalidGenerationState);
+    }
+    let ready = row.get::<bool>(1)? && row.get::<bool>(2)? && row.get::<bool>(3)?;
+    if !ready {
+        return Err(KeypoolOwnerError::ActivationNotReady);
+    }
+    let mut row_count = tx
+        .query(
+            &format!("SELECT count(*)::bigint FROM {schema}.{KEYPAIR_SLOT_TABLE}"),
+            (),
+        )
+        .await?;
+    if !matches!(row_count.next().await?, Some(row) if row.get::<i64>(0)? == 0) {
+        return Err(KeypoolOwnerError::ActivationNotReady);
+    }
+    tx.execute(
+        &format!(
+            "UPDATE {schema}.{KEYPAIR_POOL_TABLE} SET state = 'active' \
+             WHERE singleton AND generation = ?::uuid AND state = 'pending' \
+               AND activation_after <= now()"
+        ),
+        crate::db_params![generation.to_string()],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn verify_keypool_runtime_candidate(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    runtime_role: &str,
+) -> Result<(), KeypoolOwnerError> {
+    let mut rows = tx
+        .query(
+            "SELECT runtime.rolcanlogin AND NOT runtime.rolsuper \
+               AND NOT runtime.rolcreatedb AND NOT runtime.rolcreaterole \
+               AND NOT runtime.rolreplication AND NOT runtime.rolbypassrls \
+               AND runtime.oid <> database.datdba AND runtime.oid <> ns.nspowner \
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m \
+                 WHERE m.member = runtime.oid OR m.roleid = runtime.oid) \
+               AND pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'USAGE') \
+               AND NOT pg_catalog.has_schema_privilege(runtime.oid, ns.oid, 'CREATE') \
+               AND NOT pg_catalog.has_database_privilege(runtime.oid, database.oid, 'CREATE,TEMP') \
+             FROM pg_catalog.pg_roles runtime \
+             JOIN pg_catalog.pg_namespace ns ON ns.nspname = ? \
+             JOIN pg_catalog.pg_database database \
+               ON database.datname = pg_catalog.current_database() \
+             WHERE runtime.rolname = ?",
+            crate::db_params![schema, runtime_role],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(KeypoolOwnerError::UnsafeOwnerBoundary);
+    }
+    Ok(())
+}
+
+fn validate_peer_order(peer_ids: &[PeerId]) -> Result<(), ()> {
+    if peer_ids.is_empty() {
+        return Err(());
+    }
+    let mut unique = peer_ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != peer_ids.len() {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn configured_peer_order(entries: &[String]) -> Result<Vec<PeerId>, LeaseAttachError> {
+    if entries.is_empty() {
+        return Err(LeaseAttachError::InvalidConfiguredKeypairPool);
+    }
+    let peer_ids = entries
+        .iter()
+        .map(|entry| {
+            crate::clustering::identity::keypair_from_pool_entry(entry)
+                .map(|keypair| keypair.public().to_peer_id())
+                .map_err(|_| LeaseAttachError::InvalidConfiguredKeypairPool)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_peer_order(&peer_ids).map_err(|_| LeaseAttachError::InvalidConfiguredKeypairPool)?;
+    Ok(peer_ids)
+}
 
 async fn verify_attested_keypair_slot_pair(
     db: &Database,
     main_capability: &AttestedPostgresWriterCapability,
     control_plane: &Database,
     control_plane_capability: &AttestedPostgresWriterCapability,
-) -> Result<(), LeaseAttachError> {
+    expected_peer_ids: &[PeerId],
+) -> Result<EnrolledKeypairPool, LeaseAttachError> {
+    if validate_peer_order(expected_peer_ids).is_err() {
+        return Err(LeaseAttachError::KeypairPoolOrderMismatch);
+    }
     if db.driver() != DatabaseDriver::Postgres {
         return Err(LeaseAttachError::PostgresRequired);
     }
@@ -401,25 +1087,69 @@ async fn verify_attested_keypair_slot_pair(
         crate::db::physical_attestation::quote_identifier(schema),
         crate::db::physical_attestation::quote_identifier(KEYPAIR_SLOT_TABLE)
     );
+    let qualified_keypool = format!(
+        "{}.{}",
+        crate::db::physical_attestation::quote_identifier(schema),
+        crate::db::physical_attestation::quote_identifier(KEYPAIR_POOL_TABLE)
+    );
+    let qualified_keypool_slots = format!(
+        "{}.{}",
+        crate::db::physical_attestation::quote_identifier(schema),
+        crate::db::physical_attestation::quote_identifier(KEYPAIR_POOL_SLOTS_TABLE)
+    );
 
-    let mut main_tx = begin_attested_check(db, main_capability, &qualified_table).await?;
-    let mut control_tx =
-        begin_attested_check(control_plane, control_plane_capability, &qualified_table).await?;
+    let mut main_tx = begin_attested_check(
+        db,
+        main_capability,
+        &[
+            &qualified_table,
+            &qualified_keypool,
+            &qualified_keypool_slots,
+        ],
+    )
+    .await?;
+    let mut control_tx = begin_attested_check(
+        control_plane,
+        control_plane_capability,
+        &[
+            &qualified_table,
+            &qualified_keypool,
+            &qualified_keypool_slots,
+        ],
+    )
+    .await?;
 
     // Both pools now hold ACCESS SHARE against the same qualified relation.
     // The compatible locks keep owner DDL from changing the table between
     // their independent catalog snapshots.
-    verify_keypair_slot_snapshot(&mut main_tx, schema, i64::from(identity.schema.oid)).await?;
-    verify_keypair_slot_snapshot(&mut control_tx, schema, i64::from(identity.schema.oid)).await?;
+    let main_pool = verify_keypair_slot_snapshot(
+        &mut main_tx,
+        schema,
+        i64::from(identity.schema.oid),
+        expected_peer_ids,
+    )
+    .await?;
+    let control_pool = verify_keypair_slot_snapshot(
+        &mut control_tx,
+        schema,
+        i64::from(identity.schema.oid),
+        expected_peer_ids,
+    )
+    .await?;
+    if main_pool.generation != control_pool.generation
+        || main_pool.peer_ids != control_pool.peer_ids
+    {
+        return Err(LeaseAttachError::PhysicalIdentityMismatch);
+    }
     control_tx.rollback().await?;
     main_tx.rollback().await?;
-    Ok(())
+    Ok(main_pool)
 }
 
 async fn begin_attested_check<'a>(
     db: &'a Database,
     capability: &AttestedPostgresWriterCapability,
-    qualified_table: &str,
+    qualified_tables: &[&str],
 ) -> Result<Transaction<'a>, LeaseAttachError> {
     let mut tx = db.begin().await?;
     tx.execute(
@@ -442,12 +1172,11 @@ async fn begin_attested_check<'a>(
                 LeaseAttachError::Database(error)
             }
         })?;
-    tx.execute(
-        &format!("LOCK TABLE {qualified_table} IN ACCESS SHARE MODE"),
-        (),
-    )
-    .await
-    .map_err(|_| LeaseAttachError::InvalidSchemaShape)?;
+    for table in qualified_tables {
+        tx.execute(&format!("LOCK TABLE {table} IN ACCESS SHARE MODE"), ())
+            .await
+            .map_err(|_| LeaseAttachError::InvalidSchemaShape)?;
+    }
 
     capability.attest_transaction(&mut tx).await?;
     Ok(tx)
@@ -457,14 +1186,18 @@ async fn verify_keypair_slot_snapshot(
     tx: &mut Transaction<'_>,
     schema: &str,
     schema_oid: i64,
-) -> Result<(), LeaseAttachError> {
+    expected_peer_ids: &[PeerId],
+) -> Result<EnrolledKeypairPool, LeaseAttachError> {
     verify_active_schema(tx, schema, schema_oid).await?;
     verify_table_shape(tx, schema).await?;
     verify_columns(tx, schema).await?;
     verify_primary_key(tx, schema).await?;
     verify_index_shape(tx, schema).await?;
     verify_runtime_acl(tx, schema).await?;
-    Ok(())
+    verify_keypool_tables(tx, schema).await?;
+    verify_keypool_acl(tx, schema).await?;
+    verify_keypair_guard(tx, schema).await?;
+    read_enrolled_peer_order(tx, schema, expected_peer_ids).await
 }
 
 async fn verify_active_schema(
@@ -497,13 +1230,16 @@ async fn verify_table_shape(
     let mut rows = tx
         .query(
             "SELECT c.relkind = 'r' AND c.relpersistence = 'p' \
+                    AND NOT c.relispartition AND c.relowner = n.nspowner \
                     AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+                    AND c.reloftype = 0 \
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con \
                                     WHERE con.conrelid = c.oid AND con.contype <> 'p') \
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint inbound \
                                     WHERE inbound.confrelid = c.oid AND inbound.contype = 'f') \
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
-                                    WHERE tr.tgrelid = c.oid OR tr.tgconstrrelid = c.oid) \
+                                    WHERE (tr.tgrelid = c.oid OR tr.tgconstrrelid = c.oid) \
+                                      AND tr.tgname NOT IN (?, ?)) \
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw \
                                     WHERE rw.ev_class = c.oid) \
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh \
@@ -511,7 +1247,12 @@ async fn verify_table_shape(
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ? AND c.relname = ?",
-            crate::db_params![schema, KEYPAIR_SLOT_TABLE],
+            crate::db_params![
+                KEYPAIR_GUARD_TRIGGER,
+                KEYPAIR_SLOT_TRUNCATE_TRIGGER,
+                schema,
+                KEYPAIR_SLOT_TABLE,
+            ],
         )
         .await?;
     let Some(row) = rows.next().await? else {
@@ -524,6 +1265,32 @@ async fn verify_table_shape(
 }
 
 async fn verify_columns(tx: &mut Transaction<'_>, schema: &str) -> Result<(), LeaseAttachError> {
+    verify_columns_contract(
+        tx,
+        schema,
+        KEYPAIR_SLOT_TABLE,
+        &[
+            ("slot_index", "integer", true, None),
+            ("holder_node", "text", false, None),
+            ("holder_epoch", "text", false, None),
+            ("heartbeat", "timestamp with time zone", true, Some("now()")),
+            ("expired", "boolean", true, Some("true")),
+            ("keypool_generation", "uuid", true, None),
+            ("peer_id", "text", true, None),
+            ("lease_revision", "bigint", true, Some("0")),
+        ],
+    )
+    .await
+}
+
+type KeypairColumnContract = (&'static str, &'static str, bool, Option<&'static str>);
+
+async fn verify_columns_contract(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &str,
+    expected: &[KeypairColumnContract],
+) -> Result<(), LeaseAttachError> {
     let mut rows = tx
         .query(
             "SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod), \
@@ -538,7 +1305,7 @@ async fn verify_columns(tx: &mut Transaction<'_>, schema: &str) -> Result<(), Le
                ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE n.nspname = ? AND c.relname = ? AND c.relkind = 'r' \
                AND a.attnum > 0 AND NOT a.attisdropped",
-            crate::db_params![schema, KEYPAIR_SLOT_TABLE],
+            crate::db_params![schema, table],
         )
         .await?;
     let mut actual = HashMap::new();
@@ -555,27 +1322,20 @@ async fn verify_columns(tx: &mut Transaction<'_>, schema: &str) -> Result<(), Le
             ),
         );
     }
-    let expected = [
-        ("slot_index", "integer", true, None),
-        ("holder_node", "text", false, None),
-        ("holder_epoch", "text", false, None),
-        ("heartbeat", "timestamp with time zone", true, Some("now()")),
-        ("expired", "boolean", true, Some("true")),
-    ];
     if actual.len() != expected.len() {
         return Err(LeaseAttachError::InvalidSchemaShape);
     }
     for (name, kind, not_null, default) in expected {
         let Some((actual_kind, actual_not_null, generated, identity, actual_default, collation)) =
-            actual.get(name)
+            actual.get(*name)
         else {
             return Err(LeaseAttachError::InvalidSchemaShape);
         };
         if actual_kind != kind
-            || *actual_not_null != not_null
+            || *actual_not_null != *not_null
             || !generated.is_empty()
             || !identity.is_empty()
-            || actual_default.as_deref() != default
+            || actual_default.as_deref() != *default
             || !collation
         {
             return Err(LeaseAttachError::InvalidSchemaShape);
@@ -636,7 +1396,22 @@ async fn verify_index_shape(
                       AND (SELECT COALESCE(pg_catalog.bool_and(k.option = 0), true) \
                            FROM pg_catalog.unnest(i.indoption) \
                              WITH ORDINALITY k(option, position) \
-                           WHERE k.position <= i.indnkeyatts)), false) \
+                           WHERE k.position <= i.indnkeyatts) \
+                      AND NOT EXISTS ( \
+                        SELECT 1 \
+                        FROM pg_catalog.unnest(i.indclass) WITH ORDINALITY ic(opclass_oid, position) \
+                        JOIN pg_catalog.pg_attribute a \
+                          ON a.attrelid = t.oid AND a.attname = 'slot_index' \
+                        JOIN pg_catalog.pg_opclass opc ON opc.oid = ic.opclass_oid \
+                        JOIN pg_catalog.pg_am method ON method.oid = opc.opcmethod \
+                        WHERE NOT opc.opcdefault OR method.amname <> 'btree' \
+                          OR opc.opcintype <> a.atttypid) \
+                      AND NOT EXISTS ( \
+                        SELECT 1 \
+                        FROM pg_catalog.unnest(i.indcollation) WITH ORDINALITY ic(collation_oid, position) \
+                        JOIN pg_catalog.pg_attribute a \
+                          ON a.attrelid = t.oid AND a.attname = 'slot_index' \
+                        WHERE ic.collation_oid <> a.attcollation)), false) \
              FROM pg_catalog.pg_index i \
              JOIN pg_catalog.pg_class t ON t.oid = i.indrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace \
@@ -738,6 +1513,579 @@ async fn verify_runtime_acl(
         return Err(LeaseAttachError::UnsafeRuntimeRole);
     }
     Ok(())
+}
+
+async fn verify_keypool_tables(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), LeaseAttachError> {
+    verify_aux_table_shape(
+        tx,
+        schema,
+        KEYPAIR_POOL_TABLE,
+        KEYPAIR_POOL_GUARD_TRIGGER,
+        KEYPAIR_POOL_TRUNCATE_TRIGGER,
+    )
+    .await?;
+    verify_aux_table_shape(
+        tx,
+        schema,
+        KEYPAIR_POOL_SLOTS_TABLE,
+        KEYPAIR_MAP_GUARD_TRIGGER,
+        KEYPAIR_MAP_TRUNCATE_TRIGGER,
+    )
+    .await?;
+    verify_columns_contract(
+        tx,
+        schema,
+        KEYPAIR_POOL_TABLE,
+        &[
+            ("singleton", "boolean", true, None),
+            ("generation", "uuid", true, None),
+            ("state", "text", true, None),
+            ("slot_count", "integer", true, None),
+            ("activation_after", "timestamp with time zone", true, None),
+            (
+                "created_at",
+                "timestamp with time zone",
+                true,
+                Some("now()"),
+            ),
+        ],
+    )
+    .await?;
+    verify_columns_contract(
+        tx,
+        schema,
+        KEYPAIR_POOL_SLOTS_TABLE,
+        &[
+            ("generation", "uuid", true, None),
+            ("slot_index", "integer", true, None),
+            ("peer_id", "text", true, None),
+        ],
+    )
+    .await?;
+    verify_keypool_constraints(tx, schema, KEYPAIR_POOL_TABLE).await?;
+    verify_keypool_constraints(tx, schema, KEYPAIR_POOL_SLOTS_TABLE).await?;
+    Ok(())
+}
+
+async fn verify_aux_table_shape(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &str,
+    expected_trigger: &str,
+    expected_truncate_trigger: &str,
+) -> Result<(), LeaseAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT c.relkind = 'r' AND c.relpersistence = 'p' \
+                    AND NOT c.relispartition AND c.relowner = n.nspowner \
+                    AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity \
+                    AND c.reloftype = 0 \
+                    AND (SELECT count(*) = 2 FROM pg_catalog.pg_trigger tr \
+                         WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal \
+                           AND tr.tgname IN (?, ?)) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+                                    WHERE (tr.tgrelid = c.oid OR tr.tgconstrrelid = c.oid) \
+                                      AND NOT tr.tgisinternal \
+                                      AND NOT (tr.tgrelid = c.oid \
+                                        AND tr.tgname IN (?, ?))) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger tr \
+                                    WHERE (tr.tgrelid = c.oid OR tr.tgconstrrelid = c.oid) \
+                                      AND tr.tgisinternal AND NOT EXISTS ( \
+                                        SELECT 1 FROM pg_catalog.pg_constraint fk \
+                                        JOIN pg_catalog.pg_class child \
+                                          ON child.oid = fk.conrelid \
+                                        JOIN pg_catalog.pg_namespace child_ns \
+                                          ON child_ns.oid = child.relnamespace \
+                                        JOIN pg_catalog.pg_class parent \
+                                          ON parent.oid = fk.confrelid \
+                                        JOIN pg_catalog.pg_namespace parent_ns \
+                                          ON parent_ns.oid = parent.relnamespace \
+                                        WHERE fk.oid = tr.tgconstraint AND fk.contype = 'f' \
+                                          AND child_ns.nspname = ? \
+                                          AND child.relname = ? \
+                                          AND parent_ns.nspname = ? \
+                                          AND parent.relname = ?)) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint inbound \
+                                    WHERE inbound.contype = 'f' AND inbound.confrelid = c.oid \
+                                      AND NOT (c.relname = ? \
+                                        AND inbound.conrelid = (SELECT child.oid \
+                                          FROM pg_catalog.pg_class child \
+                                          JOIN pg_catalog.pg_namespace child_ns \
+                                            ON child_ns.oid = child.relnamespace \
+                                          WHERE child_ns.nspname = ? \
+                                            AND child.relname = ?))) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite rw \
+                                    WHERE rw.ev_class = c.oid) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh \
+                                    WHERE inh.inhrelid = c.oid OR inh.inhparent = c.oid) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![
+                expected_trigger,
+                expected_truncate_trigger,
+                expected_trigger,
+                expected_truncate_trigger,
+                schema,
+                KEYPAIR_POOL_SLOTS_TABLE,
+                schema,
+                KEYPAIR_POOL_TABLE,
+                KEYPAIR_POOL_TABLE,
+                schema,
+                KEYPAIR_POOL_SLOTS_TABLE,
+                schema,
+                table,
+            ],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(LeaseAttachError::InvalidKeypairPoolShape);
+    }
+    Ok(())
+}
+
+async fn verify_keypool_constraints(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<(), LeaseAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT con.contype::text, \
+                    pg_catalog.array_to_string(ARRAY( \
+                      SELECT a.attname::text \
+                      FROM pg_catalog.unnest(con.conkey) WITH ORDINALITY k(attnum, position) \
+                      JOIN pg_catalog.pg_attribute a \
+                        ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+                      ORDER BY k.position), ','), \
+                    COALESCE(ref.relname, ''), \
+                    pg_catalog.array_to_string(ARRAY( \
+                      SELECT a.attname::text \
+                      FROM pg_catalog.unnest(con.confkey) WITH ORDINALITY k(attnum, position) \
+                      JOIN pg_catalog.pg_attribute a \
+                        ON a.attrelid = con.confrelid AND a.attnum = k.attnum \
+                      ORDER BY k.position), ','), \
+                    con.condeferrable, con.condeferred, con.convalidated, \
+                    CASE WHEN con.contype IN ('p', 'u') THEN \
+                      COALESCE(ix.indisvalid AND ix.indisready AND ix.indislive \
+                        AND ix.indimmediate AND ix.indisunique \
+                        AND ix.indisprimary = (con.contype = 'p') \
+                        AND ix.indpred IS NULL AND ix.indexprs IS NULL \
+                        AND ix.indnkeyatts = pg_catalog.cardinality(con.conkey) \
+                        AND ix.indnatts = ix.indnkeyatts \
+                        AND am.amname = 'btree' \
+                        AND pg_catalog.array_to_string(ARRAY( \
+                          SELECT a.attname::text \
+                          FROM pg_catalog.unnest(ix.indkey) WITH ORDINALITY k(attnum, position) \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+                          WHERE k.position <= ix.indnkeyatts ORDER BY k.position), ',') \
+                          = pg_catalog.array_to_string(ARRAY( \
+                            SELECT a.attname::text \
+                            FROM pg_catalog.unnest(con.conkey) WITH ORDINALITY k(attnum, position) \
+                            JOIN pg_catalog.pg_attribute a \
+                              ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+                            ORDER BY k.position), ',') \
+                        AND NOT EXISTS ( \
+                          SELECT 1 \
+                          FROM pg_catalog.unnest(ix.indclass) WITH ORDINALITY ic(opclass_oid, position) \
+                          JOIN pg_catalog.unnest(ix.indkey) WITH ORDINALITY ik(attnum, position) \
+                            ON ik.position = ic.position \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = con.conrelid AND a.attnum = ik.attnum \
+                          JOIN pg_catalog.pg_opclass opc ON opc.oid = ic.opclass_oid \
+                          JOIN pg_catalog.pg_am amethod ON amethod.oid = opc.opcmethod \
+                          WHERE ic.position <= ix.indnkeyatts \
+                            AND (NOT opc.opcdefault OR amethod.amname <> 'btree' \
+                              OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_opclass def \
+                                WHERE def.opcmethod = opc.opcmethod \
+                                  AND def.opcintype = a.atttypid AND def.opcdefault \
+                                  AND def.oid = opc.oid)) \
+                        ) \
+                        AND NOT EXISTS ( \
+                          SELECT 1 \
+                          FROM pg_catalog.unnest(ix.indcollation) WITH ORDINALITY ic(collation_oid, position) \
+                          JOIN pg_catalog.unnest(ix.indkey) WITH ORDINALITY ik(attnum, position) \
+                            ON ik.position = ic.position \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = con.conrelid AND a.attnum = ik.attnum \
+                          WHERE ic.position <= ix.indnkeyatts \
+                            AND ic.collation_oid <> a.attcollation \
+                        ), false) \
+                    ELSE con.contype = 'f' END, \
+                    con.confupdtype::text, con.confdeltype::text, con.confmatchtype::text, \
+                    pg_catalog.pg_get_constraintdef(con.oid), \
+                    (con.contype <> 'f' OR ref.relnamespace = n.oid) \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace \
+             LEFT JOIN pg_catalog.pg_class ref ON ref.oid = con.confrelid \
+             LEFT JOIN pg_catalog.pg_index ix ON ix.indexrelid = con.conindid \
+             LEFT JOIN pg_catalog.pg_class ixrel ON ixrel.oid = ix.indexrelid \
+             LEFT JOIN pg_catalog.pg_am am ON am.oid = ixrel.relam \
+             WHERE n.nspname = ? AND rel.relname = ?",
+            crate::db_params![schema, table],
+        )
+        .await?;
+    let mut actual = Vec::new();
+    while let Some(row) = rows.next().await? {
+        actual.push((
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+            row.get::<String>(2)?,
+            row.get::<String>(3)?,
+            row.get::<bool>(4)?,
+            row.get::<bool>(5)?,
+            row.get::<bool>(6)?,
+            row.get::<bool>(7)?,
+            row.get::<String>(8)?,
+            row.get::<String>(9)?,
+            row.get::<String>(10)?,
+            row.get::<String>(11)?,
+            row.get::<bool>(12)?,
+        ));
+    }
+    let mut expected = if table == KEYPAIR_POOL_TABLE {
+        vec![
+            ("p", "singleton", "", "", "", "PRIMARY KEY (singleton)"),
+            ("u", "generation", "", "", "", "UNIQUE (generation)"),
+            ("c", "singleton", "", "", "", "CHECK (singleton)"),
+            ("c", "slot_count", "", "", "", "CHECK ((slot_count > 0))"),
+            (
+                "c",
+                "state",
+                "",
+                "",
+                "",
+                "CHECK ((state = ANY (ARRAY['pending'::text, 'active'::text])))",
+            ),
+        ]
+    } else if table == KEYPAIR_POOL_SLOTS_TABLE {
+        vec![
+            (
+                "p",
+                "generation,slot_index",
+                "",
+                "",
+                "",
+                "PRIMARY KEY (generation, slot_index)",
+            ),
+            (
+                "u",
+                "generation,peer_id",
+                "",
+                "",
+                "",
+                "UNIQUE (generation, peer_id)",
+            ),
+            (
+                "f",
+                "generation",
+                KEYPAIR_POOL_TABLE,
+                "generation",
+                "r/a/s",
+                "",
+            ),
+            ("c", "slot_index", "", "", "", "CHECK ((slot_index >= 0))"),
+        ]
+    } else {
+        return Err(LeaseAttachError::InvalidKeypairPoolShape);
+    };
+    actual.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    expected.sort_unstable_by(|left, right| left.0.cmp(right.0).then_with(|| left.1.cmp(right.1)));
+    let valid = actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                let (
+                    kind,
+                    columns,
+                    referenced_table,
+                    referenced_columns,
+                    deferred,
+                    initially_deferred,
+                    validated,
+                    supporting_index,
+                    update_action,
+                    delete_action,
+                    match_type,
+                    definition,
+                    reference_schema_same,
+                ) = actual;
+                let (
+                    expected_kind,
+                    expected_columns,
+                    expected_table,
+                    expected_ref_columns,
+                    expected_action,
+                    expected_definition,
+                ) = expected;
+                let foreign_key_actions = *expected_kind != "f"
+                    || format!("{delete_action}/{update_action}/{match_type}") == *expected_action;
+                kind.as_str() == *expected_kind
+                    && columns.as_str() == *expected_columns
+                    && referenced_table.as_str() == *expected_table
+                    && referenced_columns.as_str() == *expected_ref_columns
+                    && *reference_schema_same
+                    && !deferred
+                    && !initially_deferred
+                    && *validated
+                    && (*expected_kind == "c" || *expected_kind == "f" || *supporting_index)
+                    && foreign_key_actions
+                    && (*expected_kind == "f" || definition.as_str() == *expected_definition)
+            });
+    if !valid {
+        return Err(LeaseAttachError::InvalidKeypairPoolShape);
+    }
+
+    let expected_indexes = 2;
+    let mut indexes = tx
+        .query(
+            "SELECT count(*)::bigint FROM pg_catalog.pg_index i \
+             JOIN pg_catalog.pg_class c ON c.oid = i.indrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![schema, table],
+        )
+        .await?;
+    if !matches!(indexes.next().await?, Some(row) if row.get::<i64>(0)? == expected_indexes) {
+        return Err(LeaseAttachError::InvalidKeypairPoolShape);
+    }
+    Ok(())
+}
+
+async fn verify_keypool_acl(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), LeaseAttachError> {
+    verify_read_only_relation_acl(tx, schema, KEYPAIR_POOL_TABLE).await?;
+    verify_read_only_relation_acl(tx, schema, KEYPAIR_POOL_SLOTS_TABLE).await?;
+    Ok(())
+}
+
+async fn verify_read_only_relation_acl(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<(), LeaseAttachError> {
+    let mut rows = tx
+        .query(
+            "SELECT relation.relowner = ns.nspowner \
+                    AND relation.relowner <> runtime.oid \
+                    AND NOT pg_catalog.pg_has_role(runtime.oid, relation.relowner, 'SET') \
+                    AND pg_catalog.has_table_privilege(runtime.oid, relation.oid, 'SELECT') \
+                    AND NOT pg_catalog.has_table_privilege(runtime.oid, relation.oid, \
+                      'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') \
+                    AND NOT pg_catalog.has_table_privilege(runtime.oid, relation.oid, \
+                      'SELECT WITH GRANT OPTION, INSERT WITH GRANT OPTION, \
+                       UPDATE WITH GRANT OPTION, DELETE WITH GRANT OPTION, \
+                       TRUNCATE WITH GRANT OPTION, REFERENCES WITH GRANT OPTION, \
+                       TRIGGER WITH GRANT OPTION') \
+                    AND CASE WHEN pg_catalog.current_setting('server_version_num')::integer >= 170000 \
+                      THEN NOT pg_catalog.has_table_privilege(runtime.oid, relation.oid, 'MAINTAIN') \
+                      ELSE true END \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
+                      COALESCE(relation.relacl, pg_catalog.acldefault('r', relation.relowner)) \
+                    ) acl WHERE acl.grantee NOT IN (relation.relowner, runtime.oid) \
+                      OR (acl.grantee = runtime.oid AND (acl.is_grantable \
+                        OR acl.privilege_type <> 'SELECT'))) \
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
+                      WHERE a.attrelid = relation.oid AND a.attnum > 0 \
+                        AND NOT a.attisdropped AND a.attacl IS NOT NULL) \
+             FROM pg_catalog.pg_class relation \
+             JOIN pg_catalog.pg_namespace ns ON ns.oid = relation.relnamespace \
+             JOIN pg_catalog.pg_roles runtime ON runtime.rolname = current_user \
+             WHERE ns.nspname = ? AND relation.relname = ?",
+            crate::db_params![schema, table],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(LeaseAttachError::UnsafeRuntimeRole);
+    }
+    Ok(())
+}
+
+async fn verify_keypair_guard(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+) -> Result<(), LeaseAttachError> {
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_SLOT_TABLE,
+        KEYPAIR_GUARD_TRIGGER,
+        KEYPAIR_GUARD_FUNCTION,
+        31,
+        KEYPAIR_GUARD_BODY,
+    )
+    .await?;
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_POOL_TABLE,
+        KEYPAIR_POOL_GUARD_TRIGGER,
+        KEYPAIR_POOL_GUARD_FUNCTION,
+        27,
+        KEYPAIR_POOL_GUARD_BODY,
+    )
+    .await?;
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_POOL_SLOTS_TABLE,
+        KEYPAIR_MAP_GUARD_TRIGGER,
+        KEYPAIR_MAP_GUARD_FUNCTION,
+        31,
+        KEYPAIR_MAP_GUARD_BODY,
+    )
+    .await?;
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_SLOT_TABLE,
+        KEYPAIR_SLOT_TRUNCATE_TRIGGER,
+        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        34,
+        KEYPAIR_TRUNCATE_GUARD_BODY,
+    )
+    .await?;
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_POOL_TABLE,
+        KEYPAIR_POOL_TRUNCATE_TRIGGER,
+        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        34,
+        KEYPAIR_TRUNCATE_GUARD_BODY,
+    )
+    .await?;
+    verify_one_keypair_guard(
+        tx,
+        schema,
+        KEYPAIR_POOL_SLOTS_TABLE,
+        KEYPAIR_MAP_TRUNCATE_TRIGGER,
+        KEYPAIR_TRUNCATE_GUARD_FUNCTION,
+        34,
+        KEYPAIR_TRUNCATE_GUARD_BODY,
+    )
+    .await
+}
+
+async fn verify_one_keypair_guard(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    table: &str,
+    trigger_name: &str,
+    function_name: &str,
+    trigger_type: i16,
+    function_body: &str,
+) -> Result<(), LeaseAttachError> {
+    let function_path = format!("search_path=pg_catalog, {schema}, pg_temp");
+    let mut rows = tx
+        .query(
+            "SELECT count(*)::bigint, \
+                    COALESCE(bool_and(tr.tgname = ? AND NOT tr.tgisinternal \
+                      AND tr.tgenabled = 'O' AND tr.tgtype = ? \
+                      AND tr.tgnargs = 0 AND tr.tgqual IS NULL \
+                      AND proc.proname = ? AND proc.proowner = ns.nspowner \
+                      AND proc.prosecdef AND proc.provolatile = 'v' \
+                      AND proc.pronargs = 0 AND proc.prorettype = 'pg_catalog.trigger'::regtype \
+                      AND language.lanname = 'plpgsql' \
+                      AND proc.proconfig = ARRAY[?]::text[] \
+                      AND pg_catalog.btrim(proc.prosrc) = pg_catalog.btrim(?) \
+                      AND NOT pg_catalog.has_function_privilege(current_user, proc.oid, 'EXECUTE') \
+                      AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode( \
+                        COALESCE(proc.proacl, pg_catalog.acldefault('f', proc.proowner)) \
+                      ) acl WHERE acl.grantee <> proc.proowner)), false) \
+             FROM pg_catalog.pg_trigger tr \
+             JOIN pg_catalog.pg_class relation ON relation.oid = tr.tgrelid \
+             JOIN pg_catalog.pg_namespace ns ON ns.oid = relation.relnamespace \
+             JOIN pg_catalog.pg_proc proc ON proc.oid = tr.tgfoid \
+             JOIN pg_catalog.pg_language language ON language.oid = proc.prolang \
+             WHERE ns.nspname = ? AND relation.relname = ? \
+               AND tr.tgname = ? AND NOT tr.tgisinternal",
+            crate::db_params![
+                trigger_name,
+                trigger_type,
+                function_name,
+                function_path,
+                function_body,
+                schema,
+                table,
+                trigger_name,
+            ],
+        )
+        .await?;
+    if !matches!(rows.next().await?, Some(row) if row.get::<i64>(0)? == 1 && row.get::<bool>(1)?) {
+        return Err(LeaseAttachError::InvalidSchemaShape);
+    }
+    Ok(())
+}
+
+async fn read_enrolled_peer_order(
+    tx: &mut Transaction<'_>,
+    schema: &str,
+    expected_peer_ids: &[PeerId],
+) -> Result<EnrolledKeypairPool, LeaseAttachError> {
+    let quoted_schema = crate::db::physical_attestation::quote_identifier(schema);
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT generation::text, state, activation_after <= now(), slot_count \
+                 FROM {quoted_schema}.{KEYPAIR_POOL_TABLE} WHERE singleton"
+            ),
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(LeaseAttachError::KeypoolGenerationPending);
+    };
+    let generation_text: String = row.get(0)?;
+    let generation = uuid::Uuid::parse_str(&generation_text)
+        .map_err(|_| LeaseAttachError::InvalidKeypairPoolShape)?;
+    let state: String = row.get(1)?;
+    let activation_due: bool = row.get(2)?;
+    let slot_count: i32 = row.get(3)?;
+    if state != "active" || !activation_due {
+        return Err(LeaseAttachError::KeypoolGenerationPending);
+    }
+    if validate_peer_order(expected_peer_ids).is_err() {
+        return Err(LeaseAttachError::KeypairPoolOrderMismatch);
+    }
+    let mut rows = tx
+        .query(
+            &format!(
+                "SELECT slot_index, peer_id FROM {quoted_schema}.{KEYPAIR_POOL_SLOTS_TABLE} \
+                 WHERE generation = ?::uuid ORDER BY slot_index"
+            ),
+            crate::db_params![generation.to_string()],
+        )
+        .await?;
+    let mut peer_ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let slot_index: i32 = row.get(0)?;
+        let peer_id: String = row.get(1)?;
+        if slot_index < 0 || slot_index as usize != peer_ids.len() {
+            return Err(LeaseAttachError::InvalidKeypairPoolShape);
+        }
+        let parsed_peer_id =
+            PeerId::from_str(&peer_id).map_err(|_| LeaseAttachError::InvalidKeypairPoolShape)?;
+        if parsed_peer_id.to_string() != peer_id {
+            return Err(LeaseAttachError::InvalidKeypairPoolShape);
+        }
+        peer_ids.push(parsed_peer_id);
+    }
+    if peer_ids.len() != slot_count as usize || peer_ids != expected_peer_ids {
+        return Err(LeaseAttachError::KeypairPoolOrderMismatch);
+    }
+    Ok(EnrolledKeypairPool {
+        generation,
+        peer_ids,
+    })
 }
 
 /// A cheap, stable, non-cryptographic offset from a node id, so pods spread
