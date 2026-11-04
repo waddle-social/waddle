@@ -389,6 +389,13 @@ waddle-xmpp ownership::endpoint_transition::tests::slow_reserved_enqueue_recheck
 waddle-xmpp ownership::endpoint_transition::tests::unknown_reply_requires_journal_resolution_not_assumed_rollback
 waddle-xmpp ownership::endpoint_transition::tests::cancelled_prepare_stays_sealed_until_exact_compensation
 
+# Carbon opt-out settles an archive obligation only after exact binding admission.
+waddle-xmpp registry::connection_registry::outbound::tests::carbon_opt_out_requires_the_exact_binding_to_be_active
+
+# Owner-prepared notification stores attach with restricted PostgreSQL grants.
+waddle-server notification_activity::runtime_attach_tests::postgres_attached_notification_stores_validate_shape_and_runtime_grants
+waddle-server::pubsub_runtime_attach restricted_pubsub_attachment_and_guarded_owner_bootstrap
+
 # P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
 # native loopback, bounded overload, exact completion and both-pump joins.
 waddle-server::supervised_io pumps::outbound_count_and_byte_overload_stops_before_retirement
