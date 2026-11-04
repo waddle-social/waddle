@@ -6,6 +6,7 @@ use axum::extract::ws::Message;
 use futures::Sink;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use waddle_xmpp::registry::SocketWriteInterruption;
 
 #[derive(Default)]
 struct TestSink {
@@ -126,9 +127,9 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
         }
     }
 
-    struct CancelAndFailSink(tokio_util::sync::CancellationToken);
+    struct FailWithDetachTextSink;
 
-    impl Sink<Message> for CancelAndFailSink {
+    impl Sink<Message> for FailWithDetachTextSink {
         type Error = &'static str;
 
         fn poll_ready(
@@ -139,9 +140,8 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
         }
 
         fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
-            self.0.cancel();
             // A real transport error must remain ERROR even if its text happens
-            // to match the detach error and cancellation has just occurred.
+            // to match the detach error.
             Err("connection force-detached")
         }
 
@@ -169,7 +169,7 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
             .with_writer(writer)
             .finish(),
     );
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     interrupt.cancel();
     let mut detached = InterruptibleSink::new(TestSink::succeeds(), interrupt);
     assert!(
@@ -192,7 +192,7 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
     ));
     assert!(!close_ws_connection(&mut detached, "detached-close").await);
 
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     let mut detach_on_ready = InterruptibleSink::new(
         DetachOnReadySink {
             interrupt: interrupt.clone(),
@@ -211,7 +211,7 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
         AuthoritySendOutcome::TransportClosed
     ));
 
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     let mut flushing =
         InterruptibleSink::new(PendingFlushSink { sent: Vec::new() }, interrupt.clone());
     let send = send_ws_message_with_authority(
@@ -225,8 +225,8 @@ async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
     interrupt.cancel();
     assert!(matches!(send.await, AuthoritySendOutcome::TransportClosed));
 
-    let interrupt = tokio_util::sync::CancellationToken::new();
-    let mut failing = InterruptibleSink::new(CancelAndFailSink(interrupt.clone()), interrupt);
+    let interrupt = SocketWriteInterruption::new();
+    let mut failing = InterruptibleSink::new(FailWithDetachTextSink, interrupt);
     assert!(
         !send_ws_message(
             &mut failing,
@@ -316,7 +316,7 @@ pub(super) struct PendingFlushSink {
 }
 
 struct DetachOnReadySink {
-    interrupt: tokio_util::sync::CancellationToken,
+    interrupt: SocketWriteInterruption,
     sent: Vec<Message>,
 }
 
@@ -344,7 +344,7 @@ impl Sink<Message> for DetachOnReadySink {
 
 #[tokio::test]
 async fn forced_detach_between_ready_and_start_send_suppresses_the_frame() {
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     let mut sink = InterruptibleSink::new(
         DetachOnReadySink {
             interrupt: interrupt.clone(),
@@ -379,7 +379,7 @@ impl Sink<Message> for PendingFlushSink {
 
 #[tokio::test]
 async fn forced_detach_interrupts_ordinary_write_waiting_for_readiness() {
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     let mut sink = InterruptibleSink::new(PendingReadySink { sent: Vec::new() }, interrupt.clone());
     let send = send_ws_message(&mut sink, Message::Text("<message/>".into()), "detach");
     tokio::pin!(send);
@@ -394,7 +394,7 @@ async fn forced_detach_interrupts_ordinary_write_waiting_for_readiness() {
 
 #[tokio::test]
 async fn forced_detach_interrupts_ordinary_write_waiting_for_flush() {
-    let interrupt = tokio_util::sync::CancellationToken::new();
+    let interrupt = SocketWriteInterruption::new();
     let mut sink = InterruptibleSink::new(PendingFlushSink { sent: Vec::new() }, interrupt.clone());
     {
         let send = send_ws_message(&mut sink, Message::Text("<message/>".into()), "detach");
@@ -412,6 +412,238 @@ async fn forced_detach_interrupts_ordinary_write_waiting_for_flush() {
         1,
         "flush interruption follows transport acceptance"
     );
+}
+
+fn force_detach_request() -> waddle_xmpp::registry::ForceDetachRequest {
+    let (ack, _receiver) = tokio::sync::oneshot::channel();
+    waddle_xmpp::registry::ForceDetachRequest {
+        origin: waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement,
+        requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
+        ack,
+    }
+}
+
+#[tokio::test]
+async fn interrupting_detach_offer_is_not_a_stop_until_its_gate_transition() {
+    use waddle_xmpp::registry::ConnectionEntry;
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let mut requests = entry.take_force_detach_rx().expect("detach receiver");
+    let (offered_tx, offered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let target = entry.clone();
+    let stop = tokio::task::spawn_blocking(move || {
+        target.try_force_detach_and_interrupt_after_offer_for_test(force_detach_request(), || {
+            let _ = offered_tx.send(());
+            release_rx.recv().expect("release post-offer stop");
+        })
+    });
+    offered_rx.await.expect("detach offer completed");
+    requests.try_recv().expect("detach request was offered");
+
+    let mut sink = InterruptibleSink::new(TestSink::succeeds(), entry.write_interruption.clone());
+    assert!(
+        send_ws_message(
+            &mut sink,
+            Message::Text("<before-stop/>".into()),
+            "before stop"
+        )
+        .await
+    );
+    assert_eq!(sink.uninterrupted().sent.len(), 1);
+
+    release_tx.send(()).expect("allow stop transition");
+    stop.await.expect("stop task").expect("stop succeeds");
+    assert!(entry.write_interruption.is_cancelled());
+    assert!(
+        !send_ws_message(
+            &mut sink,
+            Message::Text("<after-stop/>".into()),
+            "after stop"
+        )
+        .await
+    );
+    assert_eq!(sink.uninterrupted().sent.len(), 1);
+
+    let (successor_tx, _successor_rx) = tokio::sync::mpsc::channel(1);
+    let successor = ConnectionEntry::new(successor_tx);
+    assert_ne!(entry.connection_ref(), successor.connection_ref());
+    let mut successor_requests = successor
+        .take_force_detach_rx()
+        .expect("successor receiver");
+    let mut successor_sink =
+        InterruptibleSink::new(TestSink::succeeds(), successor.write_interruption.clone());
+    assert!(
+        send_ws_message(
+            &mut successor_sink,
+            Message::Text("<successor/>".into()),
+            "successor"
+        )
+        .await
+    );
+    assert_eq!(successor_sink.uninterrupted().sent.len(), 1);
+    successor
+        .try_force_detach_and_interrupt(force_detach_request())
+        .expect("production interrupting detach succeeds");
+    successor_requests
+        .try_recv()
+        .expect("successor detach offered");
+    assert!(successor.write_interruption.is_cancelled());
+    assert!(
+        !send_ws_message(
+            &mut successor_sink,
+            Message::Text("<successor-after-stop/>".into()),
+            "successor after stop",
+        )
+        .await
+    );
+    assert_eq!(successor_sink.uninterrupted().sent.len(), 1);
+}
+
+#[tokio::test]
+async fn failed_interrupting_detach_offer_keeps_ordinary_writes_open() {
+    use waddle_xmpp::registry::ConnectionEntry;
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let requests = entry.take_force_detach_rx().expect("detach receiver");
+    let sender = entry.force_detach_sender();
+    for _ in 0..sender.max_capacity() {
+        sender
+            .try_send(force_detach_request())
+            .expect("fill detach queue");
+    }
+    assert!(matches!(
+        entry.try_force_detach_and_interrupt(force_detach_request()),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+    ));
+    assert!(!entry.write_interruption.is_cancelled());
+    drop(requests);
+    assert!(matches!(
+        entry.try_force_detach_and_interrupt(force_detach_request()),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+    ));
+    assert!(!entry.write_interruption.is_cancelled());
+    let mut sink = InterruptibleSink::new(TestSink::succeeds(), entry.write_interruption.clone());
+    assert!(send_ws_message(&mut sink, Message::Text("<still-open/>".into()), "open").await);
+    assert_eq!(sink.uninterrupted().sent.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_write_started_before_interrupting_stop_finishes_admission_first() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+    use waddle_xmpp::ownership::{NodeIdentity, SharedNodeIdentity};
+    use waddle_xmpp::registry::ConnectionEntry;
+
+    struct BlockingStart {
+        entered: Option<tokio::sync::oneshot::Sender<()>>,
+        release: mpsc::Receiver<()>,
+        admitted: Arc<AtomicUsize>,
+    }
+
+    impl Sink<Message> for BlockingStart {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.admitted.fetch_add(1, Ordering::Relaxed);
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            self.release
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| "start was not released")
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("node", "first"));
+    let inventory = crate::websocket_transport::IoCustodianInventory::new(1).expect("inventory");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let admission = crate::websocket_transport::SocketAdmission::clustered(
+        &lifecycle,
+        &identity,
+        &inventory,
+        shutdown.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .expect("socket admission")
+    .into_legacy();
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let mut requests = entry.take_force_detach_rx().expect("detach receiver");
+    let admitted = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let send = tokio::spawn({
+        let interrupt = entry.write_interruption.clone();
+        let admitted = Arc::clone(&admitted);
+        async move {
+            let mut sink = InterruptibleSink::new(
+                BlockingStart {
+                    entered: Some(entered_tx),
+                    release: release_rx,
+                    admitted,
+                },
+                interrupt,
+            );
+            send_ws_message_with_authority(
+                &mut sink,
+                Message::Text("<in-flight/>".into()),
+                "in-flight write",
+                Some((admission.permit(), &shutdown)),
+            )
+            .await
+        }
+    });
+    entered_rx.await.expect("ordinary start_send entered");
+    let (offered_tx, offered_rx) = tokio::sync::oneshot::channel();
+    let target = entry.clone();
+    let mut stop = tokio::task::spawn_blocking(move || {
+        target.try_force_detach_and_interrupt_after_offer_for_test(force_detach_request(), || {
+            let _ = offered_tx.send(());
+        })
+    });
+    offered_rx.await.expect("detach offer completed");
+    requests.try_recv().expect("detach request was offered");
+    let premature = tokio::time::timeout(Duration::from_millis(100), &mut stop).await;
+    let stopped_during_write = entry.write_interruption.is_cancelled();
+    release_tx.send(()).expect("release ordinary start_send");
+    assert!(premature.is_err(), "stop waits for entered start_send");
+    assert!(!stopped_during_write);
+    stop.await.expect("stop task").expect("stop succeeds");
+    assert!(matches!(
+        send.await.expect("send task"),
+        AuthoritySendOutcome::Sent | AuthoritySendOutcome::TransportClosed
+    ));
+    assert_eq!(admitted.load(Ordering::Relaxed), 1);
+    let mut after_stop =
+        InterruptibleSink::new(TestSink::succeeds(), entry.write_interruption.clone());
+    assert!(!send_ws_message(&mut after_stop, Message::Text("<late/>".into()), "late").await);
+    assert!(after_stop.uninterrupted().sent.is_empty());
 }
 
 async fn invalid_live_resume_preserves_blocked_write<S>(inner: S)

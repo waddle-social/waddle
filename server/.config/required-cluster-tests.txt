@@ -400,12 +400,23 @@ waddle-xmpp registry::connection_registry::tests::write_acceptance_seal_winning_
 waddle-xmpp registry::connection_registry::tests::write_acceptance_committed_before_seal_remains_queued
 waddle-server room_effect_outbox::tests::drain::due_drain_retries_a_sealed_local_binding_from_the_original_row
 
+# Interrupting force-detach gates ordinary start_send at the physical socket.
+# A successful queue offer alone is not yet the stop transition.
+waddle-server server::routes::websocket::tests::send::interrupting_detach_offer_is_not_a_stop_until_its_gate_transition
+waddle-server server::routes::websocket::tests::send::failed_interrupting_detach_offer_keeps_ordinary_writes_open
+waddle-server server::routes::websocket::tests::send::ordinary_write_started_before_interrupting_stop_finishes_admission_first
+
 # Owner-prepared notification stores attach with restricted PostgreSQL grants.
 waddle-server notification_activity::runtime_attach_tests::postgres_attached_notification_stores_validate_shape_and_runtime_grants
 waddle-server::pubsub_runtime_attach restricted_pubsub_attachment_and_guarded_owner_bootstrap
 waddle-server::room_effect_runtime_attach restricted_room_effect_outbox_preserves_and_fences_effect_rows
 waddle-server::claim_occupancy_runtime_attach claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs
 waddle-server clustering::lease::runtime_attach_tests::postgres_attached_keypair_lease_validates_both_pools_and_contract
+
+# Graceful room drain releases only its captured claim epoch; same-node
+# reacquisition after the final-write snapshot must survive the batch.
+waddle-server clustering::drain::tests::drain_exact_release_preserves_same_node_reacquire_after_snapshot
+waddle-server clustering::claims::tests::release_many_exact_preserves_a_fresh_same_node_resume
 
 # P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes
 # native loopback, bounded overload, exact completion and both-pump joins.

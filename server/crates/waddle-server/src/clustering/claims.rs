@@ -394,6 +394,12 @@ struct OrphanedSmClaimCleanup {
     malformed: bool,
 }
 
+#[derive(serde::Serialize)]
+struct ExactClaimReleaseRecord {
+    entity: String,
+    claim_epoch: i64,
+}
+
 impl PostgresClaimStore {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -1387,6 +1393,51 @@ impl ClaimStore for PostgresClaimStore {
                 .map(|entity| Value::from(entity_key(entity))),
         );
         conn.execute(&sql, params).await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        let mut seen = HashSet::with_capacity(claims.len());
+        let mut expected = Vec::with_capacity(claims.len());
+        for (entity, epoch) in claims {
+            if seen.insert((entity.clone(), *epoch)) {
+                expected.push(ExactClaimReleaseRecord {
+                    entity: entity_key(entity),
+                    claim_epoch: epoch.0,
+                });
+            }
+        }
+        if expected.is_empty() {
+            return Ok(());
+        }
+        if self.db.driver() != crate::db::DatabaseDriver::Postgres {
+            return Err(ClaimError::Backend(
+                "exact clustered claim release requires PostgreSQL".to_string(),
+            ));
+        }
+        let payload = serde_json::to_string(&expected)
+            .map_err(|error| ClaimError::Backend(error.to_string()))?;
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // Keep the full drain in one statement even at the ~18k modeled
+        // entity scale. A JSON recordset avoids PostgreSQL's bind-parameter
+        // ceiling while matching each row against its captured epoch.
+        conn.execute(
+            r#"
+                    DELETE FROM clustering_claims AS claim
+                    USING jsonb_to_recordset(?::jsonb) AS expected(entity TEXT, claim_epoch BIGINT)
+                    WHERE claim.node_id = ?
+                      AND claim.node_epoch = ?
+                      AND claim.entity = expected.entity
+                      AND claim.claim_epoch = expected.claim_epoch
+                    "#,
+            crate::db_params![payload, me.node_id.clone(), me.node_epoch.clone()],
+        )
+        .await
+        .map_err(db_err)?;
         Ok(())
     }
 }
@@ -3845,13 +3896,9 @@ mod tests {
     // runs (the doc comment's own example: "a resumed XEP-0198 session
     // legitimately steals back onto this node via `steal_for_resume`"),
     // is deleted by the stale batch entry regardless. This is the
-    // documented, accepted risk — not a bug — and Slice 10's own
-    // `crate::clustering::drain::tests::
-    // drain_seals_then_releases_only_room_entities_skipping_sm_sessions`
-    // proves the mitigation: `SmSession` entities (the only ones reachable
-    // via `steal_for_resume`) never enter a `release_many` batch in the
-    // first place, so this window is real at the store level but
-    // unreachable through the production drain path.
+    // generic API remains epoch-blind for its non-drain callers. The
+    // production drain now uses `release_many_exact`; the companion exact
+    // test below proves a captured stale epoch does not delete a fresh claim.
     #[tokio::test]
     async fn release_many_epoch_blind_window_deletes_a_fresh_same_node_resume() {
         let _guard = clustering_control_plane_table_lock().lock().await;
@@ -3899,6 +3946,67 @@ mod tests {
             "release_many's epoch-blind DELETE removes the fresh, genuinely-live claim too — \
              the documented ABA window, reproduced here at the SQL level"
         );
+    }
+
+    #[tokio::test]
+    async fn release_many_exact_preserves_a_fresh_same_node_resume() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let me = node_identity();
+        let entity = sm_entity("stream-exact-release-aba");
+        let epoch0 = store.acquire(&entity, &me).await.expect("initial acquire");
+
+        let jid: jid::BareJid = "resuming@example.com".parse().expect("valid jid");
+        let proof =
+            waddle_xmpp::ownership::verify_resume_identity(&jid, &jid).expect("identity match");
+        let epoch1 = store
+            .steal_for_resume(&entity, epoch0, proof, &me)
+            .await
+            .expect("same-node resume steal succeeds");
+        assert!(epoch1 > epoch0);
+
+        let released_entity = sm_entity("stream-exact-release-positive");
+        let released_epoch = store
+            .acquire(&released_entity, &me)
+            .await
+            .expect("claim for positive exact release");
+        let foreign_entity = sm_entity("stream-exact-release-foreign");
+        let foreign_owner = node_identity();
+        let foreign_epoch = store
+            .acquire(&foreign_entity, &foreign_owner)
+            .await
+            .expect("claim for different owner");
+
+        store
+            .release_many_exact(
+                &[
+                    (entity.clone(), epoch0),
+                    (entity.clone(), epoch0),
+                    (released_entity.clone(), released_epoch),
+                    (foreign_entity.clone(), foreign_epoch),
+                ],
+                &me,
+            )
+            .await
+            .expect("exact batch release");
+
+        assert!(
+            store
+                .fence(&entity, &me, epoch1)
+                .await
+                .expect("fence check"),
+            "exact batch must preserve the newer claim epoch"
+        );
+        assert!(!store
+            .fence(&released_entity, &me, released_epoch)
+            .await
+            .expect("positive release fence check"));
+        assert!(store
+            .fence(&foreign_entity, &foreign_owner, foreign_epoch)
+            .await
+            .expect("foreign claim fence check"));
     }
 
     // The ADR-named interleaving race: a steal CAS commits while a

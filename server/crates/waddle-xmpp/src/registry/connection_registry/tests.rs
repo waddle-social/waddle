@@ -29,6 +29,34 @@ fn test_registry_creation() {
 }
 
 #[test]
+fn stale_binding_can_still_interrupt_a_later_binding_on_the_same_socket() {
+    // Characterizes the existing physical-socket scope. A later cutover must
+    // fence this operation against the current BindingRef before treating it
+    // as exact binding retirement.
+    let connection = ConnectionRef::fresh(NodeLeaseIdentity::local_process());
+    let old_binding = BindingRef::fresh(connection.clone());
+    let new_binding = BindingRef::fresh(connection);
+    let (old_tx, _old_rx) = mpsc::channel(1);
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    let old = ConnectionEntry::new_for_binding(old_tx, old_binding.clone());
+    let mut new = ConnectionEntry::new_for_binding(new_tx, new_binding.clone());
+    // Production registration shares the owning WsConnState's interruption
+    // across successive entries made on that physical socket.
+    new.write_interruption = old.write_interruption.clone();
+    let mut old_control = old.take_force_detach_rx().expect("old control receiver");
+    let (ack, _receiver) = tokio::sync::oneshot::channel();
+    old.try_force_detach_and_interrupt(super::ForceDetachRequest {
+        origin: super::ForceDetachOrigin::FreshBindReplacement,
+        requester_bare_jid: "alice@example.test".parse().expect("bare JID"),
+        ack,
+    })
+    .expect("stale entry can still offer its control request");
+    assert_ne!(old_binding, new_binding);
+    assert!(old_control.try_recv().is_ok());
+    assert!(new.write_interruption.is_cancelled());
+}
+
+#[test]
 fn outbound_stanza_new_defaults_to_direct_frame() {
     // The default constructor preserves PR1-PR9 behavior — every
     // existing caller treats the destination's main loop as a

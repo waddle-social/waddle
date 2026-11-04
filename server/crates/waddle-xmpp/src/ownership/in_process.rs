@@ -263,6 +263,21 @@ impl ClaimStore for InProcessClaimStore {
         }
         Ok(())
     }
+
+    async fn release_many_exact(
+        &self,
+        claims: &[(Entity, ClaimEpoch)],
+        me: &NodeIdentity,
+    ) -> Result<(), ClaimError> {
+        let mut state = self.lock()?;
+        for (entity, epoch) in claims {
+            if matches!(state.claims.get(entity), Some(record) if record.owner == *me && record.epoch == *epoch)
+            {
+                state.claims.remove(entity);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
