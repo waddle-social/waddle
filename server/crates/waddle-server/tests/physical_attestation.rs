@@ -6578,3 +6578,7 @@ mod sm_attach;
 #[cfg(feature = "test-support")]
 #[path = "physical_attestation/inbox_startup.rs"]
 mod inbox_startup;
+
+#[cfg(feature = "test-support")]
+#[path = "physical_attestation/mam_read.rs"]
+mod mam_read;
