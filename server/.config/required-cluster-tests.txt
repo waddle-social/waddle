@@ -396,6 +396,7 @@ waddle-xmpp registry::connection_registry::outbound::tests::carbon_opt_out_requi
 waddle-server notification_activity::runtime_attach_tests::postgres_attached_notification_stores_validate_shape_and_runtime_grants
 waddle-server::pubsub_runtime_attach restricted_pubsub_attachment_and_guarded_owner_bootstrap
 waddle-server::room_effect_runtime_attach restricted_room_effect_outbox_preserves_and_fences_effect_rows
+waddle-server::claim_occupancy_runtime_attach claims_and_occupancy_attach_on_exact_main_pool_and_preserve_epochs
 waddle-server clustering::lease::runtime_attach_tests::postgres_attached_keypair_lease_validates_both_pools_and_contract
 
 # P3.1 dark supervised I/O (#2137/#2046): the test-support lane executes

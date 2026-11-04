@@ -71,6 +71,124 @@ use waddle_xmpp::pending_delivery::SmSessionId;
 
 use crate::db::{Database, DatabaseError};
 
+mod runtime_attach;
+pub use runtime_attach::{ClaimOccupancyAttachError, VerifiedMainClaimOccupancy};
+
+/// Verify claim and occupancy relations on one exact attested main pool.
+/// The result is structural evidence, not claim acquisition or an epoch grant.
+pub async fn attach_main_claim_occupancy(
+    db: Database,
+) -> Result<VerifiedMainClaimOccupancy, ClaimOccupancyAttachError> {
+    runtime_attach::verify(db).await
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimOwnerPreparationError {
+    #[error("claim owner preparation requires a non-runtime PostgreSQL owner handle")]
+    OwnerHandleRequired,
+    #[error("claim owner physical identity, role, or schema is unsafe")]
+    UnsafeOwnerBoundary,
+    #[error("claim owner preparation requires a fresh claim table and epoch sequence")]
+    ExistingClaimAuthority,
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
+
+/// Create a fresh claim table and epoch sequence on the supplied physical
+/// owner identity. The caller must prove the lineage is fresh, fence older
+/// writers/DDL/role changes, and ensure no previously allocated claim epoch
+/// can be reused. Existing or partially existing authority is never repaired
+/// or rewound. The NOLOGIN schema owner needs `pg_control_system()` EXECUTE.
+/// Other clustering tables and V0013 occupancy are provisioned separately.
+pub async fn initialize_fresh_claims_owner(
+    db: &Database,
+    identity: &crate::db::lineage::PgIdentity,
+) -> Result<(), ClaimOwnerPreparationError> {
+    if db.driver() != crate::db::DatabaseDriver::Postgres || db.uses_attested_postgres_pool() {
+        return Err(ClaimOwnerPreparationError::OwnerHandleRequired);
+    }
+    let mut tx = db.begin().await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ WRITE",
+        (),
+    )
+    .await?;
+    tx.execute(
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED READ WRITE",
+        (),
+    )
+    .await?;
+    tx.query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(6841445497037937991)",
+        (),
+    )
+    .await?;
+    crate::room_effect_outbox::pin_room_owner_schema(&mut tx, identity)
+        .await
+        .map_err(|_| ClaimOwnerPreparationError::UnsafeOwnerBoundary)?;
+    let mut rows = tx.query(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = ? AND c.relname IN ('clustering_claims', 'clustering_claim_epoch_seq', \
+         'clustering_claims_node_id_node_epoch', 'clustering_claims_owner_type_entity', \
+         'clustering_claims_entity_type_entity', 'clustering_nodes', 'clustering_steal_intents', \
+         'clustering_orphan_reaper_cursors', 'clustering_muc_room_effects', \
+         'clustering_muc_destroy_outbox'))", crate::db_params![&identity.schema.name.0],
+    ).await?;
+    if matches!(rows.next().await?, Some(row) if row.get::<bool>(0)?) {
+        return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+    }
+    // Fresh MUC and global migration tables may already exist. Refuse a
+    // reset when they retain rows, and inspect their kind before reading so
+    // an existing view/rule cannot execute under the owner role.
+    for table in [
+        "clustering_muc_rooms",
+        "clustering_muc_room_affiliations",
+        "clustering_muc_room_lifecycles",
+        "clustering_muc_admin_receipts",
+        "xmpp_occupancy_authority",
+    ] {
+        let mut relation = tx.query(
+            "SELECT c.relkind = 'r' AND c.relpersistence = 'p' AND c.relowner = n.nspowner \
+             AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid) \
+             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid) \
+             AND c.relam = (SELECT oid FROM pg_catalog.pg_am WHERE amname = 'heap') \
+             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = ? AND c.relname = ?",
+            crate::db_params![&identity.schema.name.0, table],
+        ).await?;
+        if let Some(row) = relation.next().await? {
+            if !row.get::<bool>(0)? {
+                return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+            }
+            let schema = crate::db::physical_attestation::quote_identifier(&identity.schema.name.0);
+            let mut retained = tx
+                .query(
+                    &format!("SELECT EXISTS (SELECT 1 FROM {schema}.\"{table}\")"),
+                    (),
+                )
+                .await?;
+            if matches!(retained.next().await?, Some(row) if row.get::<bool>(0)?) {
+                return Err(ClaimOwnerPreparationError::ExistingClaimAuthority);
+            }
+        }
+    }
+    tx.execute("SET LOCAL default_table_access_method = heap", ())
+        .await?;
+    tx.execute(
+        "CREATE SEQUENCE clustering_claim_epoch_seq AS BIGINT MINVALUE 0 START WITH 1",
+        (),
+    )
+    .await?;
+    tx.execute("CREATE TABLE clustering_claims (entity TEXT PRIMARY KEY, entity_type TEXT NOT NULL, node_id TEXT NOT NULL, node_epoch TEXT NOT NULL, claim_epoch BIGINT NOT NULL DEFAULT nextval('clustering_claim_epoch_seq'::regclass))", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_node_id_node_epoch ON clustering_claims (node_id, node_epoch)", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_owner_type_entity ON clustering_claims (node_id, node_epoch, entity_type, entity)", ()).await?;
+    tx.execute("CREATE INDEX clustering_claims_entity_type_entity ON clustering_claims (entity_type, entity)", ()).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Convert a backend database failure into the upstream `ClaimError`. The
 /// concrete diagnostic (`DatabaseError`'s `Display`) is preserved as
 /// human-facing text; see [`ClaimError::Backend`]'s doc comment for why a
@@ -431,6 +549,12 @@ impl PostgresClaimStore {
 #[async_trait]
 impl ClaimStore for PostgresClaimStore {
     async fn ensure_schema(&self) -> Result<(), ClaimError> {
+        if self.db.uses_attested_postgres_pool() {
+            return Err(ClaimError::Backend(
+                "claim schema must be prepared by the owner before restricted attachment"
+                    .to_owned(),
+            ));
+        }
         let conn = self.db.guard().await.map_err(db_err)?;
         conn.execute(
             r#"

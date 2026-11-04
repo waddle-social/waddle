@@ -79,6 +79,7 @@ package(waddle-server) & (
     | binary(migration_owner_lab)
     | binary(pubsub_runtime_attach)
     | binary(room_effect_runtime_attach)
+    | binary(claim_occupancy_runtime_attach)
     | test(clustering::)
     | test(db::)
     | test(inbox::)
