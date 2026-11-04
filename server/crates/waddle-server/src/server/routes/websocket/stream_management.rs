@@ -280,6 +280,7 @@ mod ingress_checkpoint_tests {
 }
 
 mod implementation;
+#[cfg(test)]
 pub(super) use implementation::apply_sm_ack;
 pub(super) use implementation::apply_sm_ack_with_fence;
 pub(super) use implementation::attempt_cross_node_resume_raced;

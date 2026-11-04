@@ -493,6 +493,7 @@ pub(in crate::server::routes::websocket) async fn complete_acknowledged_ingress_
 /// undefined-condition stream error plus the RFC 7395 close frame
 /// (mirroring the resume path), and the connection phase is set to
 /// Closing so the loop terminates the stream.
+#[cfg(test)]
 pub(in crate::server::routes::websocket) async fn apply_sm_ack(
     state: &WebSocketState,
     sm_state: &mut StreamManagementState,
